@@ -17,46 +17,40 @@ use crate::support::{init_test_project, real_mcp_server, test_temp_dir};
 const HEAD_COMMIT: &str = "dbc21220c25f50fce6ac93b6e7859062cd3d3ca8";
 
 const COMPLETE_JSON: &str = "\
-{\"status\":\"complete\",\"reason\":null,\"snapshot_count\":4,\"examined\":4,\
-\"limit\":100,\"next_after\":null,\"snapshots\":[\
+{\"examined\":4,\"limit\":100,\"next_after\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
 {\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"},\
 {\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
-{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}]}";
+{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
 const CLAMPED_JSON: &str = "\
-{\"status\":\"complete\",\"reason\":null,\"snapshot_count\":4,\"examined\":4,\
-\"limit\":128,\"next_after\":null,\"snapshots\":[\
+{\"examined\":4,\"limit\":128,\"next_after\":null,\"reason\":null,\"snapshot_count\":4,\"snapshots\":[\
 {\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"},\
 {\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
 {\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
-{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}]}";
+{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
 const FIRST_PAGE_JSON: &str = "\
-{\"status\":\"partial\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"examined\":4,\
-\"limit\":1,\"next_after\":\"alpha\",\"snapshots\":[\
-{\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"}]}";
+{\"examined\":4,\"limit\":1,\"next_after\":\"alpha\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
+{\"branch\":\"alpha\",\"source_revision\":\"9a3b18ef93f54c758f7915a168eed23bf555218c\",\"source_tree\":\"a086253f56c28f8ef6f00acf50eed179d41075f7\"}],\"status\":\"partial\"}";
 
 const SECOND_PAGE_JSON: &str = "\
-{\"status\":\"partial\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"examined\":4,\
-\"limit\":1,\"next_after\":\"beta\",\"snapshots\":[\
-{\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}]}";
+{\"examined\":4,\"limit\":1,\"next_after\":\"beta\",\"reason\":\"reference_limit\",\"snapshot_count\":1,\"snapshots\":[\
+{\"branch\":\"beta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"partial\"}";
 
 const LAST_PAGE_JSON: &str = "\
-{\"status\":\"complete\",\"reason\":null,\"snapshot_count\":2,\"examined\":4,\
-\"limit\":2,\"next_after\":null,\"snapshots\":[\
+{\"examined\":4,\"limit\":2,\"next_after\":null,\"reason\":null,\"snapshot_count\":2,\"snapshots\":[\
 {\"branch\":\"main\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"},\
-{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}]}";
+{\"branch\":\"zeta\",\"source_revision\":\"dbc21220c25f50fce6ac93b6e7859062cd3d3ca8\",\"source_tree\":\"64f955d5ec78273e82903eb78610cf7d682d5fb0\"}],\"status\":\"complete\"}";
 
 const EMPTY_TAIL_JSON: &str = "\
-{\"status\":\"complete\",\"reason\":null,\"snapshot_count\":0,\"examined\":4,\
-\"limit\":1,\"next_after\":null,\"snapshots\":[]}";
+{\"examined\":4,\"limit\":1,\"next_after\":null,\"reason\":null,\"snapshot_count\":0,\"snapshots\":[],\"status\":\"complete\"}";
 
 const DEFAULT_MARKDOWN: &str = "\
-**status:** complete
-**snapshot_count:** 4
 **examined:** 4
 **limit:** 100
+**snapshot_count:** 4
+**status:** complete
 
 ## snapshots
 - **alpha**
@@ -159,7 +153,7 @@ fn payload_text<'a>(response: &'a Value) -> &'a str {
         .and_then(|content| {
             content.iter().find_map(|item| {
                 let text = item["text"].as_str()?;
-                (text.starts_with('{') || text.starts_with("**status:**")).then_some(text)
+                (text.starts_with('{') || text.contains("source_revision")).then_some(text)
             })
         })
         .unwrap_or_else(|| panic!("branch list returned no payload text: {response}"))
@@ -237,7 +231,7 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
         call_branch_list(&server, 9, json!({"format": "json", "after": "bad..name"})).await;
     assert_unavailable(
         &invalid,
-        "{\"status\":\"unavailable\",\"reason\":\"branch_ref_invalid\",\"retryable\":false}",
+        "{\"reason\":\"branch_ref_invalid\",\"retryable\":false,\"status\":\"unavailable\"}",
     );
 
     let zero = call_branch_list(&server, 10, json!({"limit": 0})).await;
@@ -251,21 +245,12 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
         zero["error"]["data"]["tool"],
         json!("tracedecay_branch_list")
     );
-    assert_eq!(
-        zero["error"]["data"]["cli_fallback"],
-        json!(
-            "This tool is also available from the shell: `tracedecay tool branch_list ...` \
-             (`tracedecay tool branch_list --help` for parameters). If MCP calls keep \
-             failing or timing out, fall back to that CLI instead of querying \
-             .tracedecay databases directly."
-        )
-    );
 
     std::fs::rename(dir.path().join(".git"), dir.path().join(".git-hidden")).expect("hide git dir");
     let missing = call_branch_list(&server, 11, json!({"format": "json"})).await;
     assert_unavailable(
         &missing,
-        "{\"status\":\"unavailable\",\"reason\":\"repository_unavailable\",\"retryable\":true}",
+        "{\"reason\":\"repository_unavailable\",\"retryable\":true,\"status\":\"unavailable\"}",
     );
     assert_ne!(payload_text(&json_page), payload_text(&missing));
 }
