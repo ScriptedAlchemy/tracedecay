@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, feature/holographic-memory]
   pull_request:
-    branches: [master]
+    branches: [master, feature/holographic-memory]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -13,36 +14,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  linux-test:
+    name: Test Linux
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
+    runs-on: [self-hosted, linux, x64, hetzner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-test
+
+      - name: Run tests
+        run: cargo test --workspace
+
   test:
     name: Test ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: ubuntu-latest
           - name: macOS
-            runner: macos-14
+            runner: '"macos-14"'
           - name: Windows
-            runner: windows-latest
+            runner: '"windows-latest"'
 
     steps:
       - uses: actions/checkout@v4
-
-      # The Linux runner ships with ~10 GB free, which our 713 MB cache restore
-      # plus the cargo target dir (34 tree-sitter parsers compiled in) can
-      # exceed. See v4.5.1 CI flake: "No space left on device" mid-test.
-      - name: Free disk space (Linux only)
-        if: matrix.name == 'Linux'
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -55,7 +59,11 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
+    runs-on: [self-hosted, linux, x64, hetzner]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +75,11 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
+    runs-on: [self-hosted, linux, x64, hetzner]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
