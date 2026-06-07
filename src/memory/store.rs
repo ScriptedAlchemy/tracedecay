@@ -109,6 +109,7 @@ impl<'a> MemoryStore<'a> {
             ));
         };
         let mut merged_entities = existing.entities.clone();
+        let original_entities = merged_entities.clone();
         for entity in entities {
             if !merged_entities
                 .iter()
@@ -119,6 +120,15 @@ impl<'a> MemoryStore<'a> {
         }
         self.replace_fact_entities(existing.fact_id, &merged_entities)
             .await?;
+        if merged_entities != original_entities {
+            self.update_fact_vector(
+                existing.fact_id,
+                &existing.content,
+                &merged_entities,
+                "add_fact",
+            )
+            .await?;
+        }
         let fact = self.get_fact(existing.fact_id).await?.ok_or_else(|| {
             db_message(
                 "add_fact",
@@ -900,6 +910,35 @@ impl<'a> MemoryStore<'a> {
         let vector = self.encoder.encode_fact(content, entities);
         HolographicEncoder::serialize(&vector)
             .map_err(|e| db_message(operation, format!("failed to serialize vector: {e}")))
+    }
+
+    async fn update_fact_vector(
+        &self,
+        fact_id: i64,
+        content: &str,
+        entities: &[String],
+        operation: &str,
+    ) -> Result<()> {
+        let vector = self.encode_vector(content, entities, operation)?;
+        self.conn
+            .execute(
+                "UPDATE memory_facts
+                 SET hrr_vector = ?1,
+                     hrr_algebra = ?2,
+                     hrr_dim = ?3,
+                     updated_at = ?4
+                 WHERE fact_id = ?5",
+                params![
+                    vector,
+                    HRR_ALGEBRA,
+                    HolographicEncoder::DIMENSIONS as i64,
+                    current_timestamp(),
+                    fact_id,
+                ],
+            )
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        Ok(())
     }
 
     async fn mark_fact_banks_dirty(&self, category: MemoryCategory) -> Result<()> {
