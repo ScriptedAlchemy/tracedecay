@@ -568,6 +568,47 @@ fn quote_posix_command_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(err) => {
+                let Some(name) = existing.file_name().map(|name| name.to_owned()) else {
+                    return Err(err);
+                };
+                missing.push(name);
+                if !existing.pop() {
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
+fn relative_project_path(
+    project_root: &Path,
+    canonical_root: &Path,
+    absolute: &Path,
+    original: &Path,
+) -> Option<PathBuf> {
+    if !original.is_absolute() {
+        return Some(original.to_path_buf());
+    }
+    absolute
+        .strip_prefix(project_root)
+        .or_else(|_| absolute.strip_prefix(canonical_root))
+        .ok()
+        .map(Path::to_path_buf)
+}
+
 pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
     let root = project_root
         .canonicalize()
@@ -594,7 +635,44 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
             ),
         });
     }
-    if !absolute.starts_with(&root) {
+
+    if let Some(relative) = relative_project_path(project_root, &root, &absolute, path) {
+        let scan_root = if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            root.clone()
+        };
+        let mut current = scan_root;
+        for component in relative.components() {
+            if matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            ) {
+                continue;
+            }
+            current.push(component.as_os_str());
+            let Ok(meta) = std::fs::symlink_metadata(&current) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                return Err(TokenSaveError::Config {
+                    message: format!(
+                        "refusing to write project-local config through symlink: {}",
+                        current.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    let canonical_candidate =
+        canonicalize_existing_prefix(&absolute).map_err(|e| TokenSaveError::Config {
+            message: format!(
+                "failed to resolve project-local config path {}: {e}",
+                absolute.display()
+            ),
+        })?;
+    if !canonical_candidate.starts_with(&root) {
         return Err(TokenSaveError::Config {
             message: format!(
                 "refusing to write project-local config outside {}: {}",
@@ -602,25 +680,6 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
                 absolute.display()
             ),
         });
-    }
-
-    let mut current = PathBuf::new();
-    for component in absolute.components() {
-        current.push(component.as_os_str());
-        if !current.starts_with(&root) {
-            continue;
-        }
-        let Ok(meta) = std::fs::symlink_metadata(&current) else {
-            continue;
-        };
-        if meta.file_type().is_symlink() {
-            return Err(TokenSaveError::Config {
-                message: format!(
-                    "refusing to write project-local config through symlink: {}",
-                    current.display()
-                ),
-            });
-        }
     }
 
     Ok(())
@@ -2025,6 +2084,48 @@ mod local_install_safety_tests {
 
         let err = ensure_project_local_safe_path(&project, &project.join(".codex/config.toml"))
             .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_allows_new_file_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        symlink(&actual, &alias).unwrap();
+
+        let alias_project = alias.join("project");
+        ensure_project_local_safe_path(&alias_project, &alias_project.join(".codex/config.toml"))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_reports_symlink_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&actual, &alias).unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let alias_project = alias.join("project");
+        let err =
+            ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
+                .unwrap_err();
         assert!(
             err.to_string().contains("symlink"),
             "error should clearly identify the symlink risk: {err}"
