@@ -425,9 +425,10 @@ mod tests {
         fs::write(&excludes, ".tokensave\n").unwrap();
 
         let git_config = sandbox.path().join("gitconfig");
+        let excludes_value = excludes.to_string_lossy().replace('\\', "/");
         fs::write(
             &git_config,
-            format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+            format!("[core]\n\texcludesFile = {excludes_value}\n"),
         )
         .unwrap();
 
