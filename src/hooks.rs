@@ -122,7 +122,6 @@ pub fn hook_cursor_subagent_start() -> i32 {
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_stdin_to_string();
     reset_counter_for_cursor_event(&event).await;
-    ingest_cursor_transcript_for_event(&event).await;
     println!("{}", serde_json::json!({ "continue": true }));
     0
 }
@@ -1160,16 +1159,6 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
     if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
         let _ = cg.reset_local_counter().await;
     }
-}
-
-async fn ingest_cursor_transcript_for_event(event_json: &str) {
-    let Some(project_root) = cursor_project_root_from_event(event_json) else {
-        return;
-    };
-    let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-        return;
-    };
-    let _ = crate::sessions::cursor::ingest_cursor_transcript_event(event_json, &db).await;
 }
 
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
