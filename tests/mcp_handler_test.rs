@@ -4616,6 +4616,12 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     cg.sync().await.unwrap();
 
     let server = tokensave::mcp::McpServer::new(cg, None).await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(std::time::Duration::from_secs(2))
+            .await,
+        "startup catch-up sync should finish before mutating the project"
+    );
 
     let initial_count = server.file_token_map_snapshot().len();
 
