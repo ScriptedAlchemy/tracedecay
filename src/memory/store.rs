@@ -609,25 +609,27 @@ impl<'a> MemoryStore<'a> {
         let mut rows = self
             .conn
             .query(
-                "SELECT bank_name FROM memory_bank_dirty ORDER BY bank_name",
+                "SELECT bank_name, updated_at FROM memory_bank_dirty ORDER BY bank_name",
                 (),
             )
             .await
             .map_err(|e| db_error("rebuild_dirty_banks", e))?;
-        let mut bank_names = Vec::new();
+        let mut dirty_banks = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| db_error("rebuild_dirty_banks", e))?
         {
-            bank_names.push(
+            dirty_banks.push((
                 row.get::<String>(0)
                     .map_err(|e| db_error("rebuild_dirty_banks", e))?,
-            );
+                row.get::<i64>(1)
+                    .map_err(|e| db_error("rebuild_dirty_banks", e))?,
+            ));
         }
 
         let mut rebuilt = 0;
-        for bank_name in bank_names {
+        for (bank_name, dirty_updated_at) in dirty_banks {
             if bank_name == "all" {
                 self.rebuild_bank("all", None).await?;
             } else {
@@ -636,8 +638,9 @@ impl<'a> MemoryStore<'a> {
             }
             self.conn
                 .execute(
-                    "DELETE FROM memory_bank_dirty WHERE bank_name = ?1",
-                    params![bank_name],
+                    "DELETE FROM memory_bank_dirty
+                     WHERE bank_name = ?1 AND updated_at = ?2",
+                    params![bank_name, dirty_updated_at],
                 )
                 .await
                 .map_err(|e| db_error("rebuild_dirty_banks", e))?;

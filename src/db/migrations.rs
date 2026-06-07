@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 12;
+const LATEST_VERSION: u32 = 11;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -291,7 +291,6 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         9 => migrate_v9(conn).await,
         10 => migrate_v10(conn).await,
         11 => migrate_v11(conn).await,
-        12 => migrate_v12(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -1011,26 +1010,6 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
         operation: operation.to_string(),
     })?;
 
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Migration V12: dirty bank tracking for lazy memory-bank rebuilds
-// ---------------------------------------------------------------------------
-
-async fn migrate_v12(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_bank_dirty (
-            bank_name TEXT PRIMARY KEY,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        )",
-        (),
-    )
-    .await
-    .map_err(|e| TokenSaveError::Database {
-        message: format!("v12: failed to create memory_bank_dirty table: {e}"),
-        operation: "migrate_v12".to_string(),
-    })?;
     Ok(())
 }
 
