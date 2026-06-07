@@ -530,6 +530,11 @@ impl GlobalDb {
         if fts_query.is_empty() || limit == 0 {
             return Vec::new();
         }
+        let literal_terms: Vec<String> = query
+            .split_whitespace()
+            .filter(|term| term.contains('-'))
+            .map(str::to_lowercase)
+            .collect();
 
         let select = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
@@ -572,6 +577,12 @@ impl GlobalDb {
             let Some(message) = row_to_message(&row, 9) else {
                 continue;
             };
+            if !literal_terms.is_empty() {
+                let text = message.text.to_lowercase();
+                if !literal_terms.iter().all(|term| text.contains(term)) {
+                    continue;
+                }
+            }
             let score = row.get::<f64>(22).map_or(0.0, |rank| -rank);
             results.push(SessionMessageSearchResult {
                 session,

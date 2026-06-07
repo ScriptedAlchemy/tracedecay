@@ -4,6 +4,8 @@ use clap::Parser;
 use std::io::{self, BufRead, Write};
 use std::process;
 
+use tokensave::errors::TokenSaveError;
+use tokensave::sessions::{ingest_sessions_from_roots, SessionIngestProvider, SessionIngestRoots};
 use tokensave::tokensave::TokenSave;
 
 mod cli;
@@ -1175,6 +1177,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(1);
             }
         }
+        Commands::Sessions { action } => {
+            handle_sessions_action(action).await?;
+        }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
         }
@@ -1186,6 +1191,104 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn handle_sessions_action(action: SessionsAction) -> tokensave::errors::Result<()> {
+    match action {
+        SessionsAction::Ingest { provider } => {
+            let db = tokensave::global_db::GlobalDb::open()
+                .await
+                .ok_or_else(|| TokenSaveError::Config {
+                    message: "could not open global database".to_string(),
+                })?;
+            let home = dirs::home_dir().ok_or_else(|| TokenSaveError::Config {
+                message: "could not determine home directory".to_string(),
+            })?;
+            let provider = parse_session_provider(provider.as_deref())?;
+            let roots = SessionIngestRoots {
+                cursor_home: home.clone(),
+                codex_home: home,
+            };
+            let stats = ingest_sessions_from_roots(&db, provider, &roots).await;
+            println!(
+                "ingested {} messages from {} files ({} malformed lines)",
+                stats.messages_inserted, stats.files_seen, stats.malformed_lines
+            );
+            if !stats.token_usages.is_empty() {
+                let input_tokens: u64 = stats
+                    .token_usages
+                    .iter()
+                    .map(|usage| usage.input_tokens)
+                    .sum();
+                let cache_read_tokens: u64 = stats
+                    .token_usages
+                    .iter()
+                    .map(|usage| usage.cache_read_tokens)
+                    .sum();
+                let output_tokens: u64 = stats
+                    .token_usages
+                    .iter()
+                    .map(|usage| usage.output_tokens)
+                    .sum();
+                println!(
+                    "observed token usage records: {} input, {} cache-read, {} output tokens",
+                    input_tokens, cache_read_tokens, output_tokens
+                );
+            }
+        }
+        SessionsAction::Search {
+            query,
+            provider,
+            limit,
+        } => {
+            let db = tokensave::global_db::GlobalDb::open()
+                .await
+                .ok_or_else(|| TokenSaveError::Config {
+                    message: "could not open global database".to_string(),
+                })?;
+            for provider in session_search_providers(provider.as_deref())? {
+                for result in db
+                    .search_session_messages(provider, None, &query, limit)
+                    .await
+                {
+                    println!(
+                        "[{}] {} {}: {}",
+                        result.session.provider,
+                        result.session.project_key,
+                        result.message.role,
+                        result.message.text.replace('\n', " ")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_session_provider(
+    provider: Option<&str>,
+) -> tokensave::errors::Result<SessionIngestProvider> {
+    match provider.unwrap_or("all") {
+        "cursor" => Ok(SessionIngestProvider::Cursor),
+        "codex" => Ok(SessionIngestProvider::Codex),
+        "all" => Ok(SessionIngestProvider::All),
+        other => Err(TokenSaveError::Config {
+            message: format!("unknown session provider '{other}' (expected cursor, codex, or all)"),
+        }),
+    }
+}
+
+fn session_search_providers(
+    provider: Option<&str>,
+) -> tokensave::errors::Result<Vec<&'static str>> {
+    match provider.unwrap_or("all") {
+        "cursor" => Ok(vec!["cursor"]),
+        "codex" => Ok(vec!["codex"]),
+        "all" => Ok(vec!["cursor", "codex"]),
+        other => Err(TokenSaveError::Config {
+            message: format!("unknown session provider '{other}' (expected cursor, codex, or all)"),
+        }),
+    }
 }
 
 fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
