@@ -576,7 +576,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
 /// Check AGENTS.md contains tokensave rules.
 fn doctor_check_prompt_file(dc: &mut DoctorCounters, agents_md: &Path) {
     if agents_md.exists() {
-        let has_rules = std::fs::read_to_string(&agents_md)
+        let has_rules = std::fs::read_to_string(agents_md)
             .unwrap_or_default()
             .contains("tokensave");
         if has_rules {
