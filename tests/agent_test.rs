@@ -176,6 +176,88 @@ fn test_local_install_cursor_writes_project_config_only() {
         config["mcpServers"]["tokensave"]["args"],
         serde_json::json!(["serve"])
     );
+    assert_eq!(
+        config["mcpServers"]["tokensave"]["type"],
+        serde_json::json!("stdio")
+    );
+
+    let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
+    assert!(rule_path.exists(), "Cursor local rule should exist");
+    let rule = std::fs::read_to_string(&rule_path).unwrap();
+    assert!(rule.contains("alwaysApply: true"));
+    assert!(rule.contains("tokensave MCP tools"));
+    assert!(rule.contains("fall back"));
+
+    let permissions_path = project.path().join(".cursor/permissions.json");
+    assert!(
+        permissions_path.exists(),
+        "Cursor local permissions should exist"
+    );
+    let permissions = read_json(&permissions_path);
+    let allow = permissions["mcpAllowlist"]
+        .as_array()
+        .expect("mcpAllowlist should be an array");
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    for tool in read_only_tool_names() {
+        let expected = format!("tokensave:{tool}");
+        assert!(
+            allow_strs.contains(&expected.as_str()),
+            "Cursor permissions should allow read-only MCP tool {expected}"
+        );
+    }
+    for mutating in [
+        "tokensave_str_replace",
+        "tokensave_multi_str_replace",
+        "tokensave_insert_at",
+        "tokensave_ast_grep_rewrite",
+    ] {
+        let denied = format!("tokensave:{mutating}");
+        assert!(
+            !allow_strs.contains(&denied.as_str()),
+            "Cursor permissions should not auto-allow mutating MCP tool {denied}"
+        );
+    }
+
+    let hooks_path = project.path().join(".cursor/hooks.json");
+    assert!(
+        hooks_path.exists(),
+        "Cursor local hooks config should exist"
+    );
+    let hooks = read_json(&hooks_path);
+    let subagent_hooks = hooks["hooks"]["subagentStart"]
+        .as_array()
+        .expect("subagentStart hooks should be an array");
+    let tokensave_hook = subagent_hooks
+        .iter()
+        .find(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-subagent-start"))
+        })
+        .expect("Cursor subagentStart hook should call tokensave hook-cursor-subagent-start");
+    assert_eq!(tokensave_hook["timeout"], serde_json::json!(5));
+    let before_submit_hooks = hooks["hooks"]["beforeSubmitPrompt"]
+        .as_array()
+        .expect("beforeSubmitPrompt hooks should be an array");
+    assert!(
+        before_submit_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-before-submit-prompt"))
+        }),
+        "Cursor beforeSubmitPrompt hook should reset tokensave's local counter"
+    );
+    let after_edit_hooks = hooks["hooks"]["afterFileEdit"]
+        .as_array()
+        .expect("afterFileEdit hooks should be an array");
+    assert!(
+        after_edit_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
+        }),
+        "Cursor afterFileEdit hook should keep tokensave's index fresh after writes"
+    );
 
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
@@ -212,6 +294,15 @@ fn test_local_install_supported_agents_write_project_paths() {
         ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
         ("kilo", vec![".kilocode/mcp.json"]),
         ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
+        (
+            "cursor",
+            vec![
+                ".cursor/mcp.json",
+                ".cursor/rules/tokensave.mdc",
+                ".cursor/permissions.json",
+                ".cursor/hooks.json",
+            ],
+        ),
     ];
 
     for (agent, paths) in cases {
@@ -233,7 +324,12 @@ fn test_local_install_supported_agents_write_project_paths() {
                 "{agent} local file {} should mention tokensave",
                 path.display()
             );
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            let is_instruction_file = matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("md" | "mdc")
+            );
+            let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
+            if !is_instruction_file && !is_cursor_permissions {
                 assert!(
                     body.contains(env!("CARGO_BIN_EXE_tokensave")),
                     "{agent} local config {} should use the resolved absolute tokensave executable",

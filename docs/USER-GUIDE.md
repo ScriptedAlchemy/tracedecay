@@ -200,7 +200,7 @@ tokensave install --agent kimi        # Moonshot Kimi CLI
 tokensave install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file.
+Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
 
 Kiro setup registers tokensave in `~/.kiro/settings/mcp.json`, writes steering to
 `~/.kiro/steering/tokensave.md`, and writes a tokensave-managed agent that loads
@@ -224,6 +224,13 @@ tokensave install --local --agent copilot
 ```
 
 Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Cline, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `.kilocode/mcp.json`, and `.vibe/config.toml`.
+
+Cursor local install creates a stronger project-local setup:
+
+- `.cursor/mcp.json` registers the tokensave MCP server.
+- `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
+- `.cursor/permissions.json` auto-allows read-only tokensave MCP tools using Cursor's `mcpAllowlist` format while leaving mutating edit/session tools subject to normal approval.
+- `.cursor/hooks.json` installs Cursor-specific hooks: `subagentStart` runs `tokensave hook-cursor-subagent-start` and denies research-oriented subagents with Cursor's documented hook response shape, `beforeSubmitPrompt` resets the local token counter, and `afterFileEdit` runs a safe incremental sync after Cursor Agent writes files.
 
 The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity does not currently have a documented project-local config path, so `tokensave install --local --agent antigravity` is rejected with an unsupported-agent error.
 

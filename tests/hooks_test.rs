@@ -1,4 +1,7 @@
-use tokensave::hooks::{evaluate_hook_decision, evaluate_kiro_pre_tool_use};
+use tokensave::hooks::{
+    cursor_project_root_from_event, evaluate_cursor_subagent_start, evaluate_hook_decision,
+    evaluate_kiro_pre_tool_use,
+};
 
 fn is_blocked(json: &str) -> bool {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -201,4 +204,78 @@ fn test_kiro_allows_non_delegation_tool() {
 #[test]
 fn test_kiro_allows_invalid_json() {
     assert!(evaluate_kiro_pre_tool_use("not json").is_none());
+}
+
+#[test]
+fn test_cursor_subagent_start_blocks_explore_research_task() {
+    let input = r#"{
+        "hook_event_name": "subagentStart",
+        "subagent_type": "explore",
+        "task": "Explore the codebase architecture and call graph"
+    }"#;
+
+    let output = evaluate_cursor_subagent_start(input).expect("should deny research subagent");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(v["permission"].as_str(), Some("deny"));
+    assert!(v["user_message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave MCP tools"));
+    assert!(
+        v.get("hookSpecificOutput").is_none(),
+        "Cursor hook output must use Cursor's documented subagentStart fields"
+    );
+}
+
+#[test]
+fn test_cursor_subagent_start_allows_execution_task() {
+    let input = r#"{
+        "hook_event_name": "subagentStart",
+        "subagent_type": "generalPurpose",
+        "task": "Run the test suite and summarize failures"
+    }"#;
+
+    assert!(evaluate_cursor_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_cursor_project_root_uses_workspace_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
+    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "beforeSubmitPrompt",
+            "workspace_roots": [{}]
+        }}"#,
+        serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        cursor_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+#[test]
+fn test_cursor_project_root_uses_file_path_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    let file = src.join("lib.rs");
+    let input = format!(
+        r#"{{
+            "hook_event_name": "afterFileEdit",
+            "file_path": {}
+        }}"#,
+        serde_json::to_string(file.to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        cursor_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
 }
