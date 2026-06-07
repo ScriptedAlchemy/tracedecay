@@ -159,9 +159,25 @@ impl UserConfig {
         std::fs::write(&path, contents).is_ok()
     }
 
+    /// Saves only when `~/.tokensave/config.toml` already exists.
+    ///
+    /// This lets repo-local commands update an existing user profile without
+    /// creating one as an incidental side effect.
+    pub fn save_if_exists(&self) -> bool {
+        if !Self::exists() {
+            return false;
+        }
+        self.save()
+    }
+
     /// Returns true if this is a fresh config (file did not exist before).
     pub fn is_fresh() -> bool {
         config_path().is_none_or(|p| !p.exists())
+    }
+
+    /// Returns true when the user-level config file already exists.
+    pub fn exists() -> bool {
+        config_path().is_some_and(|p| p.exists())
     }
 }
 

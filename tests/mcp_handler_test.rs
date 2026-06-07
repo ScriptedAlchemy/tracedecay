@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
+use tokensave::sessions::cursor::open_project_session_db;
+use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
 // ---------------------------------------------------------------------------
@@ -3463,6 +3465,65 @@ async fn memory_tools_validate_malformed_inputs() {
     )
     .await;
     assert!(expect_tool_error(missing_feedback_action).contains("helpful"));
+}
+
+#[tokio::test]
+async fn message_search_reads_project_local_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "cursor-session".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Cursor transcript".to_string()),
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: Some("cursor-session.jsonl".to_string()),
+        metadata_json: None,
+    };
+    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "cursor-message".to_string(),
+            session_id: "cursor-session".to_string(),
+            role: "user".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: "Project-local transcript search is working.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_message_search",
+        json!({"query": "transcript search", "provider": "cursor", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["count"], 1);
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"],
+        "cursor-message"
+    );
+    assert_eq!(
+        parsed["results"][0]["session"]["project_key"],
+        cg.project_root().to_string_lossy().to_string()
+    );
 }
 
 #[test]

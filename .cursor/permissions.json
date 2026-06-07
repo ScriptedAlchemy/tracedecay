@@ -66,6 +66,15 @@
     "tokensave:tokensave_find_exact_symbol",
     "tokensave:tokensave_fact_store",
     "tokensave:tokensave_fact_feedback",
-    "tokensave:tokensave_memory_status"
+    "tokensave:tokensave_memory_status",
+    "tokensave:tokensave_str_replace",
+    "tokensave:tokensave_multi_str_replace",
+    "tokensave:tokensave_insert_at",
+    "tokensave:tokensave_session_start",
+    "tokensave:tokensave_session_end",
+    "tokensave:tokensave_run_affected_tests",
+    "tokensave:tokensave_replace_symbol",
+    "tokensave:tokensave_insert_at_symbol",
+    "tokensave:tokensave_message_search"
   ]
 }

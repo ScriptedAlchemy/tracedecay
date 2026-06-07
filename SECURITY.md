@@ -37,7 +37,7 @@ tokensave builds a **local** code graph stored in a SQLite (libSQL) database (`.
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The database is local-only — there is no cloud sync, remote database, or server-side storage.
 
-A second database (`~/.tokensave/global.db`) tracks which projects have been indexed, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. It contains directory paths, counters, per-turn cost/token/category records, and JSONL parse offsets. No source code or conversation content is stored.
+A second database (`~/.tokensave/global.db`) tracks which projects have been indexed, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Project-local Cursor transcript search is stored in the repository's `.tokensave/sessions.db`, which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both databases remain local-only and are not synced to a remote service.
 
 ### Network access
 

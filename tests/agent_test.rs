@@ -232,25 +232,17 @@ fn test_local_install_cursor_writes_project_config_only() {
         .as_array()
         .expect("mcpAllowlist should be an array");
     let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    for tool in read_only_tool_names() {
+    for tool in tool_names() {
         let expected = format!("tokensave:{tool}");
         assert!(
             allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should allow read-only MCP tool {expected}"
+            "Cursor permissions should allow MCP tool {expected}"
         );
     }
-    for mutating in [
-        "tokensave_str_replace",
-        "tokensave_multi_str_replace",
-        "tokensave_insert_at",
-        "tokensave_ast_grep_rewrite",
-    ] {
-        let denied = format!("tokensave:{mutating}");
-        assert!(
-            !allow_strs.contains(&denied.as_str()),
-            "Cursor permissions should not auto-allow mutating MCP tool {denied}"
-        );
-    }
+    assert!(
+        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
+        "Cursor permissions should not keep removed legacy memory tools"
+    );
 
     let hooks_path = project.path().join(".cursor/hooks.json");
     assert!(
@@ -340,6 +332,46 @@ fn test_local_install_cursor_writes_project_config_only() {
     assert!(
         !home.path().join(".tokensave/config.toml").exists(),
         "local install must not create or mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_refreshes_memory_permissions() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).unwrap();
+    std::fs::write(
+        cursor_dir.join("permissions.json"),
+        r#"{
+  "mcpAllowlist": [
+    "other:custom_tool",
+    "tokensave:tokensave_session_recall",
+    "tokensave:tokensave_str_replace"
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let permissions = read_json(&cursor_dir.join("permissions.json"));
+    let allow = permissions["mcpAllowlist"]
+        .as_array()
+        .expect("mcpAllowlist should be an array");
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    assert!(allow_strs.contains(&"other:custom_tool"));
+    for tool in tool_names() {
+        let expected = format!("tokensave:{tool}");
+        assert!(
+            allow_strs.contains(&expected.as_str()),
+            "Cursor permissions should refresh every current tokensave tool {expected}"
+        );
+    }
+    assert!(
+        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
+        "removed legacy memory permissions should be pruned"
     );
 }
 
@@ -1085,6 +1117,17 @@ fn test_codex_install_creates_config() {
         content.contains("\"serve\""),
         "config.toml should contain \"serve\" in args"
     );
+    for tool in tool_names() {
+        let section = format!("[mcp_servers.tokensave.tools.{tool}]");
+        let section_start = content.find(&section).unwrap_or_else(|| {
+            panic!("Codex config should include auto-approval section {section}")
+        });
+        let after_section = &content[section_start..];
+        assert!(
+            after_section.contains("approval_mode = \"auto\""),
+            "Codex should auto-approve tokensave tool {tool}"
+        );
+    }
 
     // Check AGENTS.md
     let agents_md = home.join(".codex/AGENTS.md");
@@ -2214,6 +2257,24 @@ fn test_healthcheck_codex_after_install() {
 }
 
 #[test]
+fn test_healthcheck_codex_local_install_checks_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("codex", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "local Codex healthcheck should pass without global ~/.codex config"
+    );
+}
+
+#[test]
 fn test_healthcheck_cursor_clean_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
@@ -2227,6 +2288,24 @@ fn test_healthcheck_cursor_clean_install() {
     };
     CursorIntegration.healthcheck(&mut dc, &hctx);
     assert_eq!(dc.issues, 0, "clean Cursor install should have no issues");
+}
+
+#[test]
+fn test_healthcheck_cursor_local_install_checks_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CursorIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
 }
 
 #[test]

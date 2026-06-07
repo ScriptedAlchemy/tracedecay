@@ -83,6 +83,12 @@ approval_mode = "auto"
 [mcp_servers.tokensave.tools.tokensave_dsm]
 approval_mode = "auto"
 
+[mcp_servers.tokensave.tools.tokensave_fact_feedback]
+approval_mode = "auto"
+
+[mcp_servers.tokensave.tools.tokensave_fact_store]
+approval_mode = "auto"
+
 [mcp_servers.tokensave.tools.tokensave_field_sites]
 approval_mode = "auto"
 
@@ -128,6 +134,12 @@ approval_mode = "auto"
 [mcp_servers.tokensave.tools.tokensave_largest]
 approval_mode = "auto"
 
+[mcp_servers.tokensave.tools.tokensave_memory_status]
+approval_mode = "auto"
+
+[mcp_servers.tokensave.tools.tokensave_message_search]
+approval_mode = "auto"
+
 [mcp_servers.tokensave.tools.tokensave_module_api]
 approval_mode = "auto"
 
@@ -155,12 +167,6 @@ approval_mode = "auto"
 [mcp_servers.tokensave.tools.tokensave_read]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_record_code_area]
-approval_mode = "auto"
-
-[mcp_servers.tokensave.tools.tokensave_record_decision]
-approval_mode = "auto"
-
 [mcp_servers.tokensave.tools.tokensave_recursion]
 approval_mode = "auto"
 
@@ -183,9 +189,6 @@ approval_mode = "auto"
 approval_mode = "auto"
 
 [mcp_servers.tokensave.tools.tokensave_session_end]
-approval_mode = "auto"
-
-[mcp_servers.tokensave.tools.tokensave_session_recall]
 approval_mode = "auto"
 
 [mcp_servers.tokensave.tools.tokensave_session_start]

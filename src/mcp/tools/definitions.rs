@@ -167,6 +167,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_store(),
         def_fact_feedback(),
         def_memory_status(),
+        def_message_search(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -1672,6 +1673,37 @@ fn def_memory_status() -> ToolDefinition {
         json!({
             "type": "object",
             "properties": {}
+        }),
+    )
+}
+
+fn def_message_search() -> ToolDefinition {
+    def(
+        "tokensave_message_search",
+        "Message Search",
+        "Search ingested Cursor/Codex/agent transcript messages stored in tokensave's project-local session-message FTS index.",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Full-text query to search in ingested transcript messages."
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Message provider to search (default: cursor).",
+                    "enum": ["cursor", "codex", "claude", "kiro", "hermes", "other"]
+                },
+                "project_key": {
+                    "type": "string",
+                    "description": "Optional project key/path filter. For Cursor transcripts this is the project root path."
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum number of messages to return (default: 10, max: 50)."
+                }
+            },
+            "required": ["query"]
         }),
     )
 }

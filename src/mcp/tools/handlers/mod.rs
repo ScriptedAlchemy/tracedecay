@@ -12,6 +12,7 @@ pub mod health;
 pub mod info;
 pub mod memory;
 pub mod redundancy;
+pub mod session;
 pub mod workflow;
 
 use std::collections::HashSet;
@@ -207,6 +208,7 @@ pub async fn handle_tool_call(
         "tokensave_fact_store" => memory::handle_fact_store(cg, args).await,
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
+        "tokensave_message_search" => session::handle_message_search(cg, args).await,
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
         }),
@@ -234,9 +236,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            76
+            77
         } else {
-            75
+            76
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -255,6 +257,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_store"));
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_impact"));
         assert!(tool_names.contains(&"tokensave_node"));
         assert!(tool_names.contains(&"tokensave_status"));
@@ -310,6 +313,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_store"));
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_read"));
         assert!(tool_names.contains(&"tokensave_outline"));
         assert!(tool_names.contains(&"tokensave_implementations"));
