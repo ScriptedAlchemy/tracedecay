@@ -1,9 +1,10 @@
-//! Hook handlers for Claude Code and Kiro integrations.
+//! Hook handlers for Claude Code, Kiro, Cursor, and Codex integrations.
 //!
-//! These functions are invoked by Claude Code's hook system to intercept
-//! tool calls, redirect exploration work to tokensave MCP tools, and
-//! track per-session token savings. Kiro invokes its own handlers with hook
-//! events on stdin and expects blocking decisions through process exit codes.
+//! These functions are invoked by each agent's hook system to intercept tool
+//! calls, redirect exploration work to tokensave MCP tools, keep the index
+//! fresh after edits / git state changes, and track per-session token savings.
+//! Each agent sends its own event schema on stdin and expects its own output
+//! shape, so the handlers are kept agent-specific rather than shared blindly.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -148,15 +149,22 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_stdin_to_string();
     let root = cursor_project_root_from_event(&event);
-    let (initialized, staleness) = match &root {
+    let context = session_steering_context_for_root(root.as_deref()).await;
+    println!("{}", cursor_session_start_json(root.as_deref(), &context));
+    0
+}
+
+/// Builds the tokensave steering `additional_context` for a resolved project
+/// root: reports index freshness when initialized, otherwise suggests
+/// `tokensave init`. Shared by the Cursor and Codex session/prompt hooks.
+async fn session_steering_context_for_root(root: Option<&Path>) -> String {
+    let (initialized, staleness) = match root {
         Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
             (true, cursor_staleness_for_root(r).await)
         }
         _ => (false, None),
     };
-    let context = build_cursor_session_context(initialized, staleness.as_deref());
-    println!("{}", cursor_session_start_json(root.as_deref(), &context));
-    0
+    build_cursor_session_context(initialized, staleness.as_deref())
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -547,21 +555,29 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
             let _ = crate::branch::add_branch_tracking(&root, &branch).await;
         }
         CursorShellSyncPlan::IncrementalSync => {
-            let marker = cursor_shell_sync_marker_path(&root);
-            let now = now_unix_secs();
-            if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
-                return;
-            }
-            write_marker_secs(&marker, now);
-
-            if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
-                match cg.sync().await {
-                    Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => {}
-                    Err(e) => eprintln!("tokensave sync failed: {e}"),
-                }
-            }
+            run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
         }
         CursorShellSyncPlan::Noop => {}
+    }
+}
+
+/// Runs a full incremental `sync()`, coalescing back-to-back invocations via a
+/// short marker-based debounce so a burst of git commands doesn't stack syncs.
+/// `marker_file` names the per-agent marker inside the `.tokensave/` dir. The
+/// sync lock additionally no-ops genuinely concurrent runs. Fail-open.
+async fn run_coalesced_incremental_sync(root: &Path, marker_file: &str) {
+    let marker = crate::config::get_tokensave_dir(root).join(marker_file);
+    let now = now_unix_secs();
+    if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
+        return;
+    }
+    write_marker_secs(&marker, now);
+
+    if let Ok(cg) = crate::tokensave::TokenSave::open(root).await {
+        match cg.sync().await {
+            Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => {}
+            Err(e) => eprintln!("tokensave sync failed: {e}"),
+        }
     }
 }
 
@@ -591,10 +607,6 @@ async fn workspace_open_for_cursor_event(event_json: &str) {
     let _ = sync_for_cursor_event(event_json).await;
 }
 
-fn cursor_shell_sync_marker_path(root: &Path) -> PathBuf {
-    crate::config::get_tokensave_dir(root).join(".cursor_shell_sync_at")
-}
-
 fn read_marker_secs(path: &Path) -> Option<i64> {
     std::fs::read_to_string(path)
         .ok()?
@@ -612,6 +624,232 @@ fn now_unix_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Codex CLI hook handlers
+//
+// Codex sends ONE JSON object on stdin (shared fields: session_id,
+// transcript_path, cwd, hook_event_name, model, plus event-specific fields)
+// and reads a Codex-shaped JSON object from stdout. These handlers intentionally
+// emit Codex's documented output schema (`hookSpecificOutput.additionalContext`
+// for steering, `hookSpecificOutput.permissionDecision` for PreToolUse) rather
+// than reusing the Claude / Cursor / Kiro output shapes.
+// ---------------------------------------------------------------------------
+
+/// Codex `SessionStart` hook handler (fire-and-forget).
+///
+/// Emits `hookSpecificOutput.additionalContext` steering the agent toward
+/// tokensave MCP tools and reporting index freshness for the session `cwd`.
+pub async fn hook_codex_session_start() -> i32 {
+    let event = read_stdin_to_string();
+    let root = codex_project_root_from_event(&event);
+    let context = session_steering_context_for_root(root.as_deref()).await;
+    println!(
+        "{}",
+        codex_additional_context_json("SessionStart", &context)
+    );
+    0
+}
+
+/// Codex `UserPromptSubmit` hook handler.
+///
+/// Resets the per-project local counter for the new turn and injects the same
+/// tokensave steering context as `SessionStart`. Never blocks the prompt.
+pub async fn hook_codex_user_prompt_submit() -> i32 {
+    let event = read_stdin_to_string();
+    let root = codex_project_root_from_event(&event);
+    reset_counter_for_codex_event(&event).await;
+    let context = session_steering_context_for_root(root.as_deref()).await;
+    println!(
+        "{}",
+        codex_additional_context_json("UserPromptSubmit", &context)
+    );
+    0
+}
+
+/// Codex `SubagentStart` hook handler.
+///
+/// Steers research/explore subagents toward tokensave MCP tools. Codex cannot
+/// hard-stop a subagent at start (`continue: false` is ignored for this event),
+/// so this injects `additionalContext` instead of denying.
+pub fn hook_codex_subagent_start() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(output) = evaluate_codex_subagent_start(&event) {
+        println!("{output}");
+    }
+    0
+}
+
+/// Codex `PostToolUse` hook handler used to keep the graph fresh after writes.
+///
+/// For `apply_patch` edits this runs a **targeted** single-file sync using the
+/// paths parsed from the patch envelope (never a full-tree scan). For `Bash`
+/// commands it reuses the shared git-command classifier: branch switches
+/// bootstrap branch tracking, other state-changing commands run a coalesced
+/// incremental sync. Fail-open and silent.
+pub async fn hook_codex_post_tool_use() -> i32 {
+    let event = read_stdin_to_string();
+    codex_post_tool_use(&event).await;
+    0
+}
+
+/// Builds a Codex hook stdout payload that injects model-visible context via
+/// `hookSpecificOutput.additionalContext`. Used by `SessionStart`,
+/// `UserPromptSubmit`, and `SubagentStart`.
+pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": additional_context,
+        }
+    })
+    .to_string()
+}
+
+/// Pure decision logic for Codex `SubagentStart` events.
+///
+/// Returns a Codex `additionalContext` payload steering research/explore
+/// subagents toward tokensave MCP tools, or `None` for execution-style
+/// subagents. Inspects `agent_type` (Codex's documented field) and any
+/// prompt/task/description text.
+pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let task = parsed
+        .get("prompt")
+        .or_else(|| parsed.get("task"))
+        .or_else(|| parsed.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let is_explore = agent_type.eq_ignore_ascii_case("explore");
+    if is_explore || is_code_research_prompt(task) {
+        return Some(codex_additional_context_json(
+            "SubagentStart",
+            TOKENSAVE_RESEARCH_BLOCK_REASON,
+        ));
+    }
+    None
+}
+
+/// Resolves the tokensave project root for a Codex event from its `cwd`.
+pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
+    let cwd = event_cwd(event_json)?;
+    crate::config::discover_project_root(&cwd)
+}
+
+/// Extracts the project-relative paths touched by a Codex `apply_patch` command.
+///
+/// Codex sends the patch text as `tool_input.command`. The `apply_patch` envelope
+/// names each file with `*** Add File:`, `*** Update File:`, `*** Delete File:`,
+/// or `*** Move to:` lines. Patch paths are relative to the session `cwd`
+/// (which may be a subdirectory of the discovered project root), so we resolve
+/// each against `cwd` and then make it relative to `project_root`. Absolute
+/// paths outside the root are skipped. The result feeds the targeted
+/// [`TokenSave::sync_if_stale_silent`] single-file sync.
+pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
+    const PREFIXES: [&str; 4] = [
+        "*** Add File:",
+        "*** Update File:",
+        "*** Delete File:",
+        "*** Move to:",
+    ];
+    let mut rels: Vec<String> = Vec::new();
+    for line in command.lines() {
+        let line = line.trim();
+        for prefix in PREFIXES {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let raw = rest.trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                let candidate = Path::new(raw);
+                let abs = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    cwd.join(candidate)
+                };
+                if let Some(rel) = rel_under_root(project_root, &abs) {
+                    if !rels.contains(&rel) {
+                        rels.push(rel);
+                    }
+                }
+            }
+        }
+    }
+    rels
+}
+
+fn is_codex_edit_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "apply_patch" | "edit" | "write"
+    )
+}
+
+fn is_codex_bash_tool(tool_name: &str) -> bool {
+    matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "shell")
+}
+
+async fn codex_post_tool_use(event_json: &str) {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return;
+    };
+    let tool_name = parsed
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let command = parsed
+        .get("tool_input")
+        .and_then(|ti| ti.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let Some(cwd) = event_cwd(event_json) else {
+        return;
+    };
+    let Some(root) = crate::config::discover_project_root(&cwd) else {
+        return;
+    };
+    // Never bootstrap indexing in an unindexed repo.
+    if !crate::tokensave::TokenSave::is_initialized(&root) {
+        return;
+    }
+
+    if is_codex_edit_tool(tool_name) {
+        let rels = codex_apply_patch_rel_paths(command, &cwd, &root);
+        if rels.is_empty() {
+            return;
+        }
+        if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
+            let _ = cg.sync_if_stale_silent(&rels).await;
+        }
+    } else if is_codex_bash_tool(tool_name) {
+        match cursor_shell_sync_plan(command) {
+            CursorShellSyncPlan::BranchAdd(branch) => {
+                // Idempotent + fail-open: already-tracked branches no-op.
+                let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+            }
+            CursorShellSyncPlan::IncrementalSync => {
+                run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
+            }
+            CursorShellSyncPlan::Noop => {}
+        }
+    }
+}
+
+async fn reset_counter_for_codex_event(event_json: &str) {
+    let Some(project_root) = codex_project_root_from_event(event_json) else {
+        return;
+    };
+    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+        let _ = cg.reset_local_counter().await;
+    }
 }
 
 /// Pure decision logic for Kiro `preToolUse` hook events.
@@ -771,11 +1009,13 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
 }
 
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
-    let cwd = kiro_event_cwd(event_json).or_else(|| std::env::current_dir().ok())?;
+    let cwd = event_cwd(event_json).or_else(|| std::env::current_dir().ok())?;
     crate::config::discover_project_root(&cwd)
 }
 
-fn kiro_event_cwd(event_json: &str) -> Option<PathBuf> {
+/// Reads the `cwd` string field from a hook event JSON payload. Shared by the
+/// Kiro and Codex handlers, both of which send the session working directory.
+fn event_cwd(event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let cwd = parsed.get("cwd").and_then(Value::as_str)?;
     let path = Path::new(cwd);

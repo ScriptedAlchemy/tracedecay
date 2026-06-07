@@ -2,17 +2,25 @@
 //! `OpenAI` Codex CLI agent integration.
 //!
 //! Handles registration of the tokensave MCP server in Codex's config
-//! file (`~/.codex/config.toml`), per-tool auto-approval settings,
-//! and prompt rules via `AGENTS.md`. Codex has no hook system.
+//! file (`~/.codex/config.toml`), per-tool auto-approval settings, prompt
+//! rules via `AGENTS.md`, and lifecycle hooks via `hooks.json`.
+//!
+//! Codex supports a Claude-style lifecycle hook system (`SessionStart`,
+//! `UserPromptSubmit`, `SubagentStart`, `PostToolUse`, …). Hooks are enabled by
+//! default, but non-managed command hooks must be reviewed and trusted with the
+//! `/hooks` CLI before they run — newly installed or changed hooks are skipped
+//! until trusted. The installer prints that guidance after writing `hooks.json`.
 
 use std::io::Write;
 use std::path::Path;
 
+use serde_json::json;
+
 use crate::errors::{Result, TokenSaveError};
 
 use super::{
-    load_toml_file, tool_names, write_toml_file, AgentIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext,
+    backup_config_file, load_json_file_strict, load_toml_file, safe_write_json_file, tool_names,
+    write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -37,10 +45,13 @@ impl AgentIntegration for CodexIntegration {
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
 
+        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Start a new Codex session — tokensave tools are now available");
+        print_hook_trust_guidance();
         Ok(())
     }
 
@@ -52,7 +63,10 @@ impl AgentIntegration for CodexIntegration {
         let codex_dir = project_path.join(".codex");
         std::fs::create_dir_all(&codex_dir).ok();
         install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))
+        install_prompt_rules(&project_path.join("AGENTS.md"))?;
+        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+        print_hook_trust_guidance();
+        Ok(())
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -63,6 +77,8 @@ impl AgentIntegration for CodexIntegration {
 
         let agents_md = codex_dir.join("AGENTS.md");
         uninstall_prompt_rules(&agents_md);
+
+        uninstall_hooks(&codex_dir.join("hooks.json"));
 
         eprintln!();
         eprintln!("Uninstall complete. Tokensave has been removed from Codex CLI.");
@@ -76,6 +92,7 @@ impl AgentIntegration for CodexIntegration {
         let config_path = codex_dir.join("config.toml");
         doctor_check_config(dc, &config_path);
         doctor_check_prompt(dc, &codex_dir);
+        doctor_check_hooks(dc, &codex_dir.join("hooks.json"));
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -201,9 +218,180 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Register tokensave lifecycle hooks in a Codex `hooks.json` (idempotent).
+///
+/// Codex organizes hooks as `hooks[event][] -> { matcher?, hooks: [handler] }`
+/// where only `type: "command"` handlers run today and `timeout` is in seconds.
+/// We register the tokensave-owned group for each event, preserving any foreign
+/// groups, so reinstalls reconcile in place. Backs up an existing file first.
+fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
+    let backup = backup_config_file(hooks_path)?;
+    let mut hooks = match load_json_file_strict(hooks_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+
+    // Steer the agent toward tokensave MCP tools + report index freshness.
+    install_codex_hook_event(
+        &mut hooks,
+        "SessionStart",
+        tokensave_bin,
+        "hook-codex-session-start",
+        5,
+        None,
+    );
+    install_codex_hook_event(
+        &mut hooks,
+        "UserPromptSubmit",
+        tokensave_bin,
+        "hook-codex-user-prompt-submit",
+        5,
+        None,
+    );
+    install_codex_hook_event(
+        &mut hooks,
+        "SubagentStart",
+        tokensave_bin,
+        "hook-codex-subagent-start",
+        5,
+        None,
+    );
+    // Keep the index fresh: apply_patch → targeted single-file sync; Bash →
+    // branch-aware / incremental sync. Matcher targets both tool names.
+    install_codex_hook_event(
+        &mut hooks,
+        "PostToolUse",
+        tokensave_bin,
+        "hook-codex-post-tool-use",
+        60,
+        Some("Bash|apply_patch"),
+    );
+
+    safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added Codex lifecycle hooks to {}",
+        hooks_path.display()
+    );
+    Ok(())
+}
+
+/// Insert (or reconcile) the tokensave-owned matcher group for `event`.
+///
+/// Drops any pre-existing group that already contains our `subcommand` handler
+/// (so refinements to matcher/timeout reach old configs) while preserving every
+/// foreign group. Idempotent: exactly one tokensave group per event.
+fn install_codex_hook_event(
+    hooks: &mut serde_json::Value,
+    event: &str,
+    tokensave_bin: &str,
+    subcommand: &str,
+    timeout: u64,
+    matcher: Option<&str>,
+) {
+    let existing = hooks["hooks"][event]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut groups: Vec<serde_json::Value> = existing
+        .into_iter()
+        .filter(|group| !group_has_subcommand(group, subcommand))
+        .collect();
+
+    let handler = json!({
+        "type": "command",
+        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "timeout": timeout,
+    });
+    let mut group = json!({ "hooks": [handler] });
+    if let Some(matcher) = matcher {
+        group["matcher"] = json!(matcher);
+    }
+    groups.push(group);
+
+    hooks["hooks"][event] = serde_json::Value::Array(groups);
+}
+
+/// True when any handler command in `group` contains `subcommand`.
+fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
+    group["hooks"].as_array().is_some_and(|handlers| {
+        handlers.iter().any(|h| {
+            h.get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|command| command.contains(subcommand))
+        })
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Codex requires non-managed command hooks to be trusted via `/hooks` before
+/// they run; newly installed/changed hooks are skipped until trusted.
+fn print_hook_trust_guidance() {
+    eprintln!();
+    eprintln!(
+        "\x1b[1mAction required:\x1b[0m Codex skips new/changed command hooks until you trust them."
+    );
+    eprintln!("  Run \x1b[1m/hooks\x1b[0m inside Codex to review and trust the tokensave hooks.");
+    eprintln!(
+        "  (For one-off non-interactive runs you can pass --dangerously-bypass-hook-trust, \
+         but trusting via /hooks is recommended.)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
+
+/// Remove tokensave-owned hook groups from a Codex `hooks.json`.
+fn uninstall_hooks(hooks_path: &Path) {
+    const SUBCOMMANDS: [&str; 4] = [
+        "hook-codex-session-start",
+        "hook-codex-user-prompt-submit",
+        "hook-codex-subagent-start",
+        "hook-codex-post-tool-use",
+    ];
+
+    if !hooks_path.exists() {
+        return;
+    }
+    let Ok(mut hooks) = load_json_file_strict(hooks_path) else {
+        return;
+    };
+
+    let Some(events) = hooks.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return;
+    };
+    for groups in events.values_mut() {
+        if let Some(arr) = groups.as_array_mut() {
+            arr.retain(|group| !SUBCOMMANDS.iter().any(|sc| group_has_subcommand(group, sc)));
+        }
+    }
+    events.retain(|_, groups| groups.as_array().is_some_and(|a| !a.is_empty()));
+
+    let is_empty = hooks
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .is_some_and(serde_json::Map::is_empty);
+    if is_empty {
+        std::fs::remove_file(hooks_path).ok();
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
+            hooks_path.display()
+        );
+    } else if safe_write_json_file(hooks_path, &hooks, None).is_ok() {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tokensave hooks from {}",
+            hooks_path.display()
+        );
+    }
+}
 
 /// Remove MCP server from ~/.codex/config.toml.
 fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
@@ -365,5 +553,45 @@ fn doctor_check_prompt(dc: &mut DoctorCounters, codex_dir: &Path) {
         }
     } else {
         dc.warn("~/.codex/AGENTS.md does not exist");
+    }
+}
+
+/// Check hooks.json registers the tokensave lifecycle hooks, and remind the
+/// user that Codex requires trusting them via `/hooks` before they run.
+fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
+    if !hooks_path.exists() {
+        dc.warn(&format!(
+            "{} not found — run `tokensave install --agent codex` to add lifecycle hooks",
+            hooks_path.display()
+        ));
+        return;
+    }
+    let hooks = super::load_json_file(hooks_path);
+    let has_session_start = hooks["hooks"]["SessionStart"]
+        .as_array()
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group["hooks"].as_array().is_some_and(|handlers| {
+                    handlers.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("hook-codex-session-start"))
+                    })
+                })
+            })
+        });
+    if has_session_start {
+        dc.pass(&format!(
+            "Lifecycle hooks registered in {}",
+            hooks_path.display()
+        ));
+        dc.info(
+            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tokensave hooks",
+        );
+    } else {
+        dc.warn(&format!(
+            "tokensave hooks NOT registered in {} — run `tokensave install --agent codex`",
+            hooks_path.display()
+        ));
     }
 }

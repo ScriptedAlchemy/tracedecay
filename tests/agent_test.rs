@@ -358,7 +358,10 @@ fn test_local_install_supported_agents_write_project_paths() {
             "claude",
             vec![".mcp.json", ".claude/settings.json", ".claude/CLAUDE.md"],
         ),
-        ("codex", vec![".codex/config.toml", "AGENTS.md"]),
+        (
+            "codex",
+            vec![".codex/config.toml", ".codex/hooks.json", "AGENTS.md"],
+        ),
         ("gemini", vec![".gemini/settings.json", "GEMINI.md"]),
         (
             "kiro",
@@ -571,6 +574,208 @@ fn test_codex_install_creates_config() {
     assert!(agents_md.exists(), "AGENTS.md should exist after install");
     let md_content = std::fs::read_to_string(&agents_md).unwrap();
     assert!(md_content.contains("tokensave"));
+}
+
+/// Returns true if any matcher group registered under `event` has a handler
+/// whose `command` contains `needle`. Mirrors Codex's nested hooks.json shape:
+/// `hooks[event][] -> { matcher?, hooks: [ { type, command, timeout } ] }`.
+fn codex_event_has_handler(hooks: &serde_json::Value, event: &str, needle: &str) -> bool {
+    hooks["hooks"][event].as_array().is_some_and(|groups| {
+        groups.iter().any(|group| {
+            group["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .is_some_and(|command| command.contains(needle))
+                })
+            })
+        })
+    })
+}
+
+/// Returns the matcher string for the group containing `needle` under `event`.
+fn codex_matcher_for_handler(
+    hooks: &serde_json::Value,
+    event: &str,
+    needle: &str,
+) -> Option<String> {
+    let groups = hooks["hooks"][event].as_array()?;
+    for group in groups {
+        let has = group["hooks"].as_array().is_some_and(|handlers| {
+            handlers.iter().any(|h| {
+                h["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(needle))
+            })
+        });
+        if has {
+            return Some(group["matcher"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    None
+}
+
+fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
+    assert!(
+        codex_event_has_handler(hooks, "SessionStart", "hook-codex-session-start"),
+        "Codex SessionStart hook should steer toward tokensave MCP tools: {hooks}"
+    );
+    assert!(
+        codex_event_has_handler(hooks, "UserPromptSubmit", "hook-codex-user-prompt-submit"),
+        "Codex UserPromptSubmit hook should reset the counter and steer the agent: {hooks}"
+    );
+    assert!(
+        codex_event_has_handler(hooks, "SubagentStart", "hook-codex-subagent-start"),
+        "Codex SubagentStart hook should redirect research subagents: {hooks}"
+    );
+    assert!(
+        codex_event_has_handler(hooks, "PostToolUse", "hook-codex-post-tool-use"),
+        "Codex PostToolUse hook should keep the index fresh: {hooks}"
+    );
+    let matcher = codex_matcher_for_handler(hooks, "PostToolUse", "hook-codex-post-tool-use")
+        .expect("PostToolUse handler should exist");
+    assert!(
+        matcher.contains("Bash") && matcher.contains("apply_patch"),
+        "PostToolUse matcher should target Bash and apply_patch, got {matcher:?}"
+    );
+}
+
+#[test]
+fn test_codex_global_install_writes_hooks() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+    CodexIntegration.install(&ctx).unwrap();
+
+    let hooks_path = home.join(".codex/hooks.json");
+    assert!(
+        hooks_path.exists(),
+        "global Codex install should write ~/.codex/hooks.json"
+    );
+    let hooks = read_json(&hooks_path);
+    assert_codex_hooks_registered(&hooks);
+}
+
+#[test]
+fn test_codex_local_install_writes_hooks() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    assert_local_install_success("codex", project.path(), home.path());
+
+    let hooks_path = project.path().join(".codex/hooks.json");
+    assert!(
+        hooks_path.exists(),
+        "local Codex install should write <project>/.codex/hooks.json"
+    );
+    let hooks = read_json(&hooks_path);
+    assert_codex_hooks_registered(&hooks);
+    // Local install must use the resolved absolute tokensave binary path.
+    assert_command_contains_bin(&hooks, "SessionStart", "hook-codex-session-start");
+
+    assert!(
+        !home.path().join(".codex/hooks.json").exists(),
+        "local install must not write the global Codex hooks config"
+    );
+}
+
+fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &str) {
+    let groups = hooks["hooks"][event].as_array().expect("event array");
+    let command = groups
+        .iter()
+        .find_map(|group| {
+            group["hooks"].as_array().and_then(|handlers| {
+                handlers.iter().find_map(|h| {
+                    h["command"]
+                        .as_str()
+                        .filter(|command| command.contains(needle))
+                })
+            })
+        })
+        .expect("handler command should exist");
+    assert!(
+        command.contains(env!("CARGO_BIN_EXE_tokensave")),
+        "Codex hook command must use the resolved absolute tokensave executable, got {command}"
+    );
+}
+
+#[test]
+fn test_codex_install_reconciles_hooks_idempotently() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+
+    // Pre-seed a hooks.json with a stale tokensave PostToolUse group plus a
+    // foreign hook that must be preserved across reinstall.
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("hooks.json"),
+        r#"{
+          "hooks": {
+            "PostToolUse": [
+              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/old/tokensave hook-codex-post-tool-use", "timeout": 60 } ] },
+              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/usr/bin/foreign-hook", "timeout": 10 } ] }
+            ]
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let ctx = make_install_ctx(home);
+    CodexIntegration.install(&ctx).unwrap();
+    CodexIntegration.install(&ctx).unwrap();
+
+    let hooks = read_json(&codex_dir.join("hooks.json"));
+    let groups = hooks["hooks"]["PostToolUse"].as_array().unwrap();
+
+    let tokensave_groups: Vec<_> = groups
+        .iter()
+        .filter(|group| {
+            group["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("hook-codex-post-tool-use"))
+                })
+            })
+        })
+        .collect();
+    assert_eq!(
+        tokensave_groups.len(),
+        1,
+        "reinstall must keep exactly one tokensave PostToolUse group, got {groups:?}"
+    );
+    assert!(
+        groups.iter().any(|group| {
+            group["hooks"].as_array().is_some_and(|handlers| {
+                handlers
+                    .iter()
+                    .any(|h| h["command"].as_str() == Some("/usr/bin/foreign-hook"))
+            })
+        }),
+        "reinstall must preserve foreign hooks, got {groups:?}"
+    );
+}
+
+#[test]
+fn test_codex_uninstall_removes_hooks() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+
+    CodexIntegration.install(&ctx).unwrap();
+    let hooks_path = home.join(".codex/hooks.json");
+    assert!(hooks_path.exists());
+
+    CodexIntegration.uninstall(&ctx).unwrap();
+
+    if hooks_path.exists() {
+        let hooks = read_json(&hooks_path);
+        assert!(
+            !codex_event_has_handler(&hooks, "SessionStart", "hook-codex-session-start"),
+            "uninstall should remove tokensave Codex hooks"
+        );
+    }
 }
 
 #[test]

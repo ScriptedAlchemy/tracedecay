@@ -135,7 +135,7 @@ tokensave install --agent vibe            # Mistral Vibe
 tokensave install --agent zed             # Zed
 ```
 
-Each agent gets its MCP server registered in the native config format. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved. Cursor global install currently registers the MCP server only; the richer Cursor integration is project-local so it can be checked into a repository.
+Each agent gets its MCP server registered in the native config format. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved. Codex gets MCP config + auto-approval in `~/.codex/config.toml`, prompt rules in `AGENTS.md`, and a Claude-style lifecycle hook set in `~/.codex/hooks.json` (see below). Cursor global install currently registers the MCP server only; the richer Cursor integration is project-local so it can be checked into a repository.
 
 All changes are idempotent -- safe to run again after upgrading. After agent setup, you'll be offered a global git post-commit hook.
 
@@ -155,6 +155,17 @@ Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json
 - `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
 All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally do not add `beforeReadFile`/`preToolUse` blocking hooks here (too aggressive/noisy); they may become opt-in later.
+
+### Codex lifecycle hooks
+
+Codex now supports a Claude-style lifecycle hook system (verified against Codex 0.136.0 — the old "Codex has no hook system" note was wrong). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tokensave hooks, written in Codex's nested `hooks[event] -> { matcher?, hooks: [ { type:"command", command, timeout } ] }` shape and reconciled idempotently (foreign hooks preserved). Each hook reads Codex's stdin JSON event and emits Codex-shaped stdout:
+
+- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tokensave MCP tools and reporting index freshness (suggests `tokensave init` when uninitialized).
+- `UserPromptSubmit` — resets the per-project local counter and injects the same steering context for the new turn.
+- `SubagentStart` — redirects research/explore subagents toward tokensave MCP tools via `additionalContext`. (Per Codex docs, `SubagentStart` cannot hard-stop a subagent — `continue:false` is ignored — so this steers rather than denies.)
+- `PostToolUse` (matcher `Bash|apply_patch`) — for `apply_patch` edits, runs a **targeted single-file** sync of just the patched paths (parsed from the patch envelope); for `Bash` git commands, reuses the shared classifier to route branch switches → `branch add` and other state-changing commands → coalesced incremental sync.
+
+All Codex hooks are fail-open and only act when a `.tokensave/` index exists. **Trust gate:** Codex skips new or changed non-managed command hooks until you trust them — run `/hooks` inside Codex to review and trust the tokensave hooks (the installer prints this reminder; `--dangerously-bypass-hook-trust` exists for one-off non-interactive runs). **Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash — raw-shell file edits, `unified_exec`, and `WebSearch` are not observed; there is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so a redundant-exploration blocker there would be unreliable and noisy.
 
 Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity is global-only and returns a clear unsupported error for `--local`.
 
