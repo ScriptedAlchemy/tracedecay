@@ -809,6 +809,30 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCodexSessionStart => {
+            let code = tokensave::hooks::hook_codex_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexUserPromptSubmit => {
+            let code = tokensave::hooks::hook_codex_user_prompt_submit().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexSubagentStart => {
+            let code = tokensave::hooks::hook_codex_subagent_start();
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexPostToolUse => {
+            let code = tokensave::hooks::hook_codex_post_tool_use().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::Serve { path, timings } => {
             if std::env::var("DISABLE_TOKENSAVE").as_deref() == Ok("true") {
                 // Allow users to opt out per-project by setting
@@ -1165,6 +1189,10 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::HookCursorSessionStart
             | Commands::HookCursorAfterShell
             | Commands::HookCursorWorkspaceOpen
+            | Commands::HookCodexSessionStart
+            | Commands::HookCodexUserPromptSubmit
+            | Commands::HookCodexSubagentStart
+            | Commands::HookCodexPostToolUse
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
             // every pre-serve startup task — `try_flush` network round-trip,
