@@ -41,6 +41,7 @@ pub mod monitor;
 pub mod redundancy;
 pub mod resolution;
 pub mod runtime_telemetry;
+pub mod sessions;
 pub mod sync;
 pub mod text;
 pub mod tokensave;
