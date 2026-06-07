@@ -791,6 +791,24 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCursorSessionStart => {
+            let code = tokensave::hooks::hook_cursor_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorAfterShell => {
+            let code = tokensave::hooks::hook_cursor_after_shell().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorWorkspaceOpen => {
+            let code = tokensave::hooks::hook_cursor_workspace_open().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::Serve { path, timings } => {
             if std::env::var("DISABLE_TOKENSAVE").as_deref() == Ok("true") {
                 // Allow users to opt out per-project by setting
@@ -1144,6 +1162,9 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::HookCursorSubagentStart
             | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorAfterFileEdit
+            | Commands::HookCursorSessionStart
+            | Commands::HookCursorAfterShell
+            | Commands::HookCursorWorkspaceOpen
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
             // every pre-serve startup task — `try_flush` network round-trip,

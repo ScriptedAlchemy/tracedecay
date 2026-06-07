@@ -230,7 +230,15 @@ Cursor local install creates a stronger project-local setup:
 - `.cursor/mcp.json` registers the tokensave MCP server.
 - `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
 - `.cursor/permissions.json` auto-allows read-only tokensave MCP tools using Cursor's `mcpAllowlist` format while leaving mutating edit/session tools subject to normal approval.
-- `.cursor/hooks.json` installs Cursor-specific hooks: `subagentStart` runs `tokensave hook-cursor-subagent-start` and denies research-oriented subagents with Cursor's documented hook response shape, `beforeSubmitPrompt` resets the local token counter, and `afterFileEdit` runs a safe incremental sync after Cursor Agent writes files.
+- `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
+  - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
+  - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
+  - `beforeSubmitPrompt` resets the local token counter.
+  - `afterFileEdit` (matcher `Write`) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
+  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
+  - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+
+  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. `beforeReadFile`/`preToolUse` blocking hooks are intentionally omitted for now to avoid noise; they may become opt-in later.
 
 The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity does not currently have a documented project-local config path, so `tokensave install --local --agent antigravity` is rejected with an unsupported-agent error.
 

@@ -128,6 +128,15 @@ pub enum Commands {
     /// Cursor afterFileEdit hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-after-file-edit", hide = true)]
     HookCursorAfterFileEdit,
+    /// Cursor sessionStart hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-session-start", hide = true)]
+    HookCursorSessionStart,
+    /// Cursor afterShellExecution hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-after-shell", hide = true)]
+    HookCursorAfterShell,
+    /// Cursor workspaceOpen hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-workspace-open", hide = true)]
+    HookCursorWorkspaceOpen,
     /// Start MCP server over stdio
     Serve {
         /// Project path
