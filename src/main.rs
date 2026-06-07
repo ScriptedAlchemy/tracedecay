@@ -1195,6 +1195,12 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Reinstall
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::HookPreToolUse
+            | Commands::HookPromptSubmit
+            | Commands::HookStop
+            | Commands::HookKiroPreToolUse
+            | Commands::HookKiroPromptSubmit
+            | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
             | Commands::HookCursorPreToolUse
             | Commands::HookCursorBeforeSubmitPrompt
@@ -1269,6 +1275,20 @@ mod startup_tests {
             path: None,
             timings: false,
         }));
+    }
+
+    #[test]
+    fn claude_and_kiro_hooks_skip_agent_install_maintenance() {
+        for command in [
+            Commands::HookPreToolUse,
+            Commands::HookPromptSubmit,
+            Commands::HookStop,
+            Commands::HookKiroPreToolUse,
+            Commands::HookKiroPromptSubmit,
+            Commands::HookKiroPostToolUse,
+        ] {
+            assert!(should_skip_agent_install_maintenance(&command));
+        }
     }
 }
 

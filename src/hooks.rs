@@ -981,18 +981,7 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
     let current_branch = crate::branch::current_branch(&root);
     let plan = cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref());
 
-    match plan {
-        CursorShellSyncPlan::BranchAdd(branch) => {
-            run_branch_tracking_or_sync(&root, &branch, ".cursor_shell_sync_at").await;
-        }
-        CursorShellSyncPlan::CurrentBranchSync(branch) => {
-            run_branch_tracking_or_sync(&root, &branch, ".cursor_shell_sync_at").await;
-        }
-        CursorShellSyncPlan::IncrementalSync => {
-            run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
-        }
-        CursorShellSyncPlan::Noop => {}
-    }
+    run_cursor_shell_sync_plan(&root, ".cursor_shell_sync_at", plan).await;
 }
 
 async fn run_branch_tracking_or_sync(root: &Path, branch: &str, marker_file: &str) {
@@ -1017,18 +1006,27 @@ async fn run_branch_tracking_or_sync(root: &Path, branch: &str, marker_file: &st
 /// `marker_file` names the per-agent marker inside the `.tokensave/` dir. The
 /// sync lock additionally no-ops genuinely concurrent runs. Fail-open.
 async fn run_coalesced_incremental_sync(root: &Path, marker_file: &str) {
-    let marker = crate::config::get_tokensave_dir(root).join(marker_file);
-    let now = now_unix_secs();
-    if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
+    if !mark_hook_should_run(root, marker_file, 3) {
         return;
     }
-    write_marker_secs(&marker, now);
 
     if let Ok(cg) = crate::tokensave::TokenSave::open(root).await {
         match cg.sync().await {
             Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => {}
             Err(e) => eprintln!("tokensave sync failed: {e}"),
         }
+    }
+}
+
+async fn run_cursor_shell_sync_plan(root: &Path, marker_file: &str, plan: CursorShellSyncPlan) {
+    match plan {
+        CursorShellSyncPlan::BranchAdd(branch) | CursorShellSyncPlan::CurrentBranchSync(branch) => {
+            run_branch_tracking_or_sync(root, &branch, marker_file).await;
+        }
+        CursorShellSyncPlan::IncrementalSync => {
+            run_coalesced_incremental_sync(root, marker_file).await;
+        }
+        CursorShellSyncPlan::Noop => {}
     }
 }
 
@@ -1380,18 +1378,8 @@ async fn codex_post_tool_use(event_json: &str) {
             return;
         }
         let current_branch = crate::branch::current_branch(&root);
-        match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
-            CursorShellSyncPlan::BranchAdd(branch) => {
-                run_branch_tracking_or_sync(&root, &branch, ".codex_shell_sync_at").await;
-            }
-            CursorShellSyncPlan::CurrentBranchSync(branch) => {
-                run_branch_tracking_or_sync(&root, &branch, ".codex_shell_sync_at").await;
-            }
-            CursorShellSyncPlan::IncrementalSync => {
-                run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
-            }
-            CursorShellSyncPlan::Noop => {}
-        }
+        let plan = cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref());
+        run_cursor_shell_sync_plan(&root, ".codex_shell_sync_at", plan).await;
     }
 }
 

@@ -211,8 +211,9 @@ pub enum BranchAddOutcome {
 
 /// Silently bootstraps/maintains tokensave branch tracking for `branch_name`.
 ///
-/// This is the library-level core shared with the `tokensave branch add` CLI
-/// command, callable from hooks without shelling out to a second process. It:
+/// This is the library-level branch-add path used by hooks without shelling out
+/// to a second process. The CLI keeps its own path so it can report detailed
+/// sync statistics. This helper:
 /// loads or bootstraps [`BranchMeta`] (via [`detect_default_branch`]), no-ops
 /// when the branch is already tracked, otherwise copies the nearest tracked
 /// ancestor's DB and runs an incremental sync against the new branch DB.
