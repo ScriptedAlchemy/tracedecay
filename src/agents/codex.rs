@@ -40,7 +40,7 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin, None)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin, None, true)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -66,6 +66,7 @@ impl AgentIntegration for CodexIntegration {
             &codex_dir.join("config.toml"),
             &ctx.tokensave_bin,
             Some(project_path),
+            false,
         )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
         install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
@@ -141,6 +142,7 @@ fn install_mcp_server(
     config_path: &Path,
     tokensave_bin: &str,
     local_project_path: Option<&Path>,
+    enable_global_db: bool,
 ) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
 
@@ -174,10 +176,10 @@ fn install_mcp_server(
         vec![toml::Value::String("serve".to_string())]
     };
     server_table.insert("args".to_string(), toml::Value::Array(args));
-    if local_project_path.is_some() {
+    if enable_global_db {
         let mut env_table = toml::map::Map::new();
         env_table.insert(
-            "TOKENSAVE_DISABLE_GLOBAL_DB".to_string(),
+            "TOKENSAVE_ENABLE_GLOBAL_DB".to_string(),
             toml::Value::String("1".to_string()),
         );
         server_table.insert("env".to_string(), toml::Value::Table(env_table));

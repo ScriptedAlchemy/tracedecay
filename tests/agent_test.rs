@@ -218,9 +218,9 @@ fn test_local_install_cursor_writes_project_config_only() {
         config["mcpServers"]["tokensave"]["type"],
         serde_json::json!("stdio")
     );
-    assert_eq!(
-        config["mcpServers"]["tokensave"]["env"]["TOKENSAVE_DISABLE_GLOBAL_DB"],
-        serde_json::json!("1")
+    assert!(
+        config["mcpServers"]["tokensave"].get("env").is_none(),
+        "local Cursor config should not need env flags for repo-local mode"
     );
 
     let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
@@ -1122,6 +1122,10 @@ fn test_codex_install_creates_config() {
         "config.toml should contain [mcp_servers.tokensave]"
     );
     assert!(
+        content.contains("TOKENSAVE_ENABLE_GLOBAL_DB = \"1\""),
+        "global Codex config should opt into user-level global accounting"
+    );
+    assert!(
         content.contains("\"serve\""),
         "config.toml should contain \"serve\" in args"
     );
@@ -1240,8 +1244,9 @@ fn test_codex_local_install_writes_hooks() {
         "local Codex config should pin serve to the project path"
     );
     assert!(
-        config.contains("TOKENSAVE_DISABLE_GLOBAL_DB = \"1\""),
-        "local Codex config should disable user-level global DB writes"
+        !config.contains("TOKENSAVE_DISABLE_GLOBAL_DB")
+            && !config.contains("TOKENSAVE_ENABLE_GLOBAL_DB"),
+        "local Codex config should not need env flags for repo-local mode"
     );
 
     let hooks_path = project.path().join(".codex/hooks.json");
@@ -1440,6 +1445,10 @@ fn test_cursor_install_creates_config() {
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
     assert!(content["mcpServers"]["tokensave"].is_object());
+    assert_eq!(
+        content["mcpServers"]["tokensave"]["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"],
+        serde_json::json!("1")
+    );
 }
 
 #[test]

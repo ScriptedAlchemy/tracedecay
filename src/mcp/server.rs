@@ -42,7 +42,7 @@ impl ServerStats {
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
 fn global_db_enabled() -> bool {
-    !std::env::var("TOKENSAVE_DISABLE_GLOBAL_DB")
+    std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }

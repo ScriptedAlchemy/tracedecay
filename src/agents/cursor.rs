@@ -28,7 +28,12 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_mcp_server(&ctx.home.join(".cursor/mcp.json"), &ctx.tokensave_bin, None)?;
+        install_mcp_server(
+            &ctx.home.join(".cursor/mcp.json"),
+            &ctx.tokensave_bin,
+            None,
+            true,
+        )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -47,6 +52,7 @@ impl AgentIntegration for CursorIntegration {
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,
             Some(project_path),
+            false,
         )?;
         install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
         install_permissions(&cursor_dir.join("permissions.json"))?;
@@ -105,6 +111,7 @@ fn install_mcp_server(
     mcp_path: &Path,
     tokensave_bin: &str,
     local_project_path: Option<&Path>,
+    enable_global_db: bool,
 ) -> Result<()> {
     if let Some(parent) = mcp_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -127,9 +134,9 @@ fn install_mcp_server(
     });
     if let Some(project_path) = local_project_path {
         server["args"] = json!(["serve", "--path", project_path.to_string_lossy()]);
-        server["env"] = json!({
-            "TOKENSAVE_DISABLE_GLOBAL_DB": "1"
-        });
+    }
+    if enable_global_db {
+        server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");
     }
     settings["mcpServers"]["tokensave"] = server;
 
