@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::Result;
+use crate::errors::{Result, TokenSaveError};
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
@@ -43,14 +43,16 @@ impl AgentIntegration for ClineIntegration {
     }
 
     fn supports_local_install(&self) -> bool {
-        true
+        false
     }
 
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(
-            &project_path.join(".cline_mcp_servers.json"),
-            &ctx.tokensave_bin,
-        )
+    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
+        Err(TokenSaveError::Config {
+            message: "Cline does not currently document or ship a project-local MCP config path. \
+                      `tokensave install --local --agent cline` is unsupported. \
+                      Run `tokensave install --agent cline` for a global install."
+                .to_string(),
+        })
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
