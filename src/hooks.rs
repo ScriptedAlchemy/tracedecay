@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+pub mod tool_hints;
+
+use tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
+
 const TOKENSAVE_RESEARCH_BLOCK_REASON: &str = "STOP: Use tokensave MCP tools \
 (tokensave_context, tokensave_search, tokensave_callees, tokensave_callers, \
 tokensave_impact, tokensave_files, tokensave_affected) instead of agents for \
@@ -37,26 +41,50 @@ pub fn hook_pre_tool_use() {
 /// Takes the raw `TOOL_INPUT` JSON string and returns the JSON decision
 /// string to print to stdout.
 pub fn evaluate_hook_decision(tool_input: &str) -> String {
-    let block_msg = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": TOKENSAVE_RESEARCH_BLOCK_REASON
-        }
-    });
-
     let parsed: serde_json::Value =
         serde_json::from_str(tool_input).unwrap_or_else(|_| serde_json::json!({}));
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Claude,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("Agent".to_string()),
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: parsed
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        file_path: None,
+        hints_enabled: true,
+    });
+    let block_reason = hint.map_or_else(
+        || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
+        |hint| {
+            format!(
+                "{}\n\n{}",
+                TOKENSAVE_RESEARCH_BLOCK_REASON,
+                format_tool_hint(&hint)
+            )
+        },
+    );
+    let block_msg = || {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": block_reason
+            }
+        })
+    };
 
     // Block Explore agents outright
     if parsed.get("subagent_type").and_then(|v| v.as_str()) == Some("Explore") {
-        return block_msg.to_string();
+        return block_msg().to_string();
     }
 
     // Check if the prompt is exploration/research work that tokensave can handle
     if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str()) {
         if is_code_research_prompt(prompt) {
-            return block_msg.to_string();
+            return block_msg().to_string();
         }
     }
 
@@ -123,7 +151,11 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_stdin_to_string();
     reset_counter_for_cursor_event(&event).await;
     ingest_cursor_transcript_for_event(&event).await;
-    println!("{}", serde_json::json!({ "continue": true }));
+    let mut output = serde_json::json!({ "continue": true });
+    if let Some(hint) = cursor_prompt_hint(&event) {
+        output["additional_context"] = Value::String(format_tool_hint(&hint));
+    }
+    println!("{output}");
     0
 }
 
@@ -208,12 +240,25 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("subagentStart".to_string()),
+        command: None,
+        prompt: (!task.is_empty()).then(|| task.to_string()),
+        subagent_type: (!subagent_type.is_empty()).then(|| subagent_type.to_string()),
+        file_path: None,
+        hints_enabled: true,
+    });
     let is_explore = subagent_type.eq_ignore_ascii_case("explore");
     if is_explore || is_code_research_prompt(task) {
         return Some(
             serde_json::json!({
                 "permission": "deny",
-                "user_message": TOKENSAVE_RESEARCH_BLOCK_REASON
+                "user_message": hint
+                    .map_or_else(|| TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(), |hint| {
+                        format!("{}\n\n{}", TOKENSAVE_RESEARCH_BLOCK_REASON, format_tool_hint(&hint))
+                    })
             })
             .to_string(),
         );
@@ -831,7 +876,10 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_stdin_to_string();
     let root = codex_project_root_from_event(&event);
     reset_counter_for_codex_event(&event).await;
-    let context = session_steering_context_for_root(root.as_deref()).await;
+    let mut context = session_steering_context_for_root(root.as_deref()).await;
+    if let Some(hint) = codex_prompt_hint(&event) {
+        append_tool_hint(&mut context, &hint);
+    }
     println!(
         "{}",
         codex_additional_context_json("UserPromptSubmit", &context)
@@ -898,12 +946,29 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("SubagentStart".to_string()),
+        command: None,
+        prompt: (!task.is_empty()).then(|| task.to_string()),
+        subagent_type: (!agent_type.is_empty()).then(|| agent_type.to_string()),
+        file_path: None,
+        hints_enabled: true,
+    });
     let is_explore = agent_type.eq_ignore_ascii_case("explore");
     if is_explore || is_code_research_prompt(task) {
-        return Some(codex_additional_context_json(
-            "SubagentStart",
-            TOKENSAVE_RESEARCH_BLOCK_REASON,
-        ));
+        let context = hint.map_or_else(
+            || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
+            |hint| {
+                format!(
+                    "{}\n\n{}",
+                    TOKENSAVE_RESEARCH_BLOCK_REASON,
+                    format_tool_hint(&hint)
+                )
+            },
+        );
+        return Some(codex_additional_context_json("SubagentStart", &context));
     }
     None
 }
@@ -1036,15 +1101,35 @@ async fn reset_counter_for_codex_event(event_json: &str) {
 /// Returns a block reason only for Kiro delegation/subagent tool calls whose
 /// task text looks like codebase research that tokensave MCP tools should
 /// answer first.
-pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<&'static str> {
+pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
     if !is_kiro_delegation_tool(tool_name) {
         return None;
     }
 
-    if kiro_event_has_research_text(parsed.get("tool_input").unwrap_or(&Value::Null)) {
-        Some(TOKENSAVE_RESEARCH_BLOCK_REASON)
+    let tool_input = parsed.get("tool_input").unwrap_or(&Value::Null);
+    if kiro_event_has_research_text(tool_input) {
+        let hint = decide_hint(&ToolHintInput {
+            agent: HintAgent::Kiro,
+            session_id: event_session_id(&parsed),
+            tool_name: Some(tool_name.to_string()),
+            command: None,
+            prompt: kiro_event_text(tool_input),
+            subagent_type: Some(tool_name.to_string()),
+            file_path: None,
+            hints_enabled: true,
+        });
+        Some(hint.map_or_else(
+            || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
+            |hint| {
+                format!(
+                    "{}\n\n{}",
+                    TOKENSAVE_RESEARCH_BLOCK_REASON,
+                    format_tool_hint(&hint)
+                )
+            },
+        ))
     } else {
         None
     }
@@ -1055,12 +1140,16 @@ fn is_kiro_delegation_tool(tool_name: &str) -> bool {
 }
 
 fn kiro_event_has_research_text(value: &Value) -> bool {
+    kiro_event_text(value).is_some_and(|text| is_code_research_prompt(&text))
+}
+
+fn kiro_event_text(value: &Value) -> Option<String> {
     let mut text = Vec::new();
     collect_kiro_task_strings(value, &mut text);
     if text.is_empty() {
         collect_strings(value, &mut text);
     }
-    text.iter().any(|s| is_code_research_prompt(s))
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 fn collect_kiro_task_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
@@ -1195,6 +1284,72 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
         Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    decide_hint(&ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(&parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: None,
+        file_path: parsed
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        hints_enabled: true,
+    })
+}
+
+fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    decide_hint(&ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: None,
+        file_path: None,
+        hints_enabled: true,
+    })
+}
+
+fn prompt_like_text(parsed: &Value) -> Option<String> {
+    [
+        "prompt",
+        "user_prompt",
+        "message",
+        "input",
+        "task",
+        "description",
+    ]
+    .iter()
+    .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+    .filter(|text| !text.is_empty())
+    .map(str::to_string)
+}
+
+fn event_session_id(parsed: &Value) -> Option<String> {
+    ["session_id", "conversation_id", "chat_id"]
+        .iter()
+        .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn format_tool_hint(hint: &ToolHint) -> String {
+    format!("tokensave hint: {}\n{}", hint.message, hint.context)
+}
+
+fn append_tool_hint(context: &mut String, hint: &ToolHint) {
+    if !context.ends_with('\n') {
+        context.push('\n');
+    }
+    context.push_str(&format_tool_hint(hint));
+    context.push('\n');
 }
 
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
