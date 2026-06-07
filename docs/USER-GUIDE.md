@@ -213,6 +213,20 @@ If you already have a different custom default agent or a user-managed
 
 The install is idempotent — safe to run again after upgrading tokensave. You'll also be offered the option to set up a global git post-commit hook (more on that below).
 
+### Project-local installs
+
+If you want an integration to apply only to the current repository, run install from the project root with `--local`:
+
+```bash
+tokensave install --local --agent claude
+tokensave install --local --agent cursor
+tokensave install --local --agent copilot
+```
+
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`.
+
+The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tokensave install --local --agent antigravity` and `tokensave install --local --agent cline` are rejected with unsupported-agent errors.
+
 #### Config backups
 
 Whenever tokensave rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:

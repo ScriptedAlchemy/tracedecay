@@ -1,9 +1,8 @@
 //! Kilo CLI agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Kilo CLI's config
-//! file (`~/.config/kilo/kilo.jsonc`). Kilo uses the `mcp` key (not
-//! `mcpServers`) with entries having `type`, `command` (as array), and
-//! `enabled` fields.
+//! Handles registration of the tokensave MCP server in Kilo CLI config files.
+//! Kilo uses the `mcp` key (not `mcpServers`) with entries having `type`,
+//! `command` (as array), and `enabled` fields.
 
 use std::path::Path;
 
@@ -40,35 +39,21 @@ impl AgentIntegration for KiloIntegration {
         let config_dir = kilo_config_dir(&ctx.home);
         std::fs::create_dir_all(&config_dir).ok();
         let config_path = kilo_config_path(&ctx.home);
-
-        let backup = backup_config_file(&config_path)?;
-        let mut settings = match load_jsonc_file_strict(&config_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(ref b) = backup {
-                    eprintln!("  Backup preserved at: {}", b.display());
-                }
-                return Err(e);
-            }
-        };
-
-        settings["mcp"]["tokensave"] = json!({
-            "type": "local",
-            "command": [ctx.tokensave_bin, "serve"],
-            "enabled": true
-        });
-
-        safe_write_json_file(&config_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
-            config_path.display()
-        );
+        install_mcp_server(&config_path, &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Start a new Kilo CLI session — tokensave tools are now available");
         Ok(())
+    }
+
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        install_mcp_server(&project_path.join("kilo.json"), &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -107,6 +92,36 @@ impl AgentIntegration for KiloIntegration {
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
+
+fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let backup = backup_config_file(config_path)?;
+    let mut settings = match load_jsonc_file_strict(config_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+
+    settings["mcp"]["tokensave"] = json!({
+        "type": "local",
+        "command": [tokensave_bin, "serve"],
+        "enabled": true
+    });
+
+    safe_write_json_file(config_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        config_path.display()
+    );
+    Ok(())
+}
 
 fn uninstall_mcp_server(config_path: &Path) {
     if !config_path.exists() {

@@ -44,6 +44,17 @@ impl AgentIntegration for CodexIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let codex_dir = project_path.join(".codex");
+        std::fs::create_dir_all(&codex_dir).ok();
+        install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&project_path.join("AGENTS.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let codex_dir = ctx.home.join(".codex");
         let config_path = codex_dir.join("config.toml");

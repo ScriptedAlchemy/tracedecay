@@ -139,6 +139,14 @@ Each agent gets its MCP server registered in the native config format. Claude Co
 
 All changes are idempotent -- safe to run again after upgrading. After agent setup, you'll be offered a global git post-commit hook.
 
+For project-scoped setup, run from the repository root:
+
+```bash
+tokensave install --local --agent cursor
+```
+
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity and Cline are global-only and return clear unsupported errors for `--local`.
+
 ### 3. Index your project
 
 ```bash

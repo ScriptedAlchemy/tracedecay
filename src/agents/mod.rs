@@ -57,6 +57,24 @@ pub trait AgentIntegration {
     /// Register MCP server, permissions, hooks, and prompt rules.
     fn install(&self, ctx: &InstallContext) -> Result<()>;
 
+    /// Returns true when this agent supports project-local configuration.
+    fn supports_local_install(&self) -> bool {
+        false
+    }
+
+    /// Register MCP server, permissions, hooks, and prompt rules under a
+    /// project/workspace directory instead of the user's global config.
+    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
+        Err(TokenSaveError::Config {
+            message: format!(
+                "{} does not support `tokensave install --local` yet. \
+                 Run `tokensave install --agent {}` for a global install.",
+                self.name(),
+                self.id()
+            ),
+        })
+    }
+
     /// Remove everything installed by [`AgentIntegration::install`].
     fn uninstall(&self, ctx: &InstallContext) -> Result<()>;
 

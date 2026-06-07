@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use tempfile::TempDir;
 use tokensave::agents::*;
@@ -110,6 +111,195 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
     }
+}
+
+fn run_local_install(agent: &str, project: &Path, home: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .arg("install")
+        .arg("--local")
+        .arg("--agent")
+        .arg(agent)
+        .current_dir(project)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("KIRO_HOME", home.join(".kiro"))
+        .env("VIBE_HOME", home.join(".vibe"))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run local install for {agent}: {e}"))
+}
+
+fn assert_local_install_success(agent: &str, project: &Path, home: &Path) {
+    let output = run_local_install(agent, project, home);
+    assert!(
+        output.status.success(),
+        "local install for {agent} should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read JSON {}: {e}", path.display())),
+    )
+    .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
+}
+
+fn expected_tokensave_bin() -> String {
+    env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
+}
+
+fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) {
+    let mut node = json;
+    for key in command_path {
+        node = node
+            .get(*key)
+            .unwrap_or_else(|| panic!("missing key {key} in {json:?}"));
+    }
+    let expected = expected_tokensave_bin();
+    assert_eq!(
+        node.as_str(),
+        Some(expected.as_str()),
+        "local MCP config must use the resolved absolute tokensave executable"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_writes_project_config_only() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let mcp_path = project.path().join(".cursor/mcp.json");
+    assert!(mcp_path.exists(), "Cursor local MCP config should exist");
+    let config = read_json(&mcp_path);
+    assert_command_is_tokensave(&config, &["mcpServers", "tokensave", "command"]);
+    assert_eq!(
+        config["mcpServers"]["tokensave"]["args"],
+        serde_json::json!(["serve"])
+    );
+
+    assert!(
+        !home.path().join(".cursor/mcp.json").exists(),
+        "local install must not write the global Cursor config"
+    );
+    assert!(
+        !home.path().join(".tokensave/config.toml").exists(),
+        "local install must not create or mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_supported_agents_write_project_paths() {
+    let cases = [
+        (
+            "claude",
+            vec![".mcp.json", ".claude/settings.json", ".claude/CLAUDE.md"],
+        ),
+        ("codex", vec![".codex/config.toml", "AGENTS.md"]),
+        ("gemini", vec![".gemini/settings.json", "GEMINI.md"]),
+        (
+            "kiro",
+            vec![
+                ".kiro/settings/mcp.json",
+                ".kiro/steering/tokensave.md",
+                ".kiro/agents/tokensave.json",
+            ],
+        ),
+        ("opencode", vec!["opencode.json", "AGENTS.md"]),
+        ("copilot", vec![".vscode/mcp.json"]),
+        ("zed", vec![".zed/settings.json"]),
+        ("roo-code", vec![".roo/mcp.json"]),
+        ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
+        ("kilo", vec!["kilo.json"]),
+        ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
+    ];
+
+    for (agent, paths) in cases {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+
+        assert_local_install_success(agent, project.path(), home.path());
+
+        for relative in paths {
+            let path = project.path().join(relative);
+            assert!(
+                path.exists(),
+                "{agent} local install should create project path {}",
+                path.display()
+            );
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains("tokensave"),
+                "{agent} local file {} should mention tokensave",
+                path.display()
+            );
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                let expected = expected_tokensave_bin();
+                assert!(
+                    body.contains(&expected),
+                    "{agent} local config {} should use the resolved absolute tokensave executable",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            !home.path().join(".tokensave/config.toml").exists(),
+            "{agent} local install must not create or mutate user-level install tracking"
+        );
+    }
+}
+
+#[test]
+fn test_local_install_rejects_antigravity_without_project_mutation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    let output = run_local_install("antigravity", project.path(), home.path());
+
+    assert!(
+        !output.status.success(),
+        "Antigravity local install should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Antigravity") && stderr.contains("--local"),
+        "unsupported-agent error should name Antigravity and --local, got:\n{stderr}"
+    );
+    assert!(
+        !home.path().join(".tokensave/config.toml").exists(),
+        "rejected local install must not mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_rejects_cline_without_project_mutation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    let output = run_local_install("cline", project.path(), home.path());
+
+    assert!(
+        !output.status.success(),
+        "Cline local install should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Cline") && stderr.contains("--local"),
+        "unsupported-agent error should name Cline and --local, got:\n{stderr}"
+    );
+    assert!(
+        !project.path().join(".cline_mcp_servers.json").exists(),
+        "unsupported Cline local install must not write undocumented workspace config"
+    );
+    assert!(
+        !home.path().join(".tokensave/config.toml").exists(),
+        "rejected local install must not mutate user-level install tracking"
+    );
 }
 
 #[test]

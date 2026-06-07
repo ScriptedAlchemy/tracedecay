@@ -85,6 +85,9 @@ pub enum Commands {
         /// Agent to configure (auto-detects if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
+        /// Write project-local configuration in the current directory
+        #[arg(long)]
+        local: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,

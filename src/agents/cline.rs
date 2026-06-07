@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::Result;
+use crate::errors::{Result, TokenSaveError};
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
@@ -33,38 +33,26 @@ impl AgentIntegration for ClineIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let settings_path = cline_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
-
-        if let Some(parent) = settings_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-
-        let backup = backup_config_file(&settings_path)?;
-        let mut settings = match load_json_file_strict(&settings_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(ref b) = backup {
-                    eprintln!("  Backup preserved at: {}", b.display());
-                }
-                return Err(e);
-            }
-        };
-        settings["mcpServers"]["tokensave"] = json!({
-            "command": ctx.tokensave_bin,
-            "args": ["serve"],
-            "disabled": false
-        });
-
-        safe_write_json_file(&settings_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
-            settings_path.display()
-        );
+        install_mcp_server(&settings_path, &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Restart VS Code — tokensave tools are now available in Cline");
         Ok(())
+    }
+
+    fn supports_local_install(&self) -> bool {
+        false
+    }
+
+    fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
+        Err(TokenSaveError::Config {
+            message: "Cline does not currently document or ship a project-local MCP config path. \
+                      `tokensave install --local --agent cline` is unsupported. \
+                      Run `tokensave install --agent cline` for a global install."
+                .to_string(),
+        })
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -105,6 +93,35 @@ impl AgentIntegration for ClineIntegration {
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
+
+fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let backup = backup_config_file(settings_path)?;
+    let mut settings = match load_json_file_strict(settings_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+    settings["mcpServers"]["tokensave"] = json!({
+        "command": tokensave_bin,
+        "args": ["serve"],
+        "disabled": false
+    });
+
+    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        settings_path.display()
+    );
+    Ok(())
+}
 
 /// Remove MCP server entry from Cline's `cline_mcp_settings.json`.
 fn uninstall_mcp_server(settings_path: &Path) {
