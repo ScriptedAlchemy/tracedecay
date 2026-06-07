@@ -140,7 +140,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     if !skip_agent_install_maintenance {
         global::try_flush(&mut user_config, is_force_flush);
     }
-    user_config.save();
+    if !is_local_install_command(&command) {
+        user_config.save();
+    }
 
     if is_first_run && !skip_agent_install_maintenance {
         eprintln!(
@@ -199,6 +201,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             home: home.clone(),
                             tokensave_bin: bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
+                            profile: None,
                         };
                         if ag.install(&ctx).is_err() {
                             all_ok = false;
@@ -538,7 +541,16 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         Commands::Tool { name, args } => {
             tool_command::run(name, args).await?;
         }
-        Commands::Install { agent } => {
+        Commands::Install {
+            agent,
+            local,
+            profile,
+        } => {
+            if profile.is_some() && agent.as_deref() != Some("hermes") {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
+                });
+            }
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -552,6 +564,52 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         .to_string(),
                 }
             })?;
+            if local {
+                let project_path = std::env::current_dir().map_err(|e| {
+                    tokensave::errors::TokenSaveError::Config {
+                        message: format!("could not determine current project directory: {e}"),
+                    }
+                })?;
+                let ctx = tokensave::agents::InstallContext {
+                    home: home.clone(),
+                    tokensave_bin: tokensave_bin.clone(),
+                    tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: profile.clone(),
+                };
+                let mut installed_names: Vec<String> = Vec::new();
+
+                if let Some(id) = agent {
+                    let ag = tokensave::agents::get_integration(&id)?;
+                    ag.install_local(&ctx, &project_path)?;
+                    installed_names.push(ag.name().to_string());
+                } else {
+                    let (to_install, _) =
+                        tokensave::agents::pick_integrations_interactive(&home, &[])?;
+                    for id in &to_install {
+                        let ag = tokensave::agents::get_integration(id)?;
+                        if ag.supports_local_install() {
+                            ag.install_local(&ctx, &project_path)?;
+                            installed_names.push(ag.name().to_string());
+                        } else {
+                            eprintln!(
+                                "Skipping {}: project-local install is not supported",
+                                ag.name()
+                            );
+                        }
+                    }
+                }
+
+                eprintln!();
+                if installed_names.is_empty() {
+                    eprintln!("No local changes.");
+                } else {
+                    for name in &installed_names {
+                        eprintln!("\x1b[32m+\x1b[0m {name} (local)");
+                    }
+                }
+                return Ok(());
+            }
+
             let mut user_cfg = tokensave::user_config::UserConfig::load();
             tokensave::agents::migrate_installed_agents(&home, &mut user_cfg);
 
@@ -565,6 +623,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home: home.clone(),
                     tokensave_bin: tokensave_bin.clone(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: profile.clone(),
                 };
                 ag.install(&ctx)?;
                 if !user_cfg.installed_agents.contains(&id) {
@@ -584,6 +643,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: profile.clone(),
                     };
                     ag.uninstall(&ctx)?;
                     removed_names.push(ag.name().to_string());
@@ -595,6 +655,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: profile.clone(),
                     };
                     ag.install(&ctx)?;
                     installed_names.push(ag.name().to_string());
@@ -651,6 +712,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: None,
                     };
                     ag.install(&ctx)?;
                 }
@@ -659,7 +721,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 user_cfg.save();
             }
         }
-        Commands::Uninstall { agent } => {
+        Commands::Uninstall { agent, profile } => {
+            if profile.is_some() && agent.as_deref() != Some("hermes") {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
+                });
+            }
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -674,6 +741,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home,
                     tokensave_bin: String::new(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: profile.clone(),
                 };
                 ag.uninstall(&ctx)?;
                 user_cfg.installed_agents.retain(|a| a != &id);
@@ -685,6 +753,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             home: home.clone(),
                             tokensave_bin: String::new(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
+                            profile: None,
                         };
                         ag.uninstall(&ctx).ok();
                     }
@@ -722,6 +791,66 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         }
         Commands::HookKiroPostToolUse => {
             let code = tokensave::hooks::hook_kiro_post_tool_use().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorSubagentStart => {
+            let code = tokensave::hooks::hook_cursor_subagent_start();
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorBeforeSubmitPrompt => {
+            let code = tokensave::hooks::hook_cursor_before_submit_prompt().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorAfterFileEdit => {
+            let code = tokensave::hooks::hook_cursor_after_file_edit().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorSessionStart => {
+            let code = tokensave::hooks::hook_cursor_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorAfterShell => {
+            let code = tokensave::hooks::hook_cursor_after_shell().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorWorkspaceOpen => {
+            let code = tokensave::hooks::hook_cursor_workspace_open().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexSessionStart => {
+            let code = tokensave::hooks::hook_codex_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexUserPromptSubmit => {
+            let code = tokensave::hooks::hook_codex_user_prompt_submit().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexSubagentStart => {
+            let code = tokensave::hooks::hook_codex_subagent_start();
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexPostToolUse => {
+            let code = tokensave::hooks::hook_codex_post_tool_use().await;
             if code != 0 {
                 process::exit(code);
             }
@@ -1076,6 +1205,16 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Reinstall
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::HookCursorSubagentStart
+            | Commands::HookCursorBeforeSubmitPrompt
+            | Commands::HookCursorAfterFileEdit
+            | Commands::HookCursorSessionStart
+            | Commands::HookCursorAfterShell
+            | Commands::HookCursorWorkspaceOpen
+            | Commands::HookCodexSessionStart
+            | Commands::HookCodexUserPromptSubmit
+            | Commands::HookCodexSubagentStart
+            | Commands::HookCodexPostToolUse
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
             // every pre-serve startup task — `try_flush` network round-trip,
@@ -1085,6 +1224,10 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             // runs on the user's next interactive `tokensave …` invocation.
             | Commands::Serve { .. }
     )
+}
+
+fn is_local_install_command(command: &Commands) -> bool {
+    matches!(command, Commands::Install { local: true, .. })
 }
 
 #[cfg(test)]
@@ -1103,11 +1246,14 @@ mod startup_tests {
     fn explicit_agent_config_commands_skip_agent_install_maintenance() {
         assert!(should_skip_agent_install_maintenance(&Commands::Install {
             agent: Some("kiro".to_string()),
+            local: false,
+            profile: None,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(
             &Commands::Uninstall {
                 agent: Some("kiro".to_string()),
+                profile: None,
             }
         ));
     }

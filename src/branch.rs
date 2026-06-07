@@ -182,6 +182,84 @@ pub fn find_nearest_tracked_ancestor(
     best.map(|(name, _)| name)
 }
 
+/// Outcome of [`add_branch_tracking`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchAddOutcome {
+    /// The project has no `.tokensave/` index; nothing was done.
+    NotIndexed,
+    /// The branch was already tracked; no copy/sync was performed.
+    AlreadyTracked,
+    /// A new branch DB was created from the nearest ancestor and synced.
+    Added,
+}
+
+/// Silently bootstraps/maintains tokensave branch tracking for `branch_name`.
+///
+/// This is the library-level core shared with the `tokensave branch add` CLI
+/// command, callable from hooks without shelling out to a second process. It:
+/// loads or bootstraps [`BranchMeta`] (via [`detect_default_branch`]), no-ops
+/// when the branch is already tracked, otherwise copies the nearest tracked
+/// ancestor's DB and runs an incremental sync against the new branch DB.
+///
+/// No-ops (returns [`BranchAddOutcome::NotIndexed`]) when the project has no
+/// `.tokensave/` index, so it never bootstraps indexing in an unindexed repo.
+/// Idempotent: a re-add of a tracked branch returns
+/// [`BranchAddOutcome::AlreadyTracked`] without re-copying.
+pub async fn add_branch_tracking(
+    project_root: &Path,
+    branch_name: &str,
+) -> crate::errors::Result<BranchAddOutcome> {
+    use crate::branch_meta;
+    use crate::config::get_tokensave_dir;
+
+    if !crate::tokensave::TokenSave::is_initialized(project_root) {
+        return Ok(BranchAddOutcome::NotIndexed);
+    }
+    let tokensave_dir = get_tokensave_dir(project_root);
+
+    let mut meta = branch_meta::load_branch_meta(&tokensave_dir).unwrap_or_else(|| {
+        let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
+        branch_meta::BranchMeta::new(&default)
+    });
+
+    if meta.is_tracked(branch_name) {
+        return Ok(BranchAddOutcome::AlreadyTracked);
+    }
+
+    let parent = find_nearest_tracked_ancestor(project_root, branch_name, &meta)
+        .unwrap_or_else(|| meta.default_branch.clone());
+    let parent_db = resolve_branch_db_path(&tokensave_dir, &parent, &meta).ok_or_else(|| {
+        crate::errors::TokenSaveError::Config {
+            message: format!("parent branch '{parent}' has no DB"),
+        }
+    })?;
+    if !parent_db.exists() {
+        return Err(crate::errors::TokenSaveError::Config {
+            message: format!("parent DB not found at '{}'", parent_db.display()),
+        });
+    }
+
+    let sanitized = sanitize_branch_name(branch_name);
+    let branches_dir = branch_meta::ensure_branches_dir(&tokensave_dir)?;
+    let new_db_path = branches_dir.join(format!("{sanitized}.db"));
+    std::fs::copy(&parent_db, &new_db_path)?;
+
+    // Save metadata BEFORE open() so it resolves the new branch to its DB.
+    let db_file = format!("branches/{sanitized}.db");
+    meta.add_branch(branch_name, &db_file, &parent);
+    branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+
+    let cg = crate::tokensave::TokenSave::open(project_root).await?;
+    let _ = cg.sync().await?;
+
+    if let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) {
+        meta.touch_synced(branch_name);
+        let _ = branch_meta::save_branch_meta(&tokensave_dir, &meta);
+    }
+
+    Ok(BranchAddOutcome::Added)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

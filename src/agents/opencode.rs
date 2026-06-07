@@ -45,6 +45,15 @@ impl AgentIntegration for OpenCodeIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        install_mcp_server(&project_path.join("opencode.json"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&project_path.join("AGENTS.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let config_path = opencode_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);

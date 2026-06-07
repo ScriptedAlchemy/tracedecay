@@ -71,7 +71,7 @@ AI coding agents waste tokens exploring codebases. Every grep, glob, and file re
 | **Smart Context Building** | **Semantic Search** | **Impact Analysis** |
 | One tool call returns everything the agent needs -- entry points, related symbols, and code snippets. | Find code by meaning, not just text. Search for "authentication" and find `login`, `validateToken`, `AuthService`. | Know exactly what breaks before you change it. Trace callers, callees, and the full impact radius of any symbol. |
 | **70+ MCP Tools** | **50+ Languages** | **12+ Agent Integrations** |
-| From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
+| From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Hermes, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
 | **Multi-Branch Indexing (opt-in)** | **100% Local** | **Always Fresh** |
 | Optional per-branch databases. Cross-branch diff and search without switching your checkout. | Source code and memory content stay on your machine. No API keys or hosted database are required; the index runs on local libSQL. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and the index diverges are merged by git, not by a file watcher. |
 | **Subprocess-Isolated Extraction** | **Code-Health Analytics** | **Atomic Edit Primitives** |
@@ -126,6 +126,8 @@ tokensave install --agent codex           # OpenAI Codex CLI
 tokensave install --agent copilot         # GitHub Copilot
 tokensave install --agent cursor          # Cursor
 tokensave install --agent gemini          # Gemini CLI
+tokensave install --agent hermes          # Hermes Agent
+tokensave install --agent hermes --profile work
 tokensave install --agent kilo            # Kilo CLI
 tokensave install --agent kiro            # AWS Kiro
 tokensave install --agent kimi            # Moonshot Kimi CLI
@@ -135,9 +137,39 @@ tokensave install --agent vibe            # Mistral Vibe
 tokensave install --agent zed             # Zed
 ```
 
-Each agent gets its MCP server registered in the native config format. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved.
+Each agent gets its MCP server registered in the native config format where that is the agent's integration model. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved. Codex gets MCP config + auto-approval in `~/.codex/config.toml`, prompt rules in `AGENTS.md`, and a Claude-style lifecycle hook set in `~/.codex/hooks.json` (see below). Hermes gets a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor global install currently registers the MCP server only; the richer Cursor integration is project-local so it can be checked into a repository.
 
 All changes are idempotent -- safe to run again after upgrading. After agent setup, you'll be offered a global git post-commit hook.
+
+For project-scoped setup, run from the repository root:
+
+```bash
+tokensave install --local --agent cursor
+```
+
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Hermes requires `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching with project-local plugins. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow only read-only tokensave MCP tools. The project hooks are:
+
+- `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
+- `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
+- `beforeSubmitPrompt` — resets the local token counter for the new turn.
+- `afterFileEdit` (matcher `Write`) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
+- `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tokensave branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
+- `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+
+All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally do not add `beforeReadFile`/`preToolUse` blocking hooks here (too aggressive/noisy); they may become opt-in later.
+
+### Codex lifecycle hooks
+
+Codex now supports a Claude-style lifecycle hook system (verified against Codex 0.136.0 — the old "Codex has no hook system" note was wrong). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tokensave hooks, written in Codex's nested `hooks[event] -> { matcher?, hooks: [ { type:"command", command, timeout } ] }` shape and reconciled idempotently (foreign hooks preserved). Each hook reads Codex's stdin JSON event and emits Codex-shaped stdout:
+
+- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tokensave MCP tools and reporting index freshness (suggests `tokensave init` when uninitialized).
+- `UserPromptSubmit` — resets the per-project local counter and injects the same steering context for the new turn.
+- `SubagentStart` — redirects research/explore subagents toward tokensave MCP tools via `additionalContext`. (Per Codex docs, `SubagentStart` cannot hard-stop a subagent — `continue:false` is ignored — so this steers rather than denies.)
+- `PostToolUse` (matcher `Bash|apply_patch`) — for `apply_patch` edits, runs a **targeted single-file** sync of just the patched paths (parsed from the patch envelope); for `Bash` git commands, reuses the shared classifier to route branch switches → `branch add` and other state-changing commands → coalesced incremental sync.
+
+All Codex hooks are fail-open and only act when a `.tokensave/` index exists. **Trust gate:** Codex skips new or changed non-managed command hooks until you trust them — run `/hooks` inside Codex to review and trust the tokensave hooks (the installer prints this reminder; `--dangerously-bypass-hook-trust` exists for one-off non-interactive runs). **Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash — raw-shell file edits, `unified_exec`, and `WebSearch` are not observed; there is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so a redundant-exploration blocker there would be unreliable and noisy.
+
+Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity and Cline are global-only and return clear unsupported errors for `--local`.
 
 ### 3. Index your project
 
@@ -665,7 +697,7 @@ tokensave files [--filter dir] [--pattern glob] [--json]   # List indexed files
 tokensave affected <files...> [--stdin] [--depth N]        # Find affected test files
 tokensave install [--agent NAME]   # Configure agent integration
 tokensave reinstall                # Refresh settings for all installed agents
-tokensave uninstall [--agent NAME] # Remove agent integration
+tokensave uninstall [--agent NAME] [--profile NAME] # Remove agent integration
 tokensave serve                    # Start MCP server
 tokensave monitor                  # Live TUI showing MCP calls across all projects
 tokensave upgrade                  # Self-update to latest version

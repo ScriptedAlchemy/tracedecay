@@ -66,6 +66,15 @@ impl AgentIntegration for CopilotIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        install_workspace_mcp_server(&project_path.join(".vscode/mcp.json"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&project_path.join(".github/copilot-instructions.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let vscode_settings_path = super::vscode_data_dir(&ctx.home).join("User/settings.json");
         let cli_settings_path = super::copilot_cli_dir(&ctx.home).join("mcp-config.json");
@@ -199,6 +208,36 @@ fn install_cli_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<(
         }
     };
     settings["mcpServers"]["tokensave"] = json!({
+        "type": "stdio",
+        "command": tokensave_bin,
+        "args": ["serve"]
+    });
+
+    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        settings_path.display()
+    );
+    Ok(())
+}
+
+/// Register MCP server in a project `.vscode/mcp.json` file.
+fn install_workspace_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let backup = backup_config_file(settings_path)?;
+    let mut settings = match load_jsonc_file_strict(settings_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+    settings["servers"]["tokensave"] = json!({
         "type": "stdio",
         "command": tokensave_bin,
         "args": ["serve"]

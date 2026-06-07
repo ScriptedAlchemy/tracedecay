@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-post-tool-use",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|apply_patch"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-session-start",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-subagent-start",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-user-prompt-submit",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

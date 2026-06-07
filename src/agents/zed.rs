@@ -41,39 +41,21 @@ impl AgentIntegration for ZedIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let config_dir = zed_config_dir(&ctx.home);
         let settings_path = config_dir.join("settings.json");
-
-        if let Some(parent) = settings_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-
-        let backup = backup_config_file(&settings_path)?;
-        let mut settings = match load_jsonc_file_strict(&settings_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(ref b) = backup {
-                    eprintln!("  Backup preserved at: {}", b.display());
-                }
-                return Err(e);
-            }
-        };
-        settings["context_servers"]["tokensave"] = json!({
-            "command": {
-                "path": ctx.tokensave_bin,
-                "args": ["serve"]
-            }
-        });
-
-        safe_write_json_file(&settings_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave context server to {}",
-            settings_path.display()
-        );
+        install_context_server(&settings_path, &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Restart Zed — tokensave tools are now available");
         Ok(())
+    }
+
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        install_context_server(&project_path.join(".zed/settings.json"), &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -114,6 +96,36 @@ impl AgentIntegration for ZedIntegration {
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
+
+fn install_context_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let backup = backup_config_file(settings_path)?;
+    let mut settings = match load_jsonc_file_strict(settings_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+    settings["context_servers"]["tokensave"] = json!({
+        "command": {
+            "path": tokensave_bin,
+            "args": ["serve"]
+        }
+    });
+
+    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tokensave context server to {}",
+        settings_path.display()
+    );
+    Ok(())
+}
 
 /// Remove context server entry from Zed settings.json.
 /// Does not delete settings.json even if object is otherwise empty.

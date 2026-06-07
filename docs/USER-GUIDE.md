@@ -181,13 +181,15 @@ This is the default. It registers the MCP server in `~/.claude/settings.json`, g
 
 ### Other agents
 
-Tokensave supports fourteen agents. Pass `--agent` to install for a specific one:
+Tokensave supports fifteen agents. Pass `--agent` to install for a specific one:
 
 ```bash
 tokensave install --agent claude      # Claude Code (default)
 tokensave install --agent opencode    # OpenCode
 tokensave install --agent codex       # OpenAI Codex CLI
 tokensave install --agent gemini      # Gemini CLI
+tokensave install --agent hermes      # Hermes Agent
+tokensave install --agent hermes --profile work
 tokensave install --agent copilot     # GitHub Copilot CLI
 tokensave install --agent cursor      # Cursor
 tokensave install --agent zed         # Zed
@@ -200,7 +202,41 @@ tokensave install --agent kimi        # Moonshot Kimi CLI
 tokensave install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file.
+Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
+
+Codex setup registers tokensave in `~/.codex/config.toml` (MCP server + per-tool
+auto-approval), writes prompt rules to `~/.codex/AGENTS.md`, and installs a
+Claude-style lifecycle hook set in `~/.codex/hooks.json` (SessionStart,
+UserPromptSubmit, SubagentStart, and PostToolUse). Codex requires you to **trust**
+new or changed command hooks before they run — run `/hooks` inside Codex to review
+and trust the tokensave hooks. See "Codex lifecycle hooks" below for what each one
+does and the known blind spots.
+
+Hermes setup writes a `tokensave` plugin into the selected Hermes profile and
+enables it in that profile's `config.yaml` under `plugins.enabled`. Without
+`--profile`, tokensave writes `~/.hermes/plugins/tokensave/` and
+`~/.hermes/config.yaml`; with `--profile work`, it writes
+`~/.hermes/profiles/work/plugins/tokensave/` and
+`~/.hermes/profiles/work/config.yaml`. Profile names are normalized to lowercase
+and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use
+`tokensave uninstall --agent hermes --profile work` to remove a named profile
+install. `tokensave reinstall` and `tokensave doctor --agent hermes` currently
+operate on the default Hermes profile only.
+
+The plugin registers one Hermes-native wrapper per tokensave tool, adds a
+lightweight `pre_llm_call` steering hook, registers a `/tokensave_status` slash
+command when the installed Hermes version supports plugin commands, and bundles
+a `tokensave:tokensave` plugin skill. The wrappers call
+`tokensave tool <name> --json --args <json>` from Hermes' current working
+directory, with a 600-second timeout and truncated stdout/stderr in error JSON.
+Passing an explicit project root is a future improvement once Hermes exposes a
+reliable root to plugins.
+Project-local Hermes install without `--profile` writes only project files:
+`.hermes/plugins/tokensave/` and `.hermes/config.yaml`. Launch Hermes with
+`HERMES_ENABLE_PROJECT_PLUGINS=true` to load project plugins. If you pass
+`--profile` together with `--local --agent hermes`, tokensave intentionally
+targets the named profile instead of the project plugin directory; use this when
+you want to run the command from a project but update a Hermes profile.
 
 Kiro setup registers tokensave in `~/.kiro/settings/mcp.json`, writes steering to
 `~/.kiro/steering/tokensave.md`, and writes a tokensave-managed agent that loads
@@ -212,6 +248,50 @@ If you already have a different custom default agent or a user-managed
 `tokensave` agent, tokensave leaves it alone and prints a warning.
 
 The install is idempotent — safe to run again after upgrading tokensave. You'll also be offered the option to set up a global git post-commit hook (more on that below).
+
+### Project-local installs
+
+If you want an integration to apply only to the current repository, run install from the project root with `--local`:
+
+```bash
+tokensave install --local --agent claude
+tokensave install --local --agent cursor
+tokensave install --local --agent copilot
+```
+
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins require `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching Hermes. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+
+Cursor local install creates a stronger project-local setup:
+
+- `.cursor/mcp.json` registers the tokensave MCP server.
+- `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
+- `.cursor/permissions.json` auto-allows read-only tokensave MCP tools using Cursor's `mcpAllowlist` format while leaving mutating edit/session tools subject to normal approval.
+- `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
+  - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
+  - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
+  - `beforeSubmitPrompt` resets the local token counter.
+  - `afterFileEdit` (matcher `Write`) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
+  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
+  - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+
+  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. `beforeReadFile`/`preToolUse` blocking hooks are intentionally omitted for now to avoid noise; they may become opt-in later.
+
+Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tokensave` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
+
+#### Codex lifecycle hooks
+
+Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tokensave hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when a `.tokensave/` index exists.
+
+- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tokensave MCP tools and reporting index freshness (suggests `tokensave init` when uninitialized).
+- `UserPromptSubmit` — resets the per-project local token counter for the new turn and injects the same steering context.
+- `SubagentStart` — redirects research/explore subagents toward tokensave MCP tools via `additionalContext`. Codex's `SubagentStart` cannot hard-stop a subagent (`continue: false` is ignored for this event), so this steers rather than denies.
+- `PostToolUse` (matcher `Bash|apply_patch`) — for `apply_patch` edits, runs a targeted single-file sync of just the patched files (parsed from the patch envelope); for `Bash` git commands, branch switches bootstrap/maintain branch tracking (`branch add`) and other state-changing git commands run a coalesced incremental sync.
+
+**Trust gate:** Codex records trust against each hook's hash and skips new or changed non-managed command hooks until trusted. After install, run `/hooks` inside Codex to review and trust the tokensave hooks (the installer prints this reminder). For one-off non-interactive runs you can pass `--dangerously-bypass-hook-trust`, but trusting via `/hooks` is recommended. `tokensave doctor --agent codex` reports whether the hooks are registered and repeats the trust reminder.
+
+**Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash commands — file edits made through raw shell, the newer `unified_exec` mechanism, and `WebSearch` are not observed. There is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so installing a redundant-exploration blocker there would be unreliable.
+
+The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tokensave install --local --agent antigravity` and `tokensave install --local --agent cline` are rejected with unsupported-agent errors.
 
 #### Config backups
 
@@ -228,6 +308,7 @@ If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore 
 ```bash
 tokensave uninstall                   # remove Claude Code integration
 tokensave uninstall --agent codex     # remove Codex integration
+tokensave uninstall --agent hermes --profile work
 ```
 
 ---

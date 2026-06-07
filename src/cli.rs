@@ -85,6 +85,12 @@ pub enum Commands {
         /// Agent to configure (auto-detects if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
+        /// Write project-local configuration in the current directory
+        #[arg(long)]
+        local: bool,
+        /// Hermes profile to install into (only used with --agent hermes)
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
@@ -94,6 +100,9 @@ pub enum Commands {
         /// Agent to remove (removes all if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
+        /// Hermes profile to uninstall from (only used with --agent hermes)
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Extraction worker (spawned by tokensave itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]
@@ -116,6 +125,36 @@ pub enum Commands {
     /// Kiro PostToolUse hook handler for incremental sync
     #[command(name = "hook-kiro-post-tool-use", hide = true)]
     HookKiroPostToolUse,
+    /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-subagent-start", hide = true)]
+    HookCursorSubagentStart,
+    /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
+    HookCursorBeforeSubmitPrompt,
+    /// Cursor afterFileEdit hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-after-file-edit", hide = true)]
+    HookCursorAfterFileEdit,
+    /// Cursor sessionStart hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-session-start", hide = true)]
+    HookCursorSessionStart,
+    /// Cursor afterShellExecution hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-after-shell", hide = true)]
+    HookCursorAfterShell,
+    /// Cursor workspaceOpen hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-workspace-open", hide = true)]
+    HookCursorWorkspaceOpen,
+    /// Codex SessionStart hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-session-start", hide = true)]
+    HookCodexSessionStart,
+    /// Codex UserPromptSubmit hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-user-prompt-submit", hide = true)]
+    HookCodexUserPromptSubmit,
+    /// Codex SubagentStart hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-subagent-start", hide = true)]
+    HookCodexSubagentStart,
+    /// Codex PostToolUse hook handler for incremental sync (called by Codex)
+    #[command(name = "hook-codex-post-tool-use", hide = true)]
+    HookCodexPostToolUse,
     /// Start MCP server over stdio
     Serve {
         /// Project path

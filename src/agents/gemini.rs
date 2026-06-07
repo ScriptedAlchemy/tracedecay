@@ -46,6 +46,17 @@ impl AgentIntegration for GeminiIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let gemini_dir = project_path.join(".gemini");
+        std::fs::create_dir_all(&gemini_dir).ok();
+        install_mcp_server(&gemini_dir.join("settings.json"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&project_path.join("GEMINI.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let gemini_dir = ctx.home.join(".gemini");
         let settings_path = gemini_dir.join("settings.json");
