@@ -332,7 +332,7 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     match sub.as_str() {
         "checkout" | "switch" => {
             // Path checkout (`git checkout -- file`) is not a branch switch.
-            if raw.iter().any(|t| *t == "--") {
+            if raw.contains(&"--") {
                 return None;
             }
             let after = &raw[sub_pos + 1..];
@@ -383,7 +383,6 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
         || token.starts_with("./")
         || token.starts_with("../")
         || token.starts_with(":/")
-        || token.contains('/')
         || token
             .rsplit_once('.')
             .is_some_and(|(_, ext)| !ext.is_empty())
