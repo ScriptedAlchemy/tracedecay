@@ -48,6 +48,14 @@ impl AgentIntegration for CursorIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let cursor_dir = project_path.join(".cursor");
+        for path in [
+            cursor_dir.join("mcp.json"),
+            cursor_dir.join("rules/tokensave.mdc"),
+            cursor_dir.join("permissions.json"),
+            cursor_dir.join("hooks.json"),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
         install_mcp_server(
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,

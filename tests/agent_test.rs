@@ -863,6 +863,28 @@ fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_rejects_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    let output = run_local_install("cursor", project.path(), home.path());
+    assert!(
+        !output.status.success(),
+        "local Cursor install should reject symlinked .cursor directories"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "error should explain the symlink refusal, got:\n{stderr}"
+    );
+}
+
 #[test]
 fn test_local_install_supported_agents_write_project_paths() {
     let cases = [
@@ -2288,6 +2310,30 @@ fn test_healthcheck_codex_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Codex healthcheck should pass without global ~/.codex config"
+    );
+}
+
+#[test]
+fn test_healthcheck_codex_ignores_unrelated_project_agents_md() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "Project-specific agent instructions without tokensave.\n",
+    )
+    .unwrap();
+    let ctx = make_install_ctx(home.path());
+    CodexIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "global Codex healthcheck should be used when project AGENTS.md is unrelated"
     );
 }
 
