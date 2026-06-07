@@ -263,25 +263,20 @@ fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
 /// non-git commands return `false`. Only commands whose first token is `git`
 /// match, so `echo git checkout` is ignored.
 pub fn is_git_state_changing_command(command: &str) -> bool {
-    let tokens: Vec<String> = command
-        .split_whitespace()
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
-    if tokens.first().map(String::as_str) != Some("git") {
-        return false;
-    }
-    let Some(sub) = tokens.iter().skip(1).find(|t| !t.starts_with('-')) else {
+    let tokens = shell_words(command);
+    let Some(sub_pos) = git_subcommand_pos(&tokens) else {
         return false;
     };
+    let sub = tokens[sub_pos].to_ascii_lowercase();
     match sub.as_str() {
         "checkout" | "switch" | "pull" | "merge" | "rebase" | "reset" | "cherry-pick" => true,
         "stash" => {
             let after = tokens
                 .iter()
-                .skip_while(|t| t.as_str() != "stash")
-                .skip(1)
+                .skip(sub_pos + 1)
+                .map(|t| t.to_ascii_lowercase())
                 .find(|t| !t.starts_with('-'));
-            matches!(after.map(String::as_str), Some("pop") | Some("apply"))
+            matches!(after.as_deref(), Some("pop" | "apply"))
         }
         _ => false,
     }
@@ -295,6 +290,8 @@ pub enum CursorShellSyncPlan {
     BranchAdd(String),
     /// Run a full incremental sync (same-branch change set).
     IncrementalSync,
+    /// Ensure the current branch is tracked, then sync it if it already was.
+    CurrentBranchSync(String),
     /// Do nothing.
     Noop,
 }
@@ -303,10 +300,22 @@ pub enum CursorShellSyncPlan {
 /// `afterShellExecution` hook should take. Branch switches take precedence
 /// over plain incremental syncs.
 pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
+    cursor_shell_sync_plan_with_current_branch(command, None)
+}
+
+/// Like [`cursor_shell_sync_plan`], but supplies the post-command current branch
+/// for state-changing commands whose branch target is ambiguous or implicit.
+pub fn cursor_shell_sync_plan_with_current_branch(
+    command: &str,
+    current_branch: Option<&str>,
+) -> CursorShellSyncPlan {
     if let Some(branch) = cursor_branch_switch_target(command) {
         return CursorShellSyncPlan::BranchAdd(branch);
     }
     if is_git_state_changing_command(command) {
+        if let Some(branch) = current_branch.filter(|branch| !branch.is_empty()) {
+            return CursorShellSyncPlan::CurrentBranchSync(branch.to_string());
+        }
         return CursorShellSyncPlan::IncrementalSync;
     }
     CursorShellSyncPlan::Noop
@@ -321,25 +330,21 @@ pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
 /// non-switch commands return `None`. Only commands whose first token is `git`
 /// are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
-    let raw: Vec<&str> = command.split_whitespace().collect();
-    let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
-    if lower.first().map(String::as_str) != Some("git") {
-        return None;
-    }
-    let sub = lower.iter().skip(1).find(|t| !t.starts_with('-'))?;
-    let sub_pos = lower.iter().position(|t| t == sub)?;
+    let raw = shell_words(command);
+    let sub_pos = git_subcommand_pos(&raw)?;
+    let sub = raw[sub_pos].to_ascii_lowercase();
 
     match sub.as_str() {
         "checkout" | "switch" => {
             // Path checkout (`git checkout -- file`) is not a branch switch.
-            if raw.contains(&"--") {
-                return None;
-            }
             let after = &raw[sub_pos + 1..];
             let mut iter = after.iter();
             while let Some(tok) = iter.next() {
-                if matches!(*tok, "-b" | "-B" | "-c" | "-C") {
-                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+                if tok == "--" {
+                    return None;
+                }
+                if matches!(tok.as_str(), "-b" | "-B" | "-c" | "-C") {
+                    return iter.find(|t| !t.starts_with('-')).cloned();
                 }
                 if tok.starts_with('-') {
                     continue;
@@ -347,17 +352,18 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
                 if is_obvious_checkout_pathspec(tok) {
                     return None;
                 }
-                return Some((*tok).to_string());
+                return Some(tok.clone());
             }
             None
         }
         "worktree" => {
+            let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
             let add_pos = lower.iter().position(|t| t == "add")?;
             let after = &raw[add_pos + 1..];
             let mut iter = after.iter();
             while let Some(tok) = iter.next() {
-                if matches!(*tok, "-b" | "-B") {
-                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+                if matches!(tok.as_str(), "-b" | "-B") {
+                    return iter.find(|t| !t.starts_with('-')).cloned();
                 }
                 if tok.starts_with('-') {
                     continue;
@@ -368,8 +374,8 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
             // second positional, if present.
             let positionals: Vec<&str> = after
                 .iter()
+                .map(String::as_str)
                 .filter(|t| !t.starts_with('-'))
-                .copied()
                 .collect();
             positionals.get(1).map(|b| (*b).to_string())
         }
@@ -386,6 +392,147 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
         || token
             .rsplit_once('.')
             .is_some_and(|(_, ext)| !ext.is_empty())
+}
+
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for c in command.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            Some('"') => match c {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(c),
+            },
+            _ => match c {
+                '\'' | '"' => quote = Some(c),
+                '\\' => escaped = true,
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn git_subcommand_pos(tokens: &[String]) -> Option<usize> {
+    if !tokens.first()?.eq_ignore_ascii_case("git") {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].to_ascii_lowercase();
+        match token.as_str() {
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                i += 2;
+            }
+            "--" => {
+                i += 1;
+            }
+            _ if token.starts_with("--git-dir=")
+                || token.starts_with("--work-tree=")
+                || token.starts_with("--namespace=")
+                || token.starts_with("--config-env=") =>
+            {
+                i += 1;
+            }
+            _ if token.starts_with('-') => {
+                i += 1;
+            }
+            _ => return Some(i),
+        }
+    }
+    None
+}
+
+pub fn cursor_shell_command_targets_project(
+    command: &str,
+    cwd: &Path,
+    project_root: &Path,
+) -> bool {
+    let tokens = shell_words(command);
+    if !tokens
+        .first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("git"))
+    {
+        return true;
+    }
+    let Some(work_dir) = git_explicit_work_dir(&tokens, cwd) else {
+        return true;
+    };
+    let target_root = crate::config::discover_project_root(&work_dir).unwrap_or(work_dir);
+    paths_same(&target_root, project_root)
+}
+
+fn git_explicit_work_dir(tokens: &[String], cwd: &Path) -> Option<PathBuf> {
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        match token.as_str() {
+            "-C" | "--work-tree" => {
+                let value = tokens.get(i + 1)?;
+                return Some(resolve_shell_path(cwd, value));
+            }
+            "-c" | "--git-dir" | "--namespace" | "--config-env" => i += 2,
+            _ if token.starts_with("--work-tree=") => {
+                let value = token.trim_start_matches("--work-tree=");
+                return Some(resolve_shell_path(cwd, value));
+            }
+            _ if token.starts_with("--git-dir=")
+                || token.starts_with("--namespace=")
+                || token.starts_with("--config-env=") =>
+            {
+                i += 1;
+            }
+            _ if token.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    None
+}
+
+fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn paths_same(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
@@ -571,6 +718,14 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
         }
         CursorShellSyncPlan::IncrementalSync => {
             run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
+        }
+        CursorShellSyncPlan::CurrentBranchSync(branch) => {
+            if !matches!(
+                crate::branch::add_branch_tracking(&root, &branch).await,
+                Ok(crate::branch::BranchAddOutcome::Added)
+            ) {
+                run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
+            }
         }
         CursorShellSyncPlan::Noop => {}
     }
@@ -852,6 +1007,14 @@ async fn codex_post_tool_use(event_json: &str) {
             }
             CursorShellSyncPlan::IncrementalSync => {
                 run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
+            }
+            CursorShellSyncPlan::CurrentBranchSync(branch) => {
+                if !matches!(
+                    crate::branch::add_branch_tracking(&root, &branch).await,
+                    Ok(crate::branch::BranchAddOutcome::Added)
+                ) {
+                    run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;
+                }
             }
             CursorShellSyncPlan::Noop => {}
         }
