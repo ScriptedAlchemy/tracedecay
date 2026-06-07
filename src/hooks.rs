@@ -818,8 +818,8 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
 ///
-/// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
-/// resolved `project_root` prefix and normalize to forward slashes so the set
+/// Cursor sends an absolute `file_path` for the edited file. We strip the
+/// resolved `project_root` prefix and normalize to forward slashes so the path
 /// can be passed straight to [`TokenSave::sync_if_stale_silent`], which does a
 /// targeted single-file sync instead of a full-tree scan. Paths outside the
 /// project root are skipped.
@@ -827,37 +827,16 @@ pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return Vec::new();
     };
-
-    let mut abs_paths: Vec<String> = Vec::new();
-    if let Some(p) = parsed
+    let Some(abs) = parsed
         .get("file_path")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-    {
-        abs_paths.push(p.to_string());
-    }
-    // Defensive: some edit payloads may carry per-edit file paths.
-    if let Some(edits) = parsed.get("edits").and_then(Value::as_array) {
-        for edit in edits {
-            if let Some(p) = edit
-                .get("file_path")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                abs_paths.push(p.to_string());
-            }
-        }
-    }
-
-    let mut rels: Vec<String> = Vec::new();
-    for abs in abs_paths {
-        if let Some(rel) = rel_under_root(project_root, Path::new(&abs)) {
-            if !rels.contains(&rel) {
-                rels.push(rel);
-            }
-        }
-    }
-    rels
+    else {
+        return Vec::new();
+    };
+    rel_under_root(project_root, Path::new(abs))
+        .into_iter()
+        .collect()
 }
 
 fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
