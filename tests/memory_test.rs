@@ -543,6 +543,14 @@ async fn memory_status_reports_exact_bucket_and_feedback_counts() {
 }
 
 #[tokio::test]
+async fn memory_status_handles_empty_fact_store() {
+    let (_tmp, cg) = make_project().await;
+    let status = cg.memory_status().await.unwrap();
+    assert_eq!(status.fact_count, 0);
+    assert_eq!(status.missing_vector_count, 0);
+}
+
+#[tokio::test]
 async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());
@@ -652,4 +660,45 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
         .content
         .contains("uses SQLite")
         && result.new_content.contains("Do not use SQLite")));
+}
+
+#[tokio::test]
+async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let retriever = FactRetriever::new(db.conn());
+
+    let mut matching = fact_request(
+        "Older fact links Project Phoenix and SQLite",
+        MemoryCategory::Decision,
+        0.9,
+    );
+    matching.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
+    store.add_fact(matching, DEFAULT_TRUST).await.unwrap();
+
+    for i in 0..125 {
+        let mut unrelated = fact_request(
+            &format!("Newer unrelated fact {i}"),
+            MemoryCategory::Decision,
+            0.9,
+        );
+        unrelated.entities = vec![format!("Unrelated {i}")];
+        store.add_fact(unrelated, DEFAULT_TRUST).await.unwrap();
+    }
+
+    let results = retriever
+        .reason(
+            &["Project Phoenix".to_string(), "SQLite".to_string()],
+            Some(MemoryCategory::Decision),
+            Some(0.3),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.fact.content.contains("Older fact links")),
+        "reason should find matching facts before applying the result cap"
+    );
 }

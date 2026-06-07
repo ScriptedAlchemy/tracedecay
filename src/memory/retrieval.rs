@@ -173,34 +173,66 @@ impl<'a> FactRetriever<'a> {
             return Ok(Vec::new());
         }
 
-        let facts = self
-            .store
-            .list_facts(
-                category,
-                Some(min_trust.unwrap_or(DEFAULT_MIN_TRUST)),
-                normalized_limit(limit).saturating_mul(10),
+        let entity_names = normalized
+            .iter()
+            .map(|entity| sql_string_literal(entity))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let required_count = normalized.len() as i64;
+        let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
+        let limit_usize = normalized_limit(limit);
+        let limit_i64 = limit_usize as i64;
+        let sql = if category.is_some() {
+            format!(
+                "SELECT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE e.normalized_name IN ({entity_names})
+                   AND f.category = ?1
+                   AND f.trust_score >= ?2
+                 GROUP BY f.fact_id
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?3
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?4"
             )
-            .await?;
-        let mut matches = Vec::new();
-        for fact in facts {
-            let fact_entities: HashSet<String> = fact
-                .entities
-                .iter()
-                .map(|entity| entity.to_ascii_lowercase())
-                .collect();
-            if normalized
-                .iter()
-                .all(|entity| fact_entities.contains(entity))
-            {
-                matches.push(fact);
-            }
+        } else {
+            format!(
+                "SELECT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE e.normalized_name IN ({entity_names})
+                   AND f.trust_score >= ?1
+                 GROUP BY f.fact_id
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?2
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?3"
+            )
+        };
+        let mut rows = if let Some(category) = category {
+            self.store
+                .conn()
+                .query(
+                    &sql,
+                    params![category.as_str(), min_trust, required_count, limit_i64],
+                )
+                .await
+        } else {
+            self.store
+                .conn()
+                .query(&sql, params![min_trust, required_count, limit_i64])
+                .await
         }
-
-        let fact_ids: Vec<i64> = matches.into_iter().map(|fact| fact.fact_id).collect();
+        .map_err(|e| db_error("reason", e))?;
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| db_error("reason", e))? {
+            fact_ids.push(row.get::<i64>(0).map_err(|e| db_error("reason", e))?);
+        }
         let mut results = self
             .results_for_fact_ids(&fact_ids, "entity reasoning")
             .await?;
-        results.truncate(normalized_limit(limit));
+        results.truncate(limit_usize);
         Ok(results)
     }
 
@@ -485,6 +517,10 @@ fn token_overlap(left: &[String], right: &[String]) -> usize {
     left.iter()
         .filter(|token| right_set.contains(token.as_str()))
         .count()
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn jaccard(left: &[String], right: &[String]) -> f64 {

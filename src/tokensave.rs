@@ -3056,7 +3056,7 @@ impl TokenSave {
             .query(
                 "SELECT COALESCE(SUM(helpful_count), 0),
                         COALESCE(SUM(unhelpful_count), 0),
-                        SUM(CASE WHEN hrr_vector IS NULL THEN 1 ELSE 0 END)
+                        COALESCE(SUM(CASE WHEN hrr_vector IS NULL THEN 1 ELSE 0 END), 0)
                  FROM memory_facts",
                 (),
             )
