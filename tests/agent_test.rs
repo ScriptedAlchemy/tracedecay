@@ -924,6 +924,18 @@ fn test_local_install_supported_agents_write_project_paths() {
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("md" | "mdc")
             );
+            if is_instruction_file {
+                assert!(
+                    body.contains("tokensave_fact_store"),
+                    "{agent} local instruction file {} should mention fact memory tools",
+                    path.display()
+                );
+                assert!(
+                    body.contains("tokensave_message_search"),
+                    "{agent} local instruction file {} should mention transcript message search",
+                    path.display()
+                );
+            }
             let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
             if !is_instruction_file && !is_cursor_permissions {
                 let expected = expected_tokensave_bin();

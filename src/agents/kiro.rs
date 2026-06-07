@@ -453,7 +453,13 @@ have been tried. Delegation is still appropriate for long-running execution work
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
 If a code analysis question cannot be fully answered by tokensave MCP tools, try \
 querying the SQLite database directly at `.tokensave/tokensave.db` (tables: `nodes`, \
-`edges`, `files`). Use SQL for structural queries that go beyond the MCP tools.\n\n\
+`edges`, `files`, `memory_facts`, `memory_entities`, `memory_feedback_events`). \
+Use SQL for structural queries that go beyond the MCP tools.\n\n\
+For durable project/user facts, prefer `tokensave_fact_store`, \
+`tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use \
+`tokensave_message_search` for project-local Cursor transcript recall when prior \
+conversation context matters. Do not store secrets, credentials, or unnecessary PII \
+in persistent facts.\n\n\
 If you discover a gap where an extractor, schema, or tokensave tool could answer a \
 question natively, propose opening an issue at \
 https://github.com/aovestdipaperino/tokensave. Remind the user to strip sensitive \
