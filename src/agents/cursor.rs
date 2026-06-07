@@ -43,10 +43,17 @@ impl AgentIntegration for CursorIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let cursor_dir = project_path.join(".cursor");
-        install_mcp_server(&cursor_dir.join("mcp.json"), &ctx.tokensave_bin)?;
-        install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
-        install_permissions(&cursor_dir.join("permissions.json"))?;
-        install_hooks(&cursor_dir.join("hooks.json"), &ctx.tokensave_bin)
+        let mcp_path = cursor_dir.join("mcp.json");
+        let rule_path = cursor_dir.join("rules/tokensave.mdc");
+        let permissions_path = cursor_dir.join("permissions.json");
+        let hooks_path = cursor_dir.join("hooks.json");
+        for path in [&mcp_path, &rule_path, &permissions_path, &hooks_path] {
+            super::ensure_project_local_safe_path(project_path, path)?;
+        }
+        install_mcp_server(&mcp_path, &ctx.tokensave_bin)?;
+        install_project_rule(&rule_path)?;
+        install_permissions(&permissions_path)?;
+        install_hooks(&hooks_path, &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -282,7 +289,7 @@ fn install_cursor_hook_entry(
         .collect();
 
     let mut entry = json!({
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout
     });
     if let Some(matcher) = matcher {
@@ -306,10 +313,6 @@ fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
         None
     };
     safe_write_text_file(path, contents, backup.as_deref())
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Remove MCP server entry from ~/.cursor/mcp.json.

@@ -16,6 +16,29 @@ pub fn current_branch(project_root: &Path) -> Option<String> {
     current_branch_git(project_root)
 }
 
+/// Returns true if `branch` exists as a local `refs/heads/*` branch.
+pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    if let Ok(repo) = gix::open(project_root) {
+        let refname = format!("refs/heads/{branch}");
+        if repo.find_reference(&refname).is_ok() {
+            return true;
+        }
+    }
+    std::process::Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(project_root)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn current_branch_gix(project_root: &Path) -> Option<String> {
     let repo = gix::open(project_root).ok()?;
     let head = repo.head().ok()?;
@@ -210,10 +233,19 @@ pub async fn add_branch_tracking(
     }
     let tokensave_dir = get_tokensave_dir(project_root);
 
+    let _branch_lock = match try_acquire_branch_add_lock(&tokensave_dir) {
+        Ok(lock) => lock,
+        Err(crate::errors::TokenSaveError::SyncLock { .. }) => {
+            return Ok(BranchAddOutcome::AlreadyTracked);
+        }
+        Err(e) => return Err(e),
+    };
+
     let mut meta = branch_meta::load_branch_meta(&tokensave_dir).unwrap_or_else(|| {
         let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
         branch_meta::BranchMeta::new(&default)
     });
+    prune_missing_branch_dbs(&tokensave_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
         return Ok(BranchAddOutcome::AlreadyTracked);
@@ -283,7 +315,46 @@ fn rollback_branch_tracking(
             let _ = crate::branch_meta::save_branch_meta(tokensave_dir, &meta);
         }
     }
-    remove_branch_db_files(new_db_path);
+    let still_ours = crate::branch_meta::load_branch_meta(tokensave_dir)
+        .and_then(|meta| meta.branches.get(branch_name).cloned())
+        .is_none_or(|entry| entry.db_file == db_file);
+    if still_ours {
+        remove_branch_db_files(new_db_path);
+    }
+}
+
+fn prune_missing_branch_dbs(tokensave_dir: &Path, meta: &mut crate::branch_meta::BranchMeta) {
+    let missing: Vec<String> = meta
+        .branches
+        .iter()
+        .filter_map(|(name, entry)| {
+            if name == &meta.default_branch {
+                return None;
+            }
+            let path = tokensave_dir.join(&entry.db_file);
+            (!path.exists()).then(|| name.clone())
+        })
+        .collect();
+    for name in missing {
+        meta.remove_branch(&name);
+    }
+}
+
+fn try_acquire_branch_add_lock(tokensave_dir: &Path) -> crate::errors::Result<std::fs::File> {
+    use fs2::FileExt;
+
+    std::fs::create_dir_all(tokensave_dir)?;
+    let lock_path = tokensave_dir.join(".branch-add.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    file.try_lock_exclusive()
+        .map_err(|e| crate::errors::TokenSaveError::SyncLock {
+            message: format!("branch add already running at {}: {e}", lock_path.display()),
+        })?;
+    Ok(file)
 }
 
 fn remove_branch_db_files(db_path: &Path) {
@@ -390,6 +461,51 @@ mod tests {
                 .join(format!("{}.db", sanitize_branch_name("feature/failsync")))
                 .exists(),
             "failed branch add should remove the copied branch DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_branch_tracking_repairs_stale_missing_db_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        git(project_root, &["init"]);
+        git(project_root, &["config", "user.email", "test@example.com"]);
+        git(project_root, &["config", "user.name", "Test User"]);
+        std::fs::write(project_root.join("lib.rs"), "pub fn main_branch() {}\n").unwrap();
+        git(project_root, &["add", "."]);
+        git(project_root, &["commit", "-m", "initial"]);
+        git(project_root, &["branch", "-M", "main"]);
+
+        let _cg = crate::tokensave::TokenSave::init(project_root)
+            .await
+            .unwrap();
+        git(project_root, &["checkout", "-b", "feature/stale"]);
+        std::fs::write(
+            project_root.join("lib.rs"),
+            "pub fn main_branch() {}\npub fn feature_branch() {}\n",
+        )
+        .unwrap();
+
+        let tokensave_dir = crate::config::get_tokensave_dir(project_root);
+        let mut meta = crate::branch_meta::load_branch_meta(&tokensave_dir).unwrap();
+        let db_file = format!("branches/{}.db", sanitize_branch_name("feature/stale"));
+        meta.add_branch("feature/stale", &db_file, "main");
+        crate::branch_meta::save_branch_meta(&tokensave_dir, &meta).unwrap();
+        assert!(
+            !tokensave_dir.join(&db_file).exists(),
+            "test setup should leave metadata pointing at a missing DB"
+        );
+
+        let outcome = add_branch_tracking(project_root, "feature/stale")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, BranchAddOutcome::Added);
+        let repaired = crate::branch_meta::load_branch_meta(&tokensave_dir).unwrap();
+        assert!(repaired.is_tracked("feature/stale"));
+        assert!(
+            tokensave_dir.join(&db_file).exists(),
+            "stale metadata should be self-repaired by recreating the branch DB"
         );
     }
 }

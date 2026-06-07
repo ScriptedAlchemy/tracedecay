@@ -62,10 +62,16 @@ impl AgentIntegration for CodexIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
+        let config_path = codex_dir.join("config.toml");
+        let agents_path = project_path.join("AGENTS.md");
+        let hooks_path = codex_dir.join("hooks.json");
+        for path in [&config_path, &agents_path, &hooks_path] {
+            super::ensure_project_local_safe_path(project_path, path)?;
+        }
         std::fs::create_dir_all(&codex_dir).ok();
-        install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))?;
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin)?;
+        install_prompt_rules(&agents_path)?;
+        install_hooks(&hooks_path, &ctx.tokensave_bin)?;
         print_hook_trust_guidance();
         Ok(())
     }
@@ -335,7 +341,7 @@ fn install_codex_hook_event(
 
     let handler = json!({
         "type": "command",
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout,
     });
     let mut group = json!({ "hooks": [handler] });
@@ -356,10 +362,6 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
                 .is_some_and(|command| command.contains(subcommand))
         })
     })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Codex requires non-managed command hooks to be trusted via `/hooks` before

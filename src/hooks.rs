@@ -113,7 +113,7 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
 /// stdout. This intentionally does not reuse the Claude hook output schema.
 pub fn hook_cursor_subagent_start() -> i32 {
     let event = read_stdin_to_string();
-    if let Some(decision) = evaluate_cursor_subagent_start(&event) {
+    if let Some(decision) = evaluate_cursor_subagent_start_persistent(&event) {
         println!("{decision}");
     }
     0
@@ -126,7 +126,7 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// rewrites, or blocks the tool call.
 pub fn hook_cursor_pre_tool_use() -> i32 {
     let event = read_stdin_to_string();
-    if let Some(output) = evaluate_cursor_pre_tool_use(&event) {
+    if let Some(output) = evaluate_cursor_pre_tool_use_persistent(&event) {
         println!("{output}");
     }
     0
@@ -221,6 +221,17 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     cursor_tool_hint_output(&input, &mut dedupe)
 }
 
+fn evaluate_cursor_subagent_start_persistent(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = cursor_subagent_hint_input(&parsed);
+    if let Some(path) = tool_hint_state_path(cursor_project_root_from_event(event_json).as_deref())
+    {
+        return cursor_tool_hint_output_with_state(&input, &path);
+    }
+    let mut dedupe = ToolHintDedupe::default();
+    cursor_tool_hint_output(&input, &mut dedupe)
+}
+
 /// Pure decision logic for Cursor `preToolUse` hook events.
 ///
 /// Returns Cursor-shaped nonblocking `additional_context` for high-confidence
@@ -229,6 +240,17 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
 pub fn evaluate_cursor_pre_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let input = cursor_pre_tool_hint_input(&parsed);
+    let mut dedupe = ToolHintDedupe::default();
+    cursor_tool_hint_output(&input, &mut dedupe)
+}
+
+fn evaluate_cursor_pre_tool_use_persistent(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = cursor_pre_tool_hint_input(&parsed);
+    if let Some(path) = tool_hint_state_path(cursor_project_root_from_event(event_json).as_deref())
+    {
+        return cursor_tool_hint_output_with_state(&input, &path);
+    }
     let mut dedupe = ToolHintDedupe::default();
     cursor_tool_hint_output(&input, &mut dedupe)
 }
@@ -248,6 +270,33 @@ pub fn cursor_tool_hint_output(
         })
         .to_string(),
     )
+}
+
+pub fn cursor_tool_hint_output_with_state(
+    input: &ToolHintInput,
+    state_path: &Path,
+) -> Option<String> {
+    let hint = decide_hint(input)?;
+    let mut dedupe = ToolHintDedupe::load(state_path).unwrap_or_default();
+    if !dedupe.should_emit(hint_session_id(input), hint.category) {
+        return None;
+    }
+    let _ = dedupe.save(state_path);
+    Some(
+        serde_json::json!({
+            "continue": true,
+            "additional_context": tool_hint_context(&hint),
+        })
+        .to_string(),
+    )
+}
+
+fn tool_hint_state_path(root: Option<&Path>) -> Option<PathBuf> {
+    let root = root?;
+    if !crate::tokensave::TokenSave::is_initialized(root) {
+        return None;
+    }
+    Some(crate::config::get_tokensave_dir(root).join("tool-hint-dedupe.json"))
 }
 
 fn cursor_subagent_hint_input(event: &Value) -> ToolHintInput {
@@ -582,8 +631,7 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 
 /// Returns the target branch for a branch-changing git command:
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
-/// `git switch -c <branch>`, and `git worktree add [<path>] <branch>` /
-/// `git worktree add -b <branch> <path>`.
+/// and `git switch -c <branch>`.
 ///
 /// Path checkouts (`git checkout -- <file>`) and non-switch commands return
 /// `None`. Only commands whose first shell word is `git` are considered.
@@ -608,34 +656,23 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
                     i += 1;
                     continue;
                 }
+                if is_obvious_checkout_pathspec(tok) {
+                    return None;
+                }
                 return Some(tok.clone());
             }
             None
         }
-        "worktree" => {
-            let add_pos = raw.iter().position(|t| t.eq_ignore_ascii_case("add"))?;
-            let after = &raw[add_pos + 1..];
-            let mut iter = after.iter();
-            while let Some(tok) = iter.next() {
-                if matches!(tok.as_str(), "-b" | "-B") {
-                    return iter.find(|t| !t.starts_with('-')).cloned();
-                }
-                if tok.starts_with('-') {
-                    continue;
-                }
-                break;
-            }
-            // No `-b`: positionals are `<path> [<branch>]`; the branch is the
-            // second positional, if present.
-            let positionals: Vec<&str> = after
-                .iter()
-                .filter(|t| !t.starts_with('-'))
-                .map(String::as_str)
-                .collect();
-            positionals.get(1).map(|b| (*b).to_string())
-        }
         _ => None,
     }
+}
+
+fn is_obvious_checkout_pathspec(token: &str) -> bool {
+    token == "."
+        || token == ":/"
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with(":/")
 }
 
 fn shell_words(command: &str) -> Vec<String> {
@@ -715,6 +752,68 @@ fn git_subcommand_pos(tokens: &[String]) -> Option<usize> {
         }
     }
     None
+}
+
+pub fn cursor_shell_command_targets_project(
+    command: &str,
+    cwd: &Path,
+    project_root: &Path,
+) -> bool {
+    let tokens = shell_words(command);
+    if !tokens
+        .first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("git"))
+    {
+        return true;
+    }
+    let Some(work_dir) = git_explicit_work_dir(&tokens, cwd) else {
+        return true;
+    };
+    let target_root = crate::config::discover_project_root(&work_dir).unwrap_or(work_dir);
+    paths_same(&target_root, project_root)
+}
+
+fn git_explicit_work_dir(tokens: &[String], cwd: &Path) -> Option<PathBuf> {
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        match token.as_str() {
+            "-C" | "--work-tree" => {
+                let value = tokens.get(i + 1)?;
+                return Some(resolve_shell_path(cwd, value));
+            }
+            "-c" | "--git-dir" | "--namespace" | "--config-env" => i += 2,
+            _ if token.starts_with("--work-tree=") => {
+                let value = token.trim_start_matches("--work-tree=");
+                return Some(resolve_shell_path(cwd, value));
+            }
+            _ if token.starts_with("--git-dir=")
+                || token.starts_with("--namespace=")
+                || token.starts_with("--config-env=") =>
+            {
+                i += 1;
+            }
+            _ if token.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    None
+}
+
+fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn paths_same(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
@@ -867,7 +966,7 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
 
 /// Branch-aware, fail-open handler for git state-changing shell commands.
 ///
-/// Branch switches (`checkout`/`switch`/`worktree add`) bootstrap/maintain
+/// Branch switches (`checkout`/`switch`) bootstrap/maintain
 /// tokensave branch tracking via [`crate::branch::add_branch_tracking`] —
 /// which is idempotent and supersedes a plain sync. Other state-changing
 /// commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) run a full
@@ -887,6 +986,15 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
+    let cwd = parsed
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.clone());
+    if !cursor_shell_command_targets_project(command, &cwd, &root) {
+        return;
+    }
     // Never bootstrap indexing in an unindexed repo.
     if !crate::tokensave::TokenSave::is_initialized(&root) {
         return;
@@ -909,6 +1017,11 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
 }
 
 async fn run_branch_tracking_or_sync(root: &Path, branch: &str, marker_file: &str) {
+    if crate::branch::current_branch(root).as_deref() != Some(branch)
+        || !crate::branch::local_branch_exists(root, branch)
+    {
+        return;
+    }
     match crate::branch::add_branch_tracking(root, branch).await {
         Ok(
             crate::branch::BranchAddOutcome::Added | crate::branch::BranchAddOutcome::NotIndexed,
@@ -952,6 +1065,9 @@ async fn workspace_open_for_cursor_event(event_json: &str) {
     if !crate::tokensave::TokenSave::is_initialized(&root) {
         return;
     }
+    if !mark_hook_should_run(&root, ".cursor_workspace_open_at", 60) {
+        return;
+    }
 
     // Ensure the current branch is tracked. When a branch is freshly added,
     // `add_branch_tracking` already runs a sync, so we can skip the catch-up.
@@ -976,6 +1092,16 @@ fn read_marker_secs(path: &Path) -> Option<i64> {
 
 fn write_marker_secs(path: &Path, secs: i64) {
     let _ = std::fs::write(path, secs.to_string());
+}
+
+fn mark_hook_should_run(root: &Path, marker_file: &str, debounce_secs: i64) -> bool {
+    let marker = crate::config::get_tokensave_dir(root).join(marker_file);
+    let now = now_unix_secs();
+    if !cursor_should_run_sync(now, read_marker_secs(&marker), debounce_secs) {
+        return false;
+    }
+    write_marker_secs(&marker, now);
+    true
 }
 
 fn now_unix_secs() -> i64 {
@@ -1034,7 +1160,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 /// the tool call, and invalid/unknown events fail open with no output.
 pub fn hook_codex_pre_tool_use() -> i32 {
     let event = read_stdin_to_string();
-    if let Some(output) = evaluate_codex_pre_tool_use(&event) {
+    if let Some(output) = evaluate_codex_pre_tool_use_persistent(&event) {
         println!("{output}");
     }
     0
@@ -1047,7 +1173,7 @@ pub fn hook_codex_pre_tool_use() -> i32 {
 /// so this injects `additionalContext` instead of denying.
 pub fn hook_codex_subagent_start() -> i32 {
     let event = read_stdin_to_string();
-    if let Some(output) = evaluate_codex_subagent_start(&event) {
+    if let Some(output) = evaluate_codex_subagent_start_persistent(&event) {
         println!("{output}");
     }
     0
@@ -1085,6 +1211,16 @@ pub fn evaluate_codex_pre_tool_use(event_json: &str) -> Option<String> {
     evaluate_codex_pre_tool_use_with_dedupe(event_json, &mut dedupe)
 }
 
+fn evaluate_codex_pre_tool_use_persistent(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = codex_pre_tool_hint_input(&parsed);
+    if let Some(path) = tool_hint_state_path(codex_project_root_from_event(event_json).as_deref()) {
+        return codex_tool_hint_output_with_state("PreToolUse", &input, &path);
+    }
+    let mut dedupe = ToolHintDedupe::default();
+    codex_tool_hint_output("PreToolUse", &input, &mut dedupe)
+}
+
 /// Pure Codex `PreToolUse` decision logic with caller-provided dedupe state.
 pub fn evaluate_codex_pre_tool_use_with_dedupe(
     event_json: &str,
@@ -1114,6 +1250,23 @@ fn codex_tool_hint_output(
     ))
 }
 
+fn codex_tool_hint_output_with_state(
+    event_name: &str,
+    input: &ToolHintInput,
+    state_path: &Path,
+) -> Option<String> {
+    let hint = decide_hint(input)?;
+    let mut dedupe = ToolHintDedupe::load(state_path).unwrap_or_default();
+    if !dedupe.should_emit(hint_session_id(input), hint.category) {
+        return None;
+    }
+    let _ = dedupe.save(state_path);
+    Some(codex_additional_context_json(
+        event_name,
+        &tool_hint_context(&hint),
+    ))
+}
+
 /// Pure decision logic for Codex `SubagentStart` events.
 ///
 /// Returns a Codex `additionalContext` payload steering research/explore
@@ -1135,6 +1288,24 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     codex_tool_hint_output("SubagentStart", &input, &mut dedupe)
 }
 
+fn evaluate_codex_subagent_start_persistent(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("SubagentStart".to_string()),
+        prompt: event_text_field(&parsed, &["prompt", "task", "description"]),
+        subagent_type: event_text_field(&parsed, &["agent_type", "subagent_type"]),
+        hints_enabled: true,
+        ..ToolHintInput::default()
+    };
+    if let Some(path) = tool_hint_state_path(codex_project_root_from_event(event_json).as_deref()) {
+        return codex_tool_hint_output_with_state("SubagentStart", &input, &path);
+    }
+    let mut dedupe = ToolHintDedupe::default();
+    codex_tool_hint_output("SubagentStart", &input, &mut dedupe)
+}
+
 /// Resolves the tokensave project root for a Codex event from its `cwd`.
 pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
     let cwd = event_cwd(event_json)?;
@@ -1145,16 +1316,17 @@ pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
 ///
 /// Codex sends the patch text as `tool_input.command`. The `apply_patch` envelope
 /// names each file with `*** Add File:`, `*** Update File:`, `*** Delete File:`,
-/// or `*** Move to:` lines. Patch paths are relative to the session `cwd`
+/// `*** Move from:`, or `*** Move to:` lines. Patch paths are relative to the session `cwd`
 /// (which may be a subdirectory of the discovered project root), so we resolve
 /// each against `cwd` and then make it relative to `project_root`. Absolute
 /// paths outside the root are skipped. The result feeds the targeted
 /// [`TokenSave::sync_if_stale_silent`] single-file sync.
 pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
-    const PREFIXES: [&str; 4] = [
+    const PREFIXES: [&str; 5] = [
         "*** Add File:",
         "*** Update File:",
         "*** Delete File:",
+        "*** Move from:",
         "*** Move to:",
     ];
     let mut rels: Vec<String> = Vec::new();
@@ -1184,10 +1356,7 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
 }
 
 fn is_codex_edit_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "apply_patch" | "edit" | "write"
-    )
+    tool_name.eq_ignore_ascii_case("apply_patch")
 }
 
 fn is_codex_bash_tool(tool_name: &str) -> bool {
@@ -1228,6 +1397,9 @@ async fn codex_post_tool_use(event_json: &str) {
             let _ = cg.sync_if_stale_silent(&rels).await;
         }
     } else if is_codex_bash_tool(tool_name) {
+        if !cursor_shell_command_targets_project(command, &cwd, &root) {
+            return;
+        }
         let current_branch = crate::branch::current_branch(&root);
         match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
             CursorShellSyncPlan::BranchAdd(branch) => {
