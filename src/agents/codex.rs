@@ -40,7 +40,7 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin, None)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -62,7 +62,11 @@ impl AgentIntegration for CodexIntegration {
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
         std::fs::create_dir_all(&codex_dir).ok();
-        install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
+        install_mcp_server(
+            &codex_dir.join("config.toml"),
+            &ctx.tokensave_bin,
+            Some(project_path),
+        )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
         install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
         print_hook_trust_guidance();
@@ -133,7 +137,11 @@ impl AgentIntegration for CodexIntegration {
 // ---------------------------------------------------------------------------
 
 /// Register MCP server and auto-approve tools in ~/.codex/config.toml.
-fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(
+    config_path: &Path,
+    tokensave_bin: &str,
+    local_project_path: Option<&Path>,
+) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
 
     // Ensure [mcp_servers.tokensave] exists
@@ -156,10 +164,24 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
         "command".to_string(),
         toml::Value::String(tokensave_bin.to_string()),
     );
-    server_table.insert(
-        "args".to_string(),
-        toml::Value::Array(vec![toml::Value::String("serve".to_string())]),
-    );
+    let args = if let Some(project_path) = local_project_path {
+        vec![
+            toml::Value::String("serve".to_string()),
+            toml::Value::String("--path".to_string()),
+            toml::Value::String(project_path.to_string_lossy().to_string()),
+        ]
+    } else {
+        vec![toml::Value::String("serve".to_string())]
+    };
+    server_table.insert("args".to_string(), toml::Value::Array(args));
+    if local_project_path.is_some() {
+        let mut env_table = toml::map::Map::new();
+        env_table.insert(
+            "TOKENSAVE_DISABLE_GLOBAL_DB".to_string(),
+            toml::Value::String("1".to_string()),
+        );
+        server_table.insert("env".to_string(), toml::Value::Table(env_table));
+    }
 
     // Auto-approve all tokensave tools so Codex doesn't prompt for each one
     let mut tools_table = toml::map::Map::new();

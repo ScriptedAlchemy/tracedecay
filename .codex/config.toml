@@ -1,6 +1,13 @@
 [mcp_servers.tokensave]
-args = ["serve"]
+args = [
+    "serve",
+    "--path",
+    "/home/zack/projects/tokensave",
+]
 command = "/home/zack/projects/tokensave/target/debug/tokensave"
+
+[mcp_servers.tokensave.env]
+TOKENSAVE_DISABLE_GLOBAL_DB = "1"
 
 [mcp_servers.tokensave.tools.tokensave_affected]
 approval_mode = "auto"

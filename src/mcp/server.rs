@@ -41,6 +41,12 @@ impl ServerStats {
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
+fn global_db_enabled() -> bool {
+    !std::env::var("TOKENSAVE_DISABLE_GLOBAL_DB")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
 /// Hand-maintained schema documentation for the `tokensave://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tokensave SQLite schema
@@ -300,7 +306,11 @@ impl McpServer {
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
-        let global_db = GlobalDb::open().await;
+        let global_db = if global_db_enabled() {
+            GlobalDb::open().await
+        } else {
+            None
+        };
         // Register this project in the global DB with its current tokens
         if let Some(ref gdb) = global_db {
             gdb.upsert(cg.project_root(), persisted).await;
@@ -572,6 +582,10 @@ impl McpServer {
         }
         let delta = current - last_flushed;
 
+        if self.global_db.is_none() {
+            return;
+        }
+
         let success = tokio::task::spawn_blocking(move || {
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
@@ -795,7 +809,7 @@ impl McpServer {
 
         // Flush remaining delta to worldwide counter (what periodic flushes missed)
         let last_flushed = self.last_flushed_tokens.load(Ordering::Relaxed);
-        if tokens_saved > last_flushed {
+        if self.global_db.is_some() && tokens_saved > last_flushed {
             let delta = tokens_saved - last_flushed;
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
@@ -1262,7 +1276,7 @@ impl McpServer {
                 }
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
-                {
+                if self.global_db.is_some() {
                     let project_path_str = self.cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();

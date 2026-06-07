@@ -3,7 +3,8 @@
     "tokensave": {
       "command": "/home/zack/projects/tokensave/scripts/tokensave-dev-mcp.sh",
       "env": {
-        "TOKENSAVE_DEV_PROJECT_ROOT": "/home/zack/projects/tokensave"
+        "TOKENSAVE_DEV_PROJECT_ROOT": "/home/zack/projects/tokensave",
+        "TOKENSAVE_DISABLE_GLOBAL_DB": "1"
       }
     }
   }

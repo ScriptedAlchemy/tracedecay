@@ -28,7 +28,7 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_mcp_server(&ctx.home.join(".cursor/mcp.json"), &ctx.tokensave_bin)?;
+        install_mcp_server(&ctx.home.join(".cursor/mcp.json"), &ctx.tokensave_bin, None)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -43,7 +43,11 @@ impl AgentIntegration for CursorIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let cursor_dir = project_path.join(".cursor");
-        install_mcp_server(&cursor_dir.join("mcp.json"), &ctx.tokensave_bin)?;
+        install_mcp_server(
+            &cursor_dir.join("mcp.json"),
+            &ctx.tokensave_bin,
+            Some(project_path),
+        )?;
         install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
         install_permissions(&cursor_dir.join("permissions.json"))?;
         install_hooks(&cursor_dir.join("hooks.json"), &ctx.tokensave_bin)
@@ -97,7 +101,11 @@ impl AgentIntegration for CursorIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(
+    mcp_path: &Path,
+    tokensave_bin: &str,
+    local_project_path: Option<&Path>,
+) -> Result<()> {
     if let Some(parent) = mcp_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -112,11 +120,18 @@ fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str) -> Result<()> {
             return Err(e);
         }
     };
-    settings["mcpServers"]["tokensave"] = json!({
+    let mut server = json!({
         "type": "stdio",
         "command": tokensave_bin,
         "args": ["serve"]
     });
+    if let Some(project_path) = local_project_path {
+        server["args"] = json!(["serve", "--path", project_path.to_string_lossy()]);
+        server["env"] = json!({
+            "TOKENSAVE_DISABLE_GLOBAL_DB": "1"
+        });
+    }
+    settings["mcpServers"]["tokensave"] = server;
 
     safe_write_json_file(mcp_path, &settings, backup.as_deref())?;
     eprintln!(
