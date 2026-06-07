@@ -12,6 +12,7 @@ pub mod health;
 pub mod info;
 pub mod memory;
 pub mod redundancy;
+pub mod session;
 pub mod workflow;
 
 use std::collections::HashSet;
@@ -204,9 +205,10 @@ pub async fn handle_tool_call(
         "tokensave_diagnose" => workflow::handle_diagnose(cg, args).await,
         "tokensave_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
         "tokensave_derives" => graph::handle_derives(cg, args).await,
-        "tokensave_record_decision" => memory::handle_record_decision(cg, args).await,
-        "tokensave_record_code_area" => memory::handle_record_code_area(cg, args).await,
-        "tokensave_session_recall" => memory::handle_session_recall(cg, args).await,
+        "tokensave_fact_store" => memory::handle_fact_store(cg, args).await,
+        "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
+        "tokensave_memory_status" => memory::handle_memory_status(cg).await,
+        "tokensave_message_search" => session::handle_message_search(cg, args).await,
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
         }),
@@ -234,9 +236,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            76
+            77
         } else {
-            75
+            76
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -252,6 +254,10 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_diagnose"));
         assert!(tool_names.contains(&"tokensave_run_affected_tests"));
         assert!(tool_names.contains(&"tokensave_derives"));
+        assert!(tool_names.contains(&"tokensave_fact_store"));
+        assert!(tool_names.contains(&"tokensave_fact_feedback"));
+        assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_impact"));
         assert!(tool_names.contains(&"tokensave_node"));
         assert!(tool_names.contains(&"tokensave_status"));
@@ -304,9 +310,10 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_session_end"));
         assert!(tool_names.contains(&"tokensave_body"));
         assert!(tool_names.contains(&"tokensave_todos"));
-        assert!(tool_names.contains(&"tokensave_record_decision"));
-        assert!(tool_names.contains(&"tokensave_record_code_area"));
-        assert!(tool_names.contains(&"tokensave_session_recall"));
+        assert!(tool_names.contains(&"tokensave_fact_store"));
+        assert!(tool_names.contains(&"tokensave_fact_feedback"));
+        assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_read"));
         assert!(tool_names.contains(&"tokensave_outline"));
         assert!(tool_names.contains(&"tokensave_implementations"));
@@ -347,8 +354,9 @@ mod tests {
             "tokensave_run_affected_tests",
             "tokensave_session_start",
             "tokensave_session_end",
-            "tokensave_record_decision",
-            "tokensave_record_code_area",
+            "tokensave_fact_store",
+            "tokensave_fact_feedback",
+            "tokensave_memory_status",
         ];
         for tool in &tools {
             let ann = tool

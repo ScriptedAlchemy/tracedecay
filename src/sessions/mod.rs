@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod cursor;
+
 /// Provider-neutral metadata for an indexed agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {

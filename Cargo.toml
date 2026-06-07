@@ -120,6 +120,7 @@ crossterm = "0.28"
 fs2 = "0.4"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
+amari-holographic = "0.23.0"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
