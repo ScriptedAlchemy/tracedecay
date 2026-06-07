@@ -165,6 +165,21 @@ fn expected_tokensave_bin() -> String {
     env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
 }
 
+fn assert_python_compiles(paths: &[&Path]) {
+    let output = Command::new("python3")
+        .arg("-m")
+        .arg("py_compile")
+        .args(paths)
+        .output()
+        .expect("python3 should be available for Hermes generated Python syntax checks");
+    assert!(
+        output.status.success(),
+        "generated Python should compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) {
     let mut node = json;
     for key in command_path {
@@ -343,6 +358,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(manifest.contains("tokensave_context"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
+    assert!(manifest.contains("provides_commands:"));
+    assert!(manifest.contains("/tokensave_status"));
 
     let init_py = std::fs::read_to_string(plugin_dir.join("__init__.py")).unwrap();
     assert!(init_py.contains("def register(ctx):"));
@@ -352,16 +369,28 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("ctx.register_skill(\"tokensave:tokensave\""));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
-    assert!(schemas_py.contains("tokensave_context"));
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
+    assert!(schemas_py.contains("json.load"));
+    let schemas_json = read_json(&plugin_dir.join("schemas.json"));
+    assert!(schemas_json.as_array().is_some_and(|schemas| schemas
+        .iter()
+        .any(|schema| schema["name"] == "tokensave_context")));
 
     let tools_py = std::fs::read_to_string(plugin_dir.join("tools.py")).unwrap();
     assert!(tools_py.contains(&expected_tokensave_bin()));
     assert!(tools_py.contains("subprocess.run"));
     assert!(tools_py.contains("tokensave tool"));
-    assert!(tools_py.contains("timeout=30"));
+    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("truncate_output"));
+    assert!(tools_py.contains("\"stderr\""));
+    assert!(tools_py.contains("\"stdout\""));
     assert!(tools_py.contains("\"tool\", name, \"--json\", \"--args\", payload"));
     assert!(!tools_py.contains("shell=True"));
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
 
     let skill = std::fs::read_to_string(plugin_dir.join("skills/tokensave/SKILL.md")).unwrap();
     assert!(skill.contains("Use tokensave"));
@@ -373,6 +402,80 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(
         !home.path().join(".hermes/config.yaml").exists(),
         "plain local install must not mutate the user profile config"
+    );
+}
+
+#[test]
+fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
+    let home = TempDir::new().unwrap();
+    let tokensave_bin = home.path().join("bin with spaces").join("token\"save-π");
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: tokensave_bin.to_string_lossy().to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+    };
+
+    HermesIntegration.install(&ctx).unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_tools.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+tools_path = pathlib.Path(sys.argv[1])
+expected_bin = sys.argv[2]
+spec = importlib.util.spec_from_file_location("tokensave_hermes_tools", tools_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+assert module.TOKENSAVE_BIN == expected_bin
+
+class Result:
+    returncode = 7
+    stdout = "stdout-" * 1000
+    stderr = "stderr-" * 1000
+
+def fake_run(argv, **kwargs):
+    assert argv[0] == expected_bin
+    assert argv[1:] == ["tool", "tokensave_context", "--json", "--args", "{\"query\": \"x\"}"]
+    assert kwargs["timeout"] == 600
+    assert kwargs["shell"] is False
+    return Result()
+
+module.subprocess.run = fake_run
+payload = json.loads(module.call_tokensave_tool("tokensave_context", {"query": "x"}))
+assert payload["error"] == "tokensave tool exited with status 7"
+assert payload["stdout"].startswith("stdout-")
+assert payload["stderr"].startswith("stderr-")
+assert payload["stdout"].endswith("...<truncated>")
+assert payload["stderr"].endswith("...<truncated>")
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir.join("tools.py"))
+        .arg(tokensave_bin)
+        .output()
+        .expect("python3 should run generated Hermes tools import check");
+    assert!(
+        output.status.success(),
+        "generated tools.py should import and expose diagnosable errors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -504,6 +607,64 @@ fn test_profile_flag_is_only_valid_for_hermes_install() {
 }
 
 #[test]
+fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    let install = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .arg("install")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--profile")
+        .arg("work")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()
+        .expect("run hermes profile install");
+    assert!(
+        install.status.success(),
+        "hermes profile install should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let plugin_dir = home.path().join(".hermes/profiles/work/plugins/tokensave");
+    assert!(plugin_dir.exists());
+
+    let uninstall = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .arg("uninstall")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--profile")
+        .arg("work")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()
+        .expect("run hermes profile uninstall");
+    assert!(
+        uninstall.status.success(),
+        "hermes profile uninstall should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    assert!(!plugin_dir.exists());
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .arg("uninstall")
+        .arg("--agent")
+        .arg("cursor")
+        .arg("--profile")
+        .arg("work")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()
+        .expect("run non-Hermes uninstall with profile");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr)
+        .contains("`--profile` is only supported with `--agent hermes`"));
+}
+
+#[test]
 fn test_hermes_install_removes_tokensave_from_disabled_list() {
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
@@ -527,6 +688,51 @@ fn test_hermes_install_removes_tokensave_from_disabled_list() {
         "plugins.disabled must not keep tokensave because disabled wins"
     );
     assert!(config.contains("    - other"));
+}
+
+#[test]
+fn test_hermes_install_backs_up_existing_config() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let backup = hermes_dir.join("config.yaml.bak");
+    assert!(
+        backup.exists(),
+        "install should back up existing Hermes config"
+    );
+    assert_eq!(
+        std::fs::read_to_string(backup).unwrap(),
+        original,
+        "backup should preserve the exact original config"
+    );
+}
+
+#[test]
+fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "theme: dark\nplugins: { enabled: [other] }\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("unsupported Hermes plugins config"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "unsupported inline plugins config must not be rewritten or duplicated"
+    );
 }
 
 #[test]
@@ -560,6 +766,28 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
     assert!(config.contains("theme: dark"));
     assert!(config.contains("    - other"));
     assert!(!config.contains("    - tokensave"));
+}
+
+#[test]
+fn test_hermes_uninstall_preserves_unknown_files_in_tokensave_plugin_dir() {
+    let home = TempDir::new().unwrap();
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("plugin.yaml"), "name: tokensave\n").unwrap();
+    std::fs::write(plugin_dir.join("user-notes.txt"), "keep me\n").unwrap();
+
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+
+    assert!(
+        plugin_dir.join("user-notes.txt").exists(),
+        "uninstall should not delete unknown files in the tokensave plugin dir"
+    );
+    assert!(
+        !plugin_dir.join("plugin.yaml").exists(),
+        "uninstall should remove tokensave-generated files"
+    );
 }
 
 #[test]

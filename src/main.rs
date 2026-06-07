@@ -721,7 +721,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 user_cfg.save();
             }
         }
-        Commands::Uninstall { agent } => {
+        Commands::Uninstall { agent, profile } => {
+            if profile.is_some() && agent.as_deref() != Some("hermes") {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
+                });
+            }
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -736,7 +741,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home,
                     tokensave_bin: String::new(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
-                    profile: None,
+                    profile: profile.clone(),
                 };
                 ag.uninstall(&ctx)?;
                 user_cfg.installed_agents.retain(|a| a != &id);
@@ -1248,6 +1253,7 @@ mod startup_tests {
         assert!(should_skip_agent_install_maintenance(
             &Commands::Uninstall {
                 agent: Some("kiro".to_string()),
+                profile: None,
             }
         ));
     }

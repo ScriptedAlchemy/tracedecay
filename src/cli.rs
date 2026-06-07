@@ -100,6 +100,9 @@ pub enum Commands {
         /// Agent to remove (removes all if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
+        /// Hermes profile to uninstall from (only used with --agent hermes)
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Extraction worker (spawned by tokensave itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]
