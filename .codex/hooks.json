@@ -12,6 +12,18 @@
         "matcher": "Bash|apply_patch"
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-pre-tool-use",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Read|Grep|Glob|Search|Task"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

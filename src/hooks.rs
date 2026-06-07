@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+pub mod tool_hints;
+
+use tool_hints::{decide_hint, HintAgent, ToolHintDedupe, ToolHintInput};
+
 const TOKENSAVE_RESEARCH_BLOCK_REASON: &str = "STOP: Use tokensave MCP tools \
 (tokensave_context, tokensave_search, tokensave_callees, tokensave_callers, \
 tokensave_impact, tokensave_files, tokensave_affected) instead of agents for \
@@ -115,6 +119,19 @@ pub fn hook_cursor_subagent_start() -> i32 {
     0
 }
 
+/// Cursor `preToolUse` hook handler.
+///
+/// Parses Cursor's tool event JSON and emits nonblocking `additional_context`
+/// soft hints for high-confidence code research tools. It never denies,
+/// rewrites, or blocks the tool call.
+pub fn hook_cursor_pre_tool_use() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(output) = evaluate_cursor_pre_tool_use(&event) {
+        println!("{output}");
+    }
+    0
+}
+
 /// Cursor `beforeSubmitPrompt` hook handler.
 ///
 /// Resets the project-local counter for a new prompt turn. The output uses
@@ -194,31 +211,273 @@ pub async fn hook_cursor_workspace_open() -> i32 {
 
 /// Pure decision logic for Cursor `subagentStart` hook events.
 ///
-/// Returns a Cursor hook response only when a research-oriented subagent should
-/// be denied in favor of tokensave MCP tools.
+/// Returns Cursor-shaped nonblocking `additional_context` only when a
+/// research-oriented subagent should be softly steered toward tokensave MCP
+/// tools.
 pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let subagent_type = parsed
-        .get("subagent_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let task = parsed
-        .get("task")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let input = cursor_subagent_hint_input(&parsed);
+    let mut dedupe = ToolHintDedupe::default();
+    cursor_tool_hint_output(&input, &mut dedupe)
+}
 
-    let is_explore = subagent_type.eq_ignore_ascii_case("explore");
-    if is_explore || is_code_research_prompt(task) {
-        return Some(
-            serde_json::json!({
-                "permission": "deny",
-                "user_message": TOKENSAVE_RESEARCH_BLOCK_REASON
-            })
-            .to_string(),
-        );
+/// Pure decision logic for Cursor `preToolUse` hook events.
+///
+/// Returns Cursor-shaped nonblocking `additional_context` for high-confidence
+/// search, broad-read, call-graph, and impact tool attempts. Invalid or
+/// unknown events fail open with no output.
+pub fn evaluate_cursor_pre_tool_use(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = cursor_pre_tool_hint_input(&parsed);
+    let mut dedupe = ToolHintDedupe::default();
+    cursor_tool_hint_output(&input, &mut dedupe)
+}
+
+pub fn cursor_tool_hint_output(
+    input: &ToolHintInput,
+    dedupe: &mut ToolHintDedupe,
+) -> Option<String> {
+    let hint = decide_hint(input)?;
+    if !dedupe.should_emit(hint_session_id(input), hint.category) {
+        return None;
     }
+    Some(
+        serde_json::json!({
+            "continue": true,
+            "additional_context": tool_hint_context(&hint),
+        })
+        .to_string(),
+    )
+}
 
-    None
+fn cursor_subagent_hint_input(event: &Value) -> ToolHintInput {
+    ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(event),
+        tool_name: Some("SubagentStart".to_string()),
+        prompt: event_text_field(event, &["task", "prompt", "description"]),
+        subagent_type: event_text_field(event, &["subagent_type", "subagentType", "agent_type"]),
+        hints_enabled: true,
+        ..ToolHintInput::default()
+    }
+}
+
+fn cursor_pre_tool_hint_input(event: &Value) -> ToolHintInput {
+    tool_hint_input_from_pre_tool_event(HintAgent::Cursor, event)
+}
+
+fn tool_hint_input_from_pre_tool_event(agent: HintAgent, event: &Value) -> ToolHintInput {
+    let tool_name = event_tool_name(event);
+    let tool_input = event.get("tool_input").unwrap_or(&Value::Null);
+    let file_path = tool_input_path(tool_input);
+    let prompt = tool_prompt_for_hint(tool_name.as_deref(), tool_input, file_path.as_deref());
+    let command = tool_command_for_hint(tool_name.as_deref(), tool_input);
+
+    ToolHintInput {
+        agent,
+        session_id: event_session_id(event),
+        tool_name,
+        command,
+        prompt,
+        subagent_type: tool_input_text_field(tool_input, &["subagent_type", "agent_type"]),
+        file_path,
+        hints_enabled: true,
+    }
+}
+
+fn tool_command_for_hint(tool_name: Option<&str>, tool_input: &Value) -> Option<String> {
+    let command = tool_input_text_field(tool_input, &["command", "cmd", "query", "pattern"]);
+    if tool_name.is_some_and(is_search_tool_name) {
+        return Some("rg tokensave-search-hint".to_string());
+    }
+    let command = command?;
+    if tool_name.is_some_and(is_shell_tool_name) && is_high_confidence_search_command(&command) {
+        Some("rg tokensave-search-hint".to_string())
+    } else {
+        Some(command)
+    }
+}
+
+fn tool_prompt_for_hint(
+    tool_name: Option<&str>,
+    tool_input: &Value,
+    file_path: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(name) = tool_name {
+        if is_call_graph_tool_name(name) {
+            parts.push("who calls".to_string());
+        } else if is_impact_tool_name(name) {
+            parts.push("impact change-risk".to_string());
+        }
+    }
+    collect_named_text(
+        tool_input,
+        &[
+            "prompt",
+            "task",
+            "query",
+            "instruction",
+            "message",
+            "description",
+        ],
+        &mut parts,
+    );
+    if tool_name.is_some_and(is_read_tool_name) && is_broad_read_tool_input(tool_input, file_path) {
+        parts.push("read every file in this directory".to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn tool_hint_context(hint: &tool_hints::ToolHint) -> String {
+    format!("{}\n\n{}", hint.message, hint.context)
+}
+
+fn hint_session_id(input: &ToolHintInput) -> String {
+    input
+        .session_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn event_tool_name(event: &Value) -> Option<String> {
+    event_text_field(event, &["tool_name", "toolName", "name"])
+}
+
+fn event_session_id(event: &Value) -> Option<String> {
+    event_text_field(event, &["session_id", "sessionId"])
+}
+
+fn event_text_field(event: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| event.get(*key).and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn tool_input_path(tool_input: &Value) -> Option<String> {
+    tool_input_text_field(tool_input, &["path", "file_path", "filePath"])
+}
+
+fn tool_input_text_field(tool_input: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| tool_input.get(*key).and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn collect_named_text(value: &Value, keys: &[&str], out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                {
+                    collect_text_values(child, out);
+                } else {
+                    collect_named_text(child, keys, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_named_text(item, keys, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_text_values(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) if !s.is_empty() => out.push(s.to_string()),
+        Value::Array(items) => {
+            for item in items {
+                collect_text_values(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values() {
+                collect_text_values(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_broad_read_tool_input(tool_input: &Value, file_path: Option<&str>) -> bool {
+    if tool_input
+        .get("recursive")
+        .or_else(|| tool_input.get("all"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    file_path.is_some_and(|path| {
+        path.ends_with('/')
+            || path.contains('*')
+            || path == "."
+            || path == "src"
+            || path.ends_with("/src")
+    })
+}
+
+fn is_high_confidence_search_command(command: &str) -> bool {
+    let first = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ';' | ','))
+        .to_ascii_lowercase();
+    matches!(
+        first.as_str(),
+        "rg" | "ripgrep" | "grep" | "find" | "search"
+    )
+}
+
+fn is_shell_tool_name(name: &str) -> bool {
+    matches_normalized_local(name, &["bash", "shell"])
+}
+
+fn is_read_tool_name(name: &str) -> bool {
+    matches_normalized_local(name, &["read", "readfile", "read_file"])
+}
+
+fn is_search_tool_name(name: &str) -> bool {
+    matches_normalized_local(name, &["search", "grep", "ripgrep", "rg", "find"])
+}
+
+fn is_call_graph_tool_name(name: &str) -> bool {
+    matches_normalized_local(
+        name,
+        &[
+            "whocalls",
+            "callers",
+            "callersof",
+            "callees",
+            "calleesof",
+            "callgraph",
+        ],
+    )
+}
+
+fn is_impact_tool_name(name: &str) -> bool {
+    matches_normalized_local(name, &["impact", "changerisk", "affected", "affectedfiles"])
+}
+
+fn matches_normalized_local(value: &str, expected: &[&str]) -> bool {
+    let normalized = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    expected.iter().any(|candidate| normalized == *candidate)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -260,28 +519,23 @@ fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
 /// pull, merge, rebase, reset, cherry-pick, `stash pop`/`stash apply`).
 ///
 /// Read-only git commands (`status`, `log`, `diff`), `commit`/`add`, and
-/// non-git commands return `false`. Only commands whose first token is `git`
-/// match, so `echo git checkout` is ignored.
+/// non-git commands return `false`. Only commands whose first shell word is
+/// `git` match, so `echo git checkout` is ignored.
 pub fn is_git_state_changing_command(command: &str) -> bool {
-    let tokens: Vec<String> = command
-        .split_whitespace()
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
-    if tokens.first().map(String::as_str) != Some("git") {
-        return false;
-    }
-    let Some(sub) = tokens.iter().skip(1).find(|t| !t.starts_with('-')) else {
+    let tokens = shell_words(command);
+    let Some(sub_pos) = git_subcommand_pos(&tokens) else {
         return false;
     };
+    let sub = tokens[sub_pos].to_ascii_lowercase();
     match sub.as_str() {
         "checkout" | "switch" | "pull" | "merge" | "rebase" | "reset" | "cherry-pick" => true,
         "stash" => {
             let after = tokens
                 .iter()
-                .skip_while(|t| t.as_str() != "stash")
-                .skip(1)
+                .skip(sub_pos + 1)
+                .map(|t| t.to_ascii_lowercase())
                 .find(|t| !t.starts_with('-'));
-            matches!(after.map(String::as_str), Some("pop") | Some("apply"))
+            matches!(after.as_deref(), Some("pop") | Some("apply"))
         }
         _ => false,
     }
@@ -295,6 +549,8 @@ pub enum CursorShellSyncPlan {
     BranchAdd(String),
     /// Run a full incremental sync (same-branch change set).
     IncrementalSync,
+    /// Ensure the current branch is tracked, then sync it if it already was.
+    CurrentBranchSync(String),
     /// Do nothing.
     Noop,
 }
@@ -303,10 +559,22 @@ pub enum CursorShellSyncPlan {
 /// `afterShellExecution` hook should take. Branch switches take precedence
 /// over plain incremental syncs.
 pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
+    cursor_shell_sync_plan_with_current_branch(command, None)
+}
+
+/// Like [`cursor_shell_sync_plan`], but supplies the post-command current branch
+/// for state-changing commands whose branch target is ambiguous or implicit.
+pub fn cursor_shell_sync_plan_with_current_branch(
+    command: &str,
+    current_branch: Option<&str>,
+) -> CursorShellSyncPlan {
     if let Some(branch) = cursor_branch_switch_target(command) {
         return CursorShellSyncPlan::BranchAdd(branch);
     }
     if is_git_state_changing_command(command) {
+        if let Some(branch) = current_branch.filter(|branch| !branch.is_empty()) {
+            return CursorShellSyncPlan::CurrentBranchSync(branch.to_string());
+        }
         return CursorShellSyncPlan::IncrementalSync;
     }
     CursorShellSyncPlan::Noop
@@ -318,42 +586,39 @@ pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
 /// `git worktree add -b <branch> <path>`.
 ///
 /// Path checkouts (`git checkout -- <file>`) and non-switch commands return
-/// `None`. Only commands whose first token is `git` are considered.
+/// `None`. Only commands whose first shell word is `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
-    let raw: Vec<&str> = command.split_whitespace().collect();
-    let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
-    if lower.first().map(String::as_str) != Some("git") {
-        return None;
-    }
-    let sub = lower.iter().skip(1).find(|t| !t.starts_with('-'))?;
-    let sub_pos = lower.iter().position(|t| t == sub)?;
+    let raw = shell_words(command);
+    let sub_pos = git_subcommand_pos(&raw)?;
+    let sub = raw[sub_pos].to_ascii_lowercase();
 
     match sub.as_str() {
         "checkout" | "switch" => {
-            // Path checkout (`git checkout -- file`) is not a branch switch.
-            if raw.iter().any(|t| *t == "--") {
-                return None;
-            }
             let after = &raw[sub_pos + 1..];
-            let mut iter = after.iter();
-            while let Some(tok) = iter.next() {
-                if matches!(*tok, "-b" | "-B" | "-c" | "-C") {
-                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+            let mut i = 0;
+            while i < after.len() {
+                let tok = &after[i];
+                if tok == "--" {
+                    return None;
+                }
+                if matches!(tok.as_str(), "-b" | "-B" | "-c" | "-C" | "--orphan") {
+                    return after.get(i + 1).cloned();
                 }
                 if tok.starts_with('-') {
+                    i += 1;
                     continue;
                 }
-                return Some((*tok).to_string());
+                return Some(tok.clone());
             }
             None
         }
         "worktree" => {
-            let add_pos = lower.iter().position(|t| t == "add")?;
+            let add_pos = raw.iter().position(|t| t.eq_ignore_ascii_case("add"))?;
             let after = &raw[add_pos + 1..];
             let mut iter = after.iter();
             while let Some(tok) = iter.next() {
-                if matches!(*tok, "-b" | "-B") {
-                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+                if matches!(tok.as_str(), "-b" | "-B") {
+                    return iter.find(|t| !t.starts_with('-')).cloned();
                 }
                 if tok.starts_with('-') {
                     continue;
@@ -365,12 +630,91 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
             let positionals: Vec<&str> = after
                 .iter()
                 .filter(|t| !t.starts_with('-'))
-                .copied()
+                .map(String::as_str)
                 .collect();
             positionals.get(1).map(|b| (*b).to_string())
         }
         _ => None,
     }
+}
+
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for c in command.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            Some('"') => match c {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(c),
+            },
+            _ => match c {
+                '\'' | '"' => quote = Some(c),
+                '\\' => escaped = true,
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn git_subcommand_pos(tokens: &[String]) -> Option<usize> {
+    if !tokens.first()?.eq_ignore_ascii_case("git") {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].to_ascii_lowercase();
+        match token.as_str() {
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                i += 2;
+            }
+            "--" => {
+                i += 1;
+            }
+            _ if token.starts_with("--git-dir=")
+                || token.starts_with("--work-tree=")
+                || token.starts_with("--namespace=")
+                || token.starts_with("--config-env=") =>
+            {
+                i += 1;
+            }
+            _ if token.starts_with('-') => {
+                i += 1;
+            }
+            _ => return Some(i),
+        }
+    }
+    None
 }
 
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
@@ -537,8 +881,7 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let plan = cursor_shell_sync_plan(command);
-    if matches!(plan, CursorShellSyncPlan::Noop) {
+    if matches!(cursor_shell_sync_plan(command), CursorShellSyncPlan::Noop) {
         return;
     }
     let Some(root) = cursor_project_root_from_event(event_json) else {
@@ -548,16 +891,32 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
     if !crate::tokensave::TokenSave::is_initialized(&root) {
         return;
     }
+    let current_branch = crate::branch::current_branch(&root);
+    let plan = cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref());
 
     match plan {
         CursorShellSyncPlan::BranchAdd(branch) => {
-            // Idempotent + fail-open: already-tracked branches no-op.
-            let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+            run_branch_tracking_or_sync(&root, &branch, ".cursor_shell_sync_at").await;
+        }
+        CursorShellSyncPlan::CurrentBranchSync(branch) => {
+            run_branch_tracking_or_sync(&root, &branch, ".cursor_shell_sync_at").await;
         }
         CursorShellSyncPlan::IncrementalSync => {
             run_coalesced_incremental_sync(&root, ".cursor_shell_sync_at").await;
         }
         CursorShellSyncPlan::Noop => {}
+    }
+}
+
+async fn run_branch_tracking_or_sync(root: &Path, branch: &str, marker_file: &str) {
+    match crate::branch::add_branch_tracking(root, branch).await {
+        Ok(
+            crate::branch::BranchAddOutcome::Added | crate::branch::BranchAddOutcome::NotIndexed,
+        ) => {}
+        Ok(crate::branch::BranchAddOutcome::AlreadyTracked) => {
+            run_coalesced_incremental_sync(root, marker_file).await;
+        }
+        Err(_) => {}
     }
 }
 
@@ -633,8 +992,8 @@ fn now_unix_secs() -> i64 {
 // transcript_path, cwd, hook_event_name, model, plus event-specific fields)
 // and reads a Codex-shaped JSON object from stdout. These handlers intentionally
 // emit Codex's documented output schema (`hookSpecificOutput.additionalContext`
-// for steering, `hookSpecificOutput.permissionDecision` for PreToolUse) rather
-// than reusing the Claude / Cursor / Kiro output shapes.
+// for steering and soft hints) rather than reusing the Claude / Cursor / Kiro
+// output shapes.
 // ---------------------------------------------------------------------------
 
 /// Codex `SessionStart` hook handler (fire-and-forget).
@@ -665,6 +1024,19 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         "{}",
         codex_additional_context_json("UserPromptSubmit", &context)
     );
+    0
+}
+
+/// Codex `PreToolUse` hook handler.
+///
+/// Emits nonblocking `hookSpecificOutput.additionalContext` soft hints for
+/// high-confidence code research tools. It never denies, rewrites, or blocks
+/// the tool call, and invalid/unknown events fail open with no output.
+pub fn hook_codex_pre_tool_use() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(output) = evaluate_codex_pre_tool_use(&event) {
+        println!("{output}");
+    }
     0
 }
 
@@ -707,6 +1079,41 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
     .to_string()
 }
 
+/// Pure decision logic for Codex `PreToolUse` hook events.
+pub fn evaluate_codex_pre_tool_use(event_json: &str) -> Option<String> {
+    let mut dedupe = ToolHintDedupe::default();
+    evaluate_codex_pre_tool_use_with_dedupe(event_json, &mut dedupe)
+}
+
+/// Pure Codex `PreToolUse` decision logic with caller-provided dedupe state.
+pub fn evaluate_codex_pre_tool_use_with_dedupe(
+    event_json: &str,
+    dedupe: &mut ToolHintDedupe,
+) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let input = codex_pre_tool_hint_input(&parsed);
+    codex_tool_hint_output("PreToolUse", &input, dedupe)
+}
+
+fn codex_pre_tool_hint_input(event: &Value) -> ToolHintInput {
+    tool_hint_input_from_pre_tool_event(HintAgent::Codex, event)
+}
+
+fn codex_tool_hint_output(
+    event_name: &str,
+    input: &ToolHintInput,
+    dedupe: &mut ToolHintDedupe,
+) -> Option<String> {
+    let hint = decide_hint(input)?;
+    if !dedupe.should_emit(hint_session_id(input), hint.category) {
+        return None;
+    }
+    Some(codex_additional_context_json(
+        event_name,
+        &tool_hint_context(&hint),
+    ))
+}
+
 /// Pure decision logic for Codex `SubagentStart` events.
 ///
 /// Returns a Codex `additionalContext` payload steering research/explore
@@ -715,26 +1122,17 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 /// prompt/task/description text.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let agent_type = parsed
-        .get("agent_type")
-        .or_else(|| parsed.get("subagent_type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let task = parsed
-        .get("prompt")
-        .or_else(|| parsed.get("task"))
-        .or_else(|| parsed.get("description"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    let is_explore = agent_type.eq_ignore_ascii_case("explore");
-    if is_explore || is_code_research_prompt(task) {
-        return Some(codex_additional_context_json(
-            "SubagentStart",
-            TOKENSAVE_RESEARCH_BLOCK_REASON,
-        ));
-    }
-    None
+    let input = ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("SubagentStart".to_string()),
+        prompt: event_text_field(&parsed, &["prompt", "task", "description"]),
+        subagent_type: event_text_field(&parsed, &["agent_type", "subagent_type"]),
+        hints_enabled: true,
+        ..ToolHintInput::default()
+    };
+    let mut dedupe = ToolHintDedupe::default();
+    codex_tool_hint_output("SubagentStart", &input, &mut dedupe)
 }
 
 /// Resolves the tokensave project root for a Codex event from its `cwd`.
@@ -830,10 +1228,13 @@ async fn codex_post_tool_use(event_json: &str) {
             let _ = cg.sync_if_stale_silent(&rels).await;
         }
     } else if is_codex_bash_tool(tool_name) {
-        match cursor_shell_sync_plan(command) {
+        let current_branch = crate::branch::current_branch(&root);
+        match cursor_shell_sync_plan_with_current_branch(command, current_branch.as_deref()) {
             CursorShellSyncPlan::BranchAdd(branch) => {
-                // Idempotent + fail-open: already-tracked branches no-op.
-                let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+                run_branch_tracking_or_sync(&root, &branch, ".codex_shell_sync_at").await;
+            }
+            CursorShellSyncPlan::CurrentBranchSync(branch) => {
+                run_branch_tracking_or_sync(&root, &branch, ".codex_shell_sync_at").await;
             }
             CursorShellSyncPlan::IncrementalSync => {
                 run_coalesced_incremental_sync(&root, ".codex_shell_sync_at").await;

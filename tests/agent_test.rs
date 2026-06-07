@@ -236,6 +236,24 @@ fn test_local_install_cursor_writes_project_config_only() {
         })
         .expect("Cursor subagentStart hook should call tokensave hook-cursor-subagent-start");
     assert_eq!(tokensave_hook["timeout"], serde_json::json!(5));
+    let pre_tool_hooks = hooks["hooks"]["preToolUse"]
+        .as_array()
+        .expect("preToolUse hooks should be an array");
+    let pre_tool_hook = pre_tool_hooks
+        .iter()
+        .find(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-pre-tool-use"))
+        })
+        .expect("Cursor preToolUse hook should call tokensave hook-cursor-pre-tool-use");
+    assert_eq!(pre_tool_hook["timeout"], serde_json::json!(5));
+    assert!(
+        pre_tool_hook["matcher"]
+            .as_str()
+            .is_some_and(|matcher| matcher.contains("Read") && matcher.contains("Task")),
+        "Cursor preToolUse matcher should cover research-prone tools"
+    );
     let before_submit_hooks = hooks["hooks"]["beforeSubmitPrompt"]
         .as_array()
         .expect("beforeSubmitPrompt hooks should be an array");
@@ -348,6 +366,35 @@ fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
     assert_eq!(
         tokensave_entries[0]["matcher"], "Write",
         "reinstall must reconcile the matcher onto a pre-existing entry"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_backs_up_existing_rule_idempotently() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
+    std::fs::create_dir_all(rule_path.parent().unwrap()).unwrap();
+    let original = "# Team Cursor Rules\n\nKeep this project-specific guidance.\n";
+    std::fs::write(&rule_path, original).unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let backup_path = project.path().join(".cursor/rules/tokensave.mdc.bak");
+    assert!(
+        backup_path.exists(),
+        "install must back up a pre-existing non-tokensave Cursor rule"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backup_path).unwrap(),
+        original,
+        "reinstall must not replace the user's original rule backup"
+    );
+    let installed = std::fs::read_to_string(&rule_path).unwrap();
+    assert!(
+        installed.contains("tokensave MCP tools") && installed.contains("alwaysApply: true"),
+        "Cursor rule should be replaced with the generated tokensave rule after backing up the original"
     );
 }
 
@@ -629,6 +676,19 @@ fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
         "Codex SubagentStart hook should redirect research subagents: {hooks}"
     );
     assert!(
+        codex_event_has_handler(hooks, "PreToolUse", "hook-codex-pre-tool-use"),
+        "Codex PreToolUse hook should emit nonblocking soft hints: {hooks}"
+    );
+    let pre_tool_matcher =
+        codex_matcher_for_handler(hooks, "PreToolUse", "hook-codex-pre-tool-use")
+            .expect("PreToolUse handler should exist");
+    assert!(
+        pre_tool_matcher.contains("Bash")
+            && pre_tool_matcher.contains("Read")
+            && pre_tool_matcher.contains("Task"),
+        "PreToolUse matcher should target research-prone tools, got {pre_tool_matcher:?}"
+    );
+    assert!(
         codex_event_has_handler(hooks, "PostToolUse", "hook-codex-post-tool-use"),
         "Codex PostToolUse hook should keep the index fresh: {hooks}"
     );
@@ -676,6 +736,29 @@ fn test_codex_local_install_writes_hooks() {
     assert!(
         !home.path().join(".codex/hooks.json").exists(),
         "local install must not write the global Codex hooks config"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_codex_local_install_propagates_agents_md_write_failure() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let agents_md = project.path().join("AGENTS.md");
+    std::os::unix::fs::symlink("/dev/full", &agents_md).unwrap();
+
+    let output = run_local_install("codex", project.path(), home.path());
+
+    assert!(
+        !output.status.success(),
+        "local Codex install should fail when AGENTS.md cannot be written\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AGENTS.md") || stderr.contains("No space left"),
+        "error should mention the failed prompt-rule write, got:\n{stderr}"
     );
 }
 

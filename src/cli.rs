@@ -122,6 +122,9 @@ pub enum Commands {
     /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-subagent-start", hide = true)]
     HookCursorSubagentStart,
+    /// Cursor preToolUse hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-pre-tool-use", hide = true)]
+    HookCursorPreToolUse,
     /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
     HookCursorBeforeSubmitPrompt,
@@ -143,6 +146,9 @@ pub enum Commands {
     /// Codex UserPromptSubmit hook handler (called by Codex, not by users directly)
     #[command(name = "hook-codex-user-prompt-submit", hide = true)]
     HookCodexUserPromptSubmit,
+    /// Codex PreToolUse hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-pre-tool-use", hide = true)]
+    HookCodexPreToolUse,
     /// Codex SubagentStart hook handler (called by Codex, not by users directly)
     #[command(name = "hook-codex-subagent-start", hide = true)]
     HookCodexSubagentStart,

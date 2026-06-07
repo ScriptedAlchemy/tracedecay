@@ -19,6 +19,13 @@
         "timeout": 5
       }
     ],
+    "preToolUse": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-pre-tool-use",
+        "matcher": "Shell|Bash|Read|ReadFile|Grep|Glob|Search|Task",
+        "timeout": 5
+      }
+    ],
     "sessionStart": [
       {
         "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-session-start",
