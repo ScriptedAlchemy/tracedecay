@@ -2123,9 +2123,8 @@ mod local_install_safety_tests {
         symlink(&outside, project.join("AGENTS.md")).unwrap();
 
         let alias_project = alias.join("project");
-        let err =
-            ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
-                .unwrap_err();
+        let err = ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
+            .unwrap_err();
         assert!(
             err.to_string().contains("symlink"),
             "error should clearly identify the symlink risk: {err}"
