@@ -724,8 +724,9 @@ fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &
             })
         })
         .expect("handler command should exist");
+    let expected = expected_tokensave_bin();
     assert!(
-        command.contains(env!("CARGO_BIN_EXE_tokensave")),
+        command.contains(&expected),
         "Codex hook command must use the resolved absolute tokensave executable, got {command}"
     );
 }
