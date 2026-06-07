@@ -317,8 +317,9 @@ pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
 /// `git switch -c <branch>`, and `git worktree add [<path>] <branch>` /
 /// `git worktree add -b <branch> <path>`.
 ///
-/// Path checkouts (`git checkout -- <file>`) and non-switch commands return
-/// `None`. Only commands whose first token is `git` are considered.
+/// Path checkouts (`git checkout -- <file>` or obvious file pathspecs) and
+/// non-switch commands return `None`. Only commands whose first token is `git`
+/// are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw: Vec<&str> = command.split_whitespace().collect();
     let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
@@ -342,6 +343,9 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
                 }
                 if tok.starts_with('-') {
                     continue;
+                }
+                if is_obvious_checkout_pathspec(tok) {
+                    return None;
                 }
                 return Some((*tok).to_string());
             }
@@ -371,6 +375,16 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn is_obvious_checkout_pathspec(token: &str) -> bool {
+    token == "."
+        || token == ":/"
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with(":/")
+        || token.contains('/')
+        || token.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty())
 }
 
 /// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
