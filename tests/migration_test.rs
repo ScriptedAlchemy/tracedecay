@@ -105,6 +105,70 @@ async fn scalar_i64(conn: &Connection, sql: &str) -> i64 {
     row.get(0).expect("failed to read scalar value")
 }
 
+async fn assert_backfilled_memory_has_vectors_and_banks(
+    conn: &Connection,
+    category: &str,
+    expected_fact_count: i64,
+) {
+    assert_eq!(
+        scalar_i64(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM memory_facts
+                 WHERE category = '{category}'
+                   AND hrr_vector IS NOT NULL
+                   AND length(hrr_vector) > 0
+                   AND hrr_algebra = 'amari_fhrr'
+                   AND hrr_dim = 2048"
+            )
+        )
+        .await,
+        expected_fact_count,
+        "all backfilled {category} facts should have serialized HRR vectors"
+    );
+    assert_eq!(
+        scalar_i64(
+            conn,
+            "SELECT COUNT(*) FROM memory_facts
+             WHERE hrr_vector IS NULL OR hrr_algebra != 'amari_fhrr' OR hrr_dim != 2048"
+        )
+        .await,
+        0,
+        "v11 migration should leave no backfilled facts missing vectors"
+    );
+    assert_eq!(
+        scalar_i64(
+            conn,
+            "SELECT COUNT(*) FROM memory_banks
+             WHERE bank_name = 'all'
+               AND vector IS NOT NULL
+               AND length(vector) > 0
+               AND hrr_algebra = 'amari_fhrr'
+               AND hrr_dim = 2048"
+        )
+        .await,
+        1,
+        "v11 migration should build the global memory bank"
+    );
+    assert_eq!(
+        scalar_i64(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM memory_banks
+                 WHERE bank_name = '{category}'
+                   AND vector IS NOT NULL
+                   AND length(vector) > 0
+                   AND hrr_algebra = 'amari_fhrr'
+                   AND hrr_dim = 2048
+                   AND fact_count = {expected_fact_count}"
+            )
+        )
+        .await,
+        1,
+        "v11 migration should build the {category} memory bank"
+    );
+}
+
 /// Checks whether a column exists on a table via PRAGMA table_info.
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
@@ -1256,6 +1320,7 @@ async fn test_v11_backfills_legacy_memory_decisions_as_facts() {
         .await,
         3
     );
+    assert_backfilled_memory_has_vectors_and_banks(&conn, "decision", 1).await;
 }
 
 #[tokio::test]
@@ -1307,6 +1372,7 @@ async fn test_v11_backfills_legacy_memory_code_areas_as_facts() {
         .await,
         1
     );
+    assert_backfilled_memory_has_vectors_and_banks(&conn, "code_area", 1).await;
 }
 
 #[tokio::test]

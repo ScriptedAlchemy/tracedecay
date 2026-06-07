@@ -12,6 +12,7 @@
 use libsql::Connection;
 
 use crate::errors::{Result, TokenSaveError};
+use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
@@ -844,7 +845,20 @@ async fn migrate_v11(conn: &Connection) -> Result<()> {
     create_holographic_memory_schema(conn, "migrate_v11").await?;
     if legacy_memory_tables_exist(conn).await? {
         backfill_legacy_memory_as_facts(conn).await?;
+        backfill_holographic_memory_vectors_and_banks(conn).await?;
     }
+    Ok(())
+}
+
+async fn backfill_holographic_memory_vectors_and_banks(conn: &Connection) -> Result<()> {
+    let store = MemoryStore::new(conn);
+    loop {
+        let updated = store.compute_missing_vectors(500).await?;
+        if updated == 0 {
+            break;
+        }
+    }
+    store.rebuild_all_banks().await?;
     Ok(())
 }
 

@@ -3468,6 +3468,8 @@ async fn memory_tools_validate_malformed_inputs() {
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions();
+    let tool_names: std::collections::HashSet<_> =
+        tools.iter().map(|tool| tool.name.as_str()).collect();
     let fact_store = tools
         .iter()
         .find(|tool| tool.name == "tokensave_fact_store")
@@ -3524,6 +3526,19 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
     );
     assert_eq!(fact_store.input_schema["properties"]["trust"]["minimum"], 0);
     assert_eq!(fact_store.input_schema["properties"]["trust"]["maximum"], 1);
+
+    assert!(
+        !tool_names.contains("tokensave_record_decision"),
+        "unshipped legacy decision tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tokensave_record_code_area"),
+        "unshipped legacy code-area tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tokensave_session_recall"),
+        "unshipped legacy recall tool should not be exposed"
+    );
 }
 
 // ---------------------------------------------------------------------------
