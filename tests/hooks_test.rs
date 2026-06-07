@@ -5,10 +5,11 @@ use tokensave::hooks::{
     build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
     codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
     cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
-    cursor_staleness_hint, cursor_tool_hint_output, evaluate_codex_pre_tool_use,
-    evaluate_codex_pre_tool_use_with_dedupe, evaluate_codex_subagent_start,
-    evaluate_cursor_pre_tool_use, evaluate_cursor_subagent_start, evaluate_hook_decision,
-    evaluate_kiro_pre_tool_use, is_git_state_changing_command, CursorShellSyncPlan,
+    cursor_staleness_hint, cursor_tool_hint_output, cursor_tool_hint_output_with_state,
+    evaluate_codex_pre_tool_use, evaluate_codex_pre_tool_use_with_dedupe,
+    evaluate_codex_subagent_start, evaluate_cursor_pre_tool_use, evaluate_cursor_subagent_start,
+    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
+    CursorShellSyncPlan,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -142,6 +143,23 @@ fn cursor_tool_hint_output_suppresses_duplicate_session_category() {
 
     assert!(cursor_tool_hint_output(&input, &mut dedupe).is_some());
     assert!(cursor_tool_hint_output(&input, &mut dedupe).is_none());
+}
+
+#[test]
+fn cursor_tool_hint_state_suppresses_duplicate_process_invocations() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join(".tokensave/tool-hint-dedupe.json");
+    let input = ToolHintInput {
+        tool_name: Some("Shell".to_string()),
+        command: Some("rg \"TokenSave\" src tests".to_string()),
+        ..hint_input()
+    };
+
+    assert!(cursor_tool_hint_output_with_state(&input, &state_path).is_some());
+    assert!(
+        cursor_tool_hint_output_with_state(&input, &state_path).is_none(),
+        "second process-equivalent invocation should be deduped from persisted state"
+    );
 }
 
 #[test]
@@ -668,14 +686,6 @@ fn test_cursor_branch_switch_target_extracts_branch() {
         cursor_branch_switch_target("git switch -c feature/y"),
         Some("feature/y".to_string())
     );
-    assert_eq!(
-        cursor_branch_switch_target("git worktree add ../wt feature/z"),
-        Some("feature/z".to_string())
-    );
-    assert_eq!(
-        cursor_branch_switch_target("git worktree add -b newbranch ../wt"),
-        Some("newbranch".to_string())
-    );
 }
 
 #[test]
@@ -684,8 +694,13 @@ fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
         cursor_branch_switch_target("git checkout -- src/main.rs"),
         None
     );
+    assert_eq!(cursor_branch_switch_target("git checkout ."), None);
     assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
     assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
+    assert_eq!(
+        cursor_branch_switch_target("git worktree add ../wt feature/z"),
+        None
+    );
     assert_eq!(cursor_branch_switch_target("git status"), None);
     assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
 }
@@ -702,7 +717,7 @@ fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
     );
     assert_eq!(
         cursor_shell_sync_plan("git worktree add ../wt feature/z"),
-        CursorShellSyncPlan::BranchAdd("feature/z".to_string())
+        CursorShellSyncPlan::Noop
     );
 }
 
@@ -977,6 +992,24 @@ fn test_codex_apply_patch_rel_paths_extracts_patched_files() {
             "src/new_mod.rs".to_string(),
             "src/old_mod.rs".to_string(),
         ]
+    );
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_extracts_move_source_and_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let command = "*** Begin Patch\n\
+        *** Update File: src/new_name.rs\n\
+        *** Move from: src/old_name.rs\n\
+        *** Move to: src/new_name.rs\n\
+        *** End Patch\n";
+
+    let mut rels = codex_apply_patch_rel_paths(command, &root, &root);
+    rels.sort();
+    assert_eq!(
+        rels,
+        vec!["src/new_name.rs".to_string(), "src/old_name.rs".to_string()]
     );
 }
 

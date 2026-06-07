@@ -543,6 +543,89 @@ fn normalize_path_separators(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+pub(crate) fn hook_command(tokensave_bin: &str, subcommand: &str) -> String {
+    hook_command_for_platform(tokensave_bin, subcommand, cfg!(windows))
+}
+
+pub(crate) fn hook_command_for_platform(
+    tokensave_bin: &str,
+    subcommand: &str,
+    windows: bool,
+) -> String {
+    let quoted = if windows {
+        quote_windows_command_arg(&normalize_path_separators(tokensave_bin))
+    } else {
+        quote_posix_command_arg(tokensave_bin)
+    };
+    format!("{quoted} {subcommand}")
+}
+
+fn quote_windows_command_arg(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn quote_posix_command_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|e| TokenSaveError::Config {
+            message: format!(
+                "failed to resolve project root {}: {e}",
+                project_root.display()
+            ),
+        })?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if absolute
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "refusing to write project-local config outside {}: {}",
+                root.display(),
+                absolute.display()
+            ),
+        });
+    }
+    if !absolute.starts_with(&root) {
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "refusing to write project-local config outside {}: {}",
+                root.display(),
+                absolute.display()
+            ),
+        });
+    }
+
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        current.push(component.as_os_str());
+        if !current.starts_with(&root) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&current) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            return Err(TokenSaveError::Config {
+                message: format!(
+                    "refusing to write project-local config through symlink: {}",
+                    current.display()
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Returns the user's home directory, cross-platform.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")
@@ -1879,6 +1962,72 @@ mod path_normalize_tests {
         assert_eq!(
             normalize_path_separators("/usr/local/bin/tokensave"),
             "/usr/local/bin/tokensave"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod local_install_safety_tests {
+    use super::*;
+
+    #[test]
+    fn windows_hook_command_quotes_windows_paths_with_spaces() {
+        let command = hook_command_for_platform(
+            r"C:\Program Files\tokensave\tokensave.exe",
+            "hook-test",
+            true,
+        );
+
+        assert_eq!(
+            command,
+            r#""C:/Program Files/tokensave/tokensave.exe" hook-test"#
+        );
+    }
+
+    #[test]
+    fn posix_hook_command_keeps_single_quote_escaping() {
+        let command = hook_command_for_platform("/tmp/tokensave's/bin", "hook-test", false);
+
+        assert_eq!(command, "'/tmp/tokensave'\\''s/bin' hook-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join("AGENTS.md")).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join(".codex")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join(".codex/config.toml"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
         );
     }
 }

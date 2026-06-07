@@ -5,6 +5,7 @@
 //! a returned hint for their own hook schema.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HintAgent {
@@ -21,6 +22,33 @@ pub enum HintCategory {
     SymbolLookup,
     FileLookup,
     ExploreSubagent,
+}
+
+impl HintCategory {
+    fn as_key(self) -> &'static str {
+        match self {
+            HintCategory::Search => "search",
+            HintCategory::BroadRead => "broad_read",
+            HintCategory::CallGraph => "call_graph",
+            HintCategory::Impact => "impact",
+            HintCategory::SymbolLookup => "symbol_lookup",
+            HintCategory::FileLookup => "file_lookup",
+            HintCategory::ExploreSubagent => "explore_subagent",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "search" => Some(HintCategory::Search),
+            "broad_read" => Some(HintCategory::BroadRead),
+            "call_graph" => Some(HintCategory::CallGraph),
+            "impact" => Some(HintCategory::Impact),
+            "symbol_lookup" => Some(HintCategory::SymbolLookup),
+            "file_lookup" => Some(HintCategory::FileLookup),
+            "explore_subagent" => Some(HintCategory::ExploreSubagent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +95,46 @@ impl ToolHintDedupe {
     pub fn should_emit(&mut self, session_id: impl Into<String>, category: HintCategory) -> bool {
         self.seen.insert((session_id.into(), category))
     }
+
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let entries: Vec<PersistedHintEntry> = serde_json::from_str(&content).unwrap_or_default();
+        let seen = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let category = HintCategory::from_key(&entry.category)?;
+                Some((entry.session_id, category))
+            })
+            .collect();
+        Ok(Self { seen })
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut entries: Vec<PersistedHintEntry> = self
+            .seen
+            .iter()
+            .map(|(session_id, category)| PersistedHintEntry {
+                session_id: session_id.clone(),
+                category: category.as_key().to_string(),
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            a.session_id
+                .cmp(&b.session_id)
+                .then_with(|| a.category.cmp(&b.category))
+        });
+        let json = serde_json::to_string_pretty(&entries).map_err(std::io::Error::other)?;
+        std::fs::write(path, format!("{json}\n"))
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedHintEntry {
+    session_id: String,
+    category: String,
 }
 
 pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
