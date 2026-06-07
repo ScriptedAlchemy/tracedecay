@@ -40,7 +40,7 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin, false, true)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -62,7 +62,12 @@ impl AgentIntegration for CodexIntegration {
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
         std::fs::create_dir_all(&codex_dir).ok();
-        install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
+        install_mcp_server(
+            &codex_dir.join("config.toml"),
+            &ctx.tokensave_bin,
+            true,
+            false,
+        )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
         install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
         print_hook_trust_guidance();
@@ -88,11 +93,21 @@ impl AgentIntegration for CodexIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
-        let codex_dir = ctx.home.join(".codex");
-        let config_path = codex_dir.join("config.toml");
-        doctor_check_config(dc, &config_path);
-        doctor_check_prompt(dc, &codex_dir);
-        doctor_check_hooks(dc, &codex_dir.join("hooks.json"));
+        let local_codex_dir = ctx.project_path.join(".codex");
+        if local_codex_dir.join("config.toml").exists()
+            || local_codex_dir.join("hooks.json").exists()
+            || ctx.project_path.join("AGENTS.md").exists()
+        {
+            doctor_check_config(dc, &local_codex_dir.join("config.toml"));
+            doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
+            doctor_check_hooks(dc, &local_codex_dir.join("hooks.json"));
+        } else {
+            let codex_dir = ctx.home.join(".codex");
+            let config_path = codex_dir.join("config.toml");
+            doctor_check_config(dc, &config_path);
+            doctor_check_prompt_file(dc, &codex_dir.join("AGENTS.md"));
+            doctor_check_hooks(dc, &codex_dir.join("hooks.json"));
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -123,7 +138,12 @@ impl AgentIntegration for CodexIntegration {
 // ---------------------------------------------------------------------------
 
 /// Register MCP server and auto-approve tools in ~/.codex/config.toml.
-fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(
+    config_path: &Path,
+    tokensave_bin: &str,
+    is_local_install: bool,
+    enable_global_db: bool,
+) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
 
     // Ensure [mcp_servers.tokensave] exists
@@ -146,10 +166,24 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
         "command".to_string(),
         toml::Value::String(tokensave_bin.to_string()),
     );
-    server_table.insert(
-        "args".to_string(),
-        toml::Value::Array(vec![toml::Value::String("serve".to_string())]),
-    );
+    let args = if is_local_install {
+        vec![
+            toml::Value::String("serve".to_string()),
+            toml::Value::String("--path".to_string()),
+            toml::Value::String(".".to_string()),
+        ]
+    } else {
+        vec![toml::Value::String("serve".to_string())]
+    };
+    server_table.insert("args".to_string(), toml::Value::Array(args));
+    if enable_global_db {
+        let mut env_table = toml::map::Map::new();
+        env_table.insert(
+            "TOKENSAVE_ENABLE_GLOBAL_DB".to_string(),
+            toml::Value::String("1".to_string()),
+        );
+        server_table.insert("env".to_string(), toml::Value::Table(env_table));
+    }
 
     // Auto-approve all tokensave tools so Codex doesn't prompt for each one
     let mut tools_table = toml::map::Map::new();
@@ -540,19 +574,24 @@ fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
 }
 
 /// Check AGENTS.md contains tokensave rules.
-fn doctor_check_prompt(dc: &mut DoctorCounters, codex_dir: &Path) {
-    let agents_md = codex_dir.join("AGENTS.md");
+fn doctor_check_prompt_file(dc: &mut DoctorCounters, agents_md: &Path) {
     if agents_md.exists() {
         let has_rules = std::fs::read_to_string(&agents_md)
             .unwrap_or_default()
             .contains("tokensave");
         if has_rules {
-            dc.pass("AGENTS.md contains tokensave rules");
+            dc.pass(&format!(
+                "AGENTS.md contains tokensave rules in {}",
+                agents_md.display()
+            ));
         } else {
-            dc.fail("AGENTS.md missing tokensave rules — run `tokensave install --agent codex`");
+            dc.fail(&format!(
+                "AGENTS.md missing tokensave rules in {} — run `tokensave install --local --agent codex` or `tokensave install --agent codex`",
+                agents_md.display()
+            ));
         }
     } else {
-        dc.warn("~/.codex/AGENTS.md does not exist");
+        dc.warn(&format!("{} does not exist", agents_md.display()));
     }
 }
 
@@ -567,22 +606,22 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         return;
     }
     let hooks = super::load_json_file(hooks_path);
-    let has_session_start = hooks["hooks"]["SessionStart"]
-        .as_array()
-        .is_some_and(|groups| {
-            groups.iter().any(|group| {
-                group["hooks"].as_array().is_some_and(|handlers| {
-                    handlers.iter().any(|h| {
-                        h["command"]
-                            .as_str()
-                            .is_some_and(|c| c.contains("hook-codex-session-start"))
-                    })
-                })
-            })
-        });
-    if has_session_start {
+    let expected = [
+        ("SessionStart", "hook-codex-session-start"),
+        ("UserPromptSubmit", "hook-codex-user-prompt-submit"),
+        ("SubagentStart", "hook-codex-subagent-start"),
+        ("PostToolUse", "hook-codex-post-tool-use"),
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .filter_map(|(event, command)| {
+            (!codex_hook_present(&hooks, event, command)).then_some(*event)
+        })
+        .collect();
+    if missing.is_empty() {
         dc.pass(&format!(
-            "Lifecycle hooks registered in {}",
+            "All {} Codex lifecycle hooks registered in {}",
+            expected.len(),
             hooks_path.display()
         ));
         dc.info(
@@ -590,8 +629,23 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         );
     } else {
         dc.warn(&format!(
-            "tokensave hooks NOT registered in {} — run `tokensave install --agent codex`",
-            hooks_path.display()
+            "tokensave hook(s) missing for {} in {} — run `tokensave install --local --agent codex` or `tokensave install --agent codex`",
+            missing.join(", "),
+            hooks_path.display(),
         ));
     }
+}
+
+fn codex_hook_present(hooks: &serde_json::Value, event: &str, command: &str) -> bool {
+    hooks["hooks"][event].as_array().is_some_and(|groups| {
+        groups.iter().any(|group| {
+            group["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .is_some_and(|value| value.contains(command))
+                })
+            })
+        })
+    })
 }

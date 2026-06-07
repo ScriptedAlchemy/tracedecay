@@ -120,6 +120,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         tokensave::extraction_worker::run_worker();
     }
 
+    let skip_startup_maintenance = should_skip_startup_maintenance(&command);
     let skip_agent_install_maintenance = should_skip_agent_install_maintenance(&command);
 
     // First-run notice (check BEFORE any config save creates the file)
@@ -137,14 +138,14 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     // makes a synchronous HTTP call (#84) which can add seconds to
     // `tokensave serve` startup on slow networks — long enough to blow the
     // MCP client's 30 s `initialize` timeout.
-    if !skip_agent_install_maintenance {
+    if !skip_startup_maintenance {
         global::try_flush(&mut user_config, is_force_flush);
     }
     if !is_local_install_command(&command) {
-        user_config.save();
+        user_config.save_if_exists();
     }
 
-    if is_first_run && !skip_agent_install_maintenance {
+    if is_first_run && !skip_startup_maintenance {
         eprintln!(
             "note: tokensave uploads anonymous token-saved counts to a worldwide counter.\n\
              \x20     Run `tokensave disable-upload-counter` to opt out."
@@ -245,7 +246,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 let mut config = tokensave::user_config::UserConfig::load();
                 config.cached_latest_version = latest.clone();
                 config.last_version_check_at = now;
-                config.save();
+                config.save_if_exists();
                 if tokensave::cloud::is_newer_version(current_version, &latest)
                     && now - config.last_version_warning_at >= 900
                 {
@@ -254,7 +255,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         current_version, latest
                     );
                     config.last_version_warning_at = now;
-                    config.save();
+                    config.save_if_exists();
                 }
             }
         }
@@ -359,7 +360,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 let mut config = tokensave::user_config::UserConfig::load();
                 config.cached_latest_version = latest.clone();
                 config.last_version_check_at = now;
-                config.save();
+                config.save_if_exists();
                 if tokensave::cloud::is_newer_version(current_version, &latest)
                     && now - config.last_version_warning_at >= 900
                 {
@@ -368,7 +369,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         current_version, latest
                     );
                     config.last_version_warning_at = now;
-                    config.save();
+                    config.save_if_exists();
                 }
             }
         }
@@ -444,7 +445,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 } else if let Some(total) = tokensave::cloud::fetch_worldwide_total() {
                     config.last_worldwide_total = total;
                     config.last_worldwide_fetch_at = now;
-                    config.save();
+                    config.save_if_exists();
                     Some(total)
                 } else if config.last_worldwide_total > 0 {
                     Some(config.last_worldwide_total) // fallback to cache
@@ -459,7 +460,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     if !fresh.is_empty() {
                         config.cached_country_flags = fresh.clone();
                         config.last_flags_fetch_at = now;
-                        config.save();
+                        config.save_if_exists();
                     }
                     if fresh.is_empty() && !config.cached_country_flags.is_empty() {
                         config.cached_country_flags.clone()
@@ -1198,7 +1199,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     Ok(())
 }
 
-fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
+fn should_skip_startup_maintenance(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Install { .. }
@@ -1226,41 +1227,47 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     )
 }
 
+fn should_skip_agent_install_maintenance(_command: &Commands) -> bool {
+    // Never mutate user-profile agent configs as an implicit startup side
+    // effect. Global/profile installs remain available through explicit
+    // `tokensave install`, `tokensave reinstall`, and `tokensave uninstall`
+    // command handling below; project-local setup remains `install --local`.
+    true
+}
+
 fn is_local_install_command(command: &Commands) -> bool {
     matches!(command, Commands::Install { local: true, .. })
 }
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{should_skip_agent_install_maintenance, Commands};
+    use super::{should_skip_agent_install_maintenance, should_skip_startup_maintenance, Commands};
 
     #[test]
-    fn doctor_skips_agent_install_maintenance() {
+    fn doctor_skips_startup_maintenance() {
         let command = Commands::Doctor {
             agent: Some("kiro".to_string()),
         };
-        assert!(should_skip_agent_install_maintenance(&command));
+        assert!(should_skip_startup_maintenance(&command));
     }
 
     #[test]
-    fn explicit_agent_config_commands_skip_agent_install_maintenance() {
-        assert!(should_skip_agent_install_maintenance(&Commands::Install {
+    fn explicit_agent_config_commands_skip_startup_maintenance() {
+        assert!(should_skip_startup_maintenance(&Commands::Install {
             agent: Some("kiro".to_string()),
             local: false,
             profile: None,
         }));
-        assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
-        assert!(should_skip_agent_install_maintenance(
-            &Commands::Uninstall {
-                agent: Some("kiro".to_string()),
-                profile: None,
-            }
-        ));
+        assert!(should_skip_startup_maintenance(&Commands::Reinstall));
+        assert!(should_skip_startup_maintenance(&Commands::Uninstall {
+            agent: Some("kiro".to_string()),
+            profile: None,
+        }));
     }
 
     #[test]
-    fn normal_commands_keep_agent_install_maintenance() {
-        assert!(!should_skip_agent_install_maintenance(&Commands::Status {
+    fn normal_commands_keep_startup_maintenance() {
+        assert!(!should_skip_startup_maintenance(&Commands::Status {
             path: None,
             json: false,
             short: false,
@@ -1270,12 +1277,30 @@ mod startup_tests {
     }
 
     #[test]
-    fn serve_skips_agent_install_maintenance() {
+    fn all_commands_skip_implicit_agent_install_maintenance() {
+        assert!(should_skip_agent_install_maintenance(&Commands::Tool {
+            name: Some("message_search".to_string()),
+            args: Vec::new(),
+        }));
+        assert!(should_skip_agent_install_maintenance(&Commands::Init {
+            path: None,
+            skip_folders: Vec::new(),
+        }));
+        assert!(should_skip_agent_install_maintenance(&Commands::Install {
+            agent: Some("cursor".to_string()),
+            local: false,
+            profile: None,
+        }));
+        assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
+    }
+
+    #[test]
+    fn serve_skips_startup_maintenance() {
         // `tokensave serve` is the MCP hot path with a 30 s client-side
         // `initialize` timeout (#84). Pre-serve maintenance work
         // (worldwide-counter flush, install-stale check, silent reinstall)
         // must NOT run on this path.
-        assert!(should_skip_agent_install_maintenance(&Commands::Serve {
+        assert!(should_skip_startup_maintenance(&Commands::Serve {
             path: None,
             timings: false,
         }));
