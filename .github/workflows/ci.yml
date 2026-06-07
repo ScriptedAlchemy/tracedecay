@@ -5,7 +5,6 @@ on:
     branches: [master, feature/holographic-memory]
   pull_request:
     branches: [master, feature/holographic-memory]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -14,38 +13,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  self-hosted-runner-approval:
-    name: Self-hosted runner approval
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name != github.repository &&
-      !contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Block unapproved external PR
-        run: |
-          echo "::error::External PRs must be reviewed and labeled 'run-hetzner-ci' before Linux CI can use the Hetzner self-hosted runner."
-          exit 1
-
-  linux-test:
-    name: Test Linux
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
-    runs-on: [self-hosted, linux, x64, hetzner]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-rust-test
-
-      - name: Run tests
-        run: cargo test --workspace
-
   test:
     name: Test ${{ matrix.name }}
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -53,6 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Linux
+            runner: '"ubuntu-latest"'
           - name: macOS
             runner: '"macos-14"'
           - name: Windows
@@ -72,11 +41,7 @@ jobs:
 
   clippy:
     name: Clippy
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
-    runs-on: [self-hosted, linux, x64, hetzner]
+    runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -88,11 +53,7 @@ jobs:
 
   fmt:
     name: Format
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'run-hetzner-ci')
-    runs-on: [self-hosted, linux, x64, hetzner]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
