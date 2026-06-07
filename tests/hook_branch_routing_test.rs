@@ -84,3 +84,29 @@ fn ambiguous_state_changes_fall_back_to_current_branch_when_available() {
         CursorShellSyncPlan::IncrementalSync
     );
 }
+
+#[test]
+fn remote_tracking_branch_switches_fall_back_to_current_branch() {
+    assert_eq!(
+        cursor_branch_switch_target("git switch --track origin/feature"),
+        None
+    );
+    assert_eq!(
+        cursor_shell_sync_plan_with_current_branch(
+            "git switch --track origin/feature",
+            Some("feature")
+        ),
+        CursorShellSyncPlan::CurrentBranchSync("feature".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git checkout -t origin/feature"),
+        None
+    );
+    assert_eq!(
+        cursor_shell_sync_plan_with_current_branch(
+            "git checkout -t origin/feature",
+            Some("feature")
+        ),
+        CursorShellSyncPlan::CurrentBranchSync("feature".to_string())
+    );
+}

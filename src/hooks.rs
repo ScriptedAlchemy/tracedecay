@@ -633,8 +633,9 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
 /// and `git switch -c <branch>`.
 ///
-/// Path checkouts (`git checkout -- <file>`) and non-switch commands return
-/// `None`. Only commands whose first shell word is `git` are considered.
+/// Path checkouts (`git checkout -- <file>`), remote tracking shortcuts such as
+/// `git switch --track origin/feature`, and non-switch commands return `None`.
+/// Only commands whose first shell word is `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw = shell_words(command);
     let sub_pos = git_subcommand_pos(&raw)?;
@@ -644,6 +645,7 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
         "checkout" | "switch" => {
             let after = &raw[sub_pos + 1..];
             let mut i = 0;
+            let mut uses_tracking_shortcut = false;
             while i < after.len() {
                 let tok = &after[i];
                 if tok == "--" {
@@ -652,9 +654,17 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
                 if matches!(tok.as_str(), "-b" | "-B" | "-c" | "-C" | "--orphan") {
                     return after.get(i + 1).cloned();
                 }
+                if tok == "-t" || tok == "--track" || tok.starts_with("--track=") {
+                    uses_tracking_shortcut = true;
+                    i += 1;
+                    continue;
+                }
                 if tok.starts_with('-') {
                     i += 1;
                     continue;
+                }
+                if uses_tracking_shortcut {
+                    return None;
                 }
                 if is_obvious_checkout_pathspec(tok) {
                     return None;
