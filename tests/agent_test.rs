@@ -1038,15 +1038,13 @@ fn test_claude_install_creates_config() {
         "permissions.allow should be an array"
     );
     let allow = settings["permissions"]["allow"].as_array().unwrap();
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_store") }));
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_feedback") }));
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_memory_status") }));
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    for perm in expected_tool_perms() {
+        assert!(
+            allow_strs.contains(&perm.as_str()),
+            "permissions.allow should contain {perm}"
+        );
+    }
 
     // Check CLAUDE.md exists with tokensave rules
     let claude_md = home.join(".claude/CLAUDE.md");
