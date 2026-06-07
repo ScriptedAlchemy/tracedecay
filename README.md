@@ -145,7 +145,7 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Cline, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity is global-only and returns a clear unsupported error for `--local`.
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity and Cline are global-only and return clear unsupported errors for `--local`.
 
 ### 3. Index your project
 
