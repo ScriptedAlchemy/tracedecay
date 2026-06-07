@@ -181,13 +181,15 @@ This is the default. It registers the MCP server in `~/.claude/settings.json`, g
 
 ### Other agents
 
-Tokensave supports fourteen agents. Pass `--agent` to install for a specific one:
+Tokensave supports fifteen agents. Pass `--agent` to install for a specific one:
 
 ```bash
 tokensave install --agent claude      # Claude Code (default)
 tokensave install --agent opencode    # OpenCode
 tokensave install --agent codex       # OpenAI Codex CLI
 tokensave install --agent gemini      # Gemini CLI
+tokensave install --agent hermes      # Hermes Agent
+tokensave install --agent hermes --profile work
 tokensave install --agent copilot     # GitHub Copilot CLI
 tokensave install --agent cursor      # Cursor
 tokensave install --agent zed         # Zed
@@ -200,7 +202,7 @@ tokensave install --agent kimi        # Moonshot Kimi CLI
 tokensave install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
+Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
 
 Codex setup registers tokensave in `~/.codex/config.toml` (MCP server + per-tool
 auto-approval), writes prompt rules to `~/.codex/AGENTS.md`, and installs a
@@ -209,6 +211,32 @@ UserPromptSubmit, SubagentStart, and PostToolUse). Codex requires you to **trust
 new or changed command hooks before they run — run `/hooks` inside Codex to review
 and trust the tokensave hooks. See "Codex lifecycle hooks" below for what each one
 does and the known blind spots.
+
+Hermes setup writes a `tokensave` plugin into the selected Hermes profile and
+enables it in that profile's `config.yaml` under `plugins.enabled`. Without
+`--profile`, tokensave writes `~/.hermes/plugins/tokensave/` and
+`~/.hermes/config.yaml`; with `--profile work`, it writes
+`~/.hermes/profiles/work/plugins/tokensave/` and
+`~/.hermes/profiles/work/config.yaml`. Profile names are normalized to lowercase
+and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use
+`tokensave uninstall --agent hermes --profile work` to remove a named profile
+install. `tokensave reinstall` and `tokensave doctor --agent hermes` currently
+operate on the default Hermes profile only.
+
+The plugin registers one Hermes-native wrapper per tokensave tool, adds a
+lightweight `pre_llm_call` steering hook, registers a `/tokensave_status` slash
+command when the installed Hermes version supports plugin commands, and bundles
+a `tokensave:tokensave` plugin skill. The wrappers call
+`tokensave tool <name> --json --args <json>` from Hermes' current working
+directory, with a 600-second timeout and truncated stdout/stderr in error JSON.
+Passing an explicit project root is a future improvement once Hermes exposes a
+reliable root to plugins.
+Project-local Hermes install without `--profile` writes only project files:
+`.hermes/plugins/tokensave/` and `.hermes/config.yaml`. Launch Hermes with
+`HERMES_ENABLE_PROJECT_PLUGINS=true` to load project plugins. If you pass
+`--profile` together with `--local --agent hermes`, tokensave intentionally
+targets the named profile instead of the project plugin directory; use this when
+you want to run the command from a project but update a Hermes profile.
 
 Kiro setup registers tokensave in `~/.kiro/settings/mcp.json`, writes steering to
 `~/.kiro/steering/tokensave.md`, and writes a tokensave-managed agent that loads
@@ -231,7 +259,7 @@ tokensave install --local --agent cursor
 tokensave install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins require `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching Hermes. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
 
 Cursor local install creates a stronger project-local setup:
 
@@ -280,6 +308,7 @@ If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore 
 ```bash
 tokensave uninstall                   # remove Claude Code integration
 tokensave uninstall --agent codex     # remove Codex integration
+tokensave uninstall --agent hermes --profile work
 ```
 
 ---
