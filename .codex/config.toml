@@ -2,7 +2,7 @@
 args = [
     "serve",
     "--path",
-    "/home/zack/projects/tokensave",
+    ".",
 ]
 command = "/home/zack/projects/tokensave/target/debug/tokensave"
 

@@ -132,8 +132,8 @@ fn install_mcp_server(
         "command": tokensave_bin,
         "args": ["serve"]
     });
-    if let Some(project_path) = local_project_path {
-        server["args"] = json!(["serve", "--path", project_path.to_string_lossy()]);
+    if local_project_path.is_some() {
+        server["args"] = json!(["serve", "--path", "."]);
     }
     if enable_global_db {
         server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");

@@ -166,11 +166,11 @@ fn install_mcp_server(
         "command".to_string(),
         toml::Value::String(tokensave_bin.to_string()),
     );
-    let args = if let Some(project_path) = local_project_path {
+    let args = if local_project_path.is_some() {
         vec![
             toml::Value::String("serve".to_string()),
             toml::Value::String("--path".to_string()),
-            toml::Value::String(project_path.to_string_lossy().to_string()),
+            toml::Value::String(".".to_string()),
         ]
     } else {
         vec![toml::Value::String("serve".to_string())]
