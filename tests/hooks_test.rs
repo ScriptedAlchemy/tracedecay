@@ -695,6 +695,7 @@ fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
         None
     );
     assert_eq!(cursor_branch_switch_target("git checkout ."), None);
+    assert_eq!(cursor_branch_switch_target("git checkout README.md"), None);
     assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
     assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
     assert_eq!(

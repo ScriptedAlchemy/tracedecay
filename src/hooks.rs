@@ -633,9 +633,10 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
 /// and `git switch -c <branch>`.
 ///
-/// Path checkouts (`git checkout -- <file>`), remote tracking shortcuts such as
-/// `git switch --track origin/feature`, and non-switch commands return `None`.
-/// Only commands whose first shell word is `git` are considered.
+/// Path checkouts (`git checkout -- <file>` or obvious file pathspecs), remote
+/// tracking shortcuts such as `git switch --track origin/feature`, and
+/// non-switch commands return `None`. Only commands whose first shell word is
+/// `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw = shell_words(command);
     let sub_pos = git_subcommand_pos(&raw)?;
@@ -683,6 +684,8 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
         || token.starts_with("./")
         || token.starts_with("../")
         || token.starts_with(":/")
+        || token.contains('/')
+        || token.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty())
 }
 
 fn shell_words(command: &str) -> Vec<String> {
