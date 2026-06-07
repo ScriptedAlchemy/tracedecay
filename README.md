@@ -145,7 +145,7 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Cline, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow only read-only tokensave MCP tools. The project hooks are:
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow only read-only tokensave MCP tools. The project hooks are:
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
 - `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
@@ -167,7 +167,7 @@ Codex now supports a Claude-style lifecycle hook system (verified against Codex 
 
 All Codex hooks are fail-open and only act when a `.tokensave/` index exists. **Trust gate:** Codex skips new or changed non-managed command hooks until you trust them — run `/hooks` inside Codex to review and trust the tokensave hooks (the installer prints this reminder; `--dangerously-bypass-hook-trust` exists for one-off non-interactive runs). **Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash — raw-shell file edits, `unified_exec`, and `WebSearch` are not observed; there is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so a redundant-exploration blocker there would be unreliable and noisy.
 
-Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity is global-only and returns a clear unsupported error for `--local`.
+Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity and Cline are global-only and return clear unsupported errors for `--local`.
 
 ### 3. Index your project
 

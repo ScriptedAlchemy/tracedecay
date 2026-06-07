@@ -231,7 +231,7 @@ tokensave install --local --agent cursor
 tokensave install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Cline, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `.kilocode/mcp.json`, and `.vibe/config.toml`.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`.
 
 Cursor local install creates a stronger project-local setup:
 
@@ -263,7 +263,7 @@ Codex supports a Claude-style lifecycle hook system (enabled by default; verifie
 
 **Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash commands — file edits made through raw shell, the newer `unified_exec` mechanism, and `WebSearch` are not observed. There is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so installing a redundant-exploration blocker there would be unreliable.
 
-The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity does not currently have a documented project-local config path, so `tokensave install --local --agent antigravity` is rejected with an unsupported-agent error.
+The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tokensave install --local --agent antigravity` and `tokensave install --local --agent cline` are rejected with unsupported-agent errors.
 
 #### Config backups
 
