@@ -684,7 +684,6 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
         || token.starts_with("./")
         || token.starts_with("../")
         || token.starts_with(":/")
-        || token.contains('/')
         || token
             .rsplit_once('.')
             .is_some_and(|(_, ext)| !ext.is_empty())
