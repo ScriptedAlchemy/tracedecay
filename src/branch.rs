@@ -74,34 +74,27 @@ pub fn detect_default_branch(project_root: &Path) -> Option<String> {
     None
 }
 
-/// Sanitizes a branch name for use as a filename.
+/// Encodes a branch name for use as a filename.
 ///
-/// Replaces `/` with `_`, strips characters unsafe for filenames,
-/// and collapses `..` sequences to prevent path traversal.
+/// Leaves ASCII letters, digits, `_`, and `-` unchanged and percent-encodes all
+/// other bytes. This keeps generated DB filenames deterministic, path-safe, and
+/// collision-free for branch names such as `feature/foo` and `feature_foo`.
 pub fn sanitize_branch_name(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' | '.' => '_',
-            c => c,
-        })
-        .collect();
-    // Collapse runs of underscores
-    let mut result = String::with_capacity(sanitized.len());
-    let mut prev_underscore = false;
-    for c in sanitized.chars() {
-        if c == '_' {
-            if !prev_underscore {
-                result.push(c);
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut result = String::with_capacity(name.len());
+    for &byte in name.as_bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
+                result.push(char::from(byte));
             }
-            prev_underscore = true;
-        } else {
-            result.push(c);
-            prev_underscore = false;
+            _ => {
+                result.push('%');
+                result.push(char::from(HEX[(byte >> 4) as usize]));
+                result.push(char::from(HEX[(byte & 0x0F) as usize]));
+            }
         }
     }
-    // Strip leading/trailing underscores
-    result.trim_matches('_').to_string()
+    result
 }
 
 /// Resolves the DB path for a given branch.
@@ -242,15 +235,29 @@ pub async fn add_branch_tracking(
     let sanitized = sanitize_branch_name(branch_name);
     let branches_dir = branch_meta::ensure_branches_dir(&tokensave_dir)?;
     let new_db_path = branches_dir.join(format!("{sanitized}.db"));
-    std::fs::copy(&parent_db, &new_db_path)?;
+    if let Err(e) = std::fs::copy(&parent_db, &new_db_path) {
+        remove_branch_db_files(&new_db_path);
+        return Err(e.into());
+    }
 
     // Save metadata BEFORE open() so it resolves the new branch to its DB.
     let db_file = format!("branches/{sanitized}.db");
     meta.add_branch(branch_name, &db_file, &parent);
-    branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+    if let Err(e) = branch_meta::save_branch_meta(&tokensave_dir, &meta) {
+        remove_branch_db_files(&new_db_path);
+        return Err(e.into());
+    }
 
-    let cg = crate::tokensave::TokenSave::open(project_root).await?;
-    let _ = cg.sync().await?;
+    let sync_result = async {
+        let cg = crate::tokensave::TokenSave::open(project_root).await?;
+        let _ = cg.sync().await?;
+        Ok::<(), crate::errors::TokenSaveError>(())
+    }
+    .await;
+    if let Err(e) = sync_result {
+        rollback_branch_tracking(&tokensave_dir, branch_name, &db_file, &new_db_path);
+        return Err(e);
+    }
 
     if let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) {
         meta.touch_synced(branch_name);
@@ -260,10 +267,51 @@ pub async fn add_branch_tracking(
     Ok(BranchAddOutcome::Added)
 }
 
+fn rollback_branch_tracking(
+    tokensave_dir: &Path,
+    branch_name: &str,
+    db_file: &str,
+    new_db_path: &Path,
+) {
+    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tokensave_dir) {
+        let should_remove = meta
+            .branches
+            .get(branch_name)
+            .is_some_and(|entry| entry.db_file == db_file);
+        if should_remove {
+            meta.remove_branch(branch_name);
+            let _ = crate::branch_meta::save_branch_meta(tokensave_dir, &meta);
+        }
+    }
+    remove_branch_db_files(new_db_path);
+}
+
+fn remove_branch_db_files(db_path: &Path) {
+    let _ = std::fs::remove_file(db_path);
+    let mut sidecar = db_path.to_path_buf();
+    sidecar.set_extension("db-wal");
+    let _ = std::fs::remove_file(&sidecar);
+    sidecar.set_extension("db-shm");
+    let _ = std::fs::remove_file(&sidecar);
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn git(project_root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project_root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn sanitize_simple() {
@@ -271,20 +319,77 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_distinguishes_slashes_from_underscores() {
+        assert_ne!(
+            sanitize_branch_name("feature/foo"),
+            sanitize_branch_name("feature_foo"),
+            "valid branch names must not collide on the same DB filename"
+        );
+    }
+
+    #[test]
     fn sanitize_slashes() {
-        assert_eq!(sanitize_branch_name("feature/foo/bar"), "feature_foo_bar");
+        assert_eq!(
+            sanitize_branch_name("feature/foo/bar"),
+            "feature%2Ffoo%2Fbar"
+        );
     }
 
     #[test]
     fn sanitize_special_chars() {
-        assert_eq!(sanitize_branch_name("fix: bug <1>"), "fix_bug_1");
+        assert_eq!(
+            sanitize_branch_name("fix: bug <1>"),
+            "fix%3A%20bug%20%3C1%3E"
+        );
     }
 
     #[test]
     fn sanitize_dots_prevented() {
-        // ".." becomes all underscores, collapsed and trimmed to empty
-        assert_eq!(sanitize_branch_name(".."), "");
-        // dots and slashes become underscores, collapsed
-        assert_eq!(sanitize_branch_name("foo/../bar"), "foo_bar");
+        assert_eq!(sanitize_branch_name(".."), "%2E%2E");
+        assert_eq!(sanitize_branch_name("foo/../bar"), "foo%2F%2E%2E%2Fbar");
+    }
+
+    #[tokio::test]
+    async fn add_branch_tracking_rolls_back_when_sync_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        git(project_root, &["init"]);
+        git(project_root, &["config", "user.email", "test@example.com"]);
+        git(project_root, &["config", "user.name", "Test User"]);
+        std::fs::write(project_root.join("lib.rs"), "pub fn main_branch() {}\n").unwrap();
+        git(project_root, &["add", "."]);
+        git(project_root, &["commit", "-m", "initial"]);
+        git(project_root, &["branch", "-M", "main"]);
+
+        let _cg = crate::tokensave::TokenSave::init(project_root)
+            .await
+            .unwrap();
+        git(project_root, &["checkout", "-b", "feature/failsync"]);
+        std::fs::write(
+            project_root.join("lib.rs"),
+            "pub fn main_branch() {}\npub fn feature_branch() {}\n",
+        )
+        .unwrap();
+
+        let _lock = crate::tokensave::try_acquire_sync_lock(project_root).unwrap();
+        let result = add_branch_tracking(project_root, "feature/failsync").await;
+
+        assert!(
+            result.is_err(),
+            "held sync lock should make branch sync fail"
+        );
+        let tokensave_dir = crate::config::get_tokensave_dir(project_root);
+        let meta = crate::branch_meta::load_branch_meta(&tokensave_dir).unwrap();
+        assert!(
+            !meta.is_tracked("feature/failsync"),
+            "failed branch add must not leave stale tracked metadata"
+        );
+        assert!(
+            !tokensave_dir
+                .join("branches")
+                .join(format!("{}.db", sanitize_branch_name("feature/failsync")))
+                .exists(),
+            "failed branch add should remove the copied branch DB"
+        );
     }
 }

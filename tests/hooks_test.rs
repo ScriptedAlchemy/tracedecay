@@ -1,10 +1,14 @@
+use tokensave::hooks::tool_hints::{
+    decide_hint, HintAgent, HintCategory, ToolHintDedupe, ToolHintInput,
+};
 use tokensave::hooks::{
     build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
     codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
     cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
-    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
-    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
-    CursorShellSyncPlan,
+    cursor_staleness_hint, cursor_tool_hint_output, evaluate_codex_pre_tool_use,
+    evaluate_codex_pre_tool_use_with_dedupe, evaluate_codex_subagent_start,
+    evaluate_cursor_pre_tool_use, evaluate_cursor_subagent_start, evaluate_hook_decision,
+    evaluate_kiro_pre_tool_use, is_git_state_changing_command, CursorShellSyncPlan,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -18,6 +22,126 @@ fn get_block_reason(json: &str) -> String {
         .as_str()
         .unwrap_or("")
         .to_string()
+}
+
+fn hint_input() -> ToolHintInput {
+    ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: Some("session-1".to_string()),
+        hints_enabled: true,
+        ..ToolHintInput::default()
+    }
+}
+
+#[test]
+fn tool_hint_rg_command_returns_search_hint() {
+    let input = ToolHintInput {
+        tool_name: Some("Shell".to_string()),
+        command: Some("rg \"TokenSave\" src tests".to_string()),
+        ..hint_input()
+    };
+
+    let hint = decide_hint(&input).expect("rg should produce a search hint");
+
+    assert_eq!(hint.category, HintCategory::Search);
+    assert!(!hint.nonblocking);
+    assert!(hint.context.contains("tokensave_search"));
+}
+
+#[test]
+fn tool_hint_grep_recursive_returns_search_hint() {
+    let input = ToolHintInput {
+        tool_name: Some("Shell".to_string()),
+        command: Some("grep -R \"fn main\" src".to_string()),
+        ..hint_input()
+    };
+
+    let hint = decide_hint(&input).expect("recursive grep should produce a search hint");
+
+    assert_eq!(hint.category, HintCategory::Search);
+    assert!(hint.context.contains("tokensave_search"));
+}
+
+#[test]
+fn tool_hint_who_calls_returns_callers_hint() {
+    let input = ToolHintInput {
+        prompt: Some("who calls sync_if_stale_silent?".to_string()),
+        ..hint_input()
+    };
+
+    let hint = decide_hint(&input).expect("caller questions should produce a call graph hint");
+
+    assert_eq!(hint.category, HintCategory::CallGraph);
+    assert!(hint.context.contains("tokensave_callers"));
+}
+
+#[test]
+fn tool_hint_impact_question_returns_impact_hint() {
+    let input = ToolHintInput {
+        prompt: Some("What is the impact and change risk of editing hooks?".to_string()),
+        ..hint_input()
+    };
+
+    let hint = decide_hint(&input).expect("impact questions should produce an impact hint");
+
+    assert_eq!(hint.category, HintCategory::Impact);
+    assert!(hint.context.contains("tokensave_impact"));
+}
+
+#[test]
+fn tool_hint_single_file_read_returns_none() {
+    let input = ToolHintInput {
+        tool_name: Some("ReadFile".to_string()),
+        file_path: Some("src/hooks.rs".to_string()),
+        ..hint_input()
+    };
+
+    assert!(decide_hint(&input).is_none());
+}
+
+#[test]
+fn tool_hint_explore_subagent_returns_nonblocking_hint() {
+    let input = ToolHintInput {
+        tool_name: Some("Subagent".to_string()),
+        subagent_type: Some("explore".to_string()),
+        prompt: Some("Explore how hook decisions work".to_string()),
+        ..hint_input()
+    };
+
+    let hint = decide_hint(&input).expect("explore subagents should get soft context");
+
+    assert_eq!(hint.category, HintCategory::ExploreSubagent);
+    assert!(hint.nonblocking);
+    assert!(hint.context.contains("tokensave_context"));
+}
+
+#[test]
+fn dedupe_suppresses_same_session_category() {
+    let mut dedupe = ToolHintDedupe::default();
+
+    assert!(dedupe.should_emit("session-1", HintCategory::Search));
+    assert!(!dedupe.should_emit("session-1", HintCategory::Search));
+}
+
+#[test]
+fn dedupe_allows_different_category_same_session() {
+    let mut dedupe = ToolHintDedupe::default();
+
+    assert!(dedupe.should_emit("session-1", HintCategory::Search));
+    assert!(dedupe.should_emit("session-1", HintCategory::Impact));
+}
+
+#[test]
+fn cursor_tool_hint_output_suppresses_duplicate_session_category() {
+    let input = ToolHintInput {
+        tool_name: Some("Shell".to_string()),
+        command: Some("rg \"TokenSave\" src tests".to_string()),
+        ..hint_input()
+    };
+    let mut dedupe = ToolHintDedupe::default();
+
+    assert!(cursor_tool_hint_output(&input, &mut dedupe).is_some());
+    assert!(cursor_tool_hint_output(&input, &mut dedupe).is_none());
 }
 
 #[test]
@@ -211,24 +335,35 @@ fn test_kiro_allows_invalid_json() {
 }
 
 #[test]
-fn test_cursor_subagent_start_blocks_explore_research_task() {
+fn test_cursor_subagent_start_returns_soft_context_for_explore_research_task() {
     let input = r#"{
         "hook_event_name": "subagentStart",
         "subagent_type": "explore",
         "task": "Explore the codebase architecture and call graph"
     }"#;
 
-    let output = evaluate_cursor_subagent_start(input).expect("should deny research subagent");
+    let output = evaluate_cursor_subagent_start(input).expect("should hint research subagent");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(v["permission"].as_str(), Some("deny"));
-    assert!(v["user_message"]
+    assert_eq!(v["continue"].as_bool(), Some(true));
+    assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave MCP tools"));
+        .contains("tokensave_context"));
+    assert!(
+        !v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("STOP:"),
+        "Cursor subagent hints must be nonblocking context"
+    );
+    assert!(
+        v.get("permission").is_none(),
+        "Cursor subagentStart must not deny soft hints"
+    );
     assert!(
         v.get("hookSpecificOutput").is_none(),
-        "Cursor hook output must use Cursor's documented subagentStart fields"
+        "Cursor hook output must use Cursor's documented context fields"
     );
 }
 
@@ -241,6 +376,107 @@ fn test_cursor_subagent_start_allows_execution_task() {
     }"#;
 
     assert!(evaluate_cursor_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_rg_shell_returns_search_context() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "session_id": "session-1",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "rg \"TokenSave\" src tests"
+        }
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("rg should get search context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(v["continue"].as_bool(), Some(true));
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave_search"));
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_broad_read_returns_context() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "session_id": "session-1",
+        "tool_name": "Read",
+        "tool_input": {
+            "path": "src",
+            "recursive": true
+        }
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("recursive read should get context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(v["continue"].as_bool(), Some(true));
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave_context"));
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_call_graph_tool_returns_context() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "session_id": "session-1",
+        "tool_name": "who-calls",
+        "tool_input": {
+            "symbol": "sync_if_stale_silent"
+        }
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("call graph tool should get context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave_callers"));
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_impact_tool_returns_context() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "session_id": "session-1",
+        "tool_name": "change-risk",
+        "tool_input": {
+            "path": "src/hooks.rs"
+        }
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("impact tool should get context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave_impact"));
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_single_file_read_returns_none() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "session_id": "session-1",
+        "tool_name": "ReadFile",
+        "tool_input": {
+            "path": "src/hooks.rs"
+        }
+    }"#;
+
+    assert!(evaluate_cursor_pre_tool_use(input).is_none());
 }
 
 #[test]
@@ -503,6 +739,157 @@ fn test_cursor_shell_sync_plan_noop_for_read_only_and_non_git() {
 // Codex hook handlers
 // ---------------------------------------------------------------------------
 
+fn codex_additional_context(output: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(output).unwrap();
+    v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn assert_codex_soft_hint_schema(output: &str, event_name: &str) {
+    let v: serde_json::Value = serde_json::from_str(output).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some(event_name)
+    );
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_some(),
+        "Codex soft hints must use hookSpecificOutput.additionalContext"
+    );
+    assert!(
+        v.get("permission").is_none(),
+        "Codex soft hints must not use Cursor's permission field"
+    );
+    assert!(
+        v["hookSpecificOutput"].get("permissionDecision").is_none(),
+        "Codex soft hints must never deny or rewrite tool calls"
+    );
+    assert!(
+        v["hookSpecificOutput"]
+            .get("permissionDecisionReason")
+            .is_none(),
+        "Codex soft hints must not emit denial reasons"
+    );
+}
+
+#[test]
+fn test_codex_pre_tool_use_bash_rg_emits_search_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-1",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "rg \"TokenSave\" src tests"
+        }
+    }"#;
+
+    let output = evaluate_codex_pre_tool_use(input).expect("rg should produce a soft hint");
+
+    assert_codex_soft_hint_schema(&output, "PreToolUse");
+    assert!(codex_additional_context(&output).contains("tokensave_search"));
+}
+
+#[test]
+fn test_codex_pre_tool_use_bash_find_emits_search_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-1",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "find src -name '*.rs'"
+        }
+    }"#;
+
+    let output = evaluate_codex_pre_tool_use(input).expect("find should produce a search hint");
+
+    assert_codex_soft_hint_schema(&output, "PreToolUse");
+    assert!(codex_additional_context(&output).contains("tokensave_search"));
+}
+
+#[test]
+fn test_codex_pre_tool_use_read_directory_emits_broad_read_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-1",
+        "tool_name": "Read",
+        "tool_input": {
+            "path": "src/"
+        }
+    }"#;
+
+    let output = evaluate_codex_pre_tool_use(input).expect("directory reads should hint");
+
+    assert_codex_soft_hint_schema(&output, "PreToolUse");
+    assert!(codex_additional_context(&output).contains("tokensave_context"));
+}
+
+#[test]
+fn test_codex_pre_tool_use_single_file_read_does_not_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-1",
+        "tool_name": "Read",
+        "tool_input": {
+            "path": "src/hooks.rs"
+        }
+    }"#;
+
+    assert!(evaluate_codex_pre_tool_use(input).is_none());
+}
+
+#[test]
+fn test_codex_pre_tool_use_task_prompt_emits_call_graph_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-2",
+        "tool_name": "Task",
+        "tool_input": {
+            "prompt": "who calls sync_if_stale_silent?"
+        }
+    }"#;
+
+    let output = evaluate_codex_pre_tool_use(input).expect("caller prompts should hint");
+
+    assert_codex_soft_hint_schema(&output, "PreToolUse");
+    assert!(codex_additional_context(&output).contains("tokensave_callers"));
+}
+
+#[test]
+fn test_codex_pre_tool_use_prompt_emits_impact_hint() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-3",
+        "tool_name": "Task",
+        "tool_input": {
+            "task": "Assess impact and change-risk for editing hooks"
+        }
+    }"#;
+
+    let output = evaluate_codex_pre_tool_use(input).expect("impact prompts should hint");
+
+    assert_codex_soft_hint_schema(&output, "PreToolUse");
+    assert!(codex_additional_context(&output).contains("tokensave_impact"));
+}
+
+#[test]
+fn test_codex_pre_tool_use_dedupe_suppresses_repeated_category() {
+    let input = r#"{
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-4",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "rg \"TokenSave\" src"
+        }
+    }"#;
+    let mut dedupe = ToolHintDedupe::default();
+
+    assert!(evaluate_codex_pre_tool_use_with_dedupe(input, &mut dedupe).is_some());
+    assert!(evaluate_codex_pre_tool_use_with_dedupe(input, &mut dedupe).is_none());
+}
+
 #[test]
 fn test_codex_additional_context_json_uses_codex_schema() {
     let json = codex_additional_context_json("SessionStart", "hello context");
@@ -540,7 +927,14 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
     assert!(v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave MCP tools"));
+        .contains("tokensave_context"));
+    assert!(
+        !v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("STOP:"),
+        "Codex SubagentStart should use shared soft-hint text, not blocking copy"
+    );
     // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
     assert!(
         v.get("permission").is_none(),

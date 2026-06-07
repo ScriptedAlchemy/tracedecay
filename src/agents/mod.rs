@@ -441,6 +441,49 @@ pub fn safe_write_json_file(
     Ok(())
 }
 
+/// Write text to a file via atomic sibling rename.
+///
+/// Mirrors [`safe_write_json_file`] for generated prompt/rule files that are
+/// plain text rather than structured JSON. The target is not opened for writing
+/// until the final rename, so a failed write leaves the original untouched.
+pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+            message: format!("cannot create directory {}: {e}", parent.display()),
+        })?;
+    }
+
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(e) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TokenSaveError::Config {
+            message: format!("failed to write new text file {}: {e}", new_path.display()),
+        });
+    }
+
+    if let Err(e) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        let hint = if let Some(b) = backup {
+            format!(
+                "\n  Backup is at: {}\n  \
+                 The original file was NOT modified.",
+                b.display()
+            )
+        } else {
+            "\n  The original file was NOT modified.".to_string()
+        };
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "failed to rename {} → {}: {e}{hint}",
+                new_path.display(),
+                path.display()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Write a JSON value to a file with pretty formatting.
 /// Creates a backup, writes atomically, and restores on failure.
 pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {

@@ -7,12 +7,12 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::Result;
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    load_jsonc_file_strict, read_only_tool_names, safe_write_json_file, AgentIntegration,
-    DoctorCounters, HealthcheckContext, InstallContext,
+    load_jsonc_file_strict, read_only_tool_names, safe_write_json_file, safe_write_text_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
 
 /// Cursor agent.
@@ -206,6 +206,14 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     );
     install_cursor_hook_entry(
         &mut hooks,
+        "preToolUse",
+        tokensave_bin,
+        "hook-cursor-pre-tool-use",
+        5,
+        Some("Shell|Bash|Read|ReadFile|Grep|Glob|Search|Task"),
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
         "beforeSubmitPrompt",
         tokensave_bin,
         "hook-cursor-before-submit-prompt",
@@ -286,14 +294,18 @@ fn install_cursor_hook_entry(
 }
 
 fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
-            message: format!("failed to create {}: {e}", parent.display()),
+    let backup = if path.exists() {
+        let existing = std::fs::read(path).map_err(|e| crate::errors::TokenSaveError::Config {
+            message: format!("failed to read {} before writing: {e}", path.display()),
         })?;
-    }
-    std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })
+        if existing == contents.as_bytes() {
+            return Ok(());
+        }
+        backup_config_file(path)?
+    } else {
+        None
+    };
+    safe_write_text_file(path, contents, backup.as_deref())
 }
 
 fn shell_quote(value: &str) -> String {
