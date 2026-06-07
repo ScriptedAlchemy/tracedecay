@@ -1,9 +1,8 @@
 //! Kilo CLI agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Kilo CLI's config
-//! file (`~/.config/kilo/kilo.jsonc`). Kilo uses the `mcp` key (not
-//! `mcpServers`) with entries having `type`, `command` (as array), and
-//! `enabled` fields.
+//! Handles registration of the tokensave MCP server in Kilo CLI config files.
+//! Kilo uses the `mcp` key (not `mcpServers`) with entries having `type`,
+//! `command` (as array), and `enabled` fields.
 
 use std::path::Path;
 
@@ -54,7 +53,7 @@ impl AgentIntegration for KiloIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(&project_path.join(".kilocode/mcp.json"), &ctx.tokensave_bin)
+        install_mcp_server(&project_path.join("kilo.json"), &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {

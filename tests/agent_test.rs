@@ -426,10 +426,9 @@ fn test_local_install_supported_agents_write_project_paths() {
         ("opencode", vec!["opencode.json", "AGENTS.md"]),
         ("copilot", vec![".vscode/mcp.json"]),
         ("zed", vec![".zed/settings.json"]),
-        ("cline", vec![".cline_mcp_servers.json"]),
         ("roo-code", vec![".roo/mcp.json"]),
         ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
-        ("kilo", vec![".kilocode/mcp.json"]),
+        ("kilo", vec!["kilo.json"]),
         ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
         (
             "cursor",
@@ -498,6 +497,32 @@ fn test_local_install_rejects_antigravity_without_project_mutation() {
     assert!(
         stderr.contains("Antigravity") && stderr.contains("--local"),
         "unsupported-agent error should name Antigravity and --local, got:\n{stderr}"
+    );
+    assert!(
+        !home.path().join(".tokensave/config.toml").exists(),
+        "rejected local install must not mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_rejects_cline_without_project_mutation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    let output = run_local_install("cline", project.path(), home.path());
+
+    assert!(
+        !output.status.success(),
+        "Cline local install should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Cline") && stderr.contains("--local"),
+        "unsupported-agent error should name Cline and --local, got:\n{stderr}"
+    );
+    assert!(
+        !project.path().join(".cline_mcp_servers.json").exists(),
+        "unsupported Cline local install must not write undocumented workspace config"
     );
     assert!(
         !home.path().join(".tokensave/config.toml").exists(),
