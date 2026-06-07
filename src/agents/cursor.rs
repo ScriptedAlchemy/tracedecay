@@ -27,38 +27,21 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let mcp_path = ctx.home.join(".cursor/mcp.json");
-
-        if let Some(parent) = mcp_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-
-        let backup = backup_config_file(&mcp_path)?;
-        let mut settings = match load_json_file_strict(&mcp_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(ref b) = backup {
-                    eprintln!("  Backup preserved at: {}", b.display());
-                }
-                return Err(e);
-            }
-        };
-        settings["mcpServers"]["tokensave"] = json!({
-            "command": ctx.tokensave_bin,
-            "args": ["serve"]
-        });
-
-        safe_write_json_file(&mcp_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
-            mcp_path.display()
-        );
+        install_mcp_server(&ctx.home.join(".cursor/mcp.json"), &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Restart Cursor — tokensave tools are now available");
         Ok(())
+    }
+
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        install_mcp_server(&project_path.join(".cursor/mcp.json"), &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -99,6 +82,34 @@ impl AgentIntegration for CursorIntegration {
 // ---------------------------------------------------------------------------
 // Uninstall helpers
 // ---------------------------------------------------------------------------
+
+fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str) -> Result<()> {
+    if let Some(parent) = mcp_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let backup = backup_config_file(mcp_path)?;
+    let mut settings = match load_json_file_strict(mcp_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+    settings["mcpServers"]["tokensave"] = json!({
+        "command": tokensave_bin,
+        "args": ["serve"]
+    });
+
+    safe_write_json_file(mcp_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        mcp_path.display()
+    );
+    Ok(())
+}
 
 /// Remove MCP server entry from ~/.cursor/mcp.json.
 fn uninstall_mcp_server(mcp_path: &Path) {

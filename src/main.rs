@@ -140,7 +140,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     if !skip_agent_install_maintenance {
         global::try_flush(&mut user_config, is_force_flush);
     }
-    user_config.save();
+    if !is_local_install_command(&command) {
+        user_config.save();
+    }
 
     if is_first_run && !skip_agent_install_maintenance {
         eprintln!(
@@ -538,7 +540,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         Commands::Tool { name, args } => {
             tool_command::run(name, args).await?;
         }
-        Commands::Install { agent } => {
+        Commands::Install { agent, local } => {
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -552,6 +554,51 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         .to_string(),
                 }
             })?;
+            if local {
+                let project_path = std::env::current_dir().map_err(|e| {
+                    tokensave::errors::TokenSaveError::Config {
+                        message: format!("could not determine current project directory: {e}"),
+                    }
+                })?;
+                let ctx = tokensave::agents::InstallContext {
+                    home: home.clone(),
+                    tokensave_bin: tokensave_bin.clone(),
+                    tool_permissions: tokensave::agents::expected_tool_perms(),
+                };
+                let mut installed_names: Vec<String> = Vec::new();
+
+                if let Some(id) = agent {
+                    let ag = tokensave::agents::get_integration(&id)?;
+                    ag.install_local(&ctx, &project_path)?;
+                    installed_names.push(ag.name().to_string());
+                } else {
+                    let (to_install, _) =
+                        tokensave::agents::pick_integrations_interactive(&home, &[])?;
+                    for id in &to_install {
+                        let ag = tokensave::agents::get_integration(id)?;
+                        if ag.supports_local_install() {
+                            ag.install_local(&ctx, &project_path)?;
+                            installed_names.push(ag.name().to_string());
+                        } else {
+                            eprintln!(
+                                "Skipping {}: project-local install is not supported",
+                                ag.name()
+                            );
+                        }
+                    }
+                }
+
+                eprintln!();
+                if installed_names.is_empty() {
+                    eprintln!("No local changes.");
+                } else {
+                    for name in &installed_names {
+                        eprintln!("\x1b[32m+\x1b[0m {name} (local)");
+                    }
+                }
+                return Ok(());
+            }
+
             let mut user_cfg = tokensave::user_config::UserConfig::load();
             tokensave::agents::migrate_installed_agents(&home, &mut user_cfg);
 
@@ -1087,6 +1134,10 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     )
 }
 
+fn is_local_install_command(command: &Commands) -> bool {
+    matches!(command, Commands::Install { local: true, .. })
+}
+
 #[cfg(test)]
 mod startup_tests {
     use super::{should_skip_agent_install_maintenance, Commands};
@@ -1103,6 +1154,7 @@ mod startup_tests {
     fn explicit_agent_config_commands_skip_agent_install_maintenance() {
         assert!(should_skip_agent_install_maintenance(&Commands::Install {
             agent: Some("kiro".to_string()),
+            local: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(

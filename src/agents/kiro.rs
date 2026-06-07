@@ -106,6 +106,23 @@ impl AgentIntegration for KiroIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let mcp_path = workspace_mcp_config_path(project_path);
+        install_mcp_server(&mcp_path, &ctx.tokensave_bin)?;
+
+        let steering = project_path.join(".kiro/steering/tokensave.md");
+        install_steering_rules(&steering)?;
+
+        let agent_path = project_path.join(".kiro/agents/tokensave.json");
+        install_managed_agent(&agent_path, &ctx.tokensave_bin, &steering)?;
+
+        Ok(())
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         uninstall_mcp_server(&mcp_config_path(&ctx.home));
         remove_steering_rules(&steering_path(&ctx.home));

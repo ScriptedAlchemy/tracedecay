@@ -55,6 +55,26 @@ impl AgentIntegration for ClaudeIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let claude_dir = project_path.join(".claude");
+        let settings_path = claude_dir.join("settings.json");
+        let claude_md_path = claude_dir.join("CLAUDE.md");
+
+        install_mcp_server(&project_path.join(".mcp.json"), &ctx.tokensave_bin)?;
+
+        std::fs::create_dir_all(&claude_dir).ok();
+        let mut settings = load_json_file_strict(&settings_path)?;
+        install_hook(&mut settings, &ctx.tokensave_bin);
+        install_permissions(&mut settings, &ctx.tool_permissions);
+        write_json_file(&settings_path, &settings)?;
+
+        install_claude_md_rules(&claude_md_path)
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let claude_dir = ctx.home.join(".claude");
         let settings_path = claude_dir.join("settings.json");
