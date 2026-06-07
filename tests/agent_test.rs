@@ -243,11 +243,6 @@ fn test_local_install_cursor_writes_project_config_only() {
             "Cursor permissions should allow MCP tool {expected}"
         );
     }
-    assert!(
-        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
-        "Cursor permissions should not keep removed legacy memory tools"
-    );
-
     let hooks_path = project.path().join(".cursor/hooks.json");
     assert!(
         hooks_path.exists(),
@@ -350,7 +345,7 @@ fn test_local_install_cursor_refreshes_memory_permissions() {
         r#"{
   "mcpAllowlist": [
     "other:custom_tool",
-    "tokensave:tokensave_session_recall",
+    "tokensave:tokensave_not_a_real_tool",
     "tokensave:tokensave_str_replace"
   ]
 }
@@ -374,8 +369,8 @@ fn test_local_install_cursor_refreshes_memory_permissions() {
         );
     }
     assert!(
-        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
-        "removed legacy memory permissions should be pruned"
+        !allow_strs.contains(&"tokensave:tokensave_not_a_real_tool"),
+        "unknown tokensave permissions should be pruned"
     );
 }
 
