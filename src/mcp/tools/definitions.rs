@@ -1669,7 +1669,7 @@ fn def_memory_status() -> ToolDefinition {
     def_rw(
         "tokensave_memory_status",
         "Memory Status",
-        "Repair dirty holographic memory banks, then return fact/entity counts and trust distribution.",
+        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, and repair stats.",
         json!({
             "type": "object",
             "properties": {}

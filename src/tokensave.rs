@@ -22,7 +22,8 @@ use crate::memory::store::MemoryStore;
 use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
     AddFactRequest, ContradictionResult, FactRecord, FactSearchResult, FeedbackRequest,
-    FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest, UpdateFactRequest,
+    FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus, SearchFactsRequest,
+    UpdateFactRequest,
 };
 use crate::resolution::ReferenceResolver;
 use crate::sync;
@@ -3004,10 +3005,35 @@ impl TokenSave {
             .await
     }
 
+    pub async fn repair_derived_memory(&self) -> Result<MemoryRepairStats> {
+        let store = MemoryStore::new(self.db.conn());
+        let mut missing_vectors_repaired = 0;
+        loop {
+            let repaired = store.compute_missing_vectors(500).await?;
+            if repaired == 0 {
+                break;
+            }
+            missing_vectors_repaired += repaired;
+        }
+
+        let dirty_banks_rebuilt = store.rebuild_dirty_banks().await?;
+        let full_banks_rebuilt = if missing_vectors_repaired > 0 {
+            store.rebuild_all_banks().await?
+        } else {
+            0
+        };
+
+        Ok(MemoryRepairStats {
+            missing_vectors_repaired,
+            dirty_banks_rebuilt,
+            full_banks_rebuilt,
+        })
+    }
+
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
         let operation = "memory_status";
         let conn = self.db.conn();
-        MemoryStore::new(conn).rebuild_dirty_banks().await?;
+        let repair = self.repair_derived_memory().await?;
         let mut fact_rows = conn
             .query("SELECT trust_score FROM memory_facts", ())
             .await
@@ -3057,7 +3083,11 @@ impl TokenSave {
             .query(
                 "SELECT COALESCE(SUM(helpful_count), 0),
                         COALESCE(SUM(unhelpful_count), 0),
-                        COALESCE(SUM(CASE WHEN hrr_vector IS NULL THEN 1 ELSE 0 END), 0)
+                        COALESCE(SUM(CASE
+                            WHEN hrr_vector IS NULL
+                              OR hrr_algebra != 'amari_fhrr'
+                              OR hrr_dim != 2048
+                            THEN 1 ELSE 0 END), 0)
                  FROM memory_facts",
                 (),
             )
@@ -3103,6 +3133,7 @@ impl TokenSave {
             unhelpful_count: unhelpful_count as usize,
             missing_vector_count: missing_vector_count as usize,
             legacy_backfill_complete: backfilled_count > 0,
+            repair,
         })
     }
 }

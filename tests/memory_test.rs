@@ -94,6 +94,21 @@ async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
         .map(|row| row.get::<i64>(0).unwrap())
 }
 
+async fn clear_fact_vector(cg: &TokenSave, fact_id: i64) {
+    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    db.close();
+}
+
 #[test]
 fn core_memory_types_use_stable_json_strings() {
     assert_eq!(MemoryCategory::UserPref.to_string(), "user_pref");
@@ -695,6 +710,39 @@ async fn memory_status_handles_empty_fact_store() {
     let status = cg.memory_status().await.unwrap();
     assert_eq!(status.fact_count, 0);
     assert_eq!(status.missing_vector_count, 0);
+}
+
+#[tokio::test]
+async fn memory_status_repairs_missing_vectors_and_reports_stats() {
+    let (_tmp, cg) = make_project().await;
+    let fact = cg
+        .add_fact(AddFactRequest {
+            content: "Repair missing derived vector before status reports".to_string(),
+            category: MemoryCategory::Project,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.8),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    clear_fact_vector(&cg, fact.fact_id).await;
+
+    let status = cg.memory_status().await.unwrap();
+    let status_json = serde_json::to_value(&status).unwrap();
+
+    assert_eq!(status.missing_vector_count, 0);
+    assert_eq!(
+        status_json["repair"]["missing_vectors_repaired"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        status_json["repair"]["full_banks_rebuilt"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1
+    );
 }
 
 #[tokio::test]

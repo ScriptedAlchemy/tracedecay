@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
+use tokensave::db::Database;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
 use tokensave::sessions::cursor::open_project_session_db;
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
@@ -3605,7 +3606,7 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
 #[tokio::test]
 async fn memory_status_repairs_dirty_banks_before_reporting() {
     let (cg, _dir) = setup_project().await;
-    handle_tool_call(
+    let added = handle_tool_call(
         &cg,
         "tokensave_fact_store",
         json!({
@@ -3619,6 +3620,20 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     )
     .await
     .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    db.close();
 
     let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
         .await
@@ -3633,6 +3648,18 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
         status["memory"]["missing_vector_count"].as_u64(),
         Some(0),
         "status-triggered bank repair should not leave missing vectors"
+    );
+    assert_eq!(
+        status["memory"]["repair"]["missing_vectors_repaired"].as_u64(),
+        Some(1),
+        "status should report derived vector repairs: {status}"
+    );
+    assert!(
+        status["memory"]["repair"]["full_banks_rebuilt"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "status should report bank repair work after vector repair: {status}"
     );
 }
 
