@@ -135,7 +135,7 @@ async fn offset_resume_only_ingests_appended_lines() {
         1
     );
 
-    let offset_key = format!("cursor:{}", transcript.to_string_lossy());
+    let offset_key = format!("cursor:{}", transcript.to_string_lossy().replace('\\', "/"));
     assert!(db.get_parse_offset(&offset_key).await.is_some());
 }
 

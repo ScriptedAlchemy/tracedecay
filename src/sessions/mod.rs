@@ -161,7 +161,7 @@ async fn read_jsonl_records(
     path: &Path,
     stats: &mut SessionIngestStats,
 ) -> Vec<(Value, u64)> {
-    let offset_key = format!("{provider}:{}", path.to_string_lossy());
+    let offset_key = format!("{provider}:{}", stable_path_string(path));
     let saved_offset = db
         .get_parse_offset(&offset_key)
         .await
@@ -386,7 +386,7 @@ async fn upsert_codex_session(db: &GlobalDb, context: &CodexFileContext) -> bool
 }
 
 fn cursor_context_for_path(path: &Path) -> CursorFileContext {
-    let transcript_path = path.to_string_lossy().to_string();
+    let transcript_path = stable_path_string(path);
     let session_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -404,7 +404,7 @@ fn cursor_context_for_path(path: &Path) -> CursorFileContext {
 }
 
 fn codex_context_for_path(path: &Path) -> CodexFileContext {
-    let transcript_path = path.to_string_lossy().to_string();
+    let transcript_path = stable_path_string(path);
     let session_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -519,4 +519,8 @@ fn file_mtime(path: &Path) -> u64 {
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn stable_path_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
