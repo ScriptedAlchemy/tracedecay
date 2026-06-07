@@ -402,32 +402,19 @@ cp scripts/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
-### Embedded file watcher
+### MCP staleness checks
 
-When you start the tokensave MCP server (e.g. via your agent), it watches the project directory and syncs automatically. See the next section.
+When you start the tokensave MCP server (e.g. via your agent), tool calls perform an on-demand staleness check and catch up changed files before returning results. There is no long-running file watcher process.
 
 ---
 
-## The Embedded File Watcher
+## MCP Staleness Checks
 
-When you start the tokensave MCP server (e.g. via your agent), it watches
-the project directory for file changes and automatically runs incremental
-syncs in the background. The watcher's lifetime is bound to the MCP
-process — when the agent exits, the watcher exits.
-
-Multiple MCP servers on the same project (e.g. two agents) coordinate via
-a per-project sync lock: only one sync runs at a time.
-
-Configure the debounce interval in `~/.tokensave/config.toml`:
-
-```toml
-watcher_debounce = "15s"
-```
+The MCP server does not run a background file watcher. Instead, MCP tool calls perform a lightweight staleness check and run an incremental sync when indexed files are stale. Multiple MCP servers on the same project coordinate via a per-project sync lock: only one sync runs at a time.
 
 ### CLI-Only Workflows
 
-If you don't keep an agent attached, the watcher is not running. Use a
-git post-commit hook to refresh the index on commit:
+If you don't keep an agent attached, use a git post-commit hook to refresh the index on commit:
 
 ```bash
 cp scripts/post-commit .git/hooks/post-commit
@@ -454,7 +441,7 @@ Then remove the entry matching your install:
 - Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
 - Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
 
-Once your agent is attached, the embedded watcher takes over automatically.
+Once your agent is attached, MCP tool calls keep the index fresh on demand.
 
 ---
 
@@ -520,7 +507,7 @@ tokensave affected src/lib.rs --quiet            # just file paths, no decoratio
 
 ## MCP Tools for AI Agents
 
-When running as an MCP server, tokensave exposes 41 tools that AI agents can call. Here's what they do, grouped by purpose.
+When running as an MCP server, tokensave exposes more than 70 tools that AI agents can call. Here's what they do, grouped by purpose.
 
 ### Core exploration
 
@@ -618,27 +605,91 @@ Marked functions are excluded from `tokensave_test_risk` coverage calculations, 
 | `tokensave_session_start` | Save current health metrics as a baseline before starting work. |
 | `tokensave_session_end` | Compare current health against the baseline to detect structural degradation during the session. |
 
-Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tokensave/session_baseline.json`, memory-recording tools update the project database, and edit tools modify source files.
+### Memory and fact recall
+
+The holographic memory tools store durable facts linked to entities:
+
+| Tool | What it does |
+|------|--------------|
+| `tokensave_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
+| `tokensave_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
+| `tokensave_memory_status` | Report fact/entity counts, four trust-score buckets, feedback counts, and missing-vector count. |
+
+Entity recall should surface facts by named entity and include why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy tools should remain as wrappers after integration so existing agent prompts and permissions keep working while new agents move to the fact-store surface.
+
+`tokensave_fact_store` request schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"]
+    },
+    "content": { "type": "string" },
+    "query": { "type": "string" },
+    "entity": { "type": "string" },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
+    "category": { "type": "string" },
+    "source": { "type": "string" },
+    "trust": { "type": "number", "minimum": 0, "maximum": 1 },
+    "trust_delta": { "type": "number" },
+    "threshold": { "type": "number" },
+    "limit": { "type": "number" },
+    "metadata": { "type": "object" },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["action"]
+}
+```
+
+`tokensave_fact_feedback` request schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
+    "action": {
+      "type": "string",
+      "enum": ["helpful", "unhelpful"]
+    },
+    "source": { "type": "string" },
+    "note": { "type": "string" },
+    "trust_delta": { "type": "number" }
+  },
+  "required": ["fact_id"]
+}
+```
+
+Provide either `"action": "helpful"|"unhelpful"` or the compatibility shorthand `"helpful": true` / `"unhelpful": true`.
+
+Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tokensave/session_baseline.json`, memory-recording and future fact-feedback tools update the project database, and edit tools modify source files.
 
 ---
 
 ## Supported Languages
 
-Tokensave supports 31 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
+Tokensave supports more than 50 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
 
-### Lite (11 languages)
+### Lite (14 languages)
 
 Always compiled. The smallest binary for the most popular languages.
 
-Rust, Go, Java, Scala, TypeScript, JavaScript, Python, C, C++, Kotlin, C#, Swift
+Rust, Go, Java, Scala, TypeScript, JavaScript, Python, C, C++, Kotlin, C#, Swift, Svelte, Astro
 
-### Medium (Lite + 9 = 20 languages)
+### Medium (Lite + 9 = 23 languages)
 
 Adds scripting, config, and additional systems languages.
 
 Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
 
-### Full (Medium + 11 = 31 languages)
+### Full (Medium + 27+ languages)
 
 Everything, including legacy and niche languages.
 
