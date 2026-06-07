@@ -4,7 +4,7 @@ on:
   push:
     branches: [master, feature/holographic-memory]
   pull_request:
-    branches: [master, feature/holographic-memory]
+    branches: ['**']
 
 permissions:
   contents: read
@@ -15,6 +15,7 @@ env:
 jobs:
   test:
     name: Test ${{ matrix.name }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -41,6 +42,7 @@ jobs:
 
   clippy:
     name: Clippy
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -53,6 +55,7 @@ jobs:
 
   fmt:
     name: Format
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

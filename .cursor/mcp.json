@@ -4,7 +4,8 @@
       "args": [
         "serve"
       ],
-      "command": "/home/zack/projects/tokensave/target/debug/tokensave"
+      "command": "/home/zack/projects/tokensave/target/debug/tokensave",
+      "type": "stdio"
     }
   }
 }

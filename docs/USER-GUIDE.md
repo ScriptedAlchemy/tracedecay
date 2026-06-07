@@ -200,7 +200,7 @@ tokensave install --agent kimi        # Moonshot Kimi CLI
 tokensave install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file.
+Each agent gets an appropriate configuration: MCP server registration, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
 
 Kiro setup registers tokensave in `~/.kiro/settings/mcp.json`, writes steering to
 `~/.kiro/steering/tokensave.md`, and writes a tokensave-managed agent that loads
@@ -224,6 +224,21 @@ tokensave install --local --agent copilot
 ```
 
 Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`.
+
+Cursor local install creates a stronger project-local setup:
+
+- `.cursor/mcp.json` registers the tokensave MCP server.
+- `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
+- `.cursor/permissions.json` auto-allows read-only tokensave MCP tools using Cursor's `mcpAllowlist` format while leaving mutating edit/session tools subject to normal approval.
+- `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
+  - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
+  - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
+  - `beforeSubmitPrompt` resets the local token counter.
+  - `afterFileEdit` (matcher `Write`) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
+  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
+  - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+
+  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. `beforeReadFile`/`preToolUse` blocking hooks are intentionally omitted for now to avoid noise; they may become opt-in later.
 
 The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tokensave install --local --agent antigravity` and `tokensave install --local --agent cline` are rejected with unsupported-agent errors.
 

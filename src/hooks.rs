@@ -102,6 +102,533 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
     }
 }
 
+/// Cursor `subagentStart` hook handler.
+///
+/// Cursor sends hook event JSON on stdin and expects Cursor-shaped JSON on
+/// stdout. This intentionally does not reuse the Claude hook output schema.
+pub fn hook_cursor_subagent_start() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(decision) = evaluate_cursor_subagent_start(&event) {
+        println!("{decision}");
+    }
+    0
+}
+
+/// Cursor `beforeSubmitPrompt` hook handler.
+///
+/// Resets the project-local counter for a new prompt turn. The output uses
+/// Cursor's documented `beforeSubmitPrompt` shape and never blocks submission.
+pub async fn hook_cursor_before_submit_prompt() -> i32 {
+    let event = read_stdin_to_string();
+    reset_counter_for_cursor_event(&event).await;
+    println!("{}", serde_json::json!({ "continue": true }));
+    0
+}
+
+/// Cursor `afterFileEdit` hook handler.
+///
+/// Keeps the graph fresh after Cursor Agent writes files. This uses a
+/// **targeted** single-file sync (`sync_if_stale_silent`) scoped to the edited
+/// path(s) rather than a full-tree `sync()`. The agent can edit many files per
+/// turn, and a full-tree scan per edit scales with repo size, not edit size —
+/// prohibitively expensive on large codebases. The targeted path skips the
+/// scan, no-ops when not stale, and waits/gives up on the sync lock, so no
+/// time-based debounce is needed. Fail-open and silent.
+pub async fn hook_cursor_after_file_edit() -> i32 {
+    let event = read_stdin_to_string();
+    targeted_sync_for_cursor_after_file_edit(&event).await;
+    0
+}
+
+/// Cursor `sessionStart` hook handler (fire-and-forget).
+///
+/// Emits Cursor's `sessionStart` output shape (`additional_context` + `env`)
+/// steering the agent toward tokensave MCP tools and reporting index freshness
+/// for the resolved workspace. Never blocks session creation.
+pub async fn hook_cursor_session_start() -> i32 {
+    let event = read_stdin_to_string();
+    let root = cursor_project_root_from_event(&event);
+    let (initialized, staleness) = match &root {
+        Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
+            (true, cursor_staleness_for_root(r).await)
+        }
+        _ => (false, None),
+    };
+    let context = build_cursor_session_context(initialized, staleness.as_deref());
+    println!("{}", cursor_session_start_json(root.as_deref(), &context));
+    0
+}
+
+/// Cursor `afterShellExecution` hook handler.
+///
+/// When the executed command is a git state-changing command (checkout,
+/// switch, pull, merge, rebase, reset, cherry-pick, stash apply/pop), a
+/// broader change set is expected, so a full incremental `sync()` is
+/// acceptable. Back-to-back git commands are coalesced via a short marker-based
+/// guard (and the sync lock no-ops concurrent runs). Fail-open and silent.
+pub async fn hook_cursor_after_shell() -> i32 {
+    let event = read_stdin_to_string();
+    sync_after_cursor_shell_event(&event).await;
+    0
+}
+
+/// Cursor `workspaceOpen` hook handler.
+///
+/// Runs a one-shot catch-up incremental `sync()` when the workspace has a
+/// tokensave index, picking up changes made while no agent was attached. We
+/// don't load plugins, so the output is an empty object. Fail-open.
+pub async fn hook_cursor_workspace_open() -> i32 {
+    let event = read_stdin_to_string();
+    workspace_open_for_cursor_event(&event).await;
+    println!("{}", serde_json::json!({}));
+    0
+}
+
+/// Pure decision logic for Cursor `subagentStart` hook events.
+///
+/// Returns a Cursor hook response only when a research-oriented subagent should
+/// be denied in favor of tokensave MCP tools.
+pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let subagent_type = parsed
+        .get("subagent_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let task = parsed
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let is_explore = subagent_type.eq_ignore_ascii_case("explore");
+    if is_explore || is_code_research_prompt(task) {
+        return Some(
+            serde_json::json!({
+                "permission": "deny",
+                "user_message": TOKENSAVE_RESEARCH_BLOCK_REASON
+            })
+            .to_string(),
+        );
+    }
+
+    None
+}
+
+pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    cursor_event_candidates(&parsed)
+        .into_iter()
+        .find_map(|candidate| crate::config::discover_project_root(&candidate))
+}
+
+fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
+        for root in roots {
+            if let Some(path) = root.as_str().filter(|s| !s.is_empty()) {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    }
+    if let Some(cwd) = event
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        candidates.push(PathBuf::from(cwd));
+    }
+    if let Some(file_path) = event
+        .get("file_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let path = Path::new(file_path);
+        candidates.push(path.parent().unwrap_or(path).to_path_buf());
+    }
+    candidates
+}
+
+/// Returns `true` when `command` is a git invocation that changes the working
+/// tree / HEAD enough that a broad re-sync is warranted (checkout, switch,
+/// pull, merge, rebase, reset, cherry-pick, `stash pop`/`stash apply`).
+///
+/// Read-only git commands (`status`, `log`, `diff`), `commit`/`add`, and
+/// non-git commands return `false`. Only commands whose first token is `git`
+/// match, so `echo git checkout` is ignored.
+pub fn is_git_state_changing_command(command: &str) -> bool {
+    let tokens: Vec<String> = command
+        .split_whitespace()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    if tokens.first().map(String::as_str) != Some("git") {
+        return false;
+    }
+    let Some(sub) = tokens.iter().skip(1).find(|t| !t.starts_with('-')) else {
+        return false;
+    };
+    match sub.as_str() {
+        "checkout" | "switch" | "pull" | "merge" | "rebase" | "reset" | "cherry-pick" => true,
+        "stash" => {
+            let after = tokens
+                .iter()
+                .skip_while(|t| t.as_str() != "stash")
+                .skip(1)
+                .find(|t| !t.starts_with('-'));
+            matches!(after.map(String::as_str), Some("pop") | Some("apply"))
+        }
+        _ => false,
+    }
+}
+
+/// The action a Cursor `afterShellExecution` hook should take for a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorShellSyncPlan {
+    /// Bootstrap/maintain branch tracking for the given branch (supersedes a
+    /// plain sync; the branch-add path copies the parent DB and syncs).
+    BranchAdd(String),
+    /// Run a full incremental sync (same-branch change set).
+    IncrementalSync,
+    /// Do nothing.
+    Noop,
+}
+
+/// Classifies a shell command into the sync action a Cursor
+/// `afterShellExecution` hook should take. Branch switches take precedence
+/// over plain incremental syncs.
+pub fn cursor_shell_sync_plan(command: &str) -> CursorShellSyncPlan {
+    if let Some(branch) = cursor_branch_switch_target(command) {
+        return CursorShellSyncPlan::BranchAdd(branch);
+    }
+    if is_git_state_changing_command(command) {
+        return CursorShellSyncPlan::IncrementalSync;
+    }
+    CursorShellSyncPlan::Noop
+}
+
+/// Returns the target branch for a branch-changing git command:
+/// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
+/// `git switch -c <branch>`, and `git worktree add [<path>] <branch>` /
+/// `git worktree add -b <branch> <path>`.
+///
+/// Path checkouts (`git checkout -- <file>` or obvious file pathspecs) and
+/// non-switch commands return `None`. Only commands whose first token is `git`
+/// are considered.
+pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
+    let raw: Vec<&str> = command.split_whitespace().collect();
+    let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
+    if lower.first().map(String::as_str) != Some("git") {
+        return None;
+    }
+    let sub = lower.iter().skip(1).find(|t| !t.starts_with('-'))?;
+    let sub_pos = lower.iter().position(|t| t == sub)?;
+
+    match sub.as_str() {
+        "checkout" | "switch" => {
+            // Path checkout (`git checkout -- file`) is not a branch switch.
+            if raw.contains(&"--") {
+                return None;
+            }
+            let after = &raw[sub_pos + 1..];
+            let mut iter = after.iter();
+            while let Some(tok) = iter.next() {
+                if matches!(*tok, "-b" | "-B" | "-c" | "-C") {
+                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+                }
+                if tok.starts_with('-') {
+                    continue;
+                }
+                if is_obvious_checkout_pathspec(tok) {
+                    return None;
+                }
+                return Some((*tok).to_string());
+            }
+            None
+        }
+        "worktree" => {
+            let add_pos = lower.iter().position(|t| t == "add")?;
+            let after = &raw[add_pos + 1..];
+            let mut iter = after.iter();
+            while let Some(tok) = iter.next() {
+                if matches!(*tok, "-b" | "-B") {
+                    return iter.find(|t| !t.starts_with('-')).map(|b| (*b).to_string());
+                }
+                if tok.starts_with('-') {
+                    continue;
+                }
+                break;
+            }
+            // No `-b`: positionals are `<path> [<branch>]`; the branch is the
+            // second positional, if present.
+            let positionals: Vec<&str> = after
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .copied()
+                .collect();
+            positionals.get(1).map(|b| (*b).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn is_obvious_checkout_pathspec(token: &str) -> bool {
+    token == "."
+        || token == ":/"
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with(":/")
+        || token
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| !ext.is_empty())
+}
+
+/// Extracts the repo-relative paths edited in a Cursor `afterFileEdit` event.
+///
+/// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
+/// resolved `project_root` prefix and normalize to forward slashes so the set
+/// can be passed straight to [`TokenSave::sync_if_stale_silent`], which does a
+/// targeted single-file sync instead of a full-tree scan. Paths outside the
+/// project root are skipped.
+pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return Vec::new();
+    };
+
+    let mut abs_paths: Vec<String> = Vec::new();
+    if let Some(p) = parsed
+        .get("file_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        abs_paths.push(p.to_string());
+    }
+    // Defensive: some edit payloads may carry per-edit file paths.
+    if let Some(edits) = parsed.get("edits").and_then(Value::as_array) {
+        for edit in edits {
+            if let Some(p) = edit
+                .get("file_path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                abs_paths.push(p.to_string());
+            }
+        }
+    }
+
+    let mut rels: Vec<String> = Vec::new();
+    for abs in abs_paths {
+        if let Some(rel) = rel_under_root(project_root, Path::new(&abs)) {
+            if !rels.contains(&rel) {
+                rels.push(rel);
+            }
+        }
+    }
+    rels
+}
+
+fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
+    let stripped = abs.strip_prefix(root).ok()?;
+    if stripped.as_os_str().is_empty() {
+        return None;
+    }
+    Some(stripped.to_string_lossy().replace('\\', "/"))
+}
+
+/// Returns `true` when a sync should run given the last marker time and a
+/// debounce window. Used to coalesce back-to-back `afterShellExecution` syncs.
+pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_secs: i64) -> bool {
+    match last_secs {
+        Some(last) => now_secs - last >= debounce_secs,
+        None => true,
+    }
+}
+
+/// Builds the `sessionStart` `additional_context` text: steer the agent toward
+/// tokensave MCP tools and report index freshness for the workspace.
+pub fn build_cursor_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
+    let mut s = String::new();
+    s.push_str(
+        "tokensave is available via MCP. Prefer tokensave MCP tools \
+         (tokensave_context, tokensave_search, tokensave_callers, tokensave_callees, \
+         tokensave_impact, tokensave_files, tokensave_affected) over broad file reads \
+         or shell search for codebase exploration, symbol lookup, call graphs, and \
+         impact analysis. Fall back to file reads only when tokensave cannot answer.\n",
+    );
+    if initialized {
+        match staleness_hint {
+            Some(hint) => s.push_str(&format!("Index status: {hint}.\n")),
+            None => s.push_str("Index status: initialized.\n"),
+        }
+    } else {
+        s.push_str(
+            "Index status: no .tokensave/ index found in this workspace — \
+             run `tokensave init` to enable tokensave tools.\n",
+        );
+    }
+    s
+}
+
+/// Formats a short relative-age staleness hint from a sync age in seconds.
+pub fn cursor_staleness_hint(age_secs: i64) -> String {
+    let age = age_secs.max(0);
+    if age < 60 {
+        "last indexed just now".to_string()
+    } else if age < 3_600 {
+        format!("last indexed {}m ago", age / 60)
+    } else if age < 86_400 {
+        format!("last indexed {}h ago", age / 3_600)
+    } else {
+        format!("last indexed {}d ago", age / 86_400)
+    }
+}
+
+/// Builds the Cursor `sessionStart` output JSON (`additional_context` + `env`).
+/// When `project_root` is known, exposes it as `TOKENSAVE_PROJECT_ROOT` so
+/// subsequent session hooks can reuse it.
+pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context: &str) -> String {
+    let mut env = serde_json::Map::new();
+    if let Some(root) = project_root {
+        env.insert(
+            "TOKENSAVE_PROJECT_ROOT".to_string(),
+            Value::String(root.to_string_lossy().to_string()),
+        );
+    }
+    serde_json::json!({
+        "additional_context": additional_context,
+        "env": Value::Object(env),
+    })
+    .to_string()
+}
+
+async fn cursor_staleness_for_root(root: &Path) -> Option<String> {
+    let cg = crate::tokensave::TokenSave::open(root).await.ok()?;
+    let last = cg.last_sync_timestamp().await;
+    if last <= 0 {
+        return None;
+    }
+    Some(cursor_staleness_hint(now_unix_secs() - last))
+}
+
+/// Targeted, fail-open single-file sync for Cursor `afterFileEdit`.
+///
+/// Resolves the edited repo-relative paths and calls `sync_if_stale_silent`,
+/// which avoids the full-tree scan that `sync()` performs. No-ops when the
+/// workspace is uninitialized or no in-project paths were edited.
+async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
+    let Some(root) = cursor_project_root_from_event(event_json) else {
+        return;
+    };
+    if !crate::tokensave::TokenSave::is_initialized(&root) {
+        return;
+    }
+    let rels = cursor_after_file_edit_rel_paths(event_json, &root);
+    if rels.is_empty() {
+        return;
+    }
+    if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
+        let _ = cg.sync_if_stale_silent(&rels).await;
+    }
+}
+
+/// Branch-aware, fail-open handler for git state-changing shell commands.
+///
+/// Branch switches (`checkout`/`switch`/`worktree add`) bootstrap/maintain
+/// tokensave branch tracking via [`crate::branch::add_branch_tracking`] —
+/// which is idempotent and supersedes a plain sync. Other state-changing
+/// commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) run a full
+/// incremental `sync()`, coalesced by a short marker-based guard so back-to-back
+/// git commands don't stack. Only acts when `.tokensave/` already exists.
+async fn sync_after_cursor_shell_event(event_json: &str) {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return;
+    };
+    let command = parsed
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let plan = cursor_shell_sync_plan(command);
+    if matches!(plan, CursorShellSyncPlan::Noop) {
+        return;
+    }
+    let Some(root) = cursor_project_root_from_event(event_json) else {
+        return;
+    };
+    // Never bootstrap indexing in an unindexed repo.
+    if !crate::tokensave::TokenSave::is_initialized(&root) {
+        return;
+    }
+
+    match plan {
+        CursorShellSyncPlan::BranchAdd(branch) => {
+            // Idempotent + fail-open: already-tracked branches no-op.
+            let _ = crate::branch::add_branch_tracking(&root, &branch).await;
+        }
+        CursorShellSyncPlan::IncrementalSync => {
+            let marker = cursor_shell_sync_marker_path(&root);
+            let now = now_unix_secs();
+            if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
+                return;
+            }
+            write_marker_secs(&marker, now);
+
+            if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
+                match cg.sync().await {
+                    Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => {}
+                    Err(e) => eprintln!("tokensave sync failed: {e}"),
+                }
+            }
+        }
+        CursorShellSyncPlan::Noop => {}
+    }
+}
+
+/// Branch-aware workspace catch-up for Cursor `workspaceOpen`.
+///
+/// When the workspace has a tokensave index, ensures the current branch's DB
+/// exists (branch-add if missing — which also syncs) and otherwise runs a
+/// catch-up incremental `sync()`. Idempotent and fail-open.
+async fn workspace_open_for_cursor_event(event_json: &str) {
+    let Some(root) = cursor_project_root_from_event(event_json) else {
+        return;
+    };
+    if !crate::tokensave::TokenSave::is_initialized(&root) {
+        return;
+    }
+
+    // Ensure the current branch is tracked. When a branch is freshly added,
+    // `add_branch_tracking` already runs a sync, so we can skip the catch-up.
+    if let Some(branch) = crate::branch::current_branch(&root) {
+        if let Ok(crate::branch::BranchAddOutcome::Added) =
+            crate::branch::add_branch_tracking(&root, &branch).await
+        {
+            return;
+        }
+    }
+
+    let _ = sync_for_cursor_event(event_json).await;
+}
+
+fn cursor_shell_sync_marker_path(root: &Path) -> PathBuf {
+    crate::config::get_tokensave_dir(root).join(".cursor_shell_sync_at")
+}
+
+fn read_marker_secs(path: &Path) -> Option<i64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+}
+
+fn write_marker_secs(path: &Path, secs: i64) {
+    let _ = std::fs::write(path, secs.to_string());
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Pure decision logic for Kiro `preToolUse` hook events.
 ///
 /// Returns a block reason only for Kiro delegation/subagent tool calls whose
@@ -224,10 +751,33 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
     }
 }
 
+async fn reset_counter_for_cursor_event(event_json: &str) {
+    let Some(project_root) = cursor_project_root_from_event(event_json) else {
+        return;
+    };
+    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+        let _ = cg.reset_local_counter().await;
+    }
+}
+
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = kiro_project_root(event_json) else {
         return Ok(());
     };
+    let cg = crate::tokensave::TokenSave::open(&project_root).await?;
+    match cg.sync().await {
+        Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
+    let Some(project_root) = cursor_project_root_from_event(event_json) else {
+        return Ok(());
+    };
+    if !crate::tokensave::TokenSave::is_initialized(&project_root) {
+        return Ok(());
+    }
     let cg = crate::tokensave::TokenSave::open(&project_root).await?;
     match cg.sync().await {
         Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),

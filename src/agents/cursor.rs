@@ -7,11 +7,12 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::Result;
+use crate::errors::{Result, TokenSaveError};
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    safe_write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    load_jsonc_file_strict, read_only_tool_names, safe_write_json_file, AgentIntegration,
+    DoctorCounters, HealthcheckContext, InstallContext,
 };
 
 /// Cursor agent.
@@ -41,7 +42,11 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(&project_path.join(".cursor/mcp.json"), &ctx.tokensave_bin)
+        let cursor_dir = project_path.join(".cursor");
+        install_mcp_server(&cursor_dir.join("mcp.json"), &ctx.tokensave_bin)?;
+        install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
+        install_permissions(&cursor_dir.join("permissions.json"))?;
+        install_hooks(&cursor_dir.join("hooks.json"), &ctx.tokensave_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -99,6 +104,7 @@ fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str) -> Result<()> {
         }
     };
     settings["mcpServers"]["tokensave"] = json!({
+        "type": "stdio",
         "command": tokensave_bin,
         "args": ["serve"]
     });
@@ -109,6 +115,189 @@ fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str) -> Result<()> {
         mcp_path.display()
     );
     Ok(())
+}
+
+fn install_project_rule(rule_path: &Path) -> Result<()> {
+    let contents = r#"---
+description: Prefer tokensave MCP tools for codebase exploration
+alwaysApply: true
+---
+
+# Prefer tokensave MCP tools
+
+- For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first.
+- Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
+- Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
+"#;
+    write_generated_text(rule_path, contents)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Wrote Cursor project rule to {}",
+        rule_path.display()
+    );
+    Ok(())
+}
+
+fn install_permissions(permissions_path: &Path) -> Result<()> {
+    let backup = backup_config_file(permissions_path)?;
+    let mut permissions = match load_jsonc_file_strict(permissions_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+
+    let existing = permissions["mcpAllowlist"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut allow = existing;
+    for tool in read_only_tool_names() {
+        let entry = format!("tokensave:{tool}");
+        if !allow.iter().any(|existing| existing == &entry) {
+            allow.push(entry);
+        }
+    }
+    permissions["mcpAllowlist"] = json!(allow);
+
+    safe_write_json_file(permissions_path, &permissions, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added Cursor MCP permissions to {}",
+        permissions_path.display()
+    );
+    Ok(())
+}
+
+fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
+    let backup = backup_config_file(hooks_path)?;
+    let mut hooks = match load_jsonc_file_strict(hooks_path) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(ref b) = backup {
+                eprintln!("  Backup preserved at: {}", b.display());
+            }
+            return Err(e);
+        }
+    };
+
+    hooks["version"] = json!(1);
+    // Reduce wasteful exploration.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "sessionStart",
+        tokensave_bin,
+        "hook-cursor-session-start",
+        5,
+        None,
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "subagentStart",
+        tokensave_bin,
+        "hook-cursor-subagent-start",
+        5,
+        None,
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "beforeSubmitPrompt",
+        tokensave_bin,
+        "hook-cursor-before-submit-prompt",
+        5,
+        None,
+    );
+    // Keep the index fresh. afterFileEdit uses a targeted single-file sync and
+    // is scoped to agent `Write` edits via a matcher.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "afterFileEdit",
+        tokensave_bin,
+        "hook-cursor-after-file-edit",
+        30,
+        Some("Write"),
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "afterShellExecution",
+        tokensave_bin,
+        "hook-cursor-after-shell",
+        60,
+        None,
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "workspaceOpen",
+        tokensave_bin,
+        "hook-cursor-workspace-open",
+        60,
+        None,
+    );
+
+    safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added Cursor project hooks to {}",
+        hooks_path.display()
+    );
+    Ok(())
+}
+
+fn install_cursor_hook_entry(
+    hooks: &mut serde_json::Value,
+    event: &str,
+    tokensave_bin: &str,
+    subcommand: &str,
+    timeout: u64,
+    matcher: Option<&str>,
+) {
+    let existing = hooks["hooks"][event]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    // Rebuild the tokensave-owned entry every install so refinements (matcher,
+    // timeout) reach pre-existing configs, while preserving any foreign hooks.
+    // Idempotent: there is always exactly one tokensave entry per event.
+    let mut event_hooks: Vec<serde_json::Value> = existing
+        .into_iter()
+        .filter(|hook| {
+            !hook
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|command| command.contains(subcommand))
+        })
+        .collect();
+
+    let mut entry = json!({
+        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "timeout": timeout
+    });
+    if let Some(matcher) = matcher {
+        entry["matcher"] = json!(matcher);
+    }
+    event_hooks.push(entry);
+
+    hooks["hooks"][event] = serde_json::Value::Array(event_hooks);
+}
+
+fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+            message: format!("failed to create {}: {e}", parent.display()),
+        })?;
+    }
+    std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
+        message: format!("failed to write {}: {e}", path.display()),
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Remove MCP server entry from ~/.cursor/mcp.json.
