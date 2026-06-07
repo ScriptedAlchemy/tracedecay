@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tokensave": {
+      "command": "/home/zack/projects/tokensave/.worktrees/holographic-memory/scripts/tokensave-dev-mcp.sh",
+      "env": {
+        "TOKENSAVE_DEV_PROJECT_ROOT": "/home/zack/projects/tokensave/.worktrees/holographic-memory"
+      }
+    }
+  }
+}
