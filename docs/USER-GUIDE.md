@@ -615,7 +615,7 @@ The holographic memory tools store durable facts linked to entities:
 | `tokensave_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
 | `tokensave_memory_status` | Report fact/entity counts, four trust-score buckets, feedback counts, and missing-vector count. |
 
-Entity recall should surface facts by named entity and include why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy tools should remain as wrappers after integration so existing agent prompts and permissions keep working while new agents move to the fact-store surface.
+Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status`.
 
 `tokensave_fact_store` request schema:
 
