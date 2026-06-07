@@ -1233,9 +1233,10 @@ fn test_codex_local_install_writes_hooks() {
 
     let config_path = project.path().join(".codex/config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("\"serve\""));
-    assert!(config.contains("\"--path\""));
-    assert!(config.contains("\".\""));
+    assert!(
+        config.contains("args = [\n    \"serve\",\n    \"--path\",\n    \".\",\n]"),
+        "local Codex config should pin serve to the project root with --path ."
+    );
     assert!(
         !config.contains("TOKENSAVE_DISABLE_GLOBAL_DB")
             && !config.contains("TOKENSAVE_ENABLE_GLOBAL_DB"),

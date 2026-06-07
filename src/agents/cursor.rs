@@ -31,7 +31,7 @@ impl AgentIntegration for CursorIntegration {
         install_mcp_server(
             &ctx.home.join(".cursor/mcp.json"),
             &ctx.tokensave_bin,
-            None,
+            false,
             true,
         )?;
 
@@ -51,7 +51,7 @@ impl AgentIntegration for CursorIntegration {
         install_mcp_server(
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,
-            Some(project_path),
+            true,
             false,
         )?;
         install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
@@ -110,7 +110,7 @@ impl AgentIntegration for CursorIntegration {
 fn install_mcp_server(
     mcp_path: &Path,
     tokensave_bin: &str,
-    local_project_path: Option<&Path>,
+    is_local_install: bool,
     enable_global_db: bool,
 ) -> Result<()> {
     if let Some(parent) = mcp_path.parent() {
@@ -132,7 +132,7 @@ fn install_mcp_server(
         "command": tokensave_bin,
         "args": ["serve"]
     });
-    if local_project_path.is_some() {
+    if is_local_install {
         server["args"] = json!(["serve", "--path", "."]);
     }
     if enable_global_db {

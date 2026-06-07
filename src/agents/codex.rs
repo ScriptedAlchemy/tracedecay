@@ -40,7 +40,7 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin, None, true)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin, false, true)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -65,7 +65,7 @@ impl AgentIntegration for CodexIntegration {
         install_mcp_server(
             &codex_dir.join("config.toml"),
             &ctx.tokensave_bin,
-            Some(project_path),
+            true,
             false,
         )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
@@ -141,7 +141,7 @@ impl AgentIntegration for CodexIntegration {
 fn install_mcp_server(
     config_path: &Path,
     tokensave_bin: &str,
-    local_project_path: Option<&Path>,
+    is_local_install: bool,
     enable_global_db: bool,
 ) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
@@ -166,7 +166,7 @@ fn install_mcp_server(
         "command".to_string(),
         toml::Value::String(tokensave_bin.to_string()),
     );
-    let args = if local_project_path.is_some() {
+    let args = if is_local_install {
         vec![
             toml::Value::String("serve".to_string()),
             toml::Value::String("--path".to_string()),
