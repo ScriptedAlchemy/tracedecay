@@ -135,7 +135,7 @@ tokensave install --agent vibe            # Mistral Vibe
 tokensave install --agent zed             # Zed
 ```
 
-Each agent gets its MCP server registered in the native config format. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved.
+Each agent gets its MCP server registered in the native config format. Claude Code additionally gets a PreToolUse hook (blocks wasteful Explore agents), a UserPromptSubmit hook, a Stop hook, prompt rules in CLAUDE.md, and auto-allowed tool permissions. Kiro gets global MCP config, `tokensave.md` steering loaded as a resource, and a tokensave-managed default agent with permissive built-in/tokensave tool approval, delegation guardrail hooks, and post-write sync; user-managed Kiro agents are preserved. Cursor global install currently registers the MCP server only; the richer Cursor integration is project-local so it can be checked into a repository.
 
 All changes are idempotent -- safe to run again after upgrading. After agent setup, you'll be offered a global git post-commit hook.
 
@@ -145,7 +145,7 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Cline, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity is global-only and returns a clear unsupported error for `--local`.
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, or the equivalent project config for Claude, Codex, Gemini, Kiro, OpenCode, Copilot/VS Code, Zed, Cline, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs use the resolved absolute `tokensave` executable path. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, permissions auto-allow only read-only tokensave MCP tools, `subagentStart` blocks research subagents until tokensave has been tried, `beforeSubmitPrompt` resets the local token counter, and `afterFileEdit` runs a safe incremental sync after Agent writes. Local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook. Antigravity is global-only and returns a clear unsupported error for `--local`.
 
 ### 3. Index your project
 

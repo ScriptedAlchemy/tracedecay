@@ -119,6 +119,15 @@ pub enum Commands {
     /// Kiro PostToolUse hook handler for incremental sync
     #[command(name = "hook-kiro-post-tool-use", hide = true)]
     HookKiroPostToolUse,
+    /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-subagent-start", hide = true)]
+    HookCursorSubagentStart,
+    /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
+    HookCursorBeforeSubmitPrompt,
+    /// Cursor afterFileEdit hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-after-file-edit", hide = true)]
+    HookCursorAfterFileEdit,
     /// Start MCP server over stdio
     Serve {
         /// Project path

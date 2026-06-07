@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-after-file-edit",
+        "timeout": 30
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-before-submit-prompt",
+        "timeout": 5
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-subagent-start",
+        "timeout": 5
+      }
+    ]
+  },
+  "version": 1
+}

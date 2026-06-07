@@ -102,6 +102,107 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
     }
 }
 
+/// Cursor `subagentStart` hook handler.
+///
+/// Cursor sends hook event JSON on stdin and expects Cursor-shaped JSON on
+/// stdout. This intentionally does not reuse the Claude hook output schema.
+pub fn hook_cursor_subagent_start() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(decision) = evaluate_cursor_subagent_start(&event) {
+        println!("{decision}");
+    }
+    0
+}
+
+/// Cursor `beforeSubmitPrompt` hook handler.
+///
+/// Resets the project-local counter for a new prompt turn. The output uses
+/// Cursor's documented `beforeSubmitPrompt` shape and never blocks submission.
+pub async fn hook_cursor_before_submit_prompt() -> i32 {
+    let event = read_stdin_to_string();
+    reset_counter_for_cursor_event(&event).await;
+    println!("{}", serde_json::json!({ "continue": true }));
+    0
+}
+
+/// Cursor `afterFileEdit` hook handler.
+///
+/// Keeps the graph fresh after Cursor Agent writes files. Missing indexes and
+/// concurrent syncs are no-ops so the hook is safe in uninitialized workspaces.
+pub async fn hook_cursor_after_file_edit() -> i32 {
+    let event = read_stdin_to_string();
+    match sync_for_cursor_event(&event).await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("tokensave sync failed: {e}");
+            1
+        }
+    }
+}
+
+/// Pure decision logic for Cursor `subagentStart` hook events.
+///
+/// Returns a Cursor hook response only when a research-oriented subagent should
+/// be denied in favor of tokensave MCP tools.
+pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let subagent_type = parsed
+        .get("subagent_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let task = parsed
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let is_explore = subagent_type.eq_ignore_ascii_case("explore");
+    if is_explore || is_code_research_prompt(task) {
+        return Some(
+            serde_json::json!({
+                "permission": "deny",
+                "user_message": TOKENSAVE_RESEARCH_BLOCK_REASON
+            })
+            .to_string(),
+        );
+    }
+
+    None
+}
+
+pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    cursor_event_candidates(&parsed)
+        .into_iter()
+        .find_map(|candidate| crate::config::discover_project_root(&candidate))
+}
+
+fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
+        for root in roots {
+            if let Some(path) = root.as_str().filter(|s| !s.is_empty()) {
+                candidates.push(PathBuf::from(path));
+            }
+        }
+    }
+    if let Some(cwd) = event
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        candidates.push(PathBuf::from(cwd));
+    }
+    if let Some(file_path) = event
+        .get("file_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let path = Path::new(file_path);
+        candidates.push(path.parent().unwrap_or(path).to_path_buf());
+    }
+    candidates
+}
+
 /// Pure decision logic for Kiro `preToolUse` hook events.
 ///
 /// Returns a block reason only for Kiro delegation/subagent tool calls whose
@@ -224,10 +325,33 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
     }
 }
 
+async fn reset_counter_for_cursor_event(event_json: &str) {
+    let Some(project_root) = cursor_project_root_from_event(event_json) else {
+        return;
+    };
+    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+        let _ = cg.reset_local_counter().await;
+    }
+}
+
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = kiro_project_root(event_json) else {
         return Ok(());
     };
+    let cg = crate::tokensave::TokenSave::open(&project_root).await?;
+    match cg.sync().await {
+        Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
+    let Some(project_root) = cursor_project_root_from_event(event_json) else {
+        return Ok(());
+    };
+    if !crate::tokensave::TokenSave::is_initialized(&project_root) {
+        return Ok(());
+    }
     let cg = crate::tokensave::TokenSave::open(&project_root).await?;
     match cg.sync().await {
         Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
