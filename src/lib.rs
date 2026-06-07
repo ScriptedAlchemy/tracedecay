@@ -36,6 +36,7 @@ pub mod global_db;
 pub mod graph;
 pub mod hooks;
 pub mod mcp;
+pub mod memory;
 pub mod monitor;
 pub mod redundancy;
 pub mod resolution;

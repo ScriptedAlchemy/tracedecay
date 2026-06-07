@@ -15,7 +15,7 @@ use crate::errors::{Result, TokenSaveError};
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 10;
+const LATEST_VERSION: u32 = 11;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -184,26 +184,6 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_ast ON node_fingerprints(ast_hash);
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_size ON node_fingerprints(body_tokens);
 
-        CREATE TABLE IF NOT EXISTS memory_decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            reason TEXT,
-            created_at INTEGER NOT NULL,
-            files TEXT NOT NULL DEFAULT '[]',
-            tags TEXT NOT NULL DEFAULT '[]'
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_code_areas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT NOT NULL,
-            description TEXT,
-            last_touched_at INTEGER NOT NULL,
-            touch_count INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_code_areas_path ON memory_code_areas(path);
-        CREATE INDEX IF NOT EXISTS idx_memory_decisions_created_at ON memory_decisions(created_at);
-
         CREATE TABLE IF NOT EXISTS read_cache (
             project_id   TEXT NOT NULL,
             session_id   TEXT NOT NULL,
@@ -219,32 +199,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_read_cache_session
-            ON read_cache(session_id, created_at);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_decisions_fts USING fts5(
-            text, reason,
-            content='memory_decisions', content_rowid='id'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_insert
-            AFTER INSERT ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(rowid, text, reason)
-                VALUES (NEW.id, NEW.text, NEW.reason);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_delete
-            AFTER DELETE ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(memory_decisions_fts, rowid, text, reason)
-                VALUES ('delete', OLD.id, OLD.text, OLD.reason);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_update
-            AFTER UPDATE ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(memory_decisions_fts, rowid, text, reason)
-                VALUES ('delete', OLD.id, OLD.text, OLD.reason);
-                INSERT INTO memory_decisions_fts(rowid, text, reason)
-                VALUES (NEW.id, NEW.text, NEW.reason);
-            END;",
+            ON read_cache(session_id, created_at);",
     )
     .await
     .map_err(|e| TokenSaveError::Database {
@@ -252,6 +207,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         operation: "create_schema".to_string(),
     })?;
 
+    create_holographic_memory_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
     Ok(())
 }
@@ -333,6 +289,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         8 => migrate_v8(conn).await,
         9 => migrate_v9(conn).await,
         10 => migrate_v10(conn).await,
+        11 => migrate_v11(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -648,8 +605,9 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
 /// Adds tables for persistent agent memory: `memory_decisions` records
 /// architecture / design choices with optional reason and tags;
 /// `memory_code_areas` tracks paths the agent has worked in. An FTS5 mirror
-/// over `memory_decisions.text` and `memory_decisions.reason` enables
-/// fuzzy recall via `tokensave_session_recall`.
+/// over `memory_decisions.text` and `memory_decisions.reason` supported the
+/// legacy decision-recall implementation before v11 backfilled and dropped
+/// these tables.
 async fn migrate_v8(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_decisions (
@@ -871,6 +829,378 @@ async fn migrate_v10(conn: &Connection) -> Result<()> {
     .map_err(|e| TokenSaveError::Database {
         message: format!("v10: failed to create node_fingerprints table: {e}"),
         operation: "migrate_v10".to_string(),
+    })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Migration V11: holographic memory active schema
+// ---------------------------------------------------------------------------
+
+/// Creates the active holographic-memory tables alongside the legacy memory
+/// tables. Legacy data is preserved and copied into `memory_facts`.
+async fn migrate_v11(conn: &Connection) -> Result<()> {
+    create_holographic_memory_schema(conn, "migrate_v11").await?;
+    if legacy_memory_tables_exist(conn).await? {
+        backfill_legacy_memory_as_facts(conn).await?;
+    }
+    Ok(())
+}
+
+async fn legacy_memory_tables_exist(conn: &Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table'
+               AND name IN ('memory_decisions', 'memory_code_areas')",
+            (),
+        )
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("migrate_v11: failed to probe legacy memory tables: {e}"),
+            operation: "migrate_v11".to_string(),
+        })?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("migrate_v11: failed to read legacy table probe: {e}"),
+            operation: "migrate_v11".to_string(),
+        })?
+        .ok_or_else(|| TokenSaveError::Database {
+            message: "migrate_v11: legacy table probe returned no rows".to_string(),
+            operation: "migrate_v11".to_string(),
+        })?;
+    let count: i64 = row.get(0).map_err(|e| TokenSaveError::Database {
+        message: format!("migrate_v11: failed to read legacy table count: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+    Ok(count > 0)
+}
+
+async fn create_holographic_memory_schema(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL DEFAULT 'general',
+            tags TEXT NOT NULL DEFAULT '[]',
+            trust_score REAL NOT NULL DEFAULT 0.5,
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            helpful_count INTEGER NOT NULL DEFAULT 0,
+            unhelpful_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            last_retrieved_at INTEGER,
+            last_feedback_at INTEGER,
+            source TEXT NOT NULL DEFAULT 'manual',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            hrr_vector BLOB,
+            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
+            hrr_dim INTEGER NOT NULL DEFAULT 2048
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_entities (
+            entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            entity_type TEXT NOT NULL DEFAULT 'unknown',
+            aliases TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_fact_entities (
+            fact_id INTEGER NOT NULL,
+            entity_id INTEGER NOT NULL,
+            PRIMARY KEY (fact_id, entity_id),
+            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_banks (
+            bank_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bank_name TEXT NOT NULL UNIQUE,
+            vector BLOB NOT NULL,
+            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
+            hrr_dim INTEGER NOT NULL DEFAULT 2048,
+            fact_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_feedback_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact_id INTEGER NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('helpful', 'unhelpful')),
+            trust_delta REAL NOT NULL,
+            old_trust REAL NOT NULL,
+            new_trust REAL NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'mcp',
+            note TEXT,
+            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_category
+            ON memory_facts(category);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_updated_at
+            ON memory_facts(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_trust_score
+            ON memory_facts(trust_score);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_source
+            ON memory_facts(source);
+        CREATE INDEX IF NOT EXISTS idx_memory_entities_type
+            ON memory_entities(entity_type);
+        CREATE INDEX IF NOT EXISTS idx_memory_fact_entities_entity_id
+            ON memory_fact_entities(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_banks_updated_at
+            ON memory_banks(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_fact_id
+            ON memory_feedback_events(fact_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_created_at
+            ON memory_feedback_events(created_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
+            content, tags,
+            content='memory_facts', content_rowid='rowid'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_insert
+            AFTER INSERT ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(rowid, content, tags)
+                VALUES (NEW.rowid, NEW.content, NEW.tags);
+            END;
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_delete
+            AFTER DELETE ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
+            END;
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_update
+            AFTER UPDATE OF content, tags ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
+                INSERT INTO memory_facts_fts(rowid, content, tags)
+                VALUES (NEW.rowid, NEW.content, NEW.tags);
+            END;",
+    )
+    .await
+    .map_err(|e| TokenSaveError::Database {
+        message: format!("{operation}: failed to create holographic memory schema: {e}"),
+        operation: operation.to_string(),
+    })?;
+
+    Ok(())
+}
+
+async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "WITH normalized_decisions AS (
+            SELECT
+                id,
+                text,
+                reason,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_facts (
+            content,
+            category,
+            tags,
+            created_at,
+            updated_at,
+            source,
+            metadata
+        )
+        SELECT
+            CASE
+                WHEN reason IS NULL OR length(trim(reason)) = 0 THEN text
+                ELSE text || char(10) || char(10) || 'Reason: ' || reason
+            END || char(10) || char(10) || 'Legacy decision id: ' || id,
+            'decision',
+            safe_tags,
+            created_at,
+            created_at,
+            'legacy_memory_decisions',
+            json_object(
+                'holographic_memory_backfill_v1', 1,
+                'legacy_table', 'memory_decisions',
+                'legacy_id', id,
+                'decision_text', text,
+                'reason', COALESCE(reason, ''),
+                'files', json(safe_files),
+                'tags', json(safe_tags)
+            )
+        FROM normalized_decisions;
+
+        WITH normalized_code_areas AS (
+            SELECT id, path, description, last_touched_at, touch_count
+            FROM memory_code_areas
+        )
+        INSERT OR IGNORE INTO memory_facts (
+            content,
+            category,
+            tags,
+            created_at,
+            updated_at,
+            source,
+            metadata
+        )
+        SELECT
+            CASE
+                WHEN description IS NULL OR length(trim(description)) = 0 THEN path
+                ELSE path || char(10) || char(10) || description
+            END || char(10) || char(10) || 'Legacy code area id: ' || id,
+            'code_area',
+            json_array('code_area', path),
+            last_touched_at,
+            last_touched_at,
+            'legacy_memory_code_areas',
+            json_object(
+                'holographic_memory_backfill_v1', 1,
+                'legacy_table', 'memory_code_areas',
+                'legacy_id', id,
+                'path', path,
+                'description', COALESCE(description, ''),
+                'last_touched_at', last_touched_at,
+                'touch_count', touch_count
+            )
+        FROM normalized_code_areas;",
+    )
+    .await
+    .map_err(|e| TokenSaveError::Database {
+        message: format!("migrate_v11: failed to backfill legacy memory: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+
+    conn.execute_batch(
+        "WITH normalized_decisions AS (
+            SELECT
+                id,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT value, lower(value), 'legacy_file', created_at
+        FROM normalized_decisions, json_each(safe_files)
+        WHERE trim(value) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT value, lower(value), 'legacy_tag', created_at
+        FROM normalized_decisions, json_each(safe_tags)
+        WHERE trim(value) != '';
+
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT path, lower(path), 'legacy_path', last_touched_at
+        FROM memory_code_areas
+        WHERE trim(path) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM normalized_decisions d
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_decisions'
+         AND json_extract(f.metadata, '$.legacy_id') = d.id
+        JOIN json_each(d.safe_files) file_entity
+        JOIN memory_entities e ON e.normalized_name = lower(file_entity.value)
+        WHERE trim(file_entity.value) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM normalized_decisions d
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_decisions'
+         AND json_extract(f.metadata, '$.legacy_id') = d.id
+        JOIN json_each(d.safe_tags) tag_entity
+        JOIN memory_entities e ON e.normalized_name = lower(tag_entity.value)
+        WHERE trim(tag_entity.value) != '';
+
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM memory_code_areas c
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_code_areas'
+         AND json_extract(f.metadata, '$.legacy_id') = c.id
+        JOIN memory_entities e ON e.normalized_name = lower(c.path)
+        WHERE trim(c.path) != '';",
+    )
+    .await
+    .map_err(|e| TokenSaveError::Database {
+        message: format!("migrate_v11: failed to link legacy memory entities: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memory_decisions_fts_insert;
+         DROP TRIGGER IF EXISTS memory_decisions_fts_delete;
+         DROP TRIGGER IF EXISTS memory_decisions_fts_update;
+         DROP TABLE IF EXISTS memory_decisions_fts;
+         DROP TABLE IF EXISTS memory_code_areas;
+         DROP TABLE IF EXISTS memory_decisions;",
+    )
+    .await
+    .map_err(|e| TokenSaveError::Database {
+        message: format!("migrate_v11: failed to drop legacy memory tables: {e}"),
+        operation: "migrate_v11".to_string(),
     })?;
 
     Ok(())

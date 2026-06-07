@@ -17,6 +17,13 @@ use crate::db::Database;
 use crate::errors::{Result, TokenSaveError};
 use crate::extraction::LanguageRegistry;
 use crate::graph::{GraphQueryManager, GraphTraverser};
+use crate::memory::retrieval::FactRetriever;
+use crate::memory::store::MemoryStore;
+use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
+use crate::memory::types::{
+    AddFactRequest, ContradictionResult, FactRecord, FactSearchResult, FeedbackRequest,
+    FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest, UpdateFactRequest,
+};
 use crate::resolution::ReferenceResolver;
 use crate::sync;
 use crate::types::*;
@@ -150,38 +157,6 @@ pub struct TokenSave {
     serving_branch: Option<String>,
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
-}
-
-/// A decision recorded by an agent during a session.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DecisionRecord {
-    /// Row id.
-    pub id: i64,
-    /// The decision text.
-    pub text: String,
-    /// Optional rationale for the decision.
-    pub reason: Option<String>,
-    /// UNIX timestamp (seconds) when the decision was recorded.
-    pub created_at: i64,
-    /// File paths relevant to this decision.
-    pub files: Vec<String>,
-    /// Arbitrary tags for categorisation.
-    pub tags: Vec<String>,
-}
-
-/// A code area (file path) that an agent has touched during a session.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CodeAreaRecord {
-    /// Row id.
-    pub id: i64,
-    /// Relative file path.
-    pub path: String,
-    /// Optional human-readable description of the area.
-    pub description: Option<String>,
-    /// UNIX timestamp (seconds) of the most recent touch.
-    pub last_touched_at: i64,
-    /// How many times this path has been touched.
-    pub touch_count: u32,
 }
 
 /// Result of a full indexing operation.
@@ -2855,189 +2830,279 @@ impl TokenSave {
 // Session memory
 // ---------------------------------------------------------------------------
 
-const MAX_RECALL_LIMIT: usize = 200;
-const MAX_CODE_AREAS_LIMIT: usize = 200;
+const MAX_FACT_LIMIT: usize = 200;
+const DEFAULT_FACT_LIMIT: usize = 20;
+
+fn memory_database_error(operation: &str, message: impl std::fmt::Display) -> TokenSaveError {
+    TokenSaveError::Database {
+        message: format!("{operation} failed: {message}"),
+        operation: operation.to_string(),
+    }
+}
+
+fn fact_result_ids(results: &[FactSearchResult]) -> Vec<i64> {
+    results.iter().map(|result| result.fact.fact_id).collect()
+}
+
+fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
+    facts.iter().map(|fact| fact.fact_id).collect()
+}
 
 impl TokenSave {
-    /// Record an agent decision. Returns the new row id.
-    pub async fn record_decision(
-        &self,
-        text: &str,
-        reason: Option<&str>,
-        files: &[String],
-        tags: &[String],
-    ) -> crate::errors::Result<i64> {
-        debug_assert!(!text.is_empty(), "decision text must not be empty");
-        let files_json =
-            serde_json::to_string(files).map_err(|e| crate::errors::TokenSaveError::Database {
-                message: format!("record_decision files serialization failed: {e}"),
-                operation: "record_decision".to_string(),
-            })?;
-        let tags_json =
-            serde_json::to_string(tags).map_err(|e| crate::errors::TokenSaveError::Database {
-                message: format!("record_decision tags serialization failed: {e}"),
-                operation: "record_decision".to_string(),
-            })?;
-        let now = current_timestamp();
-        let conn = self.db.conn();
-        conn.execute(
-            "INSERT INTO memory_decisions (text, reason, created_at, files, tags) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            libsql::params![text, reason, now, files_json, tags_json],
-        )
-        .await
-        .map_err(|e| crate::errors::TokenSaveError::Database {
-            message: format!("record_decision insert failed: {e}"),
-            operation: "record_decision".to_string(),
-        })?;
-        Ok(conn.last_insert_rowid())
+    /// Add or replace a fact in the holographic memory store.
+    pub async fn add_fact(&self, request: AddFactRequest) -> Result<FactRecord> {
+        MemoryStore::new(self.db.conn())
+            .add_fact(request, DEFAULT_TRUST)
+            .await
     }
 
-    /// Recall decisions. With `query`, runs FTS5 MATCH against text+reason.
-    /// Without `query`, returns newest-first.
-    pub async fn session_recall(
+    /// Search facts by lexical overlap, entity metadata, category, and trust.
+    pub async fn search_facts(&self, request: SearchFactsRequest) -> Result<Vec<FactSearchResult>> {
+        let mut results = FactRetriever::new(self.db.conn())
+            .search(
+                &request.query,
+                request.category,
+                request.min_trust,
+                request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
+            )
+            .await?;
+        if !request.include_why {
+            for result in &mut results {
+                result.why = None;
+            }
+        }
+        MemoryStore::new(self.db.conn())
+            .increment_retrieval_counts(&fact_result_ids(&results))
+            .await?;
+        Ok(results)
+    }
+
+    pub async fn probe_entity(
         &self,
-        query: Option<&str>,
-        since: Option<i64>,
+        entity: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
         limit: usize,
-    ) -> crate::errors::Result<Vec<DecisionRecord>> {
-        let limit = limit.clamp(1, MAX_RECALL_LIMIT) as i64;
-        let conn = self.db.conn();
+    ) -> Result<Vec<FactSearchResult>> {
+        let results = FactRetriever::new(self.db.conn())
+            .probe(entity, category, min_trust, limit)
+            .await?;
+        MemoryStore::new(self.db.conn())
+            .increment_retrieval_counts(&fact_result_ids(&results))
+            .await?;
+        Ok(results)
+    }
 
-        let db_err = |e: libsql::Error| crate::errors::TokenSaveError::Database {
-            message: format!("session_recall query failed: {e}"),
-            operation: "session_recall".to_string(),
-        };
+    pub async fn related_facts(
+        &self,
+        entity: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        let retriever = FactRetriever::new(self.db.conn());
+        let related_entities = retriever.related(entity, limit).await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut results = Vec::new();
+        for related in related_entities {
+            for result in retriever
+                .probe(&related.name, category, min_trust, limit.saturating_mul(2))
+                .await?
+            {
+                if seen.insert(result.fact.fact_id) {
+                    results.push(result);
+                    if results.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                        break;
+                    }
+                }
+            }
+            if results.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                break;
+            }
+        }
+        MemoryStore::new(self.db.conn())
+            .increment_retrieval_counts(&fact_result_ids(&results))
+            .await?;
+        Ok(results)
+    }
 
-        let mut rows = match (query, since) {
-            (Some(q), Some(ts)) => conn
-                .query(
-                    "SELECT d.id, d.text, d.reason, d.created_at, d.files, d.tags \
-                     FROM memory_decisions d \
-                     JOIN memory_decisions_fts f ON f.rowid = d.id \
-                     WHERE memory_decisions_fts MATCH ?1 AND d.created_at >= ?2 \
-                     ORDER BY d.created_at DESC LIMIT ?3",
-                    libsql::params![q, ts, limit],
-                )
-                .await
-                .map_err(db_err)?,
-            (Some(q), None) => conn
-                .query(
-                    "SELECT d.id, d.text, d.reason, d.created_at, d.files, d.tags \
-                     FROM memory_decisions d \
-                     JOIN memory_decisions_fts f ON f.rowid = d.id \
-                     WHERE memory_decisions_fts MATCH ?1 \
-                     ORDER BY d.created_at DESC LIMIT ?2",
-                    libsql::params![q, limit],
-                )
-                .await
-                .map_err(db_err)?,
-            (None, Some(ts)) => conn
-                .query(
-                    "SELECT id, text, reason, created_at, files, tags \
-                     FROM memory_decisions WHERE created_at >= ?1 \
-                     ORDER BY created_at DESC LIMIT ?2",
-                    libsql::params![ts, limit],
-                )
-                .await
-                .map_err(db_err)?,
-            (None, None) => conn
-                .query(
-                    "SELECT id, text, reason, created_at, files, tags \
-                     FROM memory_decisions ORDER BY created_at DESC LIMIT ?1",
-                    libsql::params![limit],
-                )
-                .await
-                .map_err(db_err)?,
-        };
+    pub async fn reason_facts(
+        &self,
+        entities: &[String],
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        let results = FactRetriever::new(self.db.conn())
+            .reason(entities, category, min_trust, limit)
+            .await?;
+        MemoryStore::new(self.db.conn())
+            .increment_retrieval_counts(&fact_result_ids(&results))
+            .await?;
+        Ok(results)
+    }
 
-        let row_err = |e: libsql::Error| crate::errors::TokenSaveError::Database {
-            message: format!("session_recall row read failed: {e}"),
-            operation: "session_recall".to_string(),
-        };
-        let json_err = |e: serde_json::Error| crate::errors::TokenSaveError::Database {
-            message: format!("session_recall JSON parse failed: {e}"),
-            operation: "session_recall".to_string(),
-        };
+    pub async fn contradict_facts(
+        &self,
+        category: Option<MemoryCategory>,
+        threshold: f64,
+        limit: usize,
+    ) -> Result<Vec<ContradictionResult>> {
+        let retriever = FactRetriever::new(self.db.conn());
+        if let Some(category) = category {
+            return retriever.contradict(category, threshold, limit).await;
+        }
 
         let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(row_err)? {
-            let files_json: String = row.get(4).map_err(row_err)?;
-            let tags_json: String = row.get(5).map_err(row_err)?;
-            out.push(DecisionRecord {
-                id: row.get(0).map_err(row_err)?,
-                text: row.get(1).map_err(row_err)?,
-                reason: row.get::<Option<String>>(2).map_err(row_err)?,
-                created_at: row.get(3).map_err(row_err)?,
-                files: serde_json::from_str(&files_json).map_err(json_err)?,
-                tags: serde_json::from_str(&tags_json).map_err(json_err)?,
-            });
+        for category in [
+            MemoryCategory::General,
+            MemoryCategory::UserPref,
+            MemoryCategory::Project,
+            MemoryCategory::Tool,
+            MemoryCategory::Decision,
+            MemoryCategory::CodeArea,
+        ] {
+            out.extend(retriever.contradict(category, threshold, limit).await?);
+            if out.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                out.truncate(limit.clamp(1, MAX_FACT_LIMIT));
+                break;
+            }
         }
         Ok(out)
     }
 
-    /// Record (or update) a code area the agent worked in. Increments `touch_count`
-    /// on re-touch. Description is set on first insert; subsequent `None` values
-    /// preserve the existing description.
-    pub async fn record_code_area(
-        &self,
-        path: &str,
-        description: Option<&str>,
-    ) -> crate::errors::Result<()> {
-        debug_assert!(!path.is_empty(), "code area path must not be empty");
-        let now = current_timestamp();
-        let conn = self.db.conn();
-        conn.execute(
-            "INSERT INTO memory_code_areas (path, description, last_touched_at, touch_count) \
-             VALUES (?1, ?2, ?3, 1) \
-             ON CONFLICT(path) DO UPDATE SET \
-                description = COALESCE(excluded.description, memory_code_areas.description), \
-                last_touched_at = excluded.last_touched_at, \
-                touch_count = memory_code_areas.touch_count + 1",
-            libsql::params![path, description, now],
-        )
-        .await
-        .map_err(|e| crate::errors::TokenSaveError::Database {
-            message: format!("record_code_area upsert failed: {e}"),
-            operation: "record_code_area".to_string(),
-        })?;
-        Ok(())
+    pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
+        MemoryStore::new(self.db.conn()).update_fact(request).await
     }
 
-    /// List code areas, most-recently-touched first.
-    pub async fn list_code_areas(
+    pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
+        MemoryStore::new(self.db.conn()).remove_fact(fact_id).await
+    }
+
+    pub async fn list_facts(
         &self,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
         limit: usize,
-    ) -> crate::errors::Result<Vec<CodeAreaRecord>> {
-        let limit = limit.clamp(1, MAX_CODE_AREAS_LIMIT) as i64;
+    ) -> Result<Vec<FactRecord>> {
+        let facts = MemoryStore::new(self.db.conn())
+            .list_facts(category, min_trust, limit)
+            .await?;
+        MemoryStore::new(self.db.conn())
+            .increment_retrieval_counts(&fact_ids(&facts))
+            .await?;
+        Ok(facts)
+    }
+
+    pub async fn get_fact(&self, fact_id: i64) -> Result<Option<FactRecord>> {
+        MemoryStore::new(self.db.conn()).get_fact(fact_id).await
+    }
+
+    pub async fn record_fact_feedback(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
+        MemoryStore::new(self.db.conn())
+            .record_feedback_event(request)
+            .await
+    }
+
+    pub async fn memory_status(&self) -> Result<MemoryStatus> {
+        let operation = "memory_status";
         let conn = self.db.conn();
-        let mut rows = conn
+        let mut fact_rows = conn
+            .query("SELECT trust_score FROM memory_facts", ())
+            .await
+            .map_err(|e| memory_database_error(operation, e))?;
+        let row_err = |e: libsql::Error| memory_database_error(operation, e);
+        let mut trust_0_025_count = 0_usize;
+        let mut trust_025_050_count = 0_usize;
+        let mut trust_050_075_count = 0_usize;
+        let mut trust_075_100_count = 0_usize;
+        let mut below_default_recall_threshold_count = 0_usize;
+        let mut fact_count = 0_usize;
+        while let Some(row) = fact_rows.next().await.map_err(row_err)? {
+            fact_count += 1;
+            let trust_score = row.get::<f64>(0).map_err(row_err)?;
+            if trust_score < DEFAULT_MIN_TRUST {
+                below_default_recall_threshold_count += 1;
+            }
+            if trust_score < 0.25 {
+                trust_0_025_count += 1;
+            } else if trust_score < 0.50 {
+                trust_025_050_count += 1;
+            } else if trust_score < 0.75 {
+                trust_050_075_count += 1;
+            } else {
+                trust_075_100_count += 1;
+            }
+        }
+        let mut entity_rows = conn
+            .query("SELECT COUNT(*) FROM memory_entities", ())
+            .await
+            .map_err(|e| memory_database_error(operation, e))?;
+        let entity_count = entity_rows
+            .next()
+            .await
+            .map_err(row_err)?
+            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
+        let mut bank_rows = conn
+            .query("SELECT COUNT(*) FROM memory_banks", ())
+            .await
+            .map_err(|e| memory_database_error(operation, e))?;
+        let bank_count = bank_rows
+            .next()
+            .await
+            .map_err(row_err)?
+            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
+        let mut aggregate_rows = conn
             .query(
-                "SELECT id, path, description, last_touched_at, touch_count \
-                 FROM memory_code_areas ORDER BY last_touched_at DESC LIMIT ?1",
-                libsql::params![limit],
+                "SELECT COALESCE(SUM(helpful_count), 0),
+                        COALESCE(SUM(unhelpful_count), 0),
+                        SUM(CASE WHEN hrr_vector IS NULL THEN 1 ELSE 0 END)
+                 FROM memory_facts",
+                (),
             )
             .await
-            .map_err(|e| crate::errors::TokenSaveError::Database {
-                message: format!("list_code_areas query failed: {e}"),
-                operation: "list_code_areas".to_string(),
-            })?;
-        let row_err = |e: libsql::Error| crate::errors::TokenSaveError::Database {
-            message: format!("list_code_areas row read failed: {e}"),
-            operation: "list_code_areas".to_string(),
+            .map_err(|e| memory_database_error(operation, e))?;
+        let Some(aggregate_row) = aggregate_rows.next().await.map_err(row_err)? else {
+            return Err(memory_database_error(
+                operation,
+                "memory aggregate query returned no rows",
+            ));
         };
-
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(row_err)? {
-            out.push(CodeAreaRecord {
-                id: row.get(0).map_err(row_err)?,
-                path: row.get(1).map_err(row_err)?,
-                description: row.get::<Option<String>>(2).map_err(row_err)?,
-                last_touched_at: row.get(3).map_err(row_err)?,
-                touch_count: row.get::<i64>(4).map_err(row_err)? as u32,
-            });
-        }
-        Ok(out)
+        let helpful_count = aggregate_row.get::<i64>(0).map_err(row_err)?;
+        let unhelpful_count = aggregate_row.get::<i64>(1).map_err(row_err)?;
+        let missing_vector_count = aggregate_row.get::<i64>(2).map_err(row_err)?;
+        let mut backfill_rows = conn
+            .query(
+                "SELECT COUNT(*) FROM memory_facts
+                 WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
+                (),
+            )
+            .await
+            .map_err(|e| memory_database_error(operation, e))?;
+        let backfilled_count = backfill_rows
+            .next()
+            .await
+            .map_err(row_err)?
+            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
+        let hrr_dim = 2048_usize;
+        let estimated_capacity = (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize;
+        Ok(MemoryStatus {
+            fact_count,
+            entity_count: entity_count as usize,
+            bank_count: bank_count as usize,
+            algebra_name: "amari_fhrr".to_string(),
+            hrr_dim,
+            estimated_capacity,
+            trust_0_025_count,
+            trust_025_050_count,
+            trust_050_075_count,
+            trust_075_100_count,
+            below_default_recall_threshold_count,
+            helpful_count: helpful_count as usize,
+            unhelpful_count: unhelpful_count as usize,
+            missing_vector_count: missing_vector_count as usize,
+            legacy_backfill_complete: backfilled_count > 0,
+        })
     }
 }
 

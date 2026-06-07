@@ -79,6 +79,32 @@ async fn index_exists(conn: &Connection, index_name: &str) -> bool {
         .is_some()
 }
 
+/// Checks whether a trigger exists in sqlite_master.
+async fn trigger_exists(conn: &Connection, trigger_name: &str) -> bool {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name=?1",
+            libsql::params![trigger_name],
+        )
+        .await
+        .expect("failed to query sqlite_master");
+    rows.next()
+        .await
+        .expect("failed to read sqlite_master row")
+        .is_some()
+}
+
+/// Returns the first column from the first row as i64.
+async fn scalar_i64(conn: &Connection, sql: &str) -> i64 {
+    let mut rows = conn.query(sql, ()).await.expect("failed to query scalar");
+    let row = rows
+        .next()
+        .await
+        .expect("failed to read scalar row")
+        .expect("scalar query should return a row");
+    row.get(0).expect("failed to read scalar value")
+}
+
 /// Checks whether a column exists on a table via PRAGMA table_info.
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
@@ -95,6 +121,29 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         }
     }
     false
+}
+
+/// Returns the declared SQLite type and primary-key ordinal for a column.
+async fn column_type_and_pk(conn: &Connection, table: &str, column: &str) -> (String, i64) {
+    let mut rows = conn
+        .query(&format!("PRAGMA table_info({table})"), ())
+        .await
+        .expect("failed to query table_info");
+    while let Some(row) = rows.next().await.expect("failed to read table_info row") {
+        let name = row
+            .get_str(1)
+            .expect("failed to read column name")
+            .to_string();
+        if name == column {
+            return (
+                row.get_str(2)
+                    .expect("failed to read column type")
+                    .to_string(),
+                row.get(5).expect("failed to read primary key ordinal"),
+            );
+        }
+    }
+    panic!("{table}.{column} not found");
 }
 
 /// Creates the V1 schema (tables, FTS, indexes — no metadata, no complexity columns).
@@ -234,11 +283,54 @@ async fn apply_v4(conn: &Connection) {
     set_user_version(conn, 4).await;
 }
 
+/// Creates a latest pre-v11 schema with legacy memory tables but no holographic tables.
+async fn create_v10_schema_for_v11_tests(conn: &Connection) {
+    create_schema(conn)
+        .await
+        .expect("failed to create baseline schema");
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memory_facts_fts_insert;
+         DROP TRIGGER IF EXISTS memory_facts_fts_delete;
+         DROP TRIGGER IF EXISTS memory_facts_fts_update;
+         DROP TABLE IF EXISTS memory_facts_fts;
+         DROP TABLE IF EXISTS memory_feedback_events;
+         DROP TABLE IF EXISTS memory_fact_entities;
+         DROP TABLE IF EXISTS memory_banks;
+         DROP TABLE IF EXISTS memory_entities;
+         DROP TABLE IF EXISTS memory_facts;
+
+         CREATE TABLE IF NOT EXISTS memory_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL,
+            reason TEXT,
+            created_at INTEGER NOT NULL,
+            files TEXT NOT NULL DEFAULT '[]',
+            tags TEXT NOT NULL DEFAULT '[]'
+         );
+
+         CREATE TABLE IF NOT EXISTS memory_code_areas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            description TEXT,
+            last_touched_at INTEGER NOT NULL,
+            touch_count INTEGER NOT NULL DEFAULT 1
+         );
+
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_code_areas_path
+            ON memory_code_areas(path);
+         CREATE INDEX IF NOT EXISTS idx_memory_decisions_created_at
+            ON memory_decisions(created_at);",
+    )
+    .await
+    .expect("failed to remove v11 tables");
+    set_user_version(conn, 10).await;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-/// create_schema on a fresh database sets user_version to 5 and creates all tables.
+/// create_schema on a fresh database sets user_version to latest and creates all tables.
 #[tokio::test]
 async fn test_create_schema_fresh_db() {
     let (conn, _db, _dir) = create_raw_db().await;
@@ -247,7 +339,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
     assert!(table_exists(&conn, "nodes").await);
     assert!(table_exists(&conn, "edges").await);
     assert!(table_exists(&conn, "files").await);
@@ -255,6 +347,14 @@ async fn test_create_schema_fresh_db() {
     assert!(table_exists(&conn, "vectors").await);
     assert!(table_exists(&conn, "metadata").await);
     assert!(table_exists(&conn, "nodes_fts").await);
+    assert!(!table_exists(&conn, "memory_decisions").await);
+    assert!(!table_exists(&conn, "memory_code_areas").await);
+    assert!(table_exists(&conn, "memory_facts").await);
+    assert!(table_exists(&conn, "memory_entities").await);
+    assert!(table_exists(&conn, "memory_fact_entities").await);
+    assert!(table_exists(&conn, "memory_banks").await);
+    assert!(table_exists(&conn, "memory_feedback_events").await);
+    assert!(table_exists(&conn, "memory_facts_fts").await);
 }
 
 /// create_schema is idempotent — calling it twice does not error.
@@ -269,7 +369,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 }
 
 /// migrate returns false when already at the latest version.
@@ -287,7 +387,7 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -306,7 +406,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -347,7 +447,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -383,7 +483,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -413,7 +513,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -441,7 +541,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 10);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -583,7 +683,7 @@ async fn test_database_initialize_creates_latest_version() {
         .expect("failed to read row")
         .expect("should have row");
     let version: i64 = row.get(0).expect("failed to read version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -650,7 +750,7 @@ async fn test_database_open_migrates_v1_to_latest() {
         .expect("failed to read row")
         .expect("should have row");
     let version: i64 = row.get(0).expect("failed to read version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -767,85 +867,15 @@ async fn test_fts_triggers_exist_after_migration() {
 }
 
 #[tokio::test]
-async fn test_v8_creates_memory_tables() {
+async fn test_latest_schema_omits_legacy_memory_tables() {
     let (conn, _db, _dir) = create_raw_db().await;
     create_schema(&conn).await.unwrap();
 
-    // memory_decisions table exists with expected columns
-    let mut rows = conn
-        .query(
-            "SELECT name FROM pragma_table_info('memory_decisions') ORDER BY cid",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut cols = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        cols.push(row.get::<String>(0).unwrap());
-    }
-    assert_eq!(
-        cols,
-        vec!["id", "text", "reason", "created_at", "files", "tags"]
-    );
-
-    // memory_code_areas table exists
-    let mut rows = conn
-        .query(
-            "SELECT name FROM pragma_table_info('memory_code_areas') ORDER BY cid",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut cols = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        cols.push(row.get::<String>(0).unwrap());
-    }
-    assert_eq!(
-        cols,
-        vec![
-            "id",
-            "path",
-            "description",
-            "last_touched_at",
-            "touch_count"
-        ]
-    );
-
-    // FTS table exists
-    let mut rows = conn
-        .query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_decisions_fts'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert!(
-        rows.next().await.unwrap().is_some(),
-        "memory_decisions_fts missing"
-    );
-
-    // All three FTS triggers exist
-    let mut rows = conn
-        .query(
-            "SELECT name FROM sqlite_master WHERE type='trigger' \
-             AND name IN ('memory_decisions_fts_insert', 'memory_decisions_fts_delete', 'memory_decisions_fts_update') \
-             ORDER BY name",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut trigger_names = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        trigger_names.push(row.get::<String>(0).unwrap());
-    }
-    assert_eq!(
-        trigger_names,
-        vec![
-            "memory_decisions_fts_delete",
-            "memory_decisions_fts_insert",
-            "memory_decisions_fts_update",
-        ]
-    );
+    assert!(!table_exists(&conn, "memory_decisions").await);
+    assert!(!table_exists(&conn, "memory_code_areas").await);
+    assert!(!table_exists(&conn, "memory_decisions_fts").await);
+    assert!(table_exists(&conn, "memory_facts").await);
+    assert!(table_exists(&conn, "memory_entities").await);
 }
 
 #[tokio::test]
@@ -874,7 +904,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
     let row = rows.next().await.unwrap().unwrap();
     let v: i64 = row.get(0).unwrap();
-    assert_eq!(v, 10);
+    assert_eq!(v, 11);
 
     let mut rows = conn
         .query(
@@ -888,15 +918,7 @@ async fn test_v7_to_latest_upgrade_path() {
     while let Some(row) = rows.next().await.unwrap() {
         names.push(row.get::<String>(0).unwrap());
     }
-    assert_eq!(
-        names,
-        vec![
-            "memory_code_areas",
-            "memory_decisions",
-            "memory_decisions_fts",
-            "read_cache",
-        ]
-    );
+    assert_eq!(names, vec!["read_cache"]);
 }
 
 /// V9 adds the `read_cache` table used by `tokensave_read`.
@@ -912,5 +934,529 @@ async fn test_migrate_v9_adds_read_cache() {
     assert!(
         index_exists(&conn, "idx_read_cache_session").await,
         "v9 migration should create idx_read_cache_session"
+    );
+}
+
+#[tokio::test]
+async fn test_v11_create_schema_has_holographic_memory_schema() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn)
+        .await
+        .expect("create_schema should succeed");
+
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_info('memory_facts') ORDER BY cid",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut cols = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        cols.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        cols,
+        vec![
+            "fact_id",
+            "content",
+            "category",
+            "tags",
+            "trust_score",
+            "retrieval_count",
+            "helpful_count",
+            "unhelpful_count",
+            "created_at",
+            "updated_at",
+            "last_retrieved_at",
+            "last_feedback_at",
+            "source",
+            "metadata",
+            "hrr_vector",
+            "hrr_algebra",
+            "hrr_dim",
+        ]
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_facts", "fact_id").await,
+        ("INTEGER".to_string(), 1)
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_entities", "entity_id").await,
+        ("INTEGER".to_string(), 1)
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_banks", "bank_id").await,
+        ("INTEGER".to_string(), 1)
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_fact_entities", "fact_id").await,
+        ("INTEGER".to_string(), 1)
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_fact_entities", "entity_id").await,
+        ("INTEGER".to_string(), 2)
+    );
+    assert_eq!(
+        column_type_and_pk(&conn, "memory_feedback_events", "fact_id").await,
+        ("INTEGER".to_string(), 0)
+    );
+
+    for table in [
+        "memory_entities",
+        "memory_fact_entities",
+        "memory_banks",
+        "memory_feedback_events",
+        "memory_facts_fts",
+    ] {
+        assert!(table_exists(&conn, table).await, "{table} should exist");
+    }
+
+    for index in [
+        "idx_memory_facts_category",
+        "idx_memory_facts_updated_at",
+        "idx_memory_entities_type",
+        "idx_memory_fact_entities_entity_id",
+        "idx_memory_feedback_events_fact_id",
+    ] {
+        assert!(index_exists(&conn, index).await, "{index} should exist");
+    }
+
+    for trigger in [
+        "memory_facts_fts_insert",
+        "memory_facts_fts_delete",
+        "memory_facts_fts_update",
+    ] {
+        assert!(
+            trigger_exists(&conn, trigger).await,
+            "{trigger} should exist"
+        );
+    }
+
+    conn.execute(
+        "INSERT INTO memory_facts (content, category) VALUES ('Default values matter', 'test')",
+        (),
+    )
+    .await
+    .expect("minimal memory_facts insert should use defaults");
+    let fact_id = scalar_i64(&conn, "SELECT fact_id FROM memory_facts").await;
+    assert!(fact_id > 0);
+
+    let mut rows = conn
+        .query(
+            "SELECT tags, trust_score, retrieval_count, helpful_count, unhelpful_count, source, metadata, hrr_algebra, hrr_dim FROM memory_facts WHERE fact_id=?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "[]");
+    assert_eq!(row.get::<f64>(1).unwrap(), 0.5);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    assert_eq!(row.get::<i64>(3).unwrap(), 0);
+    assert_eq!(row.get::<i64>(4).unwrap(), 0);
+    assert_eq!(row.get::<String>(5).unwrap(), "manual");
+    assert_eq!(row.get::<String>(6).unwrap(), "{}");
+    assert_eq!(row.get::<String>(7).unwrap(), "amari_fhrr");
+    assert_eq!(row.get::<i64>(8).unwrap(), 2048);
+}
+
+#[tokio::test]
+async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+
+    assert_eq!(get_user_version(&conn).await, 10);
+    assert!(table_exists(&conn, "memory_decisions").await);
+    assert!(table_exists(&conn, "memory_code_areas").await);
+    assert!(!table_exists(&conn, "memory_facts").await);
+
+    let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
+
+    assert!(did_migrate);
+    assert_eq!(get_user_version(&conn).await, 11);
+    assert!(!table_exists(&conn, "memory_decisions").await);
+    assert!(!table_exists(&conn, "memory_code_areas").await);
+    assert!(table_exists(&conn, "memory_facts").await);
+    assert!(table_exists(&conn, "memory_entities").await);
+    assert!(table_exists(&conn, "memory_fact_entities").await);
+    assert!(table_exists(&conn, "memory_banks").await);
+    assert!(table_exists(&conn, "memory_feedback_events").await);
+    assert!(table_exists(&conn, "memory_facts_fts").await);
+}
+
+#[tokio::test]
+async fn test_v11_feedback_events_enforce_action_and_cascade_with_facts() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO memory_facts (content, category) VALUES ('Feedback fact', 'test')",
+        (),
+    )
+    .await
+    .expect("failed to insert memory fact");
+    let fact_id = scalar_i64(&conn, "SELECT fact_id FROM memory_facts").await;
+    conn.execute(
+        "INSERT INTO memory_feedback_events (fact_id, action, trust_delta, old_trust, new_trust, note)
+         VALUES (?1, 'helpful', 0.1, 0.5, 0.6, 'worked')",
+        libsql::params![fact_id],
+    )
+    .await
+    .expect("valid feedback action should insert");
+
+    let invalid = conn
+        .execute(
+            "INSERT INTO memory_feedback_events (fact_id, action, trust_delta, old_trust, new_trust)
+             VALUES (?1, 'neutral', 0.0, 0.5, 0.5)",
+            libsql::params![fact_id],
+        )
+        .await;
+    assert!(invalid.is_err(), "invalid feedback action should fail");
+
+    let mut rows = conn
+        .query(
+            "SELECT source FROM memory_feedback_events WHERE fact_id=?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "mcp");
+
+    conn.execute(
+        "DELETE FROM memory_facts WHERE fact_id=?1",
+        libsql::params![fact_id],
+    )
+    .await
+    .expect("deleting memory fact should cascade");
+    assert_eq!(
+        {
+            let mut rows = conn
+                .query(
+                    "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id=?1",
+                    libsql::params![fact_id],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            row.get::<i64>(0).unwrap()
+        },
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_v11_memory_facts_fts_triggers_track_insert_update_delete() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO memory_facts (content, category, tags)
+         VALUES ('Use orbital retrieval for context', 'test', '[\"retrieval\"]')",
+        (),
+    )
+    .await
+    .expect("failed to insert memory fact");
+    let fact_id = scalar_i64(&conn, "SELECT fact_id FROM memory_facts").await;
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'orbital'"
+        )
+        .await,
+        1
+    );
+
+    conn.execute(
+        "UPDATE memory_facts SET content='Use semantic banana storage', tags='[\"banana\"]' WHERE fact_id=?1",
+        libsql::params![fact_id],
+    )
+    .await
+    .expect("failed to update memory fact");
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'orbital'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'banana'"
+        )
+        .await,
+        1
+    );
+
+    conn.execute(
+        "DELETE FROM memory_facts WHERE fact_id=?1",
+        libsql::params![fact_id],
+    )
+    .await
+    .expect("failed to delete memory fact");
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_facts_fts WHERE memory_facts_fts MATCH 'banana'"
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_v11_backfills_legacy_memory_decisions_as_facts() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    conn.execute(
+        "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
+         VALUES ('Prefer libsql migrations', 'Keeps install path simple', 1234, '[\"src/db/migrations.rs\"]', '[\"db\",\"memory\"]')",
+        (),
+    )
+    .await
+    .expect("failed to insert legacy decision");
+
+    migrate(&conn).await.expect("v11 migration should backfill");
+
+    let mut rows = conn
+        .query(
+            "SELECT fact_id, content, tags, metadata FROM memory_facts WHERE category='decision'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let fact_id = row.get::<i64>(0).unwrap();
+    let content = row.get::<String>(1).unwrap();
+    let tags = row.get::<String>(2).unwrap();
+    let metadata = row.get::<String>(3).unwrap();
+
+    assert!(fact_id > 0);
+    assert!(content.contains("Prefer libsql migrations"));
+    assert!(content.contains("Keeps install path simple"));
+    assert_eq!(tags, "[\"db\",\"memory\"]");
+    assert!(!metadata.contains("legacy-decision-"));
+    assert!(metadata.contains("holographic_memory_backfill_v1"));
+    assert!(metadata.contains("memory_decisions"));
+    assert!(metadata.contains("\"legacy_id\":1"));
+    assert!(metadata.contains("\"decision_text\":\"Prefer libsql migrations\""));
+    assert!(metadata.contains("src/db/migrations.rs"));
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*)
+             FROM memory_fact_entities fe
+             JOIN memory_entities e ON e.entity_id = fe.entity_id
+             WHERE fe.fact_id = 1
+               AND e.normalized_name IN ('src/db/migrations.rs', 'db', 'memory')"
+        )
+        .await,
+        3
+    );
+}
+
+#[tokio::test]
+async fn test_v11_backfills_legacy_memory_code_areas_as_facts() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    conn.execute(
+        "INSERT INTO memory_code_areas (path, description, last_touched_at, touch_count)
+         VALUES ('src/db/migrations.rs', 'Schema migration code', 5678, 3)",
+        (),
+    )
+    .await
+    .expect("failed to insert legacy code area");
+
+    migrate(&conn).await.expect("v11 migration should backfill");
+
+    let mut rows = conn
+        .query(
+            "SELECT fact_id, content, tags, metadata FROM memory_facts WHERE category='code_area'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let fact_id = row.get::<i64>(0).unwrap();
+    let content = row.get::<String>(1).unwrap();
+    let tags = row.get::<String>(2).unwrap();
+    let metadata = row.get::<String>(3).unwrap();
+
+    assert!(fact_id > 0);
+    assert!(content.contains("src/db/migrations.rs"));
+    assert!(content.contains("Schema migration code"));
+    assert!(tags.contains("code_area"));
+    assert!(tags.contains("src/db/migrations.rs"));
+    assert!(!metadata.contains("legacy-code-area-"));
+    assert!(metadata.contains("holographic_memory_backfill_v1"));
+    assert!(metadata.contains("memory_code_areas"));
+    assert!(metadata.contains("\"legacy_id\":1"));
+    assert!(metadata.contains("touch_count"));
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*)
+             FROM memory_fact_entities fe
+             JOIN memory_entities e ON e.entity_id = fe.entity_id
+             WHERE fe.fact_id = 1
+               AND e.normalized_name = 'src/db/migrations.rs'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_v11_backfill_is_idempotent_when_migration_reruns() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    conn.execute(
+        "INSERT INTO memory_decisions (text, reason, created_at, tags)
+         VALUES ('Avoid duplicate facts', 'Content has a unique constraint', 1000, '[\"dedupe\"]')",
+        (),
+    )
+    .await
+    .expect("failed to insert legacy decision");
+    conn.execute(
+        "INSERT INTO memory_code_areas (path, description, last_touched_at)
+         VALUES ('src/memory.rs', 'Legacy memory facade', 1000)",
+        (),
+    )
+    .await
+    .expect("failed to insert legacy code area");
+
+    migrate(&conn)
+        .await
+        .expect("first v11 migration should succeed");
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
+        2
+    );
+
+    set_user_version(&conn, 10).await;
+    migrate(&conn)
+        .await
+        .expect("rerunning v11 migration should succeed");
+
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn test_v11_backfill_handles_malformed_and_blank_legacy_json() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    conn.execute(
+        "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
+         VALUES ('Bad JSON is normalized', '', 1000, '[invalid json', 'not-an-array')",
+        (),
+    )
+    .await
+    .expect("failed to insert bad-json legacy decision");
+    conn.execute(
+        "INSERT INTO memory_code_areas (path, description, last_touched_at, touch_count)
+         VALUES ('src/blank.rs', '', 1001, 1)",
+        (),
+    )
+    .await
+    .expect("failed to insert blank legacy code area");
+
+    migrate(&conn)
+        .await
+        .expect("v11 migration should tolerate malformed legacy JSON");
+
+    let mut rows = conn
+        .query(
+            "SELECT content, tags, metadata FROM memory_facts WHERE category='decision'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let content = row.get::<String>(0).unwrap();
+    let tags = row.get::<String>(1).unwrap();
+    let metadata = row.get::<String>(2).unwrap();
+    assert!(content.contains("Bad JSON is normalized"));
+    assert!(!content.contains("Reason:"));
+    assert_eq!(tags, "[]");
+    assert!(metadata.contains("\"files\":[]"));
+    assert!(metadata.contains("\"tags\":[]"));
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*)
+             FROM memory_fact_entities fe
+             JOIN memory_facts f ON f.fact_id = fe.fact_id
+             WHERE f.category = 'decision'"
+        )
+        .await,
+        0
+    );
+
+    let mut rows = conn
+        .query(
+            "SELECT content FROM memory_facts WHERE category='code_area'",
+            (),
+        )
+        .await
+        .unwrap();
+    let content = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert!(content.contains("src/blank.rs"));
+    assert!(!content.contains("\n\n\n"));
+}
+
+#[tokio::test]
+async fn test_v11_backfill_preserves_duplicate_legacy_content() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v10_schema_for_v11_tests(&conn).await;
+    for tag in ["rust", "performance"] {
+        conn.execute(
+            "INSERT INTO memory_decisions (text, reason, created_at, files, tags)
+             VALUES ('Use Rust', 'same reason', 1000, '[]', json_array(?1))",
+            libsql::params![tag],
+        )
+        .await
+        .expect("failed to insert duplicate legacy decision");
+    }
+
+    migrate(&conn).await.expect("v11 migration should backfill");
+
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE category='decision'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(DISTINCT content) FROM memory_facts WHERE category='decision'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*)
+             FROM memory_fact_entities fe
+             JOIN memory_entities e ON e.entity_id = fe.entity_id
+             WHERE e.normalized_name IN ('rust', 'performance')"
+        )
+        .await,
+        2
     );
 }

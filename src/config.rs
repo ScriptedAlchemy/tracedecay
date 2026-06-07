@@ -425,15 +425,11 @@ mod tests {
         fs::write(&excludes, ".tokensave\n").unwrap();
 
         let git_config = sandbox.path().join("gitconfig");
-        let status = Command::new("git")
-            .env("GIT_CONFIG_GLOBAL", &git_config)
-            .arg("config")
-            .arg("--global")
-            .arg("core.excludesFile")
-            .arg(&excludes)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        fs::write(
+            &git_config,
+            format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        )
+        .unwrap();
 
         let ignored = is_ignored_by_git(&repo, Some(&git_config));
 

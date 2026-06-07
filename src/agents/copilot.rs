@@ -355,8 +355,15 @@ fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
         faster than file reads.\n\n\
         If a code analysis question cannot be fully answered by tokensave MCP tools, \
         try querying the SQLite database directly at `.tokensave/tokensave.db` \
-        (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries \
-        that go beyond what the built-in tools expose.\n"
+        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
+        `memory_feedback_events`). Use SQL to answer complex structural queries \
+        that go beyond what the built-in tools expose.\n\n\
+        For durable project/user facts, prefer `tokensave_fact_store`, \
+        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
+        Do not store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
+        If you find a gap where tokensave could answer a question natively, propose opening \
+        an issue at https://github.com/aovestdipaperino/tokensave. Remind the user to strip \
+        sensitive or proprietary code from any issue text before submitting.\n"
     )
     .map_err(|e| crate::errors::TokenSaveError::Config {
         message: format!("failed to write {}: {e}", instructions_path.display()),

@@ -159,6 +159,16 @@ fn test_claude_install_creates_config() {
         settings["permissions"]["allow"].is_array(),
         "permissions.allow should be an array"
     );
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    assert!(allow
+        .iter()
+        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_store") }));
+    assert!(allow
+        .iter()
+        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_feedback") }));
+    assert!(allow
+        .iter()
+        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_memory_status") }));
 
     // Check CLAUDE.md exists with tokensave rules
     let claude_md = home.join(".claude/CLAUDE.md");
@@ -446,6 +456,12 @@ fn test_copilot_install_creates_config() {
     let cli_content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cli_config).unwrap()).unwrap();
     assert!(cli_content["mcpServers"]["tokensave"].is_object());
+
+    let cli_prompt = home.join(".copilot/copilot-instructions.md");
+    let prompt = std::fs::read_to_string(&cli_prompt).unwrap();
+    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("sensitive or proprietary code"));
 }
 
 #[test]
@@ -482,6 +498,9 @@ fn test_vibe_install_creates_config() {
     );
     let prompt = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("tokensave"));
+    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("sensitive or proprietary code"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1812,10 +1831,13 @@ fn test_read_only_tool_names_excludes_mutating_tools() {
         "tokensave_multi_str_replace",
         "tokensave_insert_at",
         "tokensave_ast_grep_rewrite",
+        "tokensave_replace_symbol",
+        "tokensave_insert_at_symbol",
+        "tokensave_run_affected_tests",
         "tokensave_session_start",
         "tokensave_session_end",
-        "tokensave_record_decision",
-        "tokensave_record_code_area",
+        "tokensave_fact_store",
+        "tokensave_fact_feedback",
     ] {
         assert!(
             !read_only_set.contains(mutating),

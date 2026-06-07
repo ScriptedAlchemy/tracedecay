@@ -371,7 +371,7 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         let is_always = def
             .meta
             .as_ref()
-            .and_then(|m| m.pointer("/anthropic/alwaysLoad"))
+            .and_then(|m| m.get("anthropic/alwaysLoad"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
         if is_always {
@@ -446,9 +446,9 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tokensave_insert_at_symbol"
     {
         "edit"
-    } else if n == "tokensave_record_decision"
-        || n == "tokensave_record_code_area"
-        || n == "tokensave_session_recall"
+    } else if n == "tokensave_fact_store"
+        || n == "tokensave_fact_feedback"
+        || n == "tokensave_memory_status"
         || n == "tokensave_session_start"
         || n == "tokensave_session_end"
     {

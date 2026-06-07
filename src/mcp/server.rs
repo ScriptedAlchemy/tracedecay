@@ -100,8 +100,35 @@ Unique constraint: `(source, target, kind, COALESCE(line, -1))`. Indexes on `sou
 ### `metadata` — key/value store
 Common keys: `tokens_saved`, schema-version markers.
 
-### `memory_decisions`, `memory_code_areas`
-Hand-recorded notes from `tokensave_record_decision` / `tokensave_record_code_area`. FTS5 mirror tables exist for `nodes` (`nodes_fts`) and `memory_decisions` (`memory_decisions_fts`).
+### `node_fingerprints` — redundancy cache
+- `node_id` PRIMARY KEY FK → `nodes.id`
+- `ast_hash`, `cfg_hash`, `call_seq_hash`, `shingles`
+- `body_tokens`, `source_hash`
+
+### `read_cache` — rendered `tokensave_read` responses
+- primary key: `(project_id, session_id, file_path, mode, args_hash)`
+- stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
+
+### v11: `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_feedback_events`
+The holographic fact store replaces narrow decision rows with durable facts
+linked to named entities:
+
+- `memory_facts` — numeric `fact_id`, unique fact content, category, source,
+  tags JSON, computed trust score, retrieval/feedback counts, timestamps, and
+  structured metadata.
+- `memory_entities` — normalized recall keys for symbols, files,
+  directories, branches, people, subsystems, and concepts. Facts can attach
+  multiple entities so recall can start from code or natural-language names.
+- `memory_fact_entities` — many-to-many join table linking facts to entities
+  with cascade deletes.
+- `memory_banks` — optional holographic memory-bank vectors by category or
+  bank name (`bank_name`, `vector`, `hrr_algebra`, `hrr_dim`, `fact_count`,
+  `updated_at`).
+- `memory_feedback_events` — append-only `helpful`/`unhelpful` audit events
+  keyed by numeric `fact_id`, with source, note, old/new trust, and trust delta.
+
+Older `memory_decisions` / `memory_code_areas` tables are migration-only inputs:
+v11 backfills them into `memory_facts` and then drops the legacy tables.
 
 ## Recipes
 
