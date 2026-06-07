@@ -19,8 +19,9 @@ use serde_json::json;
 use crate::errors::{Result, TokenSaveError};
 
 use super::{
-    backup_config_file, load_json_file_strict, load_toml_file, safe_write_json_file, tool_names,
-    write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    backup_config_file, load_json_file_strict, load_toml_file, restore_config_backup,
+    safe_write_json_file, tool_names, write_toml_file, AgentIntegration, DoctorCounters,
+    HealthcheckContext, InstallContext,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -61,10 +62,16 @@ impl AgentIntegration for CodexIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
+        let config_path = codex_dir.join("config.toml");
+        let agents_path = project_path.join("AGENTS.md");
+        let hooks_path = codex_dir.join("hooks.json");
+        for path in [&config_path, &agents_path, &hooks_path] {
+            super::ensure_project_local_safe_path(project_path, path)?;
+        }
         std::fs::create_dir_all(&codex_dir).ok();
-        install_mcp_server(&codex_dir.join("config.toml"), &ctx.tokensave_bin)?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))?;
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin)?;
+        install_prompt_rules(&agents_path)?;
+        install_hooks(&hooks_path, &ctx.tokensave_bin)?;
         print_hook_trust_guidance();
         Ok(())
     }
@@ -176,8 +183,11 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str) -> Result<()> {
 /// Append prompt rules to AGENTS.md (idempotent).
 fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     let marker = "## Prefer tokensave MCP tools";
-    let existing = if agents_md.exists() {
-        std::fs::read_to_string(agents_md).unwrap_or_default()
+    let is_regular_file = agents_md.metadata().is_ok_and(|m| m.is_file());
+    let existing = if is_regular_file {
+        std::fs::read_to_string(agents_md).map_err(|e| TokenSaveError::Config {
+            message: format!("failed to read {}: {e}", agents_md.display()),
+        })?
     } else {
         String::new()
     };
@@ -185,14 +195,19 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         eprintln!("  AGENTS.md already contains tokensave rules, skipping");
         return Ok(());
     }
+    let backup = if is_regular_file {
+        backup_config_file(agents_md)?
+    } else {
+        None
+    };
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(agents_md)
         .map_err(|e| TokenSaveError::Config {
-            message: format!("failed to open AGENTS.md: {e}"),
+            message: format!("failed to open {}: {e}", agents_md.display()),
         })?;
-    write!(
+    if let Err(e) = write!(
         f,
         "\n{marker}\n\n\
         Before reading source files or scanning the codebase, use the tokensave MCP tools \
@@ -209,8 +224,22 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         at https://github.com/aovestdipaperino/tokensave describing the limitation. \
         **Remind the user to strip any sensitive or proprietary code from the bug description \
         before submitting.**\n"
-    )
-    .ok();
+    ) {
+        if let Some(ref b) = backup {
+            restore_config_backup(agents_md, b);
+        }
+        return Err(TokenSaveError::Config {
+            message: format!("failed to write {}: {e}", agents_md.display()),
+        });
+    }
+    if let Err(e) = f.flush() {
+        if let Some(ref b) = backup {
+            restore_config_backup(agents_md, b);
+        }
+        return Err(TokenSaveError::Config {
+            message: format!("failed to flush {}: {e}", agents_md.display()),
+        });
+    }
     eprintln!(
         "\x1b[32m✔\x1b[0m Appended tokensave rules to {}",
         agents_md.display()
@@ -261,6 +290,14 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         5,
         None,
     );
+    install_codex_hook_event(
+        &mut hooks,
+        "PreToolUse",
+        tokensave_bin,
+        "hook-codex-pre-tool-use",
+        5,
+        Some("Bash|Read|Grep|Glob|Search|Task"),
+    );
     // Keep the index fresh: apply_patch → targeted single-file sync; Bash →
     // branch-aware / incremental sync. Matcher targets both tool names.
     install_codex_hook_event(
@@ -304,7 +341,7 @@ fn install_codex_hook_event(
 
     let handler = json!({
         "type": "command",
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout,
     });
     let mut group = json!({ "hooks": [handler] });
@@ -327,10 +364,6 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
     })
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 /// Codex requires non-managed command hooks to be trusted via `/hooks` before
 /// they run; newly installed/changed hooks are skipped until trusted.
 fn print_hook_trust_guidance() {
@@ -351,9 +384,10 @@ fn print_hook_trust_guidance() {
 
 /// Remove tokensave-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 4] = [
+    const SUBCOMMANDS: [&str; 5] = [
         "hook-codex-session-start",
         "hook-codex-user-prompt-submit",
+        "hook-codex-pre-tool-use",
         "hook-codex-subagent-start",
         "hook-codex-post-tool-use",
     ];

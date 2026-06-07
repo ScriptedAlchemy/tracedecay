@@ -779,6 +779,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCursorPreToolUse => {
+            let code = tokensave::hooks::hook_cursor_pre_tool_use();
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::HookCursorBeforeSubmitPrompt => {
             let code = tokensave::hooks::hook_cursor_before_submit_prompt().await;
             if code != 0 {
@@ -817,6 +823,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         }
         Commands::HookCodexUserPromptSubmit => {
             let code = tokensave::hooks::hook_codex_user_prompt_submit().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCodexPreToolUse => {
+            let code = tokensave::hooks::hook_codex_pre_tool_use();
             if code != 0 {
                 process::exit(code);
             }
@@ -1183,7 +1195,14 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Reinstall
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::HookPreToolUse
+            | Commands::HookPromptSubmit
+            | Commands::HookStop
+            | Commands::HookKiroPreToolUse
+            | Commands::HookKiroPromptSubmit
+            | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
+            | Commands::HookCursorPreToolUse
             | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart
@@ -1191,6 +1210,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::HookCursorWorkspaceOpen
             | Commands::HookCodexSessionStart
             | Commands::HookCodexUserPromptSubmit
+            | Commands::HookCodexPreToolUse
             | Commands::HookCodexSubagentStart
             | Commands::HookCodexPostToolUse
             // `Serve` is the hot path used by MCP clients (Claude Code,
@@ -1255,6 +1275,20 @@ mod startup_tests {
             path: None,
             timings: false,
         }));
+    }
+
+    #[test]
+    fn claude_and_kiro_hooks_skip_agent_install_maintenance() {
+        for command in [
+            Commands::HookPreToolUse,
+            Commands::HookPromptSubmit,
+            Commands::HookStop,
+            Commands::HookKiroPreToolUse,
+            Commands::HookKiroPromptSubmit,
+            Commands::HookKiroPostToolUse,
+        ] {
+            assert!(should_skip_agent_install_maintenance(&command));
+        }
     }
 }
 

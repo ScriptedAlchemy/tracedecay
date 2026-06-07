@@ -441,6 +441,49 @@ pub fn safe_write_json_file(
     Ok(())
 }
 
+/// Write text to a file via atomic sibling rename.
+///
+/// Mirrors [`safe_write_json_file`] for generated prompt/rule files that are
+/// plain text rather than structured JSON. The target is not opened for writing
+/// until the final rename, so a failed write leaves the original untouched.
+pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+            message: format!("cannot create directory {}: {e}", parent.display()),
+        })?;
+    }
+
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(e) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TokenSaveError::Config {
+            message: format!("failed to write new text file {}: {e}", new_path.display()),
+        });
+    }
+
+    if let Err(e) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        let hint = if let Some(b) = backup {
+            format!(
+                "\n  Backup is at: {}\n  \
+                 The original file was NOT modified.",
+                b.display()
+            )
+        } else {
+            "\n  The original file was NOT modified.".to_string()
+        };
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "failed to rename {} → {}: {e}{hint}",
+                new_path.display(),
+                path.display()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Write a JSON value to a file with pretty formatting.
 /// Creates a backup, writes atomically, and restores on failure.
 pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -498,6 +541,148 @@ pub fn which_tokensave() -> Option<String> {
 /// contexts on Windows. No-op on Unix where paths already use `/`.
 fn normalize_path_separators(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+pub(crate) fn hook_command(tokensave_bin: &str, subcommand: &str) -> String {
+    hook_command_for_platform(tokensave_bin, subcommand, cfg!(windows))
+}
+
+pub(crate) fn hook_command_for_platform(
+    tokensave_bin: &str,
+    subcommand: &str,
+    windows: bool,
+) -> String {
+    let quoted = if windows {
+        quote_windows_command_arg(&normalize_path_separators(tokensave_bin))
+    } else {
+        quote_posix_command_arg(tokensave_bin)
+    };
+    format!("{quoted} {subcommand}")
+}
+
+fn quote_windows_command_arg(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn quote_posix_command_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(err) => {
+                let Some(name) = existing.file_name().map(|name| name.to_owned()) else {
+                    return Err(err);
+                };
+                missing.push(name);
+                if !existing.pop() {
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
+fn relative_project_path(
+    project_root: &Path,
+    canonical_root: &Path,
+    absolute: &Path,
+    original: &Path,
+) -> Option<PathBuf> {
+    if !original.is_absolute() {
+        return Some(original.to_path_buf());
+    }
+    absolute
+        .strip_prefix(project_root)
+        .or_else(|_| absolute.strip_prefix(canonical_root))
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|e| TokenSaveError::Config {
+            message: format!(
+                "failed to resolve project root {}: {e}",
+                project_root.display()
+            ),
+        })?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if absolute
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "refusing to write project-local config outside {}: {}",
+                root.display(),
+                absolute.display()
+            ),
+        });
+    }
+
+    if let Some(relative) = relative_project_path(project_root, &root, &absolute, path) {
+        let scan_root = if project_root.is_absolute() {
+            project_root.to_path_buf()
+        } else {
+            root.clone()
+        };
+        let mut current = scan_root;
+        for component in relative.components() {
+            if matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            ) {
+                continue;
+            }
+            current.push(component.as_os_str());
+            let Ok(meta) = std::fs::symlink_metadata(&current) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                return Err(TokenSaveError::Config {
+                    message: format!(
+                        "refusing to write project-local config through symlink: {}",
+                        current.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    let canonical_candidate =
+        canonicalize_existing_prefix(&absolute).map_err(|e| TokenSaveError::Config {
+            message: format!(
+                "failed to resolve project-local config path {}: {e}",
+                absolute.display()
+            ),
+        })?;
+    if !canonical_candidate.starts_with(&root) {
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "refusing to write project-local config outside {}: {}",
+                root.display(),
+                absolute.display()
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Returns the user's home directory, cross-platform.
@@ -1836,6 +2021,113 @@ mod path_normalize_tests {
         assert_eq!(
             normalize_path_separators("/usr/local/bin/tokensave"),
             "/usr/local/bin/tokensave"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod local_install_safety_tests {
+    use super::*;
+
+    #[test]
+    fn windows_hook_command_quotes_windows_paths_with_spaces() {
+        let command = hook_command_for_platform(
+            r"C:\Program Files\tokensave\tokensave.exe",
+            "hook-test",
+            true,
+        );
+
+        assert_eq!(
+            command,
+            r#""C:/Program Files/tokensave/tokensave.exe" hook-test"#
+        );
+    }
+
+    #[test]
+    fn posix_hook_command_keeps_single_quote_escaping() {
+        let command = hook_command_for_platform("/tmp/tokensave's/bin", "hook-test", false);
+
+        assert_eq!(command, "'/tmp/tokensave'\\''s/bin' hook-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join("AGENTS.md")).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join(".codex")).unwrap();
+
+        let err = ensure_project_local_safe_path(&project, &project.join(".codex/config.toml"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_allows_new_file_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        symlink(&actual, &alias).unwrap();
+
+        let alias_project = alias.join("project");
+        ensure_project_local_safe_path(&alias_project, &alias_project.join(".codex/config.toml"))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_safe_path_reports_symlink_under_canonicalized_project_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        let project = actual.join("project");
+        let outside = dir.path().join("outside.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&actual, &alias).unwrap();
+        symlink(&outside, project.join("AGENTS.md")).unwrap();
+
+        let alias_project = alias.join("project");
+        let err = ensure_project_local_safe_path(&alias_project, &alias_project.join("AGENTS.md"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should clearly identify the symlink risk: {err}"
         );
     }
 }

@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use libsql::{params, Builder, Connection, Database as LibsqlDatabase};
+use libsql::{params, Builder, Connection, Database as LibsqlDatabase, Value};
+
+use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -33,6 +35,61 @@ pub struct GlobalDb {
 /// Returns the path to the global database: `~/.tokensave/global.db`.
 pub fn global_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
+}
+
+fn opt_text(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
+}
+
+fn opt_i64(value: Option<i64>) -> Value {
+    value.map_or(Value::Null, Value::Integer)
+}
+
+fn row_to_session(row: &libsql::Row) -> Option<SessionRecord> {
+    Some(SessionRecord {
+        provider: row.get(0).ok()?,
+        session_id: row.get(1).ok()?,
+        project_key: row.get(2).ok()?,
+        project_path: row.get(3).ok()?,
+        title: row.get(4).ok()?,
+        started_at: row.get(5).ok()?,
+        ended_at: row.get(6).ok()?,
+        transcript_path: row.get(7).ok()?,
+        metadata_json: row.get(8).ok()?,
+    })
+}
+
+fn row_to_message(row: &libsql::Row, offset: i32) -> Option<SessionMessageRecord> {
+    Some(SessionMessageRecord {
+        provider: row.get(offset).ok()?,
+        message_id: row.get(offset + 1).ok()?,
+        session_id: row.get(offset + 2).ok()?,
+        role: row.get(offset + 3).ok()?,
+        timestamp: row.get(offset + 4).ok()?,
+        ordinal: row.get(offset + 5).ok()?,
+        text: row.get(offset + 6).ok()?,
+        kind: row.get(offset + 7).ok()?,
+        model: row.get(offset + 8).ok()?,
+        tool_names: row.get(offset + 9).ok()?,
+        source_path: row.get(offset + 10).ok()?,
+        source_offset: row.get(offset + 11).ok()?,
+        metadata_json: row.get(offset + 12).ok()?,
+    })
+}
+
+fn session_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter_map(|word| {
+            let sanitized: String = word.chars().filter(|c| *c != '"').collect();
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(format!("\"{sanitized}\"*"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 impl GlobalDb {
@@ -95,7 +152,68 @@ impl GlobalDb {
                 after_tokens INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts ON savings_ledger(ts);
-            CREATE INDEX IF NOT EXISTS idx_savings_ledger_project ON savings_ledger(project_path)",
+            CREATE INDEX IF NOT EXISTS idx_savings_ledger_project ON savings_ledger(project_path);
+            CREATE TABLE IF NOT EXISTS sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                transcript_path TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_project
+                ON sessions(provider, project_key);
+            CREATE INDEX IF NOT EXISTS idx_sessions_started_at
+                ON sessions(started_at);
+            CREATE TABLE IF NOT EXISTS session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT,
+                source_path TEXT,
+                source_offset INTEGER,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id),
+                FOREIGN KEY(provider, session_id)
+                    REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_messages_session
+                ON session_messages(provider, session_id, ordinal);
+            CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
+                ON session_messages(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_session_messages_source
+                ON session_messages(source_path);
+            CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+                text, role, kind, model, tool_names,
+                content='session_messages', content_rowid='rowid'
+            );
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
+                AFTER INSERT ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
+                    VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
+                END;
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
+                AFTER DELETE ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, text, role, kind, model, tool_names)
+                    VALUES ('delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names);
+                END;
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
+                AFTER UPDATE ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, text, role, kind, model, tool_names)
+                    VALUES ('delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names);
+                    INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
+                    VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
+                END",
         )
         .await
         .ok()?;
@@ -292,6 +410,176 @@ impl GlobalDb {
             }
         }
         paths
+    }
+
+    /// Inserts or replaces a provider session. Returns `false` on any DB error.
+    pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO sessions
+                 (provider, session_id, project_key, project_path, title, started_at, ended_at,
+                  transcript_path, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(provider, session_id) DO UPDATE SET
+                    project_key = excluded.project_key,
+                    project_path = excluded.project_path,
+                    title = excluded.title,
+                    started_at = excluded.started_at,
+                    ended_at = excluded.ended_at,
+                    transcript_path = excluded.transcript_path,
+                    metadata_json = excluded.metadata_json",
+                params![
+                    session.provider.as_str(),
+                    session.session_id.as_str(),
+                    session.project_key.as_str(),
+                    session.project_path.as_str(),
+                    opt_text(session.title.as_deref()),
+                    opt_i64(session.started_at),
+                    opt_i64(session.ended_at),
+                    opt_text(session.transcript_path.as_deref()),
+                    opt_text(session.metadata_json.as_deref()),
+                ],
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Returns a single provider session by its provider-local ID.
+    pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT provider, session_id, project_key, project_path, title, started_at,
+                        ended_at, transcript_path, metadata_json
+                 FROM sessions WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await
+            .ok()?;
+        row_to_session(&rows.next().await.ok()??)
+    }
+
+    /// Inserts or replaces a provider message. Returns `false` on any DB error.
+    pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO session_messages
+                 (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+                  tool_names, source_path, source_offset, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(provider, message_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    role = excluded.role,
+                    timestamp = excluded.timestamp,
+                    ordinal = excluded.ordinal,
+                    text = excluded.text,
+                    kind = excluded.kind,
+                    model = excluded.model,
+                    tool_names = excluded.tool_names,
+                    source_path = excluded.source_path,
+                    source_offset = excluded.source_offset,
+                    metadata_json = excluded.metadata_json",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.session_id.as_str(),
+                    message.role.as_str(),
+                    opt_i64(message.timestamp),
+                    message.ordinal,
+                    message.text.as_str(),
+                    opt_text(message.kind.as_deref()),
+                    opt_text(message.model.as_deref()),
+                    opt_text(message.tool_names.as_deref()),
+                    opt_text(message.source_path.as_deref()),
+                    opt_i64(message.source_offset),
+                    opt_text(message.metadata_json.as_deref()),
+                ],
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Returns a single provider message by its provider-local ID.
+    pub async fn get_session_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<SessionMessageRecord> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                        model, tool_names, source_path, source_offset, metadata_json
+                 FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await
+            .ok()?;
+        row_to_message(&rows.next().await.ok()??, 0)
+    }
+
+    /// Searches message text for a provider, optionally constrained to one project.
+    pub async fn search_session_messages(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult> {
+        let fts_query = session_fts_query(query);
+        if fts_query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let select = "SELECT
+                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+                s.ended_at, s.transcript_path, s.metadata_json,
+                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
+                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
+                bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
+             FROM session_messages_fts
+             JOIN session_messages m ON session_messages_fts.rowid = m.rowid
+             JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
+             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2";
+        let order = " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+                      LIMIT ?";
+
+        let rows_result = if let Some(project_key) = project_key {
+            self.conn
+                .query(
+                    &format!("{select} AND s.project_key = ?3{order}"),
+                    params![fts_query.as_str(), provider, project_key, limit as i64],
+                )
+                .await
+        } else {
+            self.conn
+                .query(
+                    &format!("{select}{order}"),
+                    params![fts_query.as_str(), provider, limit as i64],
+                )
+                .await
+        };
+
+        let Ok(mut rows) = rows_result else {
+            return Vec::new();
+        };
+
+        let mut results = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let Some(session) = row_to_session(&row) else {
+                continue;
+            };
+            let Some(message) = row_to_message(&row, 9) else {
+                continue;
+            };
+            let score = row.get::<f64>(22).map_or(0.0, |rank| -rank);
+            results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score,
+            });
+        }
+        results
     }
 
     // ── Accounting: turns table ──────────────────────────────────────
