@@ -427,7 +427,7 @@ fn doctor_check_mcp_server(dc: &mut DoctorCounters, mcp_path: &Path, fix: &str, 
         return;
     }
 
-    let settings = load_json_file(&mcp_path);
+    let settings = load_json_file(mcp_path);
     let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
 
     if server.and_then(|v| v.as_object()).is_some() {
