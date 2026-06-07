@@ -66,6 +66,19 @@ impl AgentIntegration for VibeIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let vibe_dir = project_path.join(".vibe");
+        std::fs::create_dir_all(&vibe_dir).ok();
+        std::fs::create_dir_all(vibe_dir.join("prompts")).ok();
+
+        install_mcp_server(&vibe_dir.join("config.toml"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&vibe_dir.join("prompts/cli.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let config_path = vibe_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);

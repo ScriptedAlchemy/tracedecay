@@ -48,6 +48,17 @@ impl AgentIntegration for KimiIntegration {
         Ok(())
     }
 
+    fn supports_local_install(&self) -> bool {
+        true
+    }
+
+    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
+        let kimi_dir = project_path.join(".kimi-code");
+        std::fs::create_dir_all(&kimi_dir).ok();
+        install_mcp_server(&kimi_dir.join("mcp.json"), &ctx.tokensave_bin)?;
+        install_prompt_rules(&project_path.join("AGENTS.md"))
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let kimi_dir = ctx.home.join(".kimi");
         let mcp_path = kimi_dir.join("mcp.json");
