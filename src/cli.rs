@@ -137,6 +137,18 @@ pub enum Commands {
     /// Cursor workspaceOpen hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-workspace-open", hide = true)]
     HookCursorWorkspaceOpen,
+    /// Codex SessionStart hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-session-start", hide = true)]
+    HookCodexSessionStart,
+    /// Codex UserPromptSubmit hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-user-prompt-submit", hide = true)]
+    HookCodexUserPromptSubmit,
+    /// Codex SubagentStart hook handler (called by Codex, not by users directly)
+    #[command(name = "hook-codex-subagent-start", hide = true)]
+    HookCodexSubagentStart,
+    /// Codex PostToolUse hook handler for incremental sync (called by Codex)
+    #[command(name = "hook-codex-post-tool-use", hide = true)]
+    HookCodexPostToolUse,
     /// Start MCP server over stdio
     Serve {
         /// Project path

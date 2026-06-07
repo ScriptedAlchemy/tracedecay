@@ -1,8 +1,10 @@
 use tokensave::hooks::{
-    build_cursor_session_context, cursor_branch_switch_target, cursor_project_root_from_event,
+    build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
+    codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
     cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
-    cursor_staleness_hint, evaluate_cursor_subagent_start, evaluate_hook_decision,
-    evaluate_kiro_pre_tool_use, is_git_state_changing_command, CursorShellSyncPlan,
+    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
+    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
+    CursorShellSyncPlan,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -496,4 +498,137 @@ fn test_cursor_shell_sync_plan_noop_for_read_only_and_non_git() {
             "{command} should be a no-op"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Codex hook handlers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codex_additional_context_json_uses_codex_schema() {
+    let json = codex_additional_context_json("SessionStart", "hello context");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SessionStart")
+    );
+    assert_eq!(
+        v["hookSpecificOutput"]["additionalContext"].as_str(),
+        Some("hello context")
+    );
+    // Codex must not reuse the Cursor/Claude permission output shapes.
+    assert!(v.get("permission").is_none());
+    assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
+}
+
+#[test]
+fn test_codex_subagent_start_redirects_explore_research_agent() {
+    // Codex SubagentStart cannot hard-stop a subagent (`continue: false` is
+    // ignored), so the handler steers it via hookSpecificOutput.additionalContext.
+    let input = r#"{
+        "hook_event_name": "SubagentStart",
+        "agent_type": "explore",
+        "cwd": "/tmp/x"
+    }"#;
+
+    let output = evaluate_codex_subagent_start(input).expect("should redirect research subagent");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SubagentStart")
+    );
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave MCP tools"));
+    // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
+    assert!(
+        v.get("permission").is_none(),
+        "Codex hook output must not use Cursor's subagentStart fields"
+    );
+}
+
+#[test]
+fn test_codex_subagent_start_allows_execution_agent() {
+    let input = r#"{
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "prompt": "Run the test suite and summarize failures"
+    }"#;
+    assert!(evaluate_codex_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_codex_subagent_start_allows_invalid_json() {
+    assert!(evaluate_codex_subagent_start("not json").is_none());
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_extracts_patched_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let command = "*** Begin Patch\n\
+        *** Update File: src/lib.rs\n\
+        @@\n-old\n+new\n\
+        *** Add File: src/new_mod.rs\n+contents\n\
+        *** Delete File: src/old_mod.rs\n\
+        *** End Patch\n";
+
+    let mut rels = codex_apply_patch_rel_paths(command, &root, &root);
+    rels.sort();
+    assert_eq!(
+        rels,
+        vec![
+            "src/lib.rs".to_string(),
+            "src/new_mod.rs".to_string(),
+            "src/old_mod.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_resolves_relative_to_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let cwd = root.join("crate_a");
+    std::fs::create_dir_all(&cwd).unwrap();
+    // apply_patch paths are relative to the session cwd, which may be a
+    // subdirectory of the discovered project root.
+    let command = "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch\n";
+
+    let rels = codex_apply_patch_rel_paths(command, &cwd, &root);
+    assert_eq!(rels, vec!["crate_a/src/lib.rs".to_string()]);
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let command = "*** Begin Patch\n*** Update File: /etc/passwd\n*** End Patch\n";
+
+    let rels = codex_apply_patch_rel_paths(command, &root, &root);
+    assert!(
+        rels.is_empty(),
+        "absolute paths outside the project root must be ignored, got {rels:?}"
+    );
+}
+
+#[test]
+fn test_codex_project_root_uses_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
+    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "PostToolUse",
+            "cwd": {}
+        }}"#,
+        serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        codex_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
 }

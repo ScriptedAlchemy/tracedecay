@@ -8,7 +8,6 @@ docs/superpowers
 /local-only
 .worktrees
 .agents/
-.codex/
 .rtk/
 .sentrux/
 cache/
