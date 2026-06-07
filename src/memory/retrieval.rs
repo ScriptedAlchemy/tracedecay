@@ -46,6 +46,15 @@ impl<'a> FactRetriever<'a> {
         let fts_scores = self
             .fts_candidates(query, category, min_trust, limit.saturating_mul(5))
             .await?;
+        let entity_candidate_ids = self
+            .entity_candidates(
+                query,
+                &query_tokens,
+                category,
+                min_trust,
+                limit.saturating_mul(10),
+            )
+            .await?;
         let mut candidates = self
             .store
             .list_facts(category, Some(min_trust), limit.saturating_mul(10))
@@ -54,6 +63,13 @@ impl<'a> FactRetriever<'a> {
         for fact_id in fts_scores.keys() {
             if candidate_ids.insert(*fact_id) {
                 if let Some(fact) = self.store.get_fact(*fact_id).await? {
+                    candidates.push(fact);
+                }
+            }
+        }
+        for fact_id in entity_candidate_ids {
+            if candidate_ids.insert(fact_id) {
+                if let Some(fact) = self.store.get_fact(fact_id).await? {
                     candidates.push(fact);
                 }
             }
@@ -351,6 +367,95 @@ impl<'a> FactRetriever<'a> {
         Ok(scores)
     }
 
+    async fn entity_candidates(
+        &self,
+        query: &str,
+        query_tokens: &[String],
+        category: Option<MemoryCategory>,
+        min_trust: f64,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let mut terms = Vec::new();
+        let normalized_query = normalize_entity(query).to_ascii_lowercase();
+        if !normalized_query.is_empty() {
+            terms.push(normalized_query);
+        }
+        terms.extend(query_tokens.iter().cloned());
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let predicates = terms
+            .iter()
+            .map(|term| {
+                let exact = sql_string_literal(term);
+                let like = sql_string_literal(&format!("%{}%", escape_like(term)));
+                format!("e.normalized_name = {exact} OR e.normalized_name LIKE {like} ESCAPE '\\'")
+            })
+            .map(|predicate| format!("({predicate})"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let sql = if category.is_some() {
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.category = ?1
+                   AND f.trust_score >= ?2
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?3"
+            )
+        } else {
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.trust_score >= ?1
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?2"
+            )
+        };
+
+        let mut rows = if let Some(category) = category {
+            self.store
+                .conn()
+                .query(
+                    sql.as_str(),
+                    params![category.as_str(), min_trust, normalized_limit(limit) as i64],
+                )
+                .await
+        } else {
+            self.store
+                .conn()
+                .query(
+                    sql.as_str(),
+                    params![min_trust, normalized_limit(limit) as i64],
+                )
+                .await
+        }
+        .map_err(|e| db_error("entity_candidates", e))?;
+
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_candidates", e))?
+        {
+            fact_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("entity_candidates", e))?,
+            );
+        }
+        Ok(fact_ids)
+    }
+
     async fn fact_ids_for_entity(
         &self,
         entity: &str,
@@ -521,6 +626,13 @@ fn token_overlap(left: &[String], right: &[String]) -> usize {
 
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn jaccard(left: &[String], right: &[String]) -> f64 {

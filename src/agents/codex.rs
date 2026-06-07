@@ -96,7 +96,7 @@ impl AgentIntegration for CodexIntegration {
         let local_codex_dir = ctx.project_path.join(".codex");
         if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || ctx.project_path.join("AGENTS.md").exists()
+            || local_agents_md_has_tokensave(&ctx.project_path.join("AGENTS.md"))
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
@@ -131,6 +131,13 @@ impl AgentIntegration for CodexIntegration {
                 .is_some()
         })
     }
+}
+
+fn local_agents_md_has_tokensave(path: &Path) -> bool {
+    path.exists()
+        && std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains("## Prefer tokensave MCP tools")
 }
 
 // ---------------------------------------------------------------------------
