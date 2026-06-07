@@ -3491,7 +3491,7 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
         feedback.annotations.as_ref().unwrap()["readOnlyHint"],
         false
     );
-    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], false);
 
     for field in [
         "action",
@@ -3538,6 +3538,40 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
     assert!(
         !tool_names.contains("tokensave_session_recall"),
         "unshipped legacy recall tool should not be exposed"
+    );
+}
+
+#[tokio::test]
+async fn memory_status_repairs_dirty_banks_before_reporting() {
+    let (cg, _dir) = setup_project().await;
+    handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "Status should repair dirty holographic banks",
+            "category": "project",
+            "entity": "Holographic Banks"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    assert!(
+        status["memory"]["bank_count"].as_u64().unwrap_or_default() >= 2,
+        "memory_status should rebuild all and category banks before reporting: {status}"
+    );
+    assert_eq!(
+        status["memory"]["missing_vector_count"].as_u64(),
+        Some(0),
+        "status-triggered bank repair should not leave missing vectors"
     );
 }
 

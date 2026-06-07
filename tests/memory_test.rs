@@ -39,6 +39,46 @@ fn fact_request(content: &str, category: MemoryCategory, trust: f64) -> AddFactR
     }
 }
 
+async fn dirty_bank_names(db: &Database) -> Vec<String> {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT bank_name FROM memory_bank_dirty ORDER BY bank_name",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut names = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        names.push(row.get::<String>(0).unwrap());
+    }
+    names
+}
+
+async fn memory_bank_count(db: &Database) -> i64 {
+    let mut rows = db
+        .conn()
+        .query("SELECT COUNT(*) FROM memory_banks", ())
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT fact_count FROM memory_banks WHERE bank_name = ?1",
+            libsql::params![bank_name],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .map(|row| row.get::<i64>(0).unwrap())
+}
+
 #[test]
 fn core_memory_types_use_stable_json_strings() {
     assert_eq!(MemoryCategory::UserPref.to_string(), "user_pref");
@@ -240,6 +280,61 @@ fn holographic_encoding_is_deterministic_and_round_trips() {
     let decoded = HolographicEncoder::deserialize(&bytes).unwrap();
     assert_eq!(decoded, first);
     assert!(HolographicEncoder::deserialize(b"not bincode").is_err());
+}
+
+#[tokio::test]
+async fn memory_store_marks_and_rebuilds_dirty_banks() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let fact = store
+        .add_fact(
+            fact_request(
+                "Project facts should dirty project banks",
+                MemoryCategory::Project,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    assert_eq!(dirty_bank_names(&db).await, vec!["all", "project"]);
+
+    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
+    assert!(dirty_bank_names(&db).await.is_empty());
+    assert_eq!(memory_bank_fact_count(&db, "all").await, Some(1));
+    assert_eq!(memory_bank_fact_count(&db, "project").await, Some(1));
+
+    store
+        .update_fact(UpdateFactRequest {
+            fact_id: fact.fact_id,
+            content: Some("Decision facts should replace project bank membership".to_string()),
+            category: Some(MemoryCategory::Decision),
+            tags: None,
+            entities: None,
+            trust: None,
+            source: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        dirty_bank_names(&db).await,
+        vec!["all", "decision", "project"]
+    );
+
+    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 3);
+    assert!(dirty_bank_names(&db).await.is_empty());
+    assert_eq!(memory_bank_fact_count(&db, "all").await, Some(1));
+    assert_eq!(memory_bank_fact_count(&db, "decision").await, Some(1));
+    assert_eq!(memory_bank_fact_count(&db, "project").await, None);
+
+    assert!(store.remove_fact(fact.fact_id).await.unwrap());
+    assert_eq!(dirty_bank_names(&db).await, vec!["all", "decision"]);
+
+    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
+    assert!(dirty_bank_names(&db).await.is_empty());
+    assert_eq!(memory_bank_count(&db).await, 0);
 }
 
 #[tokio::test]

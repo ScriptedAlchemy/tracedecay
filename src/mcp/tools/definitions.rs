@@ -1665,10 +1665,10 @@ fn def_fact_feedback() -> ToolDefinition {
 }
 
 fn def_memory_status() -> ToolDefinition {
-    def(
+    def_rw(
         "tokensave_memory_status",
         "Memory Status",
-        "Return holographic memory fact/entity counts and trust distribution.",
+        "Repair dirty holographic memory banks, then return fact/entity counts and trust distribution.",
         json!({
             "type": "object",
             "properties": {}

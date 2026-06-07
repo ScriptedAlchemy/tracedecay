@@ -119,12 +119,14 @@ impl<'a> MemoryStore<'a> {
         }
         self.replace_fact_entities(existing.fact_id, &merged_entities)
             .await?;
-        self.get_fact(existing.fact_id).await?.ok_or_else(|| {
+        let fact = self.get_fact(existing.fact_id).await?.ok_or_else(|| {
             db_message(
                 "add_fact",
                 "inserted fact was not found when reading it back",
             )
-        })
+        })?;
+        self.mark_fact_banks_dirty(fact.category).await?;
+        Ok(fact)
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
@@ -209,15 +211,40 @@ impl<'a> MemoryStore<'a> {
 
         self.replace_fact_entities(request.fact_id, &entities)
             .await?;
-        self.get_fact(request.fact_id).await?.ok_or_else(|| {
+        let updated = self.get_fact(request.fact_id).await?.ok_or_else(|| {
             db_message(
                 "update_fact",
                 "updated fact was not found when reading it back",
             )
-        })
+        })?;
+        self.mark_fact_banks_dirty(existing.category).await?;
+        self.mark_fact_banks_dirty(updated.category).await?;
+        Ok(updated)
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
+        self.conn
+            .execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| db_error("remove_fact", e))?;
+        let result = self.remove_fact_inner(fact_id).await;
+        match result {
+            Ok(value) => {
+                self.conn
+                    .execute("COMMIT", ())
+                    .await
+                    .map_err(|e| db_error("remove_fact", e))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn remove_fact_inner(&self, fact_id: i64) -> Result<bool> {
+        let existing = self.get_fact(fact_id).await?;
         let changed = self
             .conn
             .execute(
@@ -226,6 +253,11 @@ impl<'a> MemoryStore<'a> {
             )
             .await
             .map_err(|e| db_error("remove_fact", e))?;
+        if changed > 0 {
+            if let Some(fact) = existing {
+                self.mark_fact_banks_dirty(fact.category).await?;
+            }
+        }
         Ok(changed > 0)
     }
 
@@ -573,6 +605,47 @@ impl<'a> MemoryStore<'a> {
         Ok(rebuilt)
     }
 
+    pub async fn rebuild_dirty_banks(&self) -> Result<usize> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT bank_name FROM memory_bank_dirty ORDER BY bank_name",
+                (),
+            )
+            .await
+            .map_err(|e| db_error("rebuild_dirty_banks", e))?;
+        let mut bank_names = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("rebuild_dirty_banks", e))?
+        {
+            bank_names.push(
+                row.get::<String>(0)
+                    .map_err(|e| db_error("rebuild_dirty_banks", e))?,
+            );
+        }
+
+        let mut rebuilt = 0;
+        for bank_name in bank_names {
+            if bank_name == "all" {
+                self.rebuild_bank("all", None).await?;
+            } else {
+                let category = parse_category(&bank_name, "rebuild_dirty_banks")?;
+                self.rebuild_bank(category.as_str(), Some(category)).await?;
+            }
+            self.conn
+                .execute(
+                    "DELETE FROM memory_bank_dirty WHERE bank_name = ?1",
+                    params![bank_name],
+                )
+                .await
+                .map_err(|e| db_error("rebuild_dirty_banks", e))?;
+            rebuilt += 1;
+        }
+        Ok(rebuilt)
+    }
+
     pub(crate) fn conn(&self) -> &Connection {
         self.conn
     }
@@ -827,6 +900,24 @@ impl<'a> MemoryStore<'a> {
         let vector = self.encoder.encode_fact(content, entities);
         HolographicEncoder::serialize(&vector)
             .map_err(|e| db_message(operation, format!("failed to serialize vector: {e}")))
+    }
+
+    async fn mark_fact_banks_dirty(&self, category: MemoryCategory) -> Result<()> {
+        self.mark_bank_dirty("all").await?;
+        self.mark_bank_dirty(category.as_str()).await
+    }
+
+    async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO memory_bank_dirty (bank_name, updated_at)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(bank_name) DO UPDATE SET updated_at = excluded.updated_at",
+                params![bank_name, current_timestamp()],
+            )
+            .await
+            .map_err(|e| db_error("mark_bank_dirty", e))?;
+        Ok(())
     }
 }
 

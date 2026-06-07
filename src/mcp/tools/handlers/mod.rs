@@ -352,6 +352,7 @@ mod tests {
             "tokensave_session_end",
             "tokensave_fact_store",
             "tokensave_fact_feedback",
+            "tokensave_memory_status",
         ];
         for tool in &tools {
             let ann = tool

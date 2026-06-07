@@ -3007,6 +3007,7 @@ impl TokenSave {
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
         let operation = "memory_status";
         let conn = self.db.conn();
+        MemoryStore::new(conn).rebuild_dirty_banks().await?;
         let mut fact_rows = conn
             .query("SELECT trust_score FROM memory_facts", ())
             .await
