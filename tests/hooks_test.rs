@@ -1,6 +1,8 @@
 use tokensave::hooks::{
-    cursor_project_root_from_event, evaluate_cursor_subagent_start, evaluate_hook_decision,
-    evaluate_kiro_pre_tool_use,
+    build_cursor_session_context, cursor_branch_switch_target, cursor_project_root_from_event,
+    cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
+    cursor_staleness_hint, evaluate_cursor_subagent_start, evaluate_hook_decision,
+    evaluate_kiro_pre_tool_use, is_git_state_changing_command, CursorShellSyncPlan,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -278,4 +280,219 @@ fn test_cursor_project_root_uses_file_path_parent() {
         cursor_project_root_from_event(&input),
         Some(dir.path().to_path_buf())
     );
+}
+
+#[test]
+fn test_is_git_state_changing_command_detects_branch_switches() {
+    for command in [
+        "git checkout main",
+        "git switch -c feature/x",
+        "git pull --rebase",
+        "git merge origin/main",
+        "git rebase main",
+        "git reset --hard HEAD~1",
+        "git cherry-pick abc123",
+        "git stash pop",
+        "git stash apply stash@{0}",
+        "  GIT  checkout main  ",
+    ] {
+        assert!(
+            is_git_state_changing_command(command),
+            "{command} should be treated as a git state-changing command"
+        );
+    }
+}
+
+#[test]
+fn test_is_git_state_changing_command_ignores_read_only_and_non_git() {
+    for command in [
+        "git status",
+        "git log --oneline",
+        "git diff",
+        "git commit -m wip",
+        "git add .",
+        "git stash list",
+        "ls -la",
+        "cargo test",
+        "echo git checkout",
+    ] {
+        assert!(
+            !is_git_state_changing_command(command),
+            "{command} should NOT trigger a sync"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_after_file_edit_rel_paths_targets_edited_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let edited = root.join("src/lib.rs");
+    let input = format!(
+        r#"{{
+            "hook_event_name": "afterFileEdit",
+            "file_path": {},
+            "edits": [{{ "old_string": "a", "new_string": "b" }}]
+        }}"#,
+        serde_json::to_string(edited.to_str().unwrap()).unwrap()
+    );
+
+    let rels = tokensave::hooks::cursor_after_file_edit_rel_paths(&input, &root);
+    assert_eq!(rels, vec!["src/lib.rs".to_string()]);
+}
+
+#[test]
+fn test_cursor_after_file_edit_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = r#"{
+        "hook_event_name": "afterFileEdit",
+        "file_path": "/etc/passwd"
+    }"#;
+
+    let rels = tokensave::hooks::cursor_after_file_edit_rel_paths(input, &root);
+    assert!(
+        rels.is_empty(),
+        "paths outside the project root must be ignored, got {rels:?}"
+    );
+}
+
+#[test]
+fn test_cursor_should_run_sync_respects_debounce_window() {
+    assert!(cursor_should_run_sync(1_000, None, 3));
+    assert!(cursor_should_run_sync(1_000, Some(996), 3));
+    assert!(!cursor_should_run_sync(1_000, Some(998), 3));
+    assert!(!cursor_should_run_sync(1_000, Some(1_000), 3));
+}
+
+#[test]
+fn test_build_cursor_session_context_uninitialized_suggests_init() {
+    let context = build_cursor_session_context(false, None);
+    assert!(context.contains("tokensave init"));
+    assert!(context.contains("tokensave MCP tools"));
+    assert!(context.contains("tokensave_context"));
+}
+
+#[test]
+fn test_build_cursor_session_context_initialized_includes_freshness() {
+    let context = build_cursor_session_context(true, Some("last indexed 2m ago"));
+    assert!(context.contains("tokensave_context"));
+    assert!(context.contains("last indexed 2m ago"));
+    assert!(
+        !context.contains("tokensave init"),
+        "initialized workspaces should not be told to run init: {context}"
+    );
+}
+
+#[test]
+fn test_cursor_staleness_hint_formats_relative_age() {
+    assert!(cursor_staleness_hint(0).contains("just"));
+    assert!(cursor_staleness_hint(120).contains('m'));
+    assert!(cursor_staleness_hint(7_200).contains('h'));
+}
+
+#[test]
+fn test_cursor_session_start_json_sets_context_and_env_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = cursor_session_start_json(Some(dir.path()), "hello context");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["additional_context"], "hello context");
+    assert_eq!(
+        v["env"]["TOKENSAVE_PROJECT_ROOT"].as_str(),
+        Some(dir.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn test_cursor_session_start_json_without_root_omits_env_path() {
+    let json = cursor_session_start_json(None, "ctx");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["additional_context"], "ctx");
+    assert!(v["env"].get("TOKENSAVE_PROJECT_ROOT").is_none());
+}
+
+#[test]
+fn test_cursor_branch_switch_target_extracts_branch() {
+    assert_eq!(
+        cursor_branch_switch_target("git checkout main"),
+        Some("main".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git switch develop"),
+        Some("develop".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git checkout -b feature/x"),
+        Some("feature/x".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git switch -c feature/y"),
+        Some("feature/y".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git worktree add ../wt feature/z"),
+        Some("feature/z".to_string())
+    );
+    assert_eq!(
+        cursor_branch_switch_target("git worktree add -b newbranch ../wt"),
+        Some("newbranch".to_string())
+    );
+}
+
+#[test]
+fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
+    assert_eq!(
+        cursor_branch_switch_target("git checkout -- src/main.rs"),
+        None
+    );
+    assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
+    assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
+    assert_eq!(cursor_branch_switch_target("git status"), None);
+    assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
+    assert_eq!(
+        cursor_shell_sync_plan("git checkout main"),
+        CursorShellSyncPlan::BranchAdd("main".to_string())
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git switch -c feature/x"),
+        CursorShellSyncPlan::BranchAdd("feature/x".to_string())
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add ../wt feature/z"),
+        CursorShellSyncPlan::BranchAdd("feature/z".to_string())
+    );
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_routes_same_branch_changes_to_incremental_sync() {
+    for command in [
+        "git pull --rebase",
+        "git merge origin/main",
+        "git rebase main",
+        "git reset --hard HEAD~1",
+        "git cherry-pick abc123",
+        "git stash pop",
+    ] {
+        assert_eq!(
+            cursor_shell_sync_plan(command),
+            CursorShellSyncPlan::IncrementalSync,
+            "{command} should route to an incremental sync"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_shell_sync_plan_noop_for_read_only_and_non_git() {
+    for command in ["git status", "git log", "ls -la", "cargo build"] {
+        assert_eq!(
+            cursor_shell_sync_plan(command),
+            CursorShellSyncPlan::Noop,
+            "{command} should be a no-op"
+        );
+    }
 }

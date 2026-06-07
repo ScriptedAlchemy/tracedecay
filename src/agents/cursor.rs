@@ -187,12 +187,22 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     };
 
     hooks["version"] = json!(1);
+    // Reduce wasteful exploration.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "sessionStart",
+        tokensave_bin,
+        "hook-cursor-session-start",
+        5,
+        None,
+    );
     install_cursor_hook_entry(
         &mut hooks,
         "subagentStart",
         tokensave_bin,
         "hook-cursor-subagent-start",
         5,
+        None,
     );
     install_cursor_hook_entry(
         &mut hooks,
@@ -200,13 +210,33 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         tokensave_bin,
         "hook-cursor-before-submit-prompt",
         5,
+        None,
     );
+    // Keep the index fresh. afterFileEdit uses a targeted single-file sync and
+    // is scoped to agent `Write` edits via a matcher.
     install_cursor_hook_entry(
         &mut hooks,
         "afterFileEdit",
         tokensave_bin,
         "hook-cursor-after-file-edit",
         30,
+        Some("Write"),
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "afterShellExecution",
+        tokensave_bin,
+        "hook-cursor-after-shell",
+        60,
+        None,
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "workspaceOpen",
+        tokensave_bin,
+        "hook-cursor-workspace-open",
+        60,
+        None,
     );
 
     safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
@@ -223,24 +253,35 @@ fn install_cursor_hook_entry(
     tokensave_bin: &str,
     subcommand: &str,
     timeout: u64,
+    matcher: Option<&str>,
 ) {
     let existing = hooks["hooks"][event]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let has_tokensave_hook = existing.iter().any(|hook| {
-        hook.get("command")
-            .and_then(|v| v.as_str())
-            .is_some_and(|command| command.contains(subcommand))
-    });
 
-    let mut event_hooks = existing;
-    if !has_tokensave_hook {
-        event_hooks.push(json!({
-            "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
-            "timeout": timeout
-        }));
+    // Rebuild the tokensave-owned entry every install so refinements (matcher,
+    // timeout) reach pre-existing configs, while preserving any foreign hooks.
+    // Idempotent: there is always exactly one tokensave entry per event.
+    let mut event_hooks: Vec<serde_json::Value> = existing
+        .into_iter()
+        .filter(|hook| {
+            !hook
+                .get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|command| command.contains(subcommand))
+        })
+        .collect();
+
+    let mut entry = json!({
+        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "timeout": timeout
+    });
+    if let Some(matcher) = matcher {
+        entry["matcher"] = json!(matcher);
     }
+    event_hooks.push(entry);
+
     hooks["hooks"][event] = serde_json::Value::Array(event_hooks);
 }
 

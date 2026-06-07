@@ -250,13 +250,53 @@ fn test_local_install_cursor_writes_project_config_only() {
     let after_edit_hooks = hooks["hooks"]["afterFileEdit"]
         .as_array()
         .expect("afterFileEdit hooks should be an array");
-    assert!(
-        after_edit_hooks.iter().any(|hook| {
+    let after_edit_hook = after_edit_hooks
+        .iter()
+        .find(|hook| {
             hook["command"]
                 .as_str()
                 .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
+        })
+        .expect("Cursor afterFileEdit hook should keep tokensave's index fresh after writes");
+    assert_eq!(
+        after_edit_hook["matcher"], "Write",
+        "afterFileEdit hook should target agent Write edits via a matcher"
+    );
+
+    let session_start_hooks = hooks["hooks"]["sessionStart"]
+        .as_array()
+        .expect("sessionStart hooks should be an array");
+    assert!(
+        session_start_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-session-start"))
         }),
-        "Cursor afterFileEdit hook should keep tokensave's index fresh after writes"
+        "Cursor sessionStart hook should steer the agent toward tokensave MCP tools"
+    );
+
+    let after_shell_hooks = hooks["hooks"]["afterShellExecution"]
+        .as_array()
+        .expect("afterShellExecution hooks should be an array");
+    assert!(
+        after_shell_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-after-shell"))
+        }),
+        "Cursor afterShellExecution hook should resync after git state changes"
+    );
+
+    let workspace_open_hooks = hooks["hooks"]["workspaceOpen"]
+        .as_array()
+        .expect("workspaceOpen hooks should be an array");
+    assert!(
+        workspace_open_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-workspace-open"))
+        }),
+        "Cursor workspaceOpen hook should run a catch-up sync"
     );
 
     assert!(
@@ -266,6 +306,48 @@ fn test_local_install_cursor_writes_project_config_only() {
     assert!(
         !home.path().join(".tokensave/config.toml").exists(),
         "local install must not create or mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    // Pre-seed a hooks.json with a tokensave afterFileEdit entry that lacks
+    // the `Write` matcher (mirrors a config from an earlier tokensave version).
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).unwrap();
+    std::fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"/old/tokensave hook-cursor-after-file-edit","timeout":30}]}}"#,
+    )
+    .unwrap();
+
+    // Install twice to prove idempotent reconciliation.
+    assert_local_install_success("cursor", project.path(), home.path());
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let hooks = read_json(&cursor_dir.join("hooks.json"));
+    let after = hooks["hooks"]["afterFileEdit"]
+        .as_array()
+        .expect("afterFileEdit should be an array");
+    let tokensave_entries: Vec<_> = after
+        .iter()
+        .filter(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
+        })
+        .collect();
+    assert_eq!(
+        tokensave_entries.len(),
+        1,
+        "reinstall must keep exactly one tokensave afterFileEdit entry, got {after:?}"
+    );
+    assert_eq!(
+        tokensave_entries[0]["matcher"], "Write",
+        "reinstall must reconcile the matcher onto a pre-existing entry"
     );
 }
 

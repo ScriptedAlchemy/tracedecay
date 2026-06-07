@@ -3,7 +3,14 @@
     "afterFileEdit": [
       {
         "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-after-file-edit",
+        "matcher": "Write",
         "timeout": 30
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-after-shell",
+        "timeout": 60
       }
     ],
     "beforeSubmitPrompt": [
@@ -12,10 +19,22 @@
         "timeout": 5
       }
     ],
+    "sessionStart": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-session-start",
+        "timeout": 5
+      }
+    ],
     "subagentStart": [
       {
         "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-subagent-start",
         "timeout": 5
+      }
+    ],
+    "workspaceOpen": [
+      {
+        "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-cursor-workspace-open",
+        "timeout": 60
       }
     ]
   },
