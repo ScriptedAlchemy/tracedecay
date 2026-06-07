@@ -201,6 +201,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             home: home.clone(),
                             tokensave_bin: bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
+                            profile: None,
                         };
                         if ag.install(&ctx).is_err() {
                             all_ok = false;
@@ -540,7 +541,16 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         Commands::Tool { name, args } => {
             tool_command::run(name, args).await?;
         }
-        Commands::Install { agent, local } => {
+        Commands::Install {
+            agent,
+            local,
+            profile,
+        } => {
+            if profile.is_some() && agent.as_deref() != Some("hermes") {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
+                });
+            }
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -564,6 +574,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home: home.clone(),
                     tokensave_bin: tokensave_bin.clone(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: profile.clone(),
                 };
                 let mut installed_names: Vec<String> = Vec::new();
 
@@ -612,6 +623,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home: home.clone(),
                     tokensave_bin: tokensave_bin.clone(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: profile.clone(),
                 };
                 ag.install(&ctx)?;
                 if !user_cfg.installed_agents.contains(&id) {
@@ -631,6 +643,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: profile.clone(),
                     };
                     ag.uninstall(&ctx)?;
                     removed_names.push(ag.name().to_string());
@@ -642,6 +655,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: profile.clone(),
                     };
                     ag.install(&ctx)?;
                     installed_names.push(ag.name().to_string());
@@ -698,6 +712,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         home: home.clone(),
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: None,
                     };
                     ag.install(&ctx)?;
                 }
@@ -721,6 +736,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     home,
                     tokensave_bin: String::new(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: None,
                 };
                 ag.uninstall(&ctx)?;
                 user_cfg.installed_agents.retain(|a| a != &id);
@@ -732,6 +748,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             home: home.clone(),
                             tokensave_bin: String::new(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
+                            profile: None,
                         };
                         ag.uninstall(&ctx).ok();
                     }
@@ -1225,6 +1242,7 @@ mod startup_tests {
         assert!(should_skip_agent_install_maintenance(&Commands::Install {
             agent: Some("kiro".to_string()),
             local: false,
+            profile: None,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(

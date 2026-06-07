@@ -13,6 +13,7 @@ pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
+pub mod hermes;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
@@ -34,6 +35,7 @@ pub use codex::CodexIntegration;
 pub use copilot::CopilotIntegration;
 pub use cursor::CursorIntegration;
 pub use gemini::GeminiIntegration;
+pub use hermes::HermesIntegration;
 pub use kilo::KiloIntegration;
 pub use kimi::KimiIntegration;
 pub use kiro::KiroIntegration;
@@ -111,6 +113,7 @@ pub struct InstallContext {
     pub home: PathBuf,
     pub tokensave_bin: String,
     pub tool_permissions: Vec<String>,
+    pub profile: Option<String>,
 }
 
 /// Context passed to [`AgentIntegration::healthcheck`].
@@ -132,6 +135,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "gemini" => Ok(Box::new(GeminiIntegration)),
         "copilot" => Ok(Box::new(CopilotIntegration)),
         "cursor" => Ok(Box::new(CursorIntegration)),
+        "hermes" => Ok(Box::new(HermesIntegration)),
         "zed" => Ok(Box::new(ZedIntegration)),
         "cline" => Ok(Box::new(ClineIntegration)),
         "roo-code" => Ok(Box::new(RooCodeIntegration)),
@@ -158,6 +162,7 @@ pub fn all_integrations() -> Vec<Box<dyn AgentIntegration>> {
         Box::new(GeminiIntegration),
         Box::new(CopilotIntegration),
         Box::new(CursorIntegration),
+        Box::new(HermesIntegration),
         Box::new(ZedIntegration),
         Box::new(ClineIntegration),
         Box::new(RooCodeIntegration),
@@ -178,6 +183,7 @@ pub fn available_integrations() -> Vec<&'static str> {
         "gemini",
         "copilot",
         "cursor",
+        "hermes",
         "zed",
         "cline",
         "roo-code",

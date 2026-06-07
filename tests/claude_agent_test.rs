@@ -15,6 +15,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
+        profile: None,
     }
 }
 
@@ -34,6 +35,7 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tokensave_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
+        profile: None,
     }
 }
 

@@ -88,6 +88,9 @@ pub enum Commands {
         /// Write project-local configuration in the current directory
         #[arg(long)]
         local: bool,
+        /// Hermes profile to install into (only used with --agent hermes)
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
