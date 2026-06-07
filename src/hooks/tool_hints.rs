@@ -9,8 +9,10 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HintAgent {
+    Claude,
     Cursor,
     Codex,
+    Kiro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
