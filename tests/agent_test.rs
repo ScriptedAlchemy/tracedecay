@@ -147,6 +147,10 @@ fn read_json(path: &Path) -> serde_json::Value {
     .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
 }
 
+fn expected_tokensave_bin() -> String {
+    env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
+}
+
 fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) {
     let mut node = json;
     for key in command_path {
@@ -154,9 +158,10 @@ fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) 
             .get(*key)
             .unwrap_or_else(|| panic!("missing key {key} in {json:?}"));
     }
+    let expected = expected_tokensave_bin();
     assert_eq!(
         node.as_str(),
-        Some(env!("CARGO_BIN_EXE_tokensave")),
+        Some(expected.as_str()),
         "local MCP config must use the resolved absolute tokensave executable"
     );
 }
@@ -414,8 +419,9 @@ fn test_local_install_supported_agents_write_project_paths() {
             );
             let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
             if !is_instruction_file && !is_cursor_permissions {
+                let expected = expected_tokensave_bin();
                 assert!(
-                    body.contains(env!("CARGO_BIN_EXE_tokensave")),
+                    body.contains(&expected),
                     "{agent} local config {} should use the resolved absolute tokensave executable",
                     path.display()
                 );
