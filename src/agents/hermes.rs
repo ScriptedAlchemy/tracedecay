@@ -70,7 +70,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mHermes integration\x1b[0m");
-        doctor_check_plugin(dc, &ctx.home);
+        doctor_check_plugin(dc, &ctx.home, &ctx.project_path);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -122,19 +122,62 @@ fn normalize_profile(profile: Option<&str>) -> Result<Option<String>> {
     Ok(Some(normalized))
 }
 
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
-    let plugin = hermes_plugin_dir(home, None).join("plugin.yaml");
-    if plugin.exists() {
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path) {
+    let candidates = hermes_healthcheck_plugin_paths(home, project_path);
+    let plugin = candidates.iter().find(|plugin| plugin.exists());
+    if let Some(plugin) = plugin {
         dc.pass(&format!(
             "Hermes tokensave plugin found at {}",
             plugin.display()
         ));
-    } else {
+    } else if let Some(plugin) = candidates.first() {
         dc.warn(&format!(
             "{} not found — run `tokensave install --agent hermes` if you use Hermes",
             plugin.display()
         ));
+    } else {
+        dc.warn("Hermes tokensave plugin not found — run `tokensave install --agent hermes` if you use Hermes");
     }
+}
+
+fn hermes_healthcheck_plugin_paths(home: &Path, project_path: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.push(hermes_home(home));
+
+    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
+        if !env_home.is_empty() {
+            roots.push(PathBuf::from(env_home));
+        }
+    }
+
+    roots.extend(hermes_profile_dirs(home));
+    roots.push(project_path.join(".hermes"));
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut plugins = Vec::new();
+    for root in roots {
+        let plugin = root.join("plugins/tokensave/plugin.yaml");
+        if seen.insert(plugin.clone()) {
+            plugins.push(plugin);
+        }
+    }
+    plugins
+}
+
+fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
+    let profiles_dir = hermes_home(home).join("profiles");
+    let Ok(entries) = std::fs::read_dir(&profiles_dir) else {
+        return Vec::new();
+    };
+    let mut profiles = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_type = entry.file_type().ok()?;
+            file_type.is_dir().then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    profiles.sort();
+    profiles
 }
 
 fn install_plugin(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {

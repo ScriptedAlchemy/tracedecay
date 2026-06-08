@@ -773,6 +773,136 @@ assert collector.provider.name == "tokensave"
 }
 
 #[test]
+fn test_hermes_generated_memory_provider_is_discovered_from_active_home() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let hermes_home = home.path().join(".hermes");
+    let plugin_dir = hermes_home.join("plugins/tokensave");
+    let script = plugin_dir.join("check_hermes_discovery.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+import types
+
+hermes_home = pathlib.Path(sys.argv[1])
+
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+    def get_config_schema(self):
+        return []
+
+    def save_config(self, values, hermes_home):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+
+def is_memory_provider_dir(path):
+    init_file = path / "__init__.py"
+    if not init_file.exists():
+        return False
+    source = init_file.read_text(errors="replace")[:8192]
+    return "register_memory_provider" in source or "MemoryProvider" in source
+
+def iter_user_provider_dirs():
+    plugins_dir = hermes_home / "plugins"
+    for child in sorted(plugins_dir.iterdir()):
+        if child.is_dir() and not child.name.startswith(("_", ".")) and is_memory_provider_dir(child):
+            yield child.name, child
+
+def load_provider(provider_dir):
+    parent_name = "_hermes_user_memory"
+    if parent_name not in sys.modules:
+        parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+        parent_spec.submodule_search_locations = []
+        sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+    module_name = f"{parent_name}.{provider_dir.name}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        provider_dir / "__init__.py",
+        submodule_search_locations=[str(provider_dir)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    class ProviderCollector:
+        def __init__(self):
+            self.provider = None
+        def register_memory_provider(self, provider):
+            self.provider = provider
+        def register_tool(self, *args, **kwargs):
+            pass
+        def register_hook(self, *args, **kwargs):
+            pass
+        def register_cli_command(self, *args, **kwargs):
+            pass
+
+    collector = ProviderCollector()
+    module.register(collector)
+    return collector.provider
+
+config = (hermes_home / "config.yaml").read_text()
+assert "memory:" in config
+assert "provider: tokensave" in config
+
+providers = dict(iter_user_provider_dirs())
+assert "tokensave" in providers
+provider = load_provider(providers["tokensave"])
+assert provider is not None
+assert isinstance(provider, MemoryProvider)
+assert provider.name == "tokensave"
+assert provider.is_available() is True
+assert provider.get_config_schema() == []
+provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
+assert provider.hermes_home == str(hermes_home)
+assert [schema["name"] for schema in provider.get_tool_schemas()] == ["fact_store", "fact_feedback"]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(hermes_home)
+        .output()
+        .expect("python3 should run Hermes memory provider discovery check");
+    assert!(
+        output.status.success(),
+        "Hermes-style memory provider discovery should find the generated tokensave provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_hermes_global_install_and_uninstall_plugin() {
     let home = TempDir::new().unwrap();
     let ctx = make_install_ctx(home.path());
@@ -2798,6 +2928,50 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: Some("work".to_string()),
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes profile install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize named profile installs"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_local_install_checks_project_hermes_home() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("hermes", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes local install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize project-local HERMES_HOME installs"
     );
 }
 
