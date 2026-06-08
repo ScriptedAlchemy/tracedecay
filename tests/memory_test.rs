@@ -730,19 +730,10 @@ async fn memory_status_repairs_missing_vectors_and_reports_stats() {
     clear_fact_vector(&cg, fact.fact_id).await;
 
     let status = cg.memory_status().await.unwrap();
-    let status_json = serde_json::to_value(&status).unwrap();
 
     assert_eq!(status.missing_vector_count, 0);
-    assert_eq!(
-        status_json["repair"]["missing_vectors_repaired"].as_u64(),
-        Some(1)
-    );
-    assert!(
-        status_json["repair"]["full_banks_rebuilt"]
-            .as_u64()
-            .unwrap_or_default()
-            >= 1
-    );
+    assert_eq!(status.repair.missing_vectors_repaired, 1);
+    assert!(status.repair.full_banks_rebuilt >= 1);
 }
 
 #[tokio::test]
