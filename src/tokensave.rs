@@ -3017,17 +3017,11 @@ impl TokenSave {
             missing_vectors_repaired += repaired;
         }
 
-        let dirty_banks_rebuilt = store.rebuild_dirty_banks().await?;
-        let full_banks_rebuilt = if missing_vectors_repaired > 0 {
-            store.rebuild_all_banks().await?
-        } else {
-            0
-        };
+        let banks_rebuilt = store.rebuild_dirty_banks().await?;
 
         Ok(MemoryRepairStats {
             missing_vectors_repaired,
-            dirty_banks_rebuilt,
-            full_banks_rebuilt,
+            banks_rebuilt,
         })
     }
 

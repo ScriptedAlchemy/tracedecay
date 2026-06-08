@@ -517,6 +517,7 @@ impl<'a> MemoryStore<'a> {
                     )
                     .await
                     .map_err(|e| db_error("compute_missing_vectors", e))?;
+                self.mark_fact_banks_dirty(fact.category).await?;
             }
         }
 

@@ -3655,7 +3655,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
         "status should report derived vector repairs: {status}"
     );
     assert!(
-        status["memory"]["repair"]["full_banks_rebuilt"]
+        status["memory"]["repair"]["banks_rebuilt"]
             .as_u64()
             .unwrap_or_default()
             >= 1,

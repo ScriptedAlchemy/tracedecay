@@ -146,8 +146,7 @@ pub struct FeedbackResult {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRepairStats {
     pub missing_vectors_repaired: usize,
-    pub dirty_banks_rebuilt: usize,
-    pub full_banks_rebuilt: usize,
+    pub banks_rebuilt: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

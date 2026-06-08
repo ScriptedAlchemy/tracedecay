@@ -733,7 +733,7 @@ async fn memory_status_repairs_missing_vectors_and_reports_stats() {
 
     assert_eq!(status.missing_vector_count, 0);
     assert_eq!(status.repair.missing_vectors_repaired, 1);
-    assert!(status.repair.full_banks_rebuilt >= 1);
+    assert!(status.repair.banks_rebuilt >= 1);
 }
 
 #[tokio::test]
