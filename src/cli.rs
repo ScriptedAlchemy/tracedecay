@@ -143,6 +143,9 @@ pub enum Commands {
     /// Cursor workspaceOpen hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-workspace-open", hide = true)]
     HookCursorWorkspaceOpen,
+    /// Cursor stop hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-stop", hide = true)]
+    HookCursorStop,
     /// Codex SessionStart hook handler (called by Codex, not by users directly)
     #[command(name = "hook-codex-session-start", hide = true)]
     HookCodexSessionStart,
