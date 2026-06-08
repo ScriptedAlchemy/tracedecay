@@ -1157,9 +1157,11 @@ fn test_codex_install_creates_config() {
         let section_start = content.find(&section).unwrap_or_else(|| {
             panic!("Codex config should include auto-approval section {section}")
         });
-        let after_section = &content[section_start..];
+        let section_body = content[section_start..]
+            .split_once("\n[")
+            .map_or(&content[section_start..], |(body, _)| body);
         assert!(
-            after_section.contains("approval_mode = \"auto\""),
+            section_body.contains("approval_mode = \"auto\""),
             "Codex should auto-approve tokensave tool {tool}"
         );
     }
