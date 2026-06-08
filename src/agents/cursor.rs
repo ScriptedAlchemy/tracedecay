@@ -396,8 +396,7 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
     EMBEDDED_PLUGIN_FILES
         .iter()
-        .map(|&(relative, _)| relative)
-        .map(|relative| install_dir.join(relative))
+        .map(|&(relative, _)| install_dir.join(relative))
         .collect()
 }
 
