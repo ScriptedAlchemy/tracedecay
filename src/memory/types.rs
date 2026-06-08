@@ -144,6 +144,12 @@ pub struct FeedbackResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemoryRepairStats {
+    pub missing_vectors_repaired: usize,
+    pub banks_rebuilt: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStatus {
     pub fact_count: usize,
     pub entity_count: usize,
@@ -160,6 +166,7 @@ pub struct MemoryStatus {
     pub unhelpful_count: usize,
     pub missing_vector_count: usize,
     pub legacy_backfill_complete: bool,
+    pub repair: MemoryRepairStats,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

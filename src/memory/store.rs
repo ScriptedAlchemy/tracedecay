@@ -565,21 +565,24 @@ impl<'a> MemoryStore<'a> {
             if let Some(fact) = self.get_fact(*fact_id).await? {
                 let vector =
                     self.encode_vector(&fact.content, &fact.entities, "compute_missing_vectors")?;
+                // hrr_* are derived fields; recomputing them must not touch updated_at,
+                // which retrieval uses for temporal decay and tie-breaking. Bumping it here
+                // would let a read-only memory_status repair silently promote stale facts.
                 self.conn
                     .execute(
                         "UPDATE memory_facts
-                         SET hrr_vector = ?1, hrr_algebra = ?2, hrr_dim = ?3, updated_at = ?4
-                         WHERE fact_id = ?5",
+                         SET hrr_vector = ?1, hrr_algebra = ?2, hrr_dim = ?3
+                         WHERE fact_id = ?4",
                         params![
                             vector,
                             HRR_ALGEBRA,
                             HolographicEncoder::DIMENSIONS as i64,
-                            current_timestamp(),
                             *fact_id,
                         ],
                     )
                     .await
                     .map_err(|e| db_error("compute_missing_vectors", e))?;
+                self.mark_fact_banks_dirty(fact.category).await?;
             }
         }
 

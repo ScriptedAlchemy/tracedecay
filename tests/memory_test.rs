@@ -96,6 +96,50 @@ async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
         .map(|row| row.get::<i64>(0).unwrap())
 }
 
+async fn clear_fact_vector(cg: &TokenSave, fact_id: i64) {
+    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    db.close();
+}
+
+async fn set_fact_updated_at(cg: &TokenSave, fact_id: i64, updated_at: i64) {
+    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memory_facts SET updated_at = ?2 WHERE fact_id = ?1",
+            libsql::params![fact_id, updated_at],
+        )
+        .await
+        .unwrap();
+    db.close();
+}
+
+async fn fact_updated_at(cg: &TokenSave, fact_id: i64) -> i64 {
+    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT updated_at FROM memory_facts WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    let updated_at = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    db.close();
+    updated_at
+}
+
 async fn fact_hrr_vector(db: &Database, fact_id: i64) -> Vec<f64> {
     let mut rows = db
         .conn()
@@ -777,6 +821,59 @@ async fn memory_status_handles_empty_fact_store() {
     let status = cg.memory_status().await.unwrap();
     assert_eq!(status.fact_count, 0);
     assert_eq!(status.missing_vector_count, 0);
+}
+
+#[tokio::test]
+async fn memory_status_repairs_missing_vectors_and_reports_stats() {
+    let (_tmp, cg) = make_project().await;
+    let fact = cg
+        .add_fact(AddFactRequest {
+            content: "Repair missing derived vector before status reports".to_string(),
+            category: MemoryCategory::Project,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.8),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    clear_fact_vector(&cg, fact.fact_id).await;
+
+    let status = cg.memory_status().await.unwrap();
+
+    assert_eq!(status.missing_vector_count, 0);
+    assert_eq!(status.repair.missing_vectors_repaired, 1);
+    assert!(status.repair.banks_rebuilt >= 1);
+}
+
+#[tokio::test]
+async fn memory_status_repair_preserves_fact_updated_at() {
+    let (_tmp, cg) = make_project().await;
+    let fact = cg
+        .add_fact(AddFactRequest {
+            content: "Status repair must not bump fact updated_at".to_string(),
+            category: MemoryCategory::Project,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.8),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    clear_fact_vector(&cg, fact.fact_id).await;
+    set_fact_updated_at(&cg, fact.fact_id, 1000).await;
+
+    let status = cg.memory_status().await.unwrap();
+    assert_eq!(status.missing_vector_count, 0);
+    assert_eq!(status.repair.missing_vectors_repaired, 1);
+
+    assert_eq!(
+        fact_updated_at(&cg, fact.fact_id).await,
+        1000,
+        "status-triggered derived-vector repair must not change fact updated_at"
+    );
 }
 
 #[tokio::test]

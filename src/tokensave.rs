@@ -17,12 +17,14 @@ use crate::db::Database;
 use crate::errors::{Result, TokenSaveError};
 use crate::extraction::LanguageRegistry;
 use crate::graph::{GraphQueryManager, GraphTraverser};
+use crate::memory::encoding::HolographicEncoder;
 use crate::memory::retrieval::FactRetriever;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
     AddFactRequest, ContradictionResult, FactRecord, FactSearchResult, FeedbackRequest,
-    FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest, UpdateFactRequest,
+    FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus, SearchFactsRequest,
+    UpdateFactRequest,
 };
 use crate::resolution::ReferenceResolver;
 use crate::sync;
@@ -3004,10 +3006,30 @@ impl TokenSave {
             .await
     }
 
+    async fn repair_derived_memory(&self) -> Result<MemoryRepairStats> {
+        let store = MemoryStore::new(self.db.conn());
+        let mut missing_vectors_repaired = 0;
+        loop {
+            let repaired = store.compute_missing_vectors(500).await?;
+            if repaired == 0 {
+                break;
+            }
+            missing_vectors_repaired += repaired;
+        }
+
+        let banks_rebuilt = store.rebuild_dirty_banks().await?;
+
+        Ok(MemoryRepairStats {
+            missing_vectors_repaired,
+            banks_rebuilt,
+        })
+    }
+
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
         let operation = "memory_status";
         let conn = self.db.conn();
-        MemoryStore::new(conn).rebuild_dirty_banks().await?;
+        let repair = self.repair_derived_memory().await?;
+        let hrr_dim = HolographicEncoder::DIMENSIONS;
         let mut fact_rows = conn
             .query("SELECT trust_score FROM memory_facts", ())
             .await
@@ -3057,9 +3079,13 @@ impl TokenSave {
             .query(
                 "SELECT COALESCE(SUM(helpful_count), 0),
                         COALESCE(SUM(unhelpful_count), 0),
-                        COALESCE(SUM(CASE WHEN hrr_vector IS NULL THEN 1 ELSE 0 END), 0)
+                        COALESCE(SUM(CASE
+                            WHEN hrr_vector IS NULL
+                              OR hrr_algebra != 'amari_fhrr'
+                              OR hrr_dim != ?1
+                            THEN 1 ELSE 0 END), 0)
                  FROM memory_facts",
-                (),
+                libsql::params![hrr_dim as i64],
             )
             .await
             .map_err(|e| memory_database_error(operation, e))?;
@@ -3085,7 +3111,6 @@ impl TokenSave {
             .await
             .map_err(row_err)?
             .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let hrr_dim = 2048_usize;
         let estimated_capacity = (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize;
         Ok(MemoryStatus {
             fact_count,
@@ -3103,6 +3128,7 @@ impl TokenSave {
             unhelpful_count: unhelpful_count as usize,
             missing_vector_count: missing_vector_count as usize,
             legacy_backfill_complete: backfilled_count > 0,
+            repair,
         })
     }
 }
