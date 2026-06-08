@@ -1,11 +1,7 @@
 {
   "mcpServers": {
     "tokensave": {
-      "args": [
-        "serve"
-      ],
-      "command": "/home/zack/projects/tokensave/target/debug/tokensave",
-      "type": "stdio"
+      "command": "/home/zack/projects/tokensave/scripts/tokensave-dev-mcp.sh"
     }
   }
 }

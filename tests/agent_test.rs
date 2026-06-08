@@ -208,11 +208,15 @@ fn test_local_install_cursor_writes_project_config_only() {
     assert_command_is_tokensave(&config, &["mcpServers", "tokensave", "command"]);
     assert_eq!(
         config["mcpServers"]["tokensave"]["args"],
-        serde_json::json!(["serve"])
+        serde_json::json!(["serve", "--path", "."])
     );
     assert_eq!(
         config["mcpServers"]["tokensave"]["type"],
         serde_json::json!("stdio")
+    );
+    assert!(
+        config["mcpServers"]["tokensave"].get("env").is_none(),
+        "local Cursor config should not need env flags for repo-local mode"
     );
 
     let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
@@ -232,26 +236,13 @@ fn test_local_install_cursor_writes_project_config_only() {
         .as_array()
         .expect("mcpAllowlist should be an array");
     let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    for tool in read_only_tool_names() {
+    for tool in tool_names() {
         let expected = format!("tokensave:{tool}");
         assert!(
             allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should allow read-only MCP tool {expected}"
+            "Cursor permissions should allow MCP tool {expected}"
         );
     }
-    for mutating in [
-        "tokensave_str_replace",
-        "tokensave_multi_str_replace",
-        "tokensave_insert_at",
-        "tokensave_ast_grep_rewrite",
-    ] {
-        let denied = format!("tokensave:{mutating}");
-        assert!(
-            !allow_strs.contains(&denied.as_str()),
-            "Cursor permissions should not auto-allow mutating MCP tool {denied}"
-        );
-    }
-
     let hooks_path = project.path().join(".cursor/hooks.json");
     assert!(
         hooks_path.exists(),
@@ -340,6 +331,46 @@ fn test_local_install_cursor_writes_project_config_only() {
     assert!(
         !home.path().join(".tokensave/config.toml").exists(),
         "local install must not create or mutate user-level install tracking"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_refreshes_memory_permissions() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).unwrap();
+    std::fs::write(
+        cursor_dir.join("permissions.json"),
+        r#"{
+  "mcpAllowlist": [
+    "other:custom_tool",
+    "tokensave:tokensave_not_a_real_tool",
+    "tokensave:tokensave_str_replace"
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let permissions = read_json(&cursor_dir.join("permissions.json"));
+    let allow = permissions["mcpAllowlist"]
+        .as_array()
+        .expect("mcpAllowlist should be an array");
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    assert!(allow_strs.contains(&"other:custom_tool"));
+    for tool in tool_names() {
+        let expected = format!("tokensave:{tool}");
+        assert!(
+            allow_strs.contains(&expected.as_str()),
+            "Cursor permissions should refresh every current tokensave tool {expected}"
+        );
+    }
+    assert!(
+        !allow_strs.contains(&"tokensave:tokensave_not_a_real_tool"),
+        "unknown tokensave permissions should be pruned"
     );
 }
 
@@ -832,6 +863,28 @@ fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_rejects_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    let output = run_local_install("cursor", project.path(), home.path());
+    assert!(
+        !output.status.success(),
+        "local Cursor install should reject symlinked .cursor directories"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "error should explain the symlink refusal, got:\n{stderr}"
+    );
+}
+
 #[test]
 fn test_local_install_supported_agents_write_project_paths() {
     let cases = [
@@ -1006,6 +1059,14 @@ fn test_claude_install_creates_config() {
         settings["permissions"]["allow"].is_array(),
         "permissions.allow should be an array"
     );
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    for perm in expected_tool_perms() {
+        assert!(
+            allow_strs.contains(&perm.as_str()),
+            "permissions.allow should contain {perm}"
+        );
+    }
 
     // Check CLAUDE.md exists with tokensave rules
     let claude_md = home.join(".claude/CLAUDE.md");
@@ -1072,9 +1133,26 @@ fn test_codex_install_creates_config() {
         "config.toml should contain [mcp_servers.tokensave]"
     );
     assert!(
+        content.contains("TOKENSAVE_ENABLE_GLOBAL_DB = \"1\""),
+        "global Codex config should opt into user-level global accounting"
+    );
+    assert!(
         content.contains("\"serve\""),
         "config.toml should contain \"serve\" in args"
     );
+    for tool in tool_names() {
+        let section = format!("[mcp_servers.tokensave.tools.{tool}]");
+        let section_start = content.find(&section).unwrap_or_else(|| {
+            panic!("Codex config should include auto-approval section {section}")
+        });
+        let section_body = content[section_start..]
+            .split_once("\n[")
+            .map_or(&content[section_start..], |(body, _)| body);
+        assert!(
+            section_body.contains("approval_mode = \"auto\""),
+            "Codex should auto-approve tokensave tool {tool}"
+        );
+    }
 
     // Check AGENTS.md
     let agents_md = home.join(".codex/AGENTS.md");
@@ -1169,6 +1247,18 @@ fn test_codex_local_install_writes_hooks() {
     let project = TempDir::new().unwrap();
 
     assert_local_install_success("codex", project.path(), home.path());
+
+    let config_path = project.path().join(".codex/config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("args = [\n    \"serve\",\n    \"--path\",\n    \".\",\n]"),
+        "local Codex config should pin serve to the project root with --path ."
+    );
+    assert!(
+        !config.contains("TOKENSAVE_DISABLE_GLOBAL_DB")
+            && !config.contains("TOKENSAVE_ENABLE_GLOBAL_DB"),
+        "local Codex config should not need env flags for repo-local mode"
+    );
 
     let hooks_path = project.path().join(".codex/hooks.json");
     assert!(
@@ -1366,6 +1456,10 @@ fn test_cursor_install_creates_config() {
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
     assert!(content["mcpServers"]["tokensave"].is_object());
+    assert_eq!(
+        content["mcpServers"]["tokensave"]["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"],
+        serde_json::json!("1")
+    );
 }
 
 #[test]
@@ -1496,6 +1590,12 @@ fn test_copilot_install_creates_config() {
     let cli_content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cli_config).unwrap()).unwrap();
     assert!(cli_content["mcpServers"]["tokensave"].is_object());
+
+    let cli_prompt = home.join(".copilot/copilot-instructions.md");
+    let prompt = std::fs::read_to_string(&cli_prompt).unwrap();
+    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("sensitive or proprietary code"));
 }
 
 #[test]
@@ -1532,6 +1632,9 @@ fn test_vibe_install_creates_config() {
     );
     let prompt = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("tokensave"));
+    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("sensitive or proprietary code"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2195,6 +2298,48 @@ fn test_healthcheck_codex_after_install() {
 }
 
 #[test]
+fn test_healthcheck_codex_local_install_checks_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("codex", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "local Codex healthcheck should pass without global ~/.codex config"
+    );
+}
+
+#[test]
+fn test_healthcheck_codex_ignores_unrelated_project_agents_md() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "Project-specific agent instructions without tokensave.\n",
+    )
+    .unwrap();
+    let ctx = make_install_ctx(home.path());
+    CodexIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "global Codex healthcheck should be used when project AGENTS.md is unrelated"
+    );
+}
+
+#[test]
 fn test_healthcheck_cursor_clean_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
@@ -2208,6 +2353,24 @@ fn test_healthcheck_cursor_clean_install() {
     };
     CursorIntegration.healthcheck(&mut dc, &hctx);
     assert_eq!(dc.issues, 0, "clean Cursor install should have no issues");
+}
+
+#[test]
+fn test_healthcheck_cursor_local_install_checks_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CursorIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
 }
 
 #[test]
@@ -2865,10 +3028,13 @@ fn test_read_only_tool_names_excludes_mutating_tools() {
         "tokensave_multi_str_replace",
         "tokensave_insert_at",
         "tokensave_ast_grep_rewrite",
+        "tokensave_replace_symbol",
+        "tokensave_insert_at_symbol",
+        "tokensave_run_affected_tests",
         "tokensave_session_start",
         "tokensave_session_end",
-        "tokensave_record_decision",
-        "tokensave_record_code_area",
+        "tokensave_fact_store",
+        "tokensave_fact_feedback",
     ] {
         assert!(
             !read_only_set.contains(mutating),

@@ -122,6 +122,21 @@ pub struct HealthcheckContext {
     pub project_path: PathBuf,
 }
 
+/// Where an MCP server registration is being written.
+///
+/// Replaces the previous `(is_local_install, enable_global_db)` boolean pair
+/// in the per-agent `install_mcp_server` helpers, which only ever took two of
+/// the four combinations. Encoding the intent as an enum makes the two invalid
+/// combinations unrepresentable and lets each agent map the scope to its own
+/// args/env wiring via an exhaustive `match`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallScope {
+    /// User-global install: `serve` with the global DB enabled.
+    Global,
+    /// Project-local install: `serve --path .` with no global DB.
+    ProjectLocal,
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------

@@ -6,6 +6,9 @@ use tokensave::tokensave::TokenSave;
 /// Best-effort: register this project in the user-level global DB and
 /// accumulate the token-saved delta into the pending upload counter.
 pub(crate) async fn update_global_db(cg: &TokenSave) {
+    if !tokensave::user_config::UserConfig::exists() {
+        return;
+    }
     let tokens = cg.get_tokens_saved().await.unwrap_or(0);
     if let Some(gdb) = tokensave::global_db::GlobalDb::open().await {
         let previous = gdb.get_project_tokens(cg.project_root()).await;
@@ -15,7 +18,7 @@ pub(crate) async fn update_global_db(cg: &TokenSave) {
         if tokens > previous {
             let mut config = tokensave::user_config::UserConfig::load();
             config.pending_upload += tokens - previous;
-            config.save();
+            config.save_if_exists();
         }
     }
 }
@@ -71,7 +74,7 @@ pub(crate) fn check_for_update(
     } else if let Some(v) = tokensave::cloud::fetch_latest_version() {
         config.cached_latest_version = v.clone();
         config.last_version_check_at = now;
-        config.save();
+        config.save_if_exists();
         v
     } else {
         return;
@@ -92,7 +95,7 @@ pub(crate) fn check_for_update(
         );
         if !skip_suppression {
             config.last_version_warning_at = now;
-            config.save();
+            config.save_if_exists();
         }
     }
 }
