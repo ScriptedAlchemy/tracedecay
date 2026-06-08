@@ -273,9 +273,7 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
         })?;
     } else {
         for path in cursor_plugin_managed_paths(install_dir) {
-            if path.exists() {
-                std::fs::remove_file(&path).ok();
-            }
+            std::fs::remove_file(&path).ok();
         }
     }
     Ok(())
