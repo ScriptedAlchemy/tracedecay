@@ -13,7 +13,8 @@ fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path::PathBuf {
-    home.join(".config/Code/User/globalStorage")
+    tokensave::agents::vscode_data_dir(home)
+        .join("User/globalStorage")
         .join(extension_id)
         .join("tasks")
 }
