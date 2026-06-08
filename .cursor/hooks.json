@@ -32,6 +32,12 @@
         "timeout": 5
       }
     ],
+    "stop": [
+      {
+        "command": "cargo run --quiet --manifest-path ./Cargo.toml -- hook-cursor-stop",
+        "timeout": 30
+      }
+    ],
     "subagentStart": [
       {
         "command": "cargo run --quiet --manifest-path ./Cargo.toml -- hook-cursor-subagent-start",
