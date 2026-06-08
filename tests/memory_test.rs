@@ -55,6 +55,23 @@ async fn dirty_bank_names(db: &Database) -> Vec<String> {
     names
 }
 
+async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> i64 {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT updated_at FROM memory_bank_dirty WHERE bank_name = ?1",
+            libsql::params![bank_name],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .expect("dirty bank should exist")
+        .get::<i64>(0)
+        .unwrap()
+}
+
 async fn memory_bank_count(db: &Database) -> i64 {
     let mut rows = db
         .conn()
@@ -349,6 +366,75 @@ async fn memory_store_marks_and_rebuilds_dirty_banks() {
     assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
     assert!(dirty_bank_names(&db).await.is_empty());
     assert_eq!(memory_bank_count(&db).await, 0);
+}
+
+#[tokio::test]
+async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    store
+        .add_fact(
+            fact_request(
+                "Project facts may be updated while banks rebuild",
+                MemoryCategory::Project,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let before = dirty_bank_updated_at(&db, "project").await;
+
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER mark_project_dirty_after_bank_insert
+                AFTER INSERT ON memory_banks
+                WHEN NEW.bank_name = 'project'
+                BEGIN
+                    UPDATE memory_bank_dirty
+                    SET updated_at = updated_at + 100
+                    WHERE bank_name = 'project';
+                END;",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
+    assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
+    assert!(dirty_bank_updated_at(&db, "project").await > before);
+}
+
+#[tokio::test]
+async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    store
+        .add_fact(
+            fact_request("First project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let first = dirty_bank_updated_at(&db, "project").await;
+
+    store
+        .add_fact(
+            fact_request("Second project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let second = dirty_bank_updated_at(&db, "project").await;
+
+    // The dirty marker is an optimistic-concurrency token, so re-marking a bank must move it
+    // strictly forward even when both writes land in the same wall-clock second; otherwise a
+    // re-dirty during a rebuild snapshot could be silently cleared.
+    assert!(
+        second > first,
+        "dirty marker must strictly increase on re-dirty (first={first}, second={second})"
+    );
 }
 
 #[tokio::test]

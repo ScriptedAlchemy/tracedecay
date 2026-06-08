@@ -299,6 +299,15 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
     }
 }
 
+/// Compatibility marker after v12 was exposed on the PR stack.
+///
+/// The dirty-bank schema now lives in the folded v11/fresh schema, but existing
+/// databases may already carry `user_version = 12`. Keep the version monotonic
+/// so later schema work can safely use v13 instead of reusing an exposed number.
+async fn migrate_v12(_conn: &Connection) -> Result<()> {
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Migration V1: initial schema
 // ---------------------------------------------------------------------------
@@ -1011,26 +1020,6 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
         operation: operation.to_string(),
     })?;
 
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Migration V12: dirty bank tracking for lazy memory-bank rebuilds
-// ---------------------------------------------------------------------------
-
-async fn migrate_v12(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_bank_dirty (
-            bank_name TEXT PRIMARY KEY,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        )",
-        (),
-    )
-    .await
-    .map_err(|e| TokenSaveError::Database {
-        message: format!("v12: failed to create memory_bank_dirty table: {e}"),
-        operation: "migrate_v12".to_string(),
-    })?;
     Ok(())
 }
 

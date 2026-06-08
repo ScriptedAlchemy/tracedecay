@@ -147,7 +147,7 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Hermes requires `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching with project-local plugins. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow the full local tokensave MCP surface for that workspace. The project hooks are:
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Hermes requires `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching with project-local plugins. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow the local tokensave MCP surface for that workspace. The project hooks are:
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
 - `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
@@ -260,95 +260,11 @@ tokensave memory is stored in the per-project `.tokensave/tokensave.db` as durab
 |------|---------|
 | `tokensave_fact_store` | Store a fact with entities, source, reason, related facts, contradictions, tags, and an initial confidence signal |
 | `tokensave_fact_feedback` | Record user or agent feedback that raises, lowers, supersedes, or contradicts a fact's trust score |
-| `tokensave_memory_status` | Inspect fact-store readiness, schema version, entity counts, trust-score distribution, and vector/backfill health |
+| `tokensave_memory_status` | Repair dirty memory banks, then inspect fact-store readiness, entity counts, trust-score distribution, and vector/backfill health |
 
 Trust scoring is fact-level, not just text-level. The store combines source metadata, feedback history, retrieval counters, contradiction scans, and recency into the returned score components. Entity recall returns facts linked to the requested symbol, file, subsystem, or named concept with `why` metadata so agents can explain why a memory was surfaced.
 
-### Fact-store JSON schemas
-
-`tokensave_fact_store` request schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "action": {
-      "type": "string",
-      "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
-      "description": "Fact-store action to perform."
-    },
-    "content": {
-      "type": "string",
-      "description": "Durable fact statement for add/update actions."
-    },
-    "query": {
-      "type": "string",
-      "description": "Search query for search actions."
-    },
-    "entity": { "type": "string" },
-    "entities": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
-    "category": { "type": "string", "enum": ["general", "user_pref", "project", "tool", "decision", "code_area"] },
-    "source": {
-      "type": "string",
-      "description": "Where the fact came from."
-    },
-    "trust": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1,
-      "description": "Initial or replacement trust score."
-    },
-    "trust_delta": { "type": "number" },
-    "threshold": { "type": "number" },
-    "limit": { "type": "number" },
-    "metadata": { "type": "object" },
-    "tags": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
-  },
-  "required": ["action"]
-}
-```
-
-`tokensave_fact_feedback` request schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "fact_id": {
-      "oneOf": [{ "type": "number" }, { "type": "string" }],
-      "description": "Numeric fact_id returned by tokensave_fact_store or recall. Numeric strings are accepted."
-    },
-    "action": {
-      "type": "string",
-      "enum": ["helpful", "unhelpful"],
-      "description": "Feedback event to apply to the fact's trust score."
-    },
-    "source": {
-      "type": "string",
-      "description": "Optional feedback source label."
-    },
-    "note": {
-      "type": "string",
-      "description": "Optional note explaining the feedback."
-    },
-    "trust_delta": {
-      "type": "number",
-      "description": "Compatibility field; built-in helpful/unhelpful deltas are applied."
-    }
-  },
-  "required": ["fact_id"]
-}
-```
-
-Provide either `"action": "helpful"|"unhelpful"` or the compatibility shorthand
-`"helpful": true` / `"unhelpful": true`.
+See [docs/USER-GUIDE.md](docs/USER-GUIDE.md#memory-and-fact-recall) for common memory payloads. For the exact current input schema, inspect the live MCP descriptors for `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status`.
 
 ---
 
@@ -474,7 +390,7 @@ Different from the criterion bench above: criterion measures per-iteration laten
 
 ## 70+ MCP Tools
 
-The server exposes more than 70 tools (one fewer when the optional `ast-grep` binary is not on `PATH`); the tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory-recording tools also mutate local `.tokensave` state and are annotated as non-read-only. The three core tools (`tokensave_context`, `tokensave_search`, `tokensave_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
+The server exposes more than 70 tools (one fewer when the optional `ast-grep` binary is not on `PATH`); the tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory tools also mutate local `.tokensave` state and are annotated as non-read-only. The three core tools (`tokensave_context`, `tokensave_search`, `tokensave_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
 
 ### Discovery
 

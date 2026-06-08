@@ -672,25 +672,27 @@ impl<'a> MemoryStore<'a> {
         let mut rows = self
             .conn
             .query(
-                "SELECT bank_name FROM memory_bank_dirty ORDER BY bank_name",
+                "SELECT bank_name, updated_at FROM memory_bank_dirty ORDER BY bank_name",
                 (),
             )
             .await
             .map_err(|e| db_error("rebuild_dirty_banks", e))?;
-        let mut bank_names = Vec::new();
+        let mut dirty_banks = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| db_error("rebuild_dirty_banks", e))?
         {
-            bank_names.push(
+            dirty_banks.push((
                 row.get::<String>(0)
                     .map_err(|e| db_error("rebuild_dirty_banks", e))?,
-            );
+                row.get::<i64>(1)
+                    .map_err(|e| db_error("rebuild_dirty_banks", e))?,
+            ));
         }
 
         let mut rebuilt = 0;
-        for bank_name in bank_names {
+        for (bank_name, dirty_updated_at) in dirty_banks {
             if bank_name == "all" {
                 self.rebuild_bank("all", None).await?;
             } else {
@@ -699,8 +701,9 @@ impl<'a> MemoryStore<'a> {
             }
             self.conn
                 .execute(
-                    "DELETE FROM memory_bank_dirty WHERE bank_name = ?1",
-                    params![bank_name],
+                    "DELETE FROM memory_bank_dirty
+                     WHERE bank_name = ?1 AND updated_at = ?2",
+                    params![bank_name, dirty_updated_at],
                 )
                 .await
                 .map_err(|e| db_error("rebuild_dirty_banks", e))?;
@@ -973,11 +976,17 @@ impl<'a> MemoryStore<'a> {
     }
 
     async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
+        // `updated_at` doubles as an optimistic-concurrency token: `rebuild_dirty_banks` only
+        // clears a marker whose value still matches the row it snapshotted. Since
+        // `current_timestamp()` is second-resolution, a re-dirty within the same second as the
+        // snapshot would reuse that value and be silently cleared, dropping the change. Force the
+        // token strictly forward on every mark so same-second re-dirties are always preserved.
         self.conn
             .execute(
                 "INSERT INTO memory_bank_dirty (bank_name, updated_at)
                  VALUES (?1, ?2)
-                 ON CONFLICT(bank_name) DO UPDATE SET updated_at = excluded.updated_at",
+                 ON CONFLICT(bank_name) DO UPDATE SET
+                     updated_at = max(excluded.updated_at, memory_bank_dirty.updated_at + 1)",
                 params![bank_name, current_timestamp()],
             )
             .await
