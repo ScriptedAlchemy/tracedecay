@@ -156,6 +156,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
     ),
     (
+        "skills/memorizing-subject/SKILL.md",
+        include_str!("../../cursor-plugin/skills/memorizing-subject/SKILL.md"),
+    ),
+    (
         "skills/porting-code/SKILL.md",
         include_str!("../../cursor-plugin/skills/porting-code/SKILL.md"),
     ),
@@ -190,6 +194,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (
         "agents/code-health-auditor.md",
         include_str!("../../cursor-plugin/agents/code-health-auditor.md"),
+    ),
+    (
+        "commands/memorize-subject.md",
+        include_str!("../../cursor-plugin/commands/memorize-subject.md"),
     ),
     (
         "commands/tokensave-arch.md",
