@@ -86,13 +86,13 @@ AI coding agents waste tokens exploring codebases. Every grep, glob, and file re
 **Homebrew (macOS):**
 
 ```bash
-brew install aovestdipaperino/tap/tokensave
+brew install ScriptedAlchemy/tap/tokensave
 ```
 
 **Scoop (Windows):**
 
 ```powershell
-scoop bucket add tokensave https://github.com/aovestdipaperino/scoop-bucket
+scoop bucket add tokensave https://github.com/ScriptedAlchemy/scoop-bucket
 scoop install tokensave
 ```
 
@@ -106,7 +106,7 @@ cargo install tokensave --no-default-features    # lite (smallest binary)
 
 **Prebuilt binaries (Linux, Windows, macOS):**
 
-Download from the [latest release](https://github.com/aovestdipaperino/tokensave/releases/latest) and place the binary in your `PATH`.
+Download from the [latest release](https://github.com/ScriptedAlchemy/tokensave/releases/latest) and place the binary in your `PATH`.
 
 | Platform | Archive |
 |---|---|
@@ -927,11 +927,11 @@ cargo clippy --all
 
 ## Star History
 
-<a href="https://www.star-history.com/#aovestdipaperino/tokensave&Date">
+<a href="https://www.star-history.com/#ScriptedAlchemy/tokensave&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=aovestdipaperino/tokensave&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=aovestdipaperino/tokensave&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aovestdipaperino/tokensave&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date" />
  </picture>
 </a>
 

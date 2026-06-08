@@ -11,7 +11,7 @@ use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TokenSaveError};
 use crate::user_config::UserConfig;
 
-const GITHUB_REPO: &str = "aovestdipaperino/tokensave";
+const GITHUB_REPO: &str = "ScriptedAlchemy/tokensave";
 
 // Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
