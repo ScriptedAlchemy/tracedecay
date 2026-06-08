@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.aovestdipaperino/tokensave",
+  "name": "io.github.ScriptedAlchemy/tokensave",
   "title": "TokenSave",
   "description": "Code intelligence for 15+ languages: semantic graph queries instead of file reads. 37 MCP tools.",
   "repository": {
-    "url": "https://github.com/aovestdipaperino/tokensave",
+    "url": "https://github.com/ScriptedAlchemy/tokensave",
     "source": "github"
   },
-  "websiteUrl": "https://github.com/aovestdipaperino/tokensave",
+  "websiteUrl": "https://github.com/ScriptedAlchemy/tokensave",
   "version": "4.0.2",
   "packages": [
     {
