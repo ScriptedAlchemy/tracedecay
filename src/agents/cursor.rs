@@ -27,7 +27,7 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_cursor_plugin(&ctx.home)?;
+        install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -49,7 +49,7 @@ impl AgentIntegration for CursorIntegration {
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        install_cursor_plugin(&ctx.home)?;
+        install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
         uninstall_mcp_server(&cursor_dir.join("mcp.json"));
         remove_legacy_project_hooks(&cursor_dir.join("hooks.json"))?;
         remove_legacy_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
@@ -75,10 +75,7 @@ impl AgentIntegration for CursorIntegration {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
         let project_cursor = ctx.project_path.join(".cursor");
         doctor_check_plugin(dc, &ctx.home);
-        if project_cursor.join("mcp.json").exists()
-            || project_cursor.join("hooks.json").exists()
-            || project_cursor.join("rules/tokensave.mdc").exists()
-        {
+        if legacy_project_cursor_has_tokensave(&project_cursor) {
             dc.warn(
                 "legacy project Cursor MCP/hooks/rule files are present; rerun \
                  `tokensave install --local --agent cursor` to remove tokensave-owned entries",
@@ -104,11 +101,13 @@ impl AgentIntegration for CursorIntegration {
 // Plugin install helpers
 // ---------------------------------------------------------------------------
 
-/// Every file in the Cursor plugin bundle, embedded into the binary so released
-/// installs can recreate the plugin when the repo `cursor-plugin/` source dir is
-/// not present to symlink. Each entry is `(relative_path, file_contents)`. This
-/// is the single source of truth for both the embedded writer and the set of
-/// paths we manage for uninstall.
+/// Every file in the Cursor plugin bundle, embedded into the binary so installs
+/// work from a released binary without the repo `cursor-plugin/` source tree.
+/// Each entry is `(relative_path, file_contents)`. This is the single source of
+/// truth for the embedded writer, the managed-path set used for uninstall, and
+/// the coverage-guard test. The manifest, `mcp.json`, and `hooks/hooks.json`
+/// entries are rendered through helpers at install time to inject the package
+/// version and the absolute tokensave binary path.
 const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (
         ".cursor-plugin/plugin.json",
@@ -226,11 +225,7 @@ fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
 }
 
-fn cursor_plugin_source_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("cursor-plugin")
-}
-
-fn install_cursor_plugin(home: &Path) -> Result<()> {
+fn install_cursor_plugin(home: &Path, tokensave_bin: &str) -> Result<()> {
     let install_dir = cursor_plugin_install_dir(home);
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
@@ -239,18 +234,7 @@ fn install_cursor_plugin(home: &Path) -> Result<()> {
     }
     remove_cursor_plugin_install(&install_dir)?;
 
-    let source = cursor_plugin_source_dir();
-    if source.join(".cursor-plugin/plugin.json").exists()
-        && symlink_plugin_dir(&source, &install_dir).is_ok()
-    {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Installed Cursor plugin symlink at {}",
-            install_dir.display()
-        );
-        return Ok(());
-    }
-
-    write_embedded_plugin(&install_dir)?;
+    write_embedded_plugin(&install_dir, tokensave_bin)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Installed Cursor plugin at {}",
         install_dir.display()
@@ -258,24 +242,51 @@ fn install_cursor_plugin(home: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn symlink_plugin_dir(source: &Path, install_dir: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, install_dir)
-}
-
-#[cfg(not(unix))]
-fn symlink_plugin_dir(_source: &Path, _install_dir: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "directory symlink is not supported on this platform",
-    ))
-}
-
-fn write_embedded_plugin(install_dir: &Path) -> Result<()> {
+fn write_embedded_plugin(install_dir: &Path, tokensave_bin: &str) -> Result<()> {
     for &(relative, contents) in EMBEDDED_PLUGIN_FILES {
-        safe_write_text_file(&install_dir.join(relative), contents, None)?;
+        let rendered = match relative {
+            ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
+            "mcp.json" => cursor_plugin_mcp(contents, tokensave_bin)?,
+            "hooks/hooks.json" => cursor_plugin_hooks(contents, tokensave_bin)?,
+            _ => contents.to_string(),
+        };
+        safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
     }
     Ok(())
+}
+
+fn cursor_plugin_manifest(raw: &str) -> Result<String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
+    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+}
+
+fn cursor_plugin_mcp(raw: &str, tokensave_bin: &str) -> Result<String> {
+    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
+    mcp["mcpServers"]["tokensave"]["command"] = json!(tokensave_bin);
+    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+}
+
+fn cursor_plugin_hooks(raw: &str, tokensave_bin: &str) -> Result<String> {
+    let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
+    if let Some(events) = hooks
+        .get_mut("hooks")
+        .and_then(|value| value.as_object_mut())
+    {
+        for entries in events.values_mut().filter_map(|value| value.as_array_mut()) {
+            for entry in entries {
+                if let Some(command_value) = entry.get_mut("command") {
+                    let Some(command) = command_value.as_str() else {
+                        continue;
+                    };
+                    if let Some(suffix) = command.strip_prefix("tokensave ") {
+                        *command_value = json!(format!("{tokensave_bin} {suffix}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
@@ -363,6 +374,35 @@ fn legacy_mcp_has_tokensave(mcp_path: &Path) -> bool {
         .get("mcpServers")
         .and_then(|v| v.get("tokensave"))
         .is_some()
+}
+
+fn legacy_project_cursor_has_tokensave(cursor_dir: &Path) -> bool {
+    legacy_mcp_has_tokensave(&cursor_dir.join("mcp.json"))
+        || legacy_hooks_have_tokensave(&cursor_dir.join("hooks.json"))
+        || legacy_rule_has_tokensave(&cursor_dir.join("rules/tokensave.mdc"))
+}
+
+fn legacy_hooks_have_tokensave(hooks_path: &Path) -> bool {
+    load_json_file(hooks_path)
+        .get("hooks")
+        .and_then(|value| value.as_object())
+        .is_some_and(|events| {
+            events.values().any(|value| {
+                value.as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("command")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|command| command.contains("hook-cursor-"))
+                    })
+                })
+            })
+        })
+}
+
+fn legacy_rule_has_tokensave(rule_path: &Path) -> bool {
+    std::fs::read_to_string(rule_path)
+        .is_ok_and(|contents| contents.contains("tokensave MCP tools"))
 }
 
 /// Remove the tokensave MCP server entry from a Cursor `mcp.json`, deleting the
@@ -535,7 +575,9 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     }
     let settings = load_json_file(mcp_path);
     let server = &settings["mcpServers"]["tokensave"];
-    if server["command"] == "tokensave"
+    if server["command"]
+        .as_str()
+        .is_some_and(|command| !command.is_empty())
         && server["args"] == json!(["serve", "--path", "${workspaceFolder}"])
     {
         dc.pass(&format!(
@@ -627,6 +669,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn cursor_plugin_source_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("cursor-plugin")
+    }
+
     fn relative_paths_under(root: &Path) -> Vec<String> {
         let mut paths: Vec<String> = collect_regular_files(root)
             .expect("source bundle should be readable")
@@ -646,7 +692,7 @@ mod tests {
     fn write_embedded_plugin_writes_core_and_bundle_files() {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tokensave");
-        write_embedded_plugin(&install_dir).expect("embedded install should succeed");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
 
         // The four core files land, and the manifest is valid JSON carrying the
         // mcpServers key released binaries rely on.
@@ -705,7 +751,7 @@ mod tests {
     fn embedded_install_uninstalls_completely() {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tokensave");
-        write_embedded_plugin(&install_dir).expect("embedded install should succeed");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
         assert!(install_dir
             .join("skills/searching-for-code/SKILL.md")
             .exists());
