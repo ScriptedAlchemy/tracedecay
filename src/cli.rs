@@ -128,6 +128,9 @@ pub enum Commands {
     /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-subagent-start", hide = true)]
     HookCursorSubagentStart,
+    /// Cursor preToolUse hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-pre-tool-use", hide = true)]
+    HookCursorPreToolUse,
     /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
     HookCursorBeforeSubmitPrompt,

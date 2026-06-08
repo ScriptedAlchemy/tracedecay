@@ -166,6 +166,32 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         ));
     }
 
+    if input
+        .tool_name
+        .as_deref()
+        .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
+    {
+        return Some(hint(
+            HintCategory::Search,
+            "For codebase search, consider using tokensave_search or tokensave_context.",
+            "tokensave_search uses the existing index for code search; tokensave_context can gather focused surrounding context when a text search is only a starting point.",
+            false,
+        ));
+    }
+
+    if input
+        .tool_name
+        .as_deref()
+        .is_some_and(|name| matches_normalized(name, &["glob"]))
+    {
+        return Some(hint(
+            HintCategory::FileLookup,
+            "For finding files by role or path, consider using tokensave_files.",
+            "tokensave_files can list indexed files and narrow file lookup before opening individual files.",
+            false,
+        ));
+    }
+
     let text = combined_text(input);
     if text.is_empty() {
         return None;
