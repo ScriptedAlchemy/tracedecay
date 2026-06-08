@@ -27,7 +27,7 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_cursor_plugin(&ctx.home)?;
+        install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -49,7 +49,7 @@ impl AgentIntegration for CursorIntegration {
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        install_cursor_plugin(&ctx.home)?;
+        install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
         uninstall_mcp_server(&cursor_dir.join("mcp.json"));
         remove_legacy_project_hooks(&cursor_dir.join("hooks.json"))?;
         remove_legacy_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
@@ -75,10 +75,7 @@ impl AgentIntegration for CursorIntegration {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
         let project_cursor = ctx.project_path.join(".cursor");
         doctor_check_plugin(dc, &ctx.home);
-        if project_cursor.join("mcp.json").exists()
-            || project_cursor.join("hooks.json").exists()
-            || project_cursor.join("rules/tokensave.mdc").exists()
-        {
+        if legacy_project_cursor_has_tokensave(&project_cursor) {
             dc.warn(
                 "legacy project Cursor MCP/hooks/rule files are present; rerun \
                  `tokensave install --local --agent cursor` to remove tokensave-owned entries",
@@ -108,6 +105,7 @@ const PLUGIN_MANIFEST: &str = include_str!("../../cursor-plugin/.cursor-plugin/p
 const PLUGIN_MCP: &str = include_str!("../../cursor-plugin/mcp.json");
 const PLUGIN_HOOKS: &str = include_str!("../../cursor-plugin/hooks/hooks.json");
 const PLUGIN_RULE: &str = include_str!("../../cursor-plugin/rules/tokensave.mdc");
+const PLUGIN_README: &str = include_str!("../../cursor-plugin/README.md");
 
 fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tokensave")
@@ -117,11 +115,7 @@ fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
 }
 
-fn cursor_plugin_source_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("cursor-plugin")
-}
-
-fn install_cursor_plugin(home: &Path) -> Result<()> {
+fn install_cursor_plugin(home: &Path, tokensave_bin: &str) -> Result<()> {
     let install_dir = cursor_plugin_install_dir(home);
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
@@ -130,18 +124,7 @@ fn install_cursor_plugin(home: &Path) -> Result<()> {
     }
     remove_cursor_plugin_install(&install_dir)?;
 
-    let source = cursor_plugin_source_dir();
-    if source.join(".cursor-plugin/plugin.json").exists()
-        && symlink_plugin_dir(&source, &install_dir).is_ok()
-    {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Installed Cursor plugin symlink at {}",
-            install_dir.display()
-        );
-        return Ok(());
-    }
-
-    write_embedded_plugin(&install_dir)?;
+    write_embedded_plugin(&install_dir, tokensave_bin)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Installed Cursor plugin at {}",
         install_dir.display()
@@ -149,28 +132,58 @@ fn install_cursor_plugin(home: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn symlink_plugin_dir(source: &Path, install_dir: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, install_dir)
-}
-
-#[cfg(not(unix))]
-fn symlink_plugin_dir(_source: &Path, _install_dir: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "directory symlink is not supported on this platform",
-    ))
-}
-
-fn write_embedded_plugin(install_dir: &Path) -> Result<()> {
+fn write_embedded_plugin(install_dir: &Path, tokensave_bin: &str) -> Result<()> {
     safe_write_text_file(
         &install_dir.join(".cursor-plugin/plugin.json"),
-        PLUGIN_MANIFEST,
+        &cursor_plugin_manifest()?,
         None,
     )?;
-    safe_write_text_file(&install_dir.join("mcp.json"), PLUGIN_MCP, None)?;
-    safe_write_text_file(&install_dir.join("hooks/hooks.json"), PLUGIN_HOOKS, None)?;
-    safe_write_text_file(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE, None)
+    safe_write_text_file(
+        &install_dir.join("mcp.json"),
+        &cursor_plugin_mcp(tokensave_bin)?,
+        None,
+    )?;
+    safe_write_text_file(
+        &install_dir.join("hooks/hooks.json"),
+        &cursor_plugin_hooks(tokensave_bin)?,
+        None,
+    )?;
+    safe_write_text_file(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE, None)?;
+    safe_write_text_file(&install_dir.join("README.md"), PLUGIN_README, None)
+}
+
+fn cursor_plugin_manifest() -> Result<String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(PLUGIN_MANIFEST)?;
+    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+}
+
+fn cursor_plugin_mcp(tokensave_bin: &str) -> Result<String> {
+    let mut mcp: serde_json::Value = serde_json::from_str(PLUGIN_MCP)?;
+    mcp["mcpServers"]["tokensave"]["command"] = json!(tokensave_bin);
+    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+}
+
+fn cursor_plugin_hooks(tokensave_bin: &str) -> Result<String> {
+    let mut hooks: serde_json::Value = serde_json::from_str(PLUGIN_HOOKS)?;
+    if let Some(events) = hooks
+        .get_mut("hooks")
+        .and_then(|value| value.as_object_mut())
+    {
+        for entries in events.values_mut().filter_map(|value| value.as_array_mut()) {
+            for entry in entries {
+                if let Some(command_value) = entry.get_mut("command") {
+                    let Some(command) = command_value.as_str() else {
+                        continue;
+                    };
+                    if let Some(suffix) = command.strip_prefix("tokensave ") {
+                        *command_value = json!(format!("{tokensave_bin} {suffix}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
@@ -263,6 +276,35 @@ fn legacy_mcp_has_tokensave(mcp_path: &Path) -> bool {
         .get("mcpServers")
         .and_then(|v| v.get("tokensave"))
         .is_some()
+}
+
+fn legacy_project_cursor_has_tokensave(cursor_dir: &Path) -> bool {
+    legacy_mcp_has_tokensave(&cursor_dir.join("mcp.json"))
+        || legacy_hooks_have_tokensave(&cursor_dir.join("hooks.json"))
+        || legacy_rule_has_tokensave(&cursor_dir.join("rules/tokensave.mdc"))
+}
+
+fn legacy_hooks_have_tokensave(hooks_path: &Path) -> bool {
+    load_json_file(hooks_path)
+        .get("hooks")
+        .and_then(|value| value.as_object())
+        .is_some_and(|events| {
+            events.values().any(|value| {
+                value.as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("command")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|command| command.contains("hook-cursor-"))
+                    })
+                })
+            })
+        })
+}
+
+fn legacy_rule_has_tokensave(rule_path: &Path) -> bool {
+    std::fs::read_to_string(rule_path)
+        .is_ok_and(|contents| contents.contains("tokensave MCP tools"))
 }
 
 /// Remove the tokensave MCP server entry from a Cursor `mcp.json`, deleting the
@@ -435,7 +477,9 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     }
     let settings = load_json_file(mcp_path);
     let server = &settings["mcpServers"]["tokensave"];
-    if server["command"] == "tokensave"
+    if server["command"]
+        .as_str()
+        .is_some_and(|command| !command.is_empty())
         && server["args"] == json!(["serve", "--path", "${workspaceFolder}"])
     {
         dc.pass(&format!(

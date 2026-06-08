@@ -187,7 +187,7 @@ fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join(".cursor/plugins/local/tokensave")
 }
 
-fn assert_cursor_plugin_bundle(plugin_dir: &Path) {
+fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tokensave");
     assert_eq!(manifest["displayName"], "TokenSave");
@@ -205,7 +205,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path) {
     let mcp = read_json(&plugin_dir.join("mcp.json"));
     let server = &mcp["mcpServers"]["tokensave"];
     assert_eq!(server["type"], "stdio");
-    assert_eq!(server["command"], "tokensave");
+    assert_eq!(server["command"], expected_command);
     assert_eq!(
         server["args"],
         serde_json::json!(["serve", "--path", "${workspaceFolder}"])
@@ -249,8 +249,8 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path) {
         assert!(
             hook["command"]
                 .as_str()
-                .is_some_and(|command| command.starts_with("tokensave ")),
-            "plugin hook commands should resolve tokensave from PATH"
+                .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
+            "plugin hook commands should use the installed tokensave binary"
         );
         if let Some(matcher) = matcher {
             assert_eq!(hook["matcher"], matcher);
@@ -261,6 +261,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path) {
     assert!(rule.contains("alwaysApply: true"));
     assert!(rule.contains("tokensave MCP tools"));
     assert!(rule.contains("fall back"));
+    assert!(plugin_dir.join("README.md").exists());
 }
 
 #[test]
@@ -269,6 +270,7 @@ fn test_cursor_plugin_bundle_files_are_valid() {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("cursor-plugin")
             .as_path(),
+        "tokensave",
     );
 }
 
@@ -279,7 +281,15 @@ fn test_cursor_install_installs_local_plugin_without_global_mcp() {
 
     CursorIntegration.install(&ctx).unwrap();
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home.path()));
+    let plugin_dir = cursor_plugin_install_dir(home.path());
+    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tokensave_bin);
+    assert!(
+        !std::fs::symlink_metadata(&plugin_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Cursor install should write a real plugin directory, not a symlink"
+    );
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
@@ -293,7 +303,10 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
 
     assert_local_install_success("cursor", project.path(), home.path());
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home.path()));
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(home.path()),
+        &expected_tokensave_bin(),
+    );
 
     let mcp_path = project.path().join(".cursor/mcp.json");
     assert!(
@@ -389,6 +402,48 @@ fn test_local_install_cursor_preserves_existing_permissions_file() {
     assert!(permissions.contains("other:custom_tool"));
     assert!(permissions.contains("tokensave:tokensave_not_a_real_tool"));
     assert!(permissions.contains("tokensave:tokensave_str_replace"));
+}
+
+#[test]
+fn test_cursor_healthcheck_ignores_foreign_project_cursor_files() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    CursorIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other-bin"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"other-hook","timeout":30}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tokensave.mdc"),
+        "---\nalwaysApply: false\n---\nforeign rule\n",
+    )
+    .unwrap();
+
+    let mut dc = DoctorCounters::new();
+    CursorIntegration.healthcheck(
+        &mut dc,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(dc.warnings, 0, "foreign Cursor files should not warn");
+    assert_eq!(
+        dc.issues, 0,
+        "foreign Cursor files should not fail healthcheck"
+    );
 }
 
 #[test]
@@ -1468,7 +1523,7 @@ fn test_cursor_install_creates_plugin() {
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home));
+    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tokensave_bin);
     assert!(
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
@@ -1919,7 +1974,10 @@ fn test_cursor_install_preserves_existing_legacy_mcp_config() {
         .install(&make_install_ctx(dir.path()))
         .unwrap();
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(dir.path()));
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(dir.path()),
+        &make_install_ctx(dir.path()).tokensave_bin,
+    );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         original,
