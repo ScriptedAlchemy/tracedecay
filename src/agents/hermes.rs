@@ -732,6 +732,7 @@ def make_handler(name: str):
 fn plugin_init() -> String {
     r#""""tokensave Hermes plugin registration."""
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -793,6 +794,11 @@ def _normalize_memory_tool_call(name, arguments):
         return tool_name, _decode_tool_args(tool_args)
     return name, _decode_tool_args(arguments)
 
+def _tokensave_binary_available() -> bool:
+    if os.path.dirname(tools.TOKENSAVE_BIN):
+        return Path(tools.TOKENSAVE_BIN).is_file() and os.access(tools.TOKENSAVE_BIN, os.X_OK)
+    return shutil.which(tools.TOKENSAVE_BIN) is not None
+
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"
 
@@ -805,7 +811,7 @@ class TokensaveMemoryProvider(MemoryProvider):
         return "tokensave"
 
     def is_available(self) -> bool:
-        return shutil.which(tools.TOKENSAVE_BIN) is not None
+        return _tokensave_binary_available()
 
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home")

@@ -484,11 +484,11 @@ fn test_hermes_local_install_writes_profile_plugin() {
         "plain local install must not mutate the user profile config"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_hermes_home = std::fs::canonicalize(project.path())
+        .unwrap_or_else(|_| project.path().to_path_buf())
+        .join(".hermes");
     assert!(
-        stderr.contains(&format!(
-            "HERMES_HOME={}",
-            project.path().join(".hermes").display()
-        )),
+        stderr.contains(&format!("HERMES_HOME={}", expected_hermes_home.display())),
         "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
     );
 }
