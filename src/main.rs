@@ -2,7 +2,6 @@
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
 use std::process;
 
 use tokensave::tokensave::TokenSave;
@@ -18,34 +17,6 @@ use cli::*;
 /// Alias for the shared timestamp utility.
 pub(crate) fn current_unix_timestamp() -> i64 {
     tokensave::tokensave::current_timestamp()
-}
-
-async fn track_cursor_branch_after_install(agent_id: &str, project_path: Option<&Path>) {
-    if agent_id != "cursor" {
-        return;
-    }
-    let Some(project_path) = project_path else {
-        return;
-    };
-    let Some(branch_name) = tokensave::branch::current_branch(project_path) else {
-        return;
-    };
-    match tokensave::branch::add_branch_tracking(project_path, &branch_name).await {
-        Ok(tokensave::branch::BranchAddOutcome::Added) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tokensave indexing"
-            );
-        }
-        Ok(
-            tokensave::branch::BranchAddOutcome::AlreadyTracked
-            | tokensave::branch::BranchAddOutcome::NotIndexed,
-        ) => {}
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tokensave indexing: {err}"
-            );
-        }
-    }
 }
 
 /// A self-animating spinner that ticks on a background thread.
@@ -588,9 +559,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             })?;
             let tokensave_bin = tokensave::agents::which_tokensave().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
-                    message: "tokensave not found on PATH. Install it first:\n  \
-                          cargo install tokensave\n  \
-                          brew install aovestdipaperino/tap/tokensave"
+                    message: "tokensave not found on PATH. Install it from this repo first:\n  \
+                          cargo binstall --git https://github.com/ScriptedAlchemy/tokensave tokensave\n  \
+                          cargo install --git https://github.com/ScriptedAlchemy/tokensave tokensave"
                         .to_string(),
                 }
             })?;
@@ -611,7 +582,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 if let Some(id) = agent {
                     let ag = tokensave::agents::get_integration(&id)?;
                     ag.install_local(&ctx, &project_path)?;
-                    track_cursor_branch_after_install(&id, Some(&project_path)).await;
+                    ag.post_install(Some(&project_path)).await;
                     installed_names.push(ag.name().to_string());
                 } else {
                     let (to_install, _) =
@@ -620,7 +591,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         let ag = tokensave::agents::get_integration(id)?;
                         if ag.supports_local_install() {
                             ag.install_local(&ctx, &project_path)?;
-                            track_cursor_branch_after_install(id, Some(&project_path)).await;
+                            ag.post_install(Some(&project_path)).await;
                             installed_names.push(ag.name().to_string());
                         } else {
                             eprintln!(
@@ -659,7 +630,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     profile: profile.clone(),
                 };
                 ag.install(&ctx)?;
-                track_cursor_branch_after_install(&id, project_path.as_deref()).await;
+                ag.post_install(project_path.as_deref()).await;
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
                     installed_names.push(name);
@@ -692,7 +663,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: profile.clone(),
                     };
                     ag.install(&ctx)?;
-                    track_cursor_branch_after_install(id, project_path.as_deref()).await;
+                    ag.post_install(project_path.as_deref()).await;
                     installed_names.push(ag.name().to_string());
                     if !user_cfg.installed_agents.contains(id) {
                         user_cfg.installed_agents.push(id.clone());
@@ -751,7 +722,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: None,
                     };
                     ag.install(&ctx)?;
-                    track_cursor_branch_after_install(id, project_path.as_deref()).await;
+                    ag.post_install(project_path.as_deref()).await;
                 }
                 eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
                 user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
