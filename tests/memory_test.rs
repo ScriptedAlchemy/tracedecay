@@ -406,6 +406,38 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
 }
 
 #[tokio::test]
+async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    store
+        .add_fact(
+            fact_request("First project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let first = dirty_bank_updated_at(&db, "project").await;
+
+    store
+        .add_fact(
+            fact_request("Second project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let second = dirty_bank_updated_at(&db, "project").await;
+
+    // The dirty marker is an optimistic-concurrency token, so re-marking a bank must move it
+    // strictly forward even when both writes land in the same wall-clock second; otherwise a
+    // re-dirty during a rebuild snapshot could be silently cleared.
+    assert!(
+        second > first,
+        "dirty marker must strictly increase on re-dirty (first={first}, second={second})"
+    );
+}
+
+#[tokio::test]
 async fn memory_store_add_list_get_and_deduplicates_by_content() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());

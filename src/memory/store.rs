@@ -976,11 +976,17 @@ impl<'a> MemoryStore<'a> {
     }
 
     async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
+        // `updated_at` doubles as an optimistic-concurrency token: `rebuild_dirty_banks` only
+        // clears a marker whose value still matches the row it snapshotted. Since
+        // `current_timestamp()` is second-resolution, a re-dirty within the same second as the
+        // snapshot would reuse that value and be silently cleared, dropping the change. Force the
+        // token strictly forward on every mark so same-second re-dirties are always preserved.
         self.conn
             .execute(
                 "INSERT INTO memory_bank_dirty (bank_name, updated_at)
                  VALUES (?1, ?2)
-                 ON CONFLICT(bank_name) DO UPDATE SET updated_at = excluded.updated_at",
+                 ON CONFLICT(bank_name) DO UPDATE SET
+                     updated_at = max(excluded.updated_at, memory_bank_dirty.updated_at + 1)",
                 params![bank_name, current_timestamp()],
             )
             .await
