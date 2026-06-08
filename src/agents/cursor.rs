@@ -10,8 +10,8 @@ use serde_json::json;
 use crate::errors::{Result, TokenSaveError};
 
 use super::{
-    backup_and_write_json, load_json_file, load_jsonc_file_strict, AgentIntegration,
-    DoctorCounters, HealthcheckContext, InstallContext,
+    backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
 
 /// Cursor agent.
@@ -50,7 +50,7 @@ impl AgentIntegration for CursorIntegration {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
         install_cursor_plugin(&ctx.home)?;
-        remove_legacy_project_mcp(&cursor_dir.join("mcp.json"));
+        uninstall_mcp_server(&cursor_dir.join("mcp.json"));
         remove_legacy_project_hooks(&cursor_dir.join("hooks.json"))?;
         remove_legacy_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
 
@@ -163,13 +163,14 @@ fn symlink_plugin_dir(_source: &Path, _install_dir: &Path) -> std::io::Result<()
 }
 
 fn write_embedded_plugin(install_dir: &Path) -> Result<()> {
-    write_generated_text(
+    safe_write_text_file(
         &install_dir.join(".cursor-plugin/plugin.json"),
         PLUGIN_MANIFEST,
+        None,
     )?;
-    write_generated_text(&install_dir.join("mcp.json"), PLUGIN_MCP)?;
-    write_generated_text(&install_dir.join("hooks/hooks.json"), PLUGIN_HOOKS)?;
-    write_generated_text(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE)
+    safe_write_text_file(&install_dir.join("mcp.json"), PLUGIN_MCP, None)?;
+    safe_write_text_file(&install_dir.join("hooks/hooks.json"), PLUGIN_HOOKS, None)?;
+    safe_write_text_file(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE, None)
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
@@ -249,12 +250,11 @@ fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
-        let path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            collect_regular_files_inner(&path, out)?;
-        } else if metadata.is_file() {
-            out.push(path);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_regular_files_inner(&entry.path(), out)?;
+        } else if file_type.is_file() {
+            out.push(entry.path());
         }
     }
     Ok(())
@@ -267,18 +267,8 @@ fn legacy_mcp_has_tokensave(mcp_path: &Path) -> bool {
         .is_some()
 }
 
-fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
-            message: format!("failed to create {}: {e}", parent.display()),
-        })?;
-    }
-    std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })
-}
-
-/// Remove MCP server entry from ~/.cursor/mcp.json.
+/// Remove the tokensave MCP server entry from a Cursor `mcp.json`, deleting the
+/// file when it becomes empty and otherwise backing up before rewriting.
 fn uninstall_mcp_server(mcp_path: &Path) {
     if !mcp_path.exists() {
         eprintln!("  {} not found, skipping", mcp_path.display());
@@ -330,10 +320,6 @@ fn uninstall_mcp_server(mcp_path: &Path) {
     }
 }
 
-fn remove_legacy_project_mcp(mcp_path: &Path) {
-    uninstall_mcp_server(mcp_path);
-}
-
 fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {
         return Ok(());
@@ -347,12 +333,8 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     };
 
     let mut removed = false;
-    let event_names: Vec<String> = events.keys().cloned().collect();
-    for event in event_names {
-        let Some(entries) = events
-            .get_mut(&event)
-            .and_then(|value| value.as_array_mut())
-        else {
+    for value in events.values_mut() {
+        let Some(entries) = value.as_array_mut() else {
             continue;
         };
         let before = entries.len();
@@ -411,7 +393,7 @@ fn remove_legacy_project_rule(rule_path: &Path) -> Result<()> {
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let plugin_dir = cursor_plugin_install_dir(home);
-    let manifest_path = plugin_dir.join(".cursor-plugin/plugin.json");
+    let manifest_path = cursor_plugin_manifest_path(home);
     if !manifest_path.exists() {
         dc.warn(&format!(
             "{} not found — run `tokensave install --agent cursor` if you use Cursor",
@@ -446,6 +428,13 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 }
 
 fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
+    if !mcp_path.exists() {
+        dc.warn(&format!(
+            "{} not found — run `tokensave install --agent cursor`",
+            mcp_path.display()
+        ));
+        return;
+    }
     let settings = load_json_file(mcp_path);
     let server = &settings["mcpServers"]["tokensave"];
     if server["command"] == "tokensave"
