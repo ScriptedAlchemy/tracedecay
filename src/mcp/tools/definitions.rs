@@ -1692,7 +1692,7 @@ fn def_message_search() -> ToolDefinition {
                 "provider": {
                     "type": "string",
                     "description": "Message provider to search (default: cursor).",
-                    "enum": ["cursor", "codex", "claude", "kiro", "hermes", "other"]
+                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"]
                 },
                 "project_key": {
                     "type": "string",
