@@ -97,6 +97,89 @@ impl Drop for Spinner {
     }
 }
 
+fn hermes_profile_targets(
+    home: &std::path::Path,
+) -> tokensave::errors::Result<Vec<Option<String>>> {
+    let mut targets = vec![None];
+    let profiles_dir = home.join(".hermes/profiles");
+    let entries = match std::fs::read_dir(&profiles_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(targets),
+        Err(e) => {
+            return Err(tokensave::errors::TokenSaveError::Config {
+                message: format!(
+                    "failed to read Hermes profiles directory {}: {e}",
+                    profiles_dir.display()
+                ),
+            });
+        }
+    };
+
+    let mut profile_names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| tokensave::errors::TokenSaveError::Config {
+            message: format!(
+                "failed to read Hermes profiles directory {}: {e}",
+                profiles_dir.display()
+            ),
+        })?;
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|e| tokensave::errors::TokenSaveError::Config {
+                    message: format!(
+                        "failed to inspect Hermes profile {}: {e}",
+                        entry.path().display()
+                    ),
+                })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            tokensave::errors::TokenSaveError::Config {
+                message: format!(
+                    "Hermes profile path is not valid UTF-8: {}",
+                    entry.path().display()
+                ),
+            }
+        })?;
+        profile_names.push(name);
+    }
+    profile_names.sort();
+    targets.extend(profile_names.into_iter().map(Some));
+    Ok(targets)
+}
+
+fn validate_hermes_profile_flags(
+    agent: Option<&str>,
+    profile: &Option<String>,
+    all_profiles: bool,
+) -> tokensave::errors::Result<()> {
+    if profile.is_some() && agent != Some("hermes") {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: "`--profile` is only supported with `--agent hermes`".to_string(),
+        });
+    }
+    if all_profiles && agent != Some("hermes") {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: "`--all-profiles` is only supported with `--agent hermes`".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn hermes_selected_profile_targets(
+    home: &std::path::Path,
+    profile: &Option<String>,
+    all_profiles: bool,
+) -> tokensave::errors::Result<Vec<Option<String>>> {
+    if all_profiles {
+        hermes_profile_targets(home)
+    } else {
+        Ok(vec![profile.clone()])
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -546,12 +629,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             agent,
             local,
             profile,
+            all_profiles,
         } => {
-            if profile.is_some() && agent.as_deref() != Some("hermes") {
-                return Err(tokensave::errors::TokenSaveError::Config {
-                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
-                });
-            }
+            validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -581,7 +661,17 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
 
                 if let Some(id) = agent {
                     let ag = tokensave::agents::get_integration(&id)?;
-                    ag.install_local(&ctx, &project_path)?;
+                    for target_profile in
+                        hermes_selected_profile_targets(&home, &profile, all_profiles)?
+                    {
+                        let ctx = tokensave::agents::InstallContext {
+                            home: home.clone(),
+                            tokensave_bin: tokensave_bin.clone(),
+                            tool_permissions: tokensave::agents::expected_tool_perms(),
+                            profile: target_profile,
+                        };
+                        ag.install_local(&ctx, &project_path)?;
+                    }
                     installed_names.push(ag.name().to_string());
                 } else {
                     let (to_install, _) =
@@ -620,13 +710,17 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             if let Some(id) = agent {
                 let ag = tokensave::agents::get_integration(&id)?;
                 let name = ag.name().to_string();
-                let ctx = tokensave::agents::InstallContext {
-                    home: home.clone(),
-                    tokensave_bin: tokensave_bin.clone(),
-                    tool_permissions: tokensave::agents::expected_tool_perms(),
-                    profile: profile.clone(),
-                };
-                ag.install(&ctx)?;
+                for target_profile in
+                    hermes_selected_profile_targets(&home, &profile, all_profiles)?
+                {
+                    let ctx = tokensave::agents::InstallContext {
+                        home: home.clone(),
+                        tokensave_bin: tokensave_bin.clone(),
+                        tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: target_profile,
+                    };
+                    ag.install(&ctx)?;
+                }
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
                     installed_names.push(name);
@@ -722,12 +816,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 user_cfg.save();
             }
         }
-        Commands::Uninstall { agent, profile } => {
-            if profile.is_some() && agent.as_deref() != Some("hermes") {
-                return Err(tokensave::errors::TokenSaveError::Config {
-                    message: "`--profile` is only supported with `--agent hermes`".to_string(),
-                });
-            }
+        Commands::Uninstall {
+            agent,
+            profile,
+            all_profiles,
+        } => {
+            validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -738,13 +832,17 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
 
             if let Some(id) = agent {
                 let ag = tokensave::agents::get_integration(&id)?;
-                let ctx = tokensave::agents::InstallContext {
-                    home,
-                    tokensave_bin: String::new(),
-                    tool_permissions: tokensave::agents::expected_tool_perms(),
-                    profile: profile.clone(),
-                };
-                ag.uninstall(&ctx)?;
+                for target_profile in
+                    hermes_selected_profile_targets(&home, &profile, all_profiles)?
+                {
+                    let ctx = tokensave::agents::InstallContext {
+                        home: home.clone(),
+                        tokensave_bin: String::new(),
+                        tool_permissions: tokensave::agents::expected_tool_perms(),
+                        profile: target_profile,
+                    };
+                    ag.uninstall(&ctx)?;
+                }
                 user_cfg.installed_agents.retain(|a| a != &id);
                 user_cfg.save();
             } else {
@@ -1290,11 +1388,13 @@ mod startup_tests {
             agent: Some("kiro".to_string()),
             local: false,
             profile: None,
+            all_profiles: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
         assert!(should_skip_startup_maintenance(&Commands::Uninstall {
             agent: Some("kiro".to_string()),
             profile: None,
+            all_profiles: false,
         }));
     }
 
@@ -1322,6 +1422,7 @@ mod startup_tests {
             agent: Some("cursor".to_string()),
             local: false,
             profile: None,
+            all_profiles: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
@@ -1335,6 +1436,7 @@ mod startup_tests {
             &Commands::Uninstall {
                 agent: Some("cursor".to_string()),
                 profile: None,
+                all_profiles: false,
             }
         ));
         assert!(should_skip_agent_install_maintenance(&Commands::Doctor {
