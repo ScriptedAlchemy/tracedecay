@@ -183,10 +183,6 @@ fn mcp_server_entry(tokensave_bin: &str) -> serde_json::Value {
     })
 }
 
-fn hook_command(tokensave_bin: &str, subcommand: &str) -> String {
-    format!("{tokensave_bin} {subcommand}")
-}
-
 fn file_resource_uri(path: &Path) -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     let path = percent_encode_file_uri_path(&path);
@@ -226,26 +222,26 @@ fn managed_agent_config(tokensave_bin: &str, steering_path: &Path) -> serde_json
         "hooks": {
             "userPromptSubmit": [
                 {
-                    "command": hook_command(tokensave_bin, KIRO_PROMPT_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PROMPT_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 }
             ],
             "preToolUse": [
                 {
                     "matcher": "delegate",
-                    "command": hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 },
                 {
                     "matcher": "subagent",
-                    "command": hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 }
             ],
             "postToolUse": [
                 {
                     "matcher": "fs_write",
-                    "command": hook_command(tokensave_bin, KIRO_POST_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_POST_TOOL_HOOK),
                     "timeout_ms": KIRO_SYNC_HOOK_TIMEOUT_MS
                 }
             ]
