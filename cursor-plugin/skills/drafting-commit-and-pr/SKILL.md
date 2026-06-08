@@ -1,0 +1,23 @@
+---
+name: drafting-commit-and-pr
+description: Draft a commit message, PR description, or changelog from the semantic meaning of your changes. Use for "write a commit message", "draft the PR description", "generate release notes", or summarizing a changeset. Does not commit or push.
+disable-model-invocation: true
+---
+
+# Drafting commit & PR text
+
+## Workflow
+
+1. **Commit message → `tokensave_commit_context`** (`staged_only`): changed symbols + file roles + recent commit style → draft a message that matches the repo's style.
+2. **PR description → `tokensave_pr_context`** (`base_ref`, `head_ref`): semantic summary → draft body (Summary / Impact / Tests).
+3. **Release notes → `tokensave_changelog`** (`from_ref`, `to_ref`): categorized added / removed / modified symbols.
+4. **Sanity-check what actually changed → `tokensave_branch_diff`** (base vs head graph).
+
+## Guardrails
+
+- Read-only with respect to the working tree: this skill drafts text only. Leave `git commit` / `gh pr create` to the user or a dedicated git workflow.
+
+## Output
+
+- The drafted commit / PR / changelog text.
+- If any result includes a `tokensave_metrics:` line, report the savings to the user.
