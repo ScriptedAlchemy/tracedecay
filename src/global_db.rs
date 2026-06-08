@@ -11,6 +11,9 @@ use libsql::{params, Builder, Connection, Database as LibsqlDatabase, Value};
 
 use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 
+const MAX_SESSION_MESSAGE_TEXT_BYTES: usize = 256 * 1024;
+const SESSION_MESSAGE_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
+
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SavingsTotal {
@@ -39,6 +42,28 @@ pub fn global_db_path() -> Option<PathBuf> {
 
 fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |s| Value::Text(s.to_string()))
+}
+
+fn capped_session_message_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.len() <= MAX_SESSION_MESSAGE_TEXT_BYTES {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let budget =
+        MAX_SESSION_MESSAGE_TEXT_BYTES.saturating_sub(SESSION_MESSAGE_TRUNCATION_MARKER.len());
+    let mut end = 0;
+    for (idx, ch) in text.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+
+    let mut capped = String::with_capacity(end + SESSION_MESSAGE_TRUNCATION_MARKER.len());
+    capped.push_str(&text[..end]);
+    capped.push_str(SESSION_MESSAGE_TRUNCATION_MARKER);
+    std::borrow::Cow::Owned(capped)
 }
 
 fn opt_i64(value: Option<i64>) -> Value {
@@ -461,6 +486,7 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        let text = capped_session_message_text(&message.text);
         self.conn
             .execute(
                 "INSERT INTO session_messages
@@ -486,7 +512,7 @@ impl GlobalDb {
                     message.role.as_str(),
                     opt_i64(message.timestamp),
                     message.ordinal,
-                    message.text.as_str(),
+                    text.as_ref(),
                     opt_text(message.kind.as_deref()),
                     opt_text(message.model.as_deref()),
                     opt_text(message.tool_names.as_deref()),

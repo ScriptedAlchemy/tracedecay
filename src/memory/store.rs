@@ -48,10 +48,10 @@ impl<'a> MemoryStore<'a> {
             .map_err(|e| db_error(operation, e))?;
         match work.await {
             Ok(value) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(|e| db_error(operation, e))?;
+                if let Err(error) = self.conn.execute("COMMIT", ()).await {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return Err(db_error(operation, error));
+                }
                 Ok(value)
             }
             Err(error) => {
