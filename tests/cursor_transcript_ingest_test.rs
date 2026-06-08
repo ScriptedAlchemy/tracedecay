@@ -2,7 +2,8 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tokensave::sessions::cursor::{
-    ingest_cursor_transcript_event, open_project_session_db, project_session_db_path,
+    ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped, open_project_session_db,
+    project_session_db_path,
 };
 
 fn init_project(tmp: &TempDir) -> std::path::PathBuf {
@@ -138,6 +139,35 @@ async fn cursor_transcript_ingest_reads_only_appended_lines() {
         .search_session_messages("cursor", None, "incremental ingestion", 10)
         .await;
     assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_transcript_ingest_cap_defers_large_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    let large_text = "x".repeat(2048);
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"role\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{large_text}\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let capped = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(128)).await;
+    assert_eq!(capped.messages_upserted, 0);
+
+    let uncapped = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(uncapped.messages_upserted, 1);
 }
 
 #[tokio::test]

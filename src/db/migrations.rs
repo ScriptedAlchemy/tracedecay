@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 11;
+const LATEST_VERSION: u32 = 12;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -291,11 +291,21 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         9 => migrate_v9(conn).await,
         10 => migrate_v10(conn).await,
         11 => migrate_v11(conn).await,
+        12 => migrate_v12(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
         }),
     }
+}
+
+/// Compatibility marker after v12 was exposed on the PR stack.
+///
+/// The dirty-bank schema now lives in the folded v11/fresh schema, but existing
+/// databases may already carry `user_version = 12`. Keep the version monotonic
+/// so later schema work can safely use v13 instead of reusing an exposed number.
+async fn migrate_v12(_conn: &Connection) -> Result<()> {
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

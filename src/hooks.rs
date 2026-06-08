@@ -187,12 +187,17 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
 /// Cursor `stop` hook handler (fire-and-forget).
 ///
 /// Fires at the end of an agent turn and performs the primary transcript
-/// ingest: a time-boxed, unbounded incremental catch-up that picks up every
-/// line appended during the turn. The `stop` output is informational only, so
+/// ingest: a time-boxed incremental catch-up that picks up bounded transcript
+/// tails appended during the turn. The `stop` output is informational only, so
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 pub async fn hook_cursor_stop() -> i32 {
     let event = read_stdin_to_string();
-    ingest_cursor_transcript_for_event(&event, None, CURSOR_STOP_INGEST_BUDGET).await;
+    ingest_cursor_transcript_for_event(
+        &event,
+        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
+        CURSOR_STOP_INGEST_BUDGET,
+    )
+    .await;
     println!("{}", serde_json::json!({}));
     0
 }
@@ -221,7 +226,12 @@ pub async fn hook_cursor_session_start() -> i32 {
     let event = read_stdin_to_string();
     // Catch-up ingest for resumed sessions whose transcript grew while no agent
     // was attached. No-op (no transcript_path) for brand-new sessions. Fail-open.
-    ingest_cursor_transcript_for_event(&event, None, CURSOR_SESSION_INGEST_BUDGET).await;
+    ingest_cursor_transcript_for_event(
+        &event,
+        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
+        CURSOR_SESSION_INGEST_BUDGET,
+    )
+    .await;
     let root = cursor_project_root_from_event(&event);
     let context = session_steering_context_for_root(root.as_deref()).await;
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
@@ -1286,6 +1296,9 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
 /// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
 /// backlogs are left for the `sessionStart` / `stop` catch-up ingests.
 const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+/// Largest transcript tail a low-priority Cursor catch-up hook will read.
+/// Oversized backlogs stay queued instead of blocking hook execution.
+const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
 /// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
 const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);

@@ -477,6 +477,27 @@ impl McpServer {
             .unwrap_or_default()
             .as_secs() as i64;
         self.last_staleness_check_at.store(now, Ordering::Release);
+
+        // Best-effort transcript ingestion sweep for hookless agents (Claude,
+        // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
+        // agents register no hook, so their transcripts are reconciled here.
+        // Detached + timeout-guarded so it never delays MCP readiness, and
+        // independent of the catch-up completion flag below; per-file
+        // parse_offsets make repeat sweeps cheap no-ops.
+        {
+            let project_root = self.cg.project_root().to_path_buf();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
+                    if let Some(db) =
+                        crate::sessions::cursor::open_project_session_db(&project_root).await
+                    {
+                        let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
+                    }
+                })
+                .await;
+            });
+        }
+
         self.startup_catch_up_done.store(true, Ordering::Release);
     }
 

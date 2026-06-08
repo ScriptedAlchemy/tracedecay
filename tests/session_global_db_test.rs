@@ -111,6 +111,28 @@ async fn upsert_session_message_round_trips_and_updates() {
 }
 
 #[tokio::test]
+async fn upsert_session_message_truncates_oversized_text_deterministically() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "session-1", "project-a");
+    db.upsert_session(&session).await;
+
+    let oversized = "x".repeat(300_000);
+    let message = sample_message("cursor", "message-1", "session-1", &oversized);
+    assert!(db.upsert_session_message(&message).await);
+
+    let fetched = db
+        .get_session_message("cursor", "message-1")
+        .await
+        .expect("message should exist");
+    assert!(fetched.text.len() < oversized.len());
+    assert!(
+        fetched.text.ends_with("[truncated by tokensave]"),
+        "truncated message should be explicitly marked"
+    );
+}
+
+#[tokio::test]
 async fn search_session_messages_uses_fts_and_filters_provider_project() {
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;

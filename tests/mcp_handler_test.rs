@@ -3602,6 +3602,20 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
     );
 }
 
+#[test]
+fn message_search_provider_schema_matches_ingested_providers() {
+    let tools = get_tool_definitions();
+    let message_search = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_message_search")
+        .expect("tokensave_message_search definition");
+
+    assert_eq!(
+        message_search.input_schema["properties"]["provider"]["enum"],
+        serde_json::json!(["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"])
+    );
+}
+
 #[tokio::test]
 async fn memory_status_repairs_dirty_banks_before_reporting() {
     let (cg, _dir) = setup_project().await;
