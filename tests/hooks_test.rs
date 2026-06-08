@@ -2,9 +2,9 @@ use tokensave::hooks::{
     build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
     codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
     cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
-    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
-    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
-    CursorShellSyncPlan,
+    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_pre_tool_use,
+    evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
+    is_git_state_changing_command, CursorShellSyncPlan,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -247,6 +247,66 @@ fn test_cursor_subagent_start_allows_execution_task() {
     }"#;
 
     assert!(evaluate_cursor_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_hints_for_grep_search() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "Grep",
+        "tool_input": {
+            "pattern": "cursor_prompt_hint",
+            "path": "src"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("Grep should get a tokensave hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(v["continue"].as_bool(), Some(true));
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave hint:"));
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave_search"));
+    assert!(v.get("permission").is_none());
+}
+
+#[test]
+fn test_cursor_pre_tool_use_hints_for_shell_rg() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "rg cursor_prompt_hint src"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_pre_tool_use(input).expect("rg shell command should get a hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(v["continue"].as_bool(), Some(true));
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave hint:"));
+}
+
+#[test]
+fn test_cursor_pre_tool_use_allows_single_file_read() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+            "file_path": "src/hooks.rs"
+        },
+        "session_id": "cursor-test"
+    }"#;
+
+    assert!(evaluate_cursor_pre_tool_use(input).is_none());
 }
 
 #[test]

@@ -164,7 +164,7 @@ alwaysApply: true
 
 # Prefer tokensave MCP tools
 
-- For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first.
+- For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first. Treat `tokensave_context` as the default starting point before Grep/Glob/search when `.tokensave/` exists.
 - Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
 - For durable project/user facts, prefer `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use `tokensave_message_search` for project-local Cursor transcript recall when prior conversation context matters.
 - Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
@@ -255,6 +255,14 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         "hook-cursor-subagent-start",
         5,
         None,
+    );
+    install_cursor_hook_entry(
+        &mut hooks,
+        "preToolUse",
+        tokensave_bin,
+        "hook-cursor-pre-tool-use",
+        5,
+        Some("Shell|Bash|Grep|Glob|Search"),
     );
     install_cursor_hook_entry(
         &mut hooks,
@@ -508,6 +516,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     let expected = [
         ("sessionStart", "hook-cursor-session-start"),
         ("subagentStart", "hook-cursor-subagent-start"),
+        ("preToolUse", "hook-cursor-pre-tool-use"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),

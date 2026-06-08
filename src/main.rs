@@ -802,6 +802,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCursorPreToolUse => {
+            let code = tokensave::hooks::hook_cursor_pre_tool_use();
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::HookCursorBeforeSubmitPrompt => {
             let code = tokensave::hooks::hook_cursor_before_submit_prompt().await;
             if code != 0 {
@@ -1207,6 +1213,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
             | Commands::HookCursorSubagentStart
+            | Commands::HookCursorPreToolUse
             | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart

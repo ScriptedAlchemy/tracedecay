@@ -269,12 +269,13 @@ Cursor local install creates a stronger project-local setup:
 - `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
   - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
   - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
+  - `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) injects a nonblocking `additional_context` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files`.
   - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
   - `afterFileEdit` (matcher `Write`) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
   - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
   - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
-  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. `beforeReadFile`/`preToolUse` blocking hooks are intentionally omitted for now to avoid noise; they may become opt-in later.
+  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. Cursor `preToolUse` remains nonblocking to avoid noisy denials.
 
 Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tokensave` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
 

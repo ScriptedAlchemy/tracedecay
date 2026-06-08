@@ -151,12 +151,13 @@ Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
 - `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
+- `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) — fail-open; injects a soft `additional_context` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files` before spending a Grep/rg call.
 - `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
 - `afterFileEdit` (matcher `Write`) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
 - `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tokensave branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
 - `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
-All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally do not add `beforeReadFile`/`preToolUse` blocking hooks here (too aggressive/noisy); they may become opt-in later.
+All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally keep Cursor `preToolUse` nonblocking: it nudges broad search toward tokensave but does not deny reads/search.
 
 ### Codex lifecycle hooks
 

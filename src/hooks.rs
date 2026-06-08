@@ -147,6 +147,18 @@ pub fn hook_cursor_subagent_start() -> i32 {
     0
 }
 
+/// Cursor `preToolUse` hook handler.
+///
+/// Emits nonblocking Cursor-shaped `additional_context` for broad search tools
+/// such as Grep and shell `rg` before the model spends a tool call on them.
+pub fn hook_cursor_pre_tool_use() -> i32 {
+    let event = read_stdin_to_string();
+    if let Some(decision) = evaluate_cursor_pre_tool_use(&event) {
+        println!("{decision}");
+    }
+    0
+}
+
 /// Cursor `beforeSubmitPrompt` hook handler.
 ///
 /// Resets the project-local counter for a new prompt turn. The output uses
@@ -266,6 +278,22 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Pure decision logic for Cursor `preToolUse` hook events.
+///
+/// Returns a soft `additional_context` hint only for high-confidence broad
+/// search tools. Invalid or unrelated tool events fail open with no output.
+pub fn evaluate_cursor_pre_tool_use(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let hint = decide_hint(&cursor_pre_tool_hint_input(&parsed))?;
+    Some(
+        serde_json::json!({
+            "continue": true,
+            "additional_context": format_tool_hint(&hint),
+        })
+        .to_string(),
+    )
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -1282,6 +1310,35 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
     })
 }
 
+fn cursor_pre_tool_hint_input(parsed: &Value) -> ToolHintInput {
+    let tool_input = parsed
+        .get("tool_input")
+        .or_else(|| parsed.get("toolInput"))
+        .or_else(|| parsed.get("input"))
+        .unwrap_or(&Value::Null);
+    ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(parsed),
+        tool_name: text_field(parsed, &["tool_name", "toolName", "name"]),
+        command: text_field(tool_input, &["command", "cmd"])
+            .or_else(|| text_field(parsed, &["command", "cmd"])),
+        prompt: text_field(
+            tool_input,
+            &["prompt", "query", "pattern", "task", "description"],
+        )
+        .or_else(|| {
+            text_field(
+                parsed,
+                &["prompt", "query", "pattern", "task", "description"],
+            )
+        }),
+        subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
+        file_path: text_field(tool_input, &["file_path", "filePath", "path"])
+            .or_else(|| text_field(parsed, &["file_path", "filePath", "path"])),
+        hints_enabled: true,
+    }
+}
+
 fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
     decide_hint(&ToolHintInput {
@@ -1294,6 +1351,13 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         file_path: None,
         hints_enabled: true,
     })
+}
+
+fn text_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 fn prompt_like_text(parsed: &Value) -> Option<String> {

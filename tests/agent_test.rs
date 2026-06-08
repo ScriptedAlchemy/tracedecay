@@ -861,6 +861,30 @@ fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
         tokensave_entries[0]["matcher"], "Write",
         "reinstall must reconcile the matcher onto a pre-existing entry"
     );
+
+    let pre = hooks["hooks"]["preToolUse"]
+        .as_array()
+        .expect("preToolUse should be an array");
+    let pre_tokensave_entries: Vec<_> = pre
+        .iter()
+        .filter(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-pre-tool-use"))
+        })
+        .collect();
+    assert_eq!(
+        pre_tokensave_entries.len(),
+        1,
+        "install should add exactly one Cursor preToolUse hint hook"
+    );
+    assert!(
+        pre_tokensave_entries[0]["matcher"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Grep"),
+        "preToolUse hook should match Grep/search tools"
+    );
 }
 
 #[cfg(unix)]
