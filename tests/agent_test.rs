@@ -691,11 +691,26 @@ assert provider.session_id == "session-only"
 
 schemas = provider.get_tool_schemas()
 schema_names = [schema.get("name") for schema in schemas]
-assert schema_names == ["fact_store", "fact_feedback"]
+assert schema_names == [
+    "fact_store",
+    "fact_add",
+    "fact_search",
+    "fact_probe",
+    "fact_related",
+    "fact_reason",
+    "fact_contradict",
+    "fact_update",
+    "fact_remove",
+    "fact_list",
+    "fact_feedback",
+    "memory_status",
+]
 assert all("function" not in schema for schema in schemas)
-fact_store_schema = schemas[0]
-fact_feedback_schema = schemas[1]
+schema_by_name = {schema["name"]: schema for schema in schemas}
+fact_store_schema = schema_by_name["fact_store"]
+fact_feedback_schema = schema_by_name["fact_feedback"]
 assert fact_store_schema["parameters"]["required"] == ["action"]
+assert "action" not in schema_by_name["fact_search"]["parameters"].get("required", [])
 assert fact_feedback_schema["parameters"]["required"] == ["fact_id"]
 
 calls = []
@@ -707,14 +722,24 @@ def fake_call(name, args, **kwargs):
 plugin.tools.call_tokensave_tool = fake_call
 store_result = provider.handle_tool_call("fact_store", {"action": "list"}, request_id="r1")
 feedback_result = provider.handle_tool_call("fact_feedback", {"fact_id": 7, "helpful": True})
+search_result = provider.handle_tool_call("fact_search", {"query": "Project Phoenix"})
+status_result = provider.handle_tool_call("memory_status", None)
 assert isinstance(store_result, str)
 assert isinstance(feedback_result, str)
+assert isinstance(search_result, str)
+assert isinstance(status_result, str)
 assert json.loads(store_result)["name"] == "tokensave_fact_store"
 assert json.loads(feedback_result)["name"] == "tokensave_fact_feedback"
+assert json.loads(search_result)["name"] == "tokensave_fact_store"
+assert json.loads(status_result)["name"] == "tokensave_memory_status"
 assert calls[0][0] == "tokensave_fact_store"
 assert calls[0][1] == {"action": "list"}
 assert calls[0][2]["request_id"] == "r1"
 assert calls[1][0] == "tokensave_fact_feedback"
+assert calls[2][0] == "tokensave_fact_store"
+assert calls[2][1] == {"query": "Project Phoenix", "action": "search"}
+assert calls[3][0] == "tokensave_memory_status"
+assert calls[3][1] == {}
 
 class LegacyCtx:
     def __init__(self):
@@ -884,7 +909,8 @@ assert provider.is_available() is True
 assert provider.get_config_schema() == []
 provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
 assert provider.hermes_home == str(hermes_home)
-assert [schema["name"] for schema in provider.get_tool_schemas()] == ["fact_store", "fact_feedback"]
+assert "fact_search" in [schema["name"] for schema in provider.get_tool_schemas()]
+assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
 "#,
     )
     .unwrap();

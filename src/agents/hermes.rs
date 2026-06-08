@@ -789,10 +789,38 @@ except Exception:
     class MemoryProvider:
         pass
 
-MEMORY_TOOL_MAP = {
-    "fact_store": "tokensave_fact_store",
-    "fact_feedback": "tokensave_fact_feedback",
+MEMORY_FACT_ACTIONS = {
+    "fact_add": "add",
+    "fact_search": "search",
+    "fact_probe": "probe",
+    "fact_related": "related",
+    "fact_reason": "reason",
+    "fact_contradict": "contradict",
+    "fact_update": "update",
+    "fact_remove": "remove",
+    "fact_list": "list",
 }
+
+MEMORY_ACTION_DESCRIPTIONS = {
+    "fact_add": "Add a holographic memory fact.",
+    "fact_search": "Search holographic memory facts by query.",
+    "fact_probe": "Find facts connected to one entity.",
+    "fact_related": "List entities related to one entity.",
+    "fact_reason": "Reason over facts that connect multiple entities.",
+    "fact_contradict": "Scan memory facts for likely contradictions.",
+    "fact_update": "Update an existing holographic memory fact.",
+    "fact_remove": "Remove a holographic memory fact.",
+    "fact_list": "List holographic memory facts.",
+}
+
+MEMORY_TOOL_MAP = {"fact_store": {"tokensave_name": "tokensave_fact_store"}}
+for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
+    MEMORY_TOOL_MAP[_hermes_name] = {
+        "tokensave_name": "tokensave_fact_store",
+        "fixed_args": {"action": _action},
+    }
+MEMORY_TOOL_MAP["fact_feedback"] = {"tokensave_name": "tokensave_fact_feedback"}
+MEMORY_TOOL_MAP["memory_status"] = {"tokensave_name": "tokensave_memory_status"}
 
 def _pre_llm_call(*args, **kwargs):
     return (
@@ -803,13 +831,27 @@ def _pre_llm_call(*args, **kwargs):
 def _tokensave_status(raw_args: str = ""):
     return tools.call_tokensave_tool("tokensave_status", {})
 
-def _memory_schema(tokensave_name: str, hermes_name: str) -> dict:
+def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
         if schema.get("name") == tokensave_name:
+            parameters = json.loads(json.dumps(schema.get("parameters", {})))
+            if action is not None:
+                properties = parameters.get("properties")
+                if isinstance(properties, dict):
+                    properties.pop("action", None)
+                required = parameters.get("required")
+                if isinstance(required, list):
+                    required = [field for field in required if field != "action"]
+                    if required:
+                        parameters["required"] = required
+                    else:
+                        parameters.pop("required", None)
             return {
                 "name": hermes_name,
-                "description": schema.get("description", ""),
-                "parameters": schema.get("parameters", {}),
+                "description": MEMORY_ACTION_DESCRIPTIONS.get(
+                    hermes_name, schema.get("description", "")
+                ),
+                "parameters": parameters,
             }
     return {
         "name": hermes_name,
@@ -863,16 +905,23 @@ class TokensaveMemoryProvider(MemoryProvider):
         self.session_id = session_id
 
     def get_tool_schemas(self):
-        return [
-            _memory_schema("tokensave_fact_store", "fact_store"),
-            _memory_schema("tokensave_fact_feedback", "fact_feedback"),
-        ]
+        memory_schemas = [_memory_schema("tokensave_fact_store", "fact_store")]
+        for hermes_name, action in MEMORY_FACT_ACTIONS.items():
+            memory_schemas.append(_memory_schema("tokensave_fact_store", hermes_name, action))
+        memory_schemas.append(_memory_schema("tokensave_fact_feedback", "fact_feedback"))
+        memory_schemas.append(_memory_schema("tokensave_memory_status", "memory_status"))
+        return memory_schemas
 
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
-        tokensave_name = MEMORY_TOOL_MAP.get(tool_name)
-        if tokensave_name is None:
+        mapping = MEMORY_TOOL_MAP.get(tool_name)
+        if mapping is None:
             return tools.error_payload(f"unknown memory tool: {tool_name}")
+        tokensave_name = mapping["tokensave_name"]
+        fixed_args = mapping.get("fixed_args")
+        if fixed_args:
+            tool_args = dict(tool_args)
+            tool_args.update(fixed_args)
         return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
 
 def register(ctx):
