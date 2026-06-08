@@ -190,7 +190,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path) {
     assert_eq!(manifest["displayName"], "TokenSave");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["license"], "MIT");
-    assert_eq!(manifest["mcp"], "mcp.json");
+    assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
     assert!(
         manifest["rules"]

@@ -364,7 +364,7 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
         });
         removed |= entries.len() != before;
     }
-    events.retain(|_, value| value.as_array().map_or(true, |entries| !entries.is_empty()));
+    events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
 
     if !removed {
         return Ok(());
@@ -427,7 +427,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 
     let manifest = load_json_file(&manifest_path);
     if manifest.get("name").and_then(|v| v.as_str()) == Some("tokensave")
-        && manifest.get("mcp").and_then(|v| v.as_str()) == Some("mcp.json")
+        && manifest.get("mcpServers").and_then(|v| v.as_str()) == Some("mcp.json")
         && manifest.get("hooks").and_then(|v| v.as_str()) == Some("hooks/hooks.json")
     {
         dc.pass(&format!(
