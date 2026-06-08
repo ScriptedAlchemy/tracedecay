@@ -104,10 +104,82 @@ impl AgentIntegration for CursorIntegration {
 // Plugin install helpers
 // ---------------------------------------------------------------------------
 
-const PLUGIN_MANIFEST: &str = include_str!("../../cursor-plugin/.cursor-plugin/plugin.json");
-const PLUGIN_MCP: &str = include_str!("../../cursor-plugin/mcp.json");
-const PLUGIN_HOOKS: &str = include_str!("../../cursor-plugin/hooks/hooks.json");
-const PLUGIN_RULE: &str = include_str!("../../cursor-plugin/rules/tokensave.mdc");
+/// Every file in the Cursor plugin bundle, embedded into the binary so released
+/// installs can recreate the plugin when the repo `cursor-plugin/` source dir is
+/// not present to symlink. Each entry is `(relative_path, file_contents)`. This
+/// is the single source of truth for both the embedded writer and the set of
+/// paths we manage for uninstall.
+const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".cursor-plugin/plugin.json",
+        include_str!("../../cursor-plugin/.cursor-plugin/plugin.json"),
+    ),
+    ("mcp.json", include_str!("../../cursor-plugin/mcp.json")),
+    (
+        "hooks/hooks.json",
+        include_str!("../../cursor-plugin/hooks/hooks.json"),
+    ),
+    (
+        "rules/tokensave.mdc",
+        include_str!("../../cursor-plugin/rules/tokensave.mdc"),
+    ),
+    (
+        "skills/architecture-overview/SKILL.md",
+        include_str!("../../cursor-plugin/skills/architecture-overview/SKILL.md"),
+    ),
+    (
+        "skills/cleaning-up-dead-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/cleaning-up-dead-code/SKILL.md"),
+    ),
+    (
+        "skills/drafting-commit-and-pr/SKILL.md",
+        include_str!("../../cursor-plugin/skills/drafting-commit-and-pr/SKILL.md"),
+    ),
+    (
+        "skills/finding-impacted-areas/SKILL.md",
+        include_str!("../../cursor-plugin/skills/finding-impacted-areas/SKILL.md"),
+    ),
+    (
+        "skills/porting-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/porting-code/SKILL.md"),
+    ),
+    (
+        "skills/recalling-project-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/reviewing-a-diff/SKILL.md",
+        include_str!("../../cursor-plugin/skills/reviewing-a-diff/SKILL.md"),
+    ),
+    (
+        "skills/running-impacted-tests/SKILL.md",
+        include_str!("../../cursor-plugin/skills/running-impacted-tests/SKILL.md"),
+    ),
+    (
+        "skills/searching-for-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/searching-for-code/SKILL.md"),
+    ),
+    (
+        "skills/tracing-functions/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tracing-functions/SKILL.md"),
+    ),
+    (
+        "agents/code-explorer.md",
+        include_str!("../../cursor-plugin/agents/code-explorer.md"),
+    ),
+    (
+        "commands/tokensave-arch.md",
+        include_str!("../../cursor-plugin/commands/tokensave-arch.md"),
+    ),
+    (
+        "commands/tokensave-port.md",
+        include_str!("../../cursor-plugin/commands/tokensave-port.md"),
+    ),
+    (
+        "commands/tokensave-review.md",
+        include_str!("../../cursor-plugin/commands/tokensave-review.md"),
+    ),
+];
 
 fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tokensave")
@@ -163,14 +235,10 @@ fn symlink_plugin_dir(_source: &Path, _install_dir: &Path) -> std::io::Result<()
 }
 
 fn write_embedded_plugin(install_dir: &Path) -> Result<()> {
-    safe_write_text_file(
-        &install_dir.join(".cursor-plugin/plugin.json"),
-        PLUGIN_MANIFEST,
-        None,
-    )?;
-    safe_write_text_file(&install_dir.join("mcp.json"), PLUGIN_MCP, None)?;
-    safe_write_text_file(&install_dir.join("hooks/hooks.json"), PLUGIN_HOOKS, None)?;
-    safe_write_text_file(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE, None)
+    for &(relative, contents) in EMBEDDED_PLUGIN_FILES {
+        safe_write_text_file(&install_dir.join(relative), contents, None)?;
+    }
+    Ok(())
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
@@ -229,16 +297,14 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    [
-        ".cursor-plugin/plugin.json",
-        "mcp.json",
-        "hooks/hooks.json",
-        "rules/tokensave.mdc",
-        "README.md",
-    ]
-    .into_iter()
-    .map(|relative| install_dir.join(relative))
-    .collect()
+    // Every embedded file, plus `README.md` which the symlink install ships but
+    // the embedded writer does not — kept here as a best-effort cleanup guard.
+    EMBEDDED_PLUGIN_FILES
+        .iter()
+        .map(|&(relative, _)| relative)
+        .chain(std::iter::once("README.md"))
+        .map(|relative| install_dir.join(relative))
+        .collect()
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -520,5 +586,107 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
             "Cursor plugin tokensave rule is incomplete in {} — run `tokensave install --agent cursor`",
             rule_path.display()
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn relative_paths_under(root: &Path) -> Vec<String> {
+        let mut paths: Vec<String> = collect_regular_files(root)
+            .expect("source bundle should be readable")
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .expect("collected paths live under root")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn write_embedded_plugin_writes_core_and_bundle_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir).expect("embedded install should succeed");
+
+        // The four core files land, and the manifest is valid JSON carrying the
+        // mcpServers key released binaries rely on.
+        let manifest_path = install_dir.join(".cursor-plugin/plugin.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["name"], "tokensave");
+        assert_eq!(manifest["mcpServers"], "mcp.json");
+        assert!(install_dir.join("mcp.json").exists());
+        assert!(install_dir.join("hooks/hooks.json").exists());
+        assert!(install_dir.join("rules/tokensave.mdc").exists());
+
+        // A representative skill, the agent, and a command also ship, so released
+        // installs are no longer missing the bundle that the symlink path provides.
+        assert!(
+            install_dir
+                .join("skills/searching-for-code/SKILL.md")
+                .exists(),
+            "a representative skill should be embedded"
+        );
+        assert!(
+            install_dir.join("agents/code-explorer.md").exists(),
+            "the code-explorer agent should be embedded"
+        );
+        assert!(
+            install_dir.join("commands/tokensave-arch.md").exists(),
+            "a representative command should be embedded"
+        );
+
+        // Every embedded file is also a managed path so uninstall can clean it.
+        let managed = cursor_plugin_managed_paths(&install_dir);
+        for &(relative, _) in EMBEDDED_PLUGIN_FILES {
+            assert!(
+                managed.contains(&install_dir.join(relative)),
+                "{relative} should be a managed path"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_file_list_covers_the_whole_source_bundle() {
+        // Guards against adding a file to cursor-plugin/ without embedding it:
+        // every source file must be embedded, except README.md which the symlink
+        // install ships but the embedded writer intentionally omits.
+        let on_disk = relative_paths_under(&cursor_plugin_source_dir());
+        let mut expected: Vec<String> = EMBEDDED_PLUGIN_FILES
+            .iter()
+            .map(|&(relative, _)| relative.to_string())
+            .chain(std::iter::once("README.md".to_string()))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            on_disk, expected,
+            "EMBEDDED_PLUGIN_FILES must cover every cursor-plugin file (README is symlink-only)"
+        );
+    }
+
+    #[test]
+    fn embedded_install_uninstalls_completely() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir).expect("embedded install should succeed");
+        assert!(install_dir
+            .join("skills/searching-for-code/SKILL.md")
+            .exists());
+
+        // Because managed paths cover every embedded file, uninstall recognises a
+        // tokensave-only directory and removes it entirely.
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+        assert!(
+            !install_dir.exists(),
+            "embedded install should be fully removed on uninstall"
+        );
     }
 }
