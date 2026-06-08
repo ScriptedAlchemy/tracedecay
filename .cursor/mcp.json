@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "tokensave": {
-      "command": "/home/zack/projects/tokensave/scripts/tokensave-dev-mcp.sh"
-    }
-  }
-}

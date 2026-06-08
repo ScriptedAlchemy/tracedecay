@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tokensave": {
+      "type": "stdio",
+      "command": "tokensave",
+      "args": [
+        "serve",
+        "--path",
+        "${workspaceFolder}"
+      ]
+    }
+  }
+}
