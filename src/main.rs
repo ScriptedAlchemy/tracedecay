@@ -1227,12 +1227,25 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
     )
 }
 
-fn should_skip_agent_install_maintenance(_command: &Commands) -> bool {
-    // Never mutate user-profile agent configs as an implicit startup side
-    // effect. Global/profile installs remain available through explicit
-    // `tokensave install`, `tokensave reinstall`, and `tokensave uninstall`
-    // command handling below; project-local setup remains `install --local`.
-    true
+fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
+    // Selectively gate the implicit `check_install_stale` + silent-reinstall
+    // path so agent permissions/hooks/MCP config stay in sync after a binary
+    // upgrade, without firing on paths where it would be wrong or wasteful:
+    //   - `Serve`: the MCP hot path with a 30 s client `initialize` timeout
+    //     (#84). Reinstalling every tracked agent before the stdio loop starts
+    //     can blow that budget, so it must stay off `serve`.
+    //   - `Install` / `Reinstall`: already perform installation — don't
+    //     double-install as an implicit prelude to the explicit command.
+    //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
+    //     reinstall scan there too.
+    // Every other command (the normal everyday invocations) runs maintenance.
+    matches!(
+        command,
+        Commands::Serve { .. }
+            | Commands::Install { .. }
+            | Commands::Reinstall
+            | Commands::Tool { .. }
+    )
 }
 
 fn is_local_install_command(command: &Commands) -> bool {
@@ -1277,14 +1290,13 @@ mod startup_tests {
     }
 
     #[test]
-    fn all_commands_skip_implicit_agent_install_maintenance() {
-        assert!(should_skip_agent_install_maintenance(&Commands::Tool {
-            name: Some("message_search".to_string()),
-            args: Vec::new(),
-        }));
-        assert!(should_skip_agent_install_maintenance(&Commands::Init {
+    fn agent_install_maintenance_is_selective() {
+        // Skip the implicit reinstall scan on the hot path (`serve`), on the
+        // explicit install commands (they already install), and on per-call
+        // tool invocations.
+        assert!(should_skip_agent_install_maintenance(&Commands::Serve {
             path: None,
-            skip_folders: Vec::new(),
+            timings: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Install {
             agent: Some("cursor".to_string()),
@@ -1292,6 +1304,24 @@ mod startup_tests {
             profile: None,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
+        assert!(should_skip_agent_install_maintenance(&Commands::Tool {
+            name: Some("message_search".to_string()),
+            args: Vec::new(),
+        }));
+
+        // Run maintenance for normal everyday command invocations so a binary
+        // upgrade re-syncs agent config.
+        assert!(!should_skip_agent_install_maintenance(&Commands::Init {
+            path: None,
+            skip_folders: Vec::new(),
+        }));
+        assert!(!should_skip_agent_install_maintenance(&Commands::Status {
+            path: None,
+            json: false,
+            short: false,
+            details: false,
+            runtime: false,
+        }));
     }
 
     #[test]
