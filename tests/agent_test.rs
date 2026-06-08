@@ -1116,6 +1116,28 @@ fn test_hermes_install_backs_up_existing_config() {
 }
 
 #[test]
+fn test_hermes_install_rejects_existing_memory_provider_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original =
+        "theme: dark\nmemory:\n  provider: other-memory\nplugins:\n  enabled:\n    - other\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("Hermes memory provider already configured"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "install must not overwrite an existing Hermes memory provider"
+    );
+}
+
+#[test]
 fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");

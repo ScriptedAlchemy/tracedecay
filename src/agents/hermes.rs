@@ -312,7 +312,9 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
         .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
     if let Some(provider_line) = provider_line {
         if lines[provider_line].trim() != "provider: tokensave" {
-            lines[provider_line] = "  provider: tokensave".to_string();
+            return Err(
+                "Hermes memory provider already configured; refusing to overwrite it".to_string(),
+            );
         }
     } else {
         lines.insert(memory_start + 1, "  provider: tokensave".to_string());
