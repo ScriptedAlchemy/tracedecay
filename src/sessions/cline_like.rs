@@ -147,6 +147,10 @@ impl TranscriptSource for ClineLikeSource {
                 "source": format!("{}_task_history", self.provider),
             }))
             .ok(),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
         };
 
         Some(ParsedTranscript {

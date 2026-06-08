@@ -5,6 +5,7 @@ use tokensave::sessions::cursor::{
     ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped, open_project_session_db,
     project_session_db_path,
 };
+use tokensave::sessions::SessionSearchScope;
 
 fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     let project = tmp.path().join("project");
@@ -12,6 +13,39 @@ fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     std::fs::create_dir(project.join(".tokensave")).unwrap();
     std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
     project
+}
+
+fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": "parent-session",
+        "conversation_id": "conversation-1",
+        "transcript_path": transcript,
+        "workspace_roots": [project],
+        "model": "gpt-5.5"
+    })
+}
+
+fn write_cursor_parent_with_subagent(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let transcripts_dir = tmp.path().join("agent-transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    let parent = transcripts_dir.join("parent-session.jsonl");
+    std::fs::write(
+        &parent,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Parent asks for orchard transcript research."}]}}
+"#,
+    )
+    .unwrap();
+
+    let subagent_dir = transcripts_dir.join("parent-session").join("subagents");
+    std::fs::create_dir_all(&subagent_dir).unwrap();
+    let subagent = subagent_dir.join("worker-1.jsonl");
+    std::fs::write(
+        &subagent,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Worker found orchard transcript evidence."}]}}
+"#,
+    )
+    .unwrap();
+    (parent, subagent)
 }
 
 #[tokio::test]
@@ -208,4 +242,154 @@ async fn cursor_transcript_ingest_defers_partial_final_line() {
         .search_session_messages("cursor", None, "partial handling", 10)
         .await;
     assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_subagent_transcript_ingests_as_child_session() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let child = db
+        .get_session("cursor", "worker-1")
+        .await
+        .expect("subagent session should be stored");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent-session"));
+    assert!(child.is_subagent);
+    assert_eq!(child.agent_id.as_deref(), Some("worker-1"));
+
+    let results = db
+        .search_session_messages("cursor", None, "orchard evidence", 10)
+        .await;
+    assert!(results.iter().any(|hit| {
+        hit.session.session_id == "worker-1"
+            && hit.session.parent_session_id.as_deref() == Some("parent-session")
+    }));
+}
+
+#[tokio::test]
+async fn cursor_capped_ingest_discovers_subagents() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+
+    let stats = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(4096)).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let child = db
+        .get_session("cursor", "worker-1")
+        .await
+        .expect("subagent session should be stored");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent-session"));
+    assert!(child.is_subagent);
+}
+
+#[tokio::test]
+async fn cursor_subagent_ingestion_is_incremental_per_file() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let (parent, subagent) = write_cursor_parent_with_subagent(&tmp);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(first.messages_upserted, 2);
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&subagent)
+        .unwrap();
+    file.write_all(
+        b"{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Worker appended orchard followup.\"}]}}\n",
+    )
+    .unwrap();
+    drop(file);
+
+    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(second.sessions_upserted, 1);
+    assert_eq!(second.messages_upserted, 1);
+
+    let child_hits = db
+        .search_session_messages_filtered(
+            "cursor",
+            None,
+            "orchard",
+            10,
+            SessionSearchScope::SubagentsOnly,
+            Some("parent-session"),
+        )
+        .await;
+    assert_eq!(child_hits.len(), 2);
+    assert!(child_hits
+        .iter()
+        .all(|hit| hit.session.session_id == "worker-1"));
+}
+
+#[tokio::test]
+async fn cursor_parent_and_subagent_offsets_do_not_collide() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 2);
+
+    let parent_message = db
+        .get_session_message("cursor", "parent-session:0")
+        .await
+        .expect("parent offset-derived id should exist");
+    let child_message = db
+        .get_session_message("cursor", "worker-1:0")
+        .await
+        .expect("subagent offset-derived id should exist");
+
+    assert_eq!(parent_message.session_id, "parent-session");
+    assert_eq!(child_message.session_id, "worker-1");
+    assert_ne!(parent_message.message_id, child_message.message_id);
+}
+
+#[tokio::test]
+async fn cursor_task_tool_dispatch_prompt_becomes_searchable() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-task-1","name":"Task","input":{"description":"Research TranscriptSource ingestion","prompt":"Find how TranscriptSource handles JSONL offsets","subagent_type":"generalPurpose"}}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let results = db
+        .search_session_messages("cursor", None, "TranscriptSource offsets", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].message.kind.as_deref(), Some("tool_dispatch"));
+    let metadata: serde_json::Value =
+        serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "cursor_transcript");
+    assert_eq!(metadata["tool_use_id"], "toolu-task-1");
 }

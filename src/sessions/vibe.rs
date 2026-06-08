@@ -96,6 +96,10 @@ impl TranscriptSource for VibeSource {
                 "source": "vibe_messages",
             }))
             .ok(),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
         };
 
         Some(ParsedTranscript {

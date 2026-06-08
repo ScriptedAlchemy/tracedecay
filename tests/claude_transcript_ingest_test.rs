@@ -57,6 +57,39 @@ fn write_claude_transcript(
     path
 }
 
+fn write_claude_subagent_transcript(
+    home: &std::path::Path,
+    parent_session: &str,
+    agent_id: &str,
+) -> std::path::PathBuf {
+    let dir = home
+        .join(".claude/projects/-some-slug")
+        .join(parent_session)
+        .join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("agent-{agent_id}.jsonl"));
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "sessionId": format!("agent-{agent_id}"),
+                "uuid": "child-u1",
+                "timestamp": "2026-01-01T00:00:10.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "The child worker verified billing fallback evidence."}
+                    ]
+                }
+            })
+        ),
+    )
+    .unwrap();
+    path
+}
+
 #[tokio::test]
 async fn claude_transcript_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
@@ -143,4 +176,33 @@ async fn claude_transcript_for_other_project_is_skipped() {
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
     );
+}
+
+#[tokio::test]
+async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_claude_transcript(&home, &project, "parent-claude");
+    write_claude_subagent_transcript(&home, "parent-claude", "worker");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 3);
+
+    let child = db
+        .get_session("claude", "agent-worker")
+        .await
+        .expect("subagent session should be stored");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent-claude"));
+    assert!(child.is_subagent);
+    assert_eq!(child.agent_id.as_deref(), Some("worker"));
+
+    let results = db
+        .search_session_messages("claude", None, "fallback evidence", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].session.session_id, "agent-worker");
 }

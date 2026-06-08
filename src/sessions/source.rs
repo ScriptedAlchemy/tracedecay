@@ -82,6 +82,10 @@ pub struct SessionDraft {
     pub project_path: String,
     pub title: Option<String>,
     pub metadata_json: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub is_subagent: bool,
+    pub agent_id: Option<String>,
+    pub parent_tool_use_id: Option<String>,
 }
 
 /// The result of parsing only the *new* portion of one transcript file.
@@ -210,6 +214,10 @@ async fn ingest_one(
         ended_at,
         transcript_path: Some(path.to_string_lossy().to_string()),
         metadata_json: draft.metadata_json,
+        parent_session_id: draft.parent_session_id,
+        is_subagent: draft.is_subagent,
+        agent_id: draft.agent_id,
+        parent_tool_use_id: draft.parent_tool_use_id,
     };
 
     let sessions_upserted = u64::from(db.upsert_session(&session).await);
