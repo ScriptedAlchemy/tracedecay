@@ -136,6 +136,7 @@ fn test_block_response_has_reason() {
     let result = evaluate_hook_decision(input);
     let reason = get_block_reason(&result);
     assert!(reason.contains("tokensave MCP tools"));
+    assert!(reason.contains("tokensave hint:"));
 }
 
 #[test]
@@ -167,6 +168,7 @@ fn test_kiro_blocks_delegate_code_research_task() {
     }"#;
     let reason = evaluate_kiro_pre_tool_use(input).unwrap();
     assert!(reason.contains("tokensave MCP tools"));
+    assert!(reason.contains("tokensave hint:"));
 }
 
 #[test]
@@ -226,6 +228,10 @@ fn test_cursor_subagent_start_blocks_explore_research_task() {
         .as_str()
         .unwrap_or_default()
         .contains("tokensave MCP tools"));
+    assert!(v["user_message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave hint:"));
     assert!(
         v.get("hookSpecificOutput").is_none(),
         "Cursor hook output must use Cursor's documented subagentStart fields"
@@ -542,6 +548,10 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
         .as_str()
         .unwrap_or_default()
         .contains("tokensave MCP tools"));
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("tokensave hint:"));
     // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
     assert!(
         v.get("permission").is_none(),

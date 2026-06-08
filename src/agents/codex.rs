@@ -96,7 +96,7 @@ impl AgentIntegration for CodexIntegration {
         let local_codex_dir = ctx.project_path.join(".codex");
         if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || ctx.project_path.join("AGENTS.md").exists()
+            || local_agents_md_has_tokensave(&ctx.project_path.join("AGENTS.md"))
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
@@ -131,6 +131,13 @@ impl AgentIntegration for CodexIntegration {
                 .is_some()
         })
     }
+}
+
+fn local_agents_md_has_tokensave(path: &Path) -> bool {
+    path.exists()
+        && std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains("## Prefer tokensave MCP tools")
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +243,14 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         faster than file reads.\n\n\
         If a code analysis question cannot be fully answered by tokensave MCP tools, \
         try querying the SQLite database directly at `.tokensave/tokensave.db` \
-        (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries \
+        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
+        `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
+        For durable project/user facts, prefer `tokensave_fact_store`, \
+        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
+        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        prior conversation context matters. Do not store secrets, credentials, or \
+        unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tokensave tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/aovestdipaperino/tokensave describing the limitation. \

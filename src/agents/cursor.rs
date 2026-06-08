@@ -48,6 +48,14 @@ impl AgentIntegration for CursorIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let cursor_dir = project_path.join(".cursor");
+        for path in [
+            cursor_dir.join("mcp.json"),
+            cursor_dir.join("rules/tokensave.mdc"),
+            cursor_dir.join("permissions.json"),
+            cursor_dir.join("hooks.json"),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
         install_mcp_server(
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,
@@ -158,6 +166,7 @@ alwaysApply: true
 
 - For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first.
 - Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
+- For durable project/user facts, prefer `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use `tokensave_message_search` for project-local Cursor transcript recall when prior conversation context matters.
 - Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
 "#;
     write_generated_text(rule_path, contents)?;
