@@ -1,0 +1,12 @@
+name: pressure_smoke
+context_length: 300
+context_threshold: 0.30
+fresh_tail_count: 2
+leaf_chunk_tokens: 24
+condensation_fanin: 4
+incremental_max_depth: 1
+dynamic_leaf_chunk_enabled: false
+target_after_compaction: 0.55
+min_turns_between_compactions: 0
+policy_version: "1"
+notes: "Small deterministic pressure policy for benchmark chatter/headroom validation only."

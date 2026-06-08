@@ -1,0 +1,92 @@
+name: Bug or regression report
+description: Report broken, incorrect, or regressed hermes-lcm behavior.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include enough evidence for a maintainer to reproduce or verify it.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+      placeholder: lcm_expand should return the matching source messages for the selected summary node.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+      placeholder: lcm_expand returned an empty result even though lcm_describe showed child content.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: List exact steps, commands, config, or a small scenario that reproduces the issue.
+      placeholder: |
+        1. Enable hermes-lcm with context.engine: lcm
+        2. Run ...
+        3. Call ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version and branch
+      description: hermes-lcm version, branch, commit, or release tag.
+      placeholder: v0.16.1, main, or commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, Hermes Agent version, and relevant backend if known.
+      placeholder: Arch Linux, Python 3.14, Hermes Agent ..., OpenRouter/Claude/etc.
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: Include only the relevant hermes-lcm or Hermes config. Redact secrets.
+      render: yaml
+      placeholder: |
+        context:
+          engine: lcm
+        lcm:
+          ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, traceback, or failing test
+      description: Paste the error, traceback, failing assertion, or command output that proves the issue.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation attempted
+      description: What did you run or check already?
+      placeholder: |
+        - pytest tests/test_lcm_engine.py -q -> fails at ...
+        - python -m compileall -q . -> passes
+    validations:
+      required: false
