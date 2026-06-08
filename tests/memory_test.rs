@@ -55,7 +55,7 @@ async fn dirty_bank_names(db: &Database) -> Vec<String> {
     names
 }
 
-async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> Option<i64> {
+async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> i64 {
     let mut rows = db
         .conn()
         .query(
@@ -67,7 +67,9 @@ async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> Option<i64> {
     rows.next()
         .await
         .unwrap()
-        .map(|row| row.get::<i64>(0).unwrap())
+        .expect("dirty bank should exist")
+        .get::<i64>(0)
+        .unwrap()
 }
 
 async fn memory_bank_count(db: &Database) -> i64 {
@@ -368,7 +370,7 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
         )
         .await
         .unwrap();
-    let before = dirty_bank_updated_at(&db, "project").await.unwrap();
+    let before = dirty_bank_updated_at(&db, "project").await;
 
     db.conn()
         .execute_batch(
@@ -386,7 +388,7 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
 
     assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
     assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
-    assert!(dirty_bank_updated_at(&db, "project").await.unwrap() > before);
+    assert!(dirty_bank_updated_at(&db, "project").await > before);
 }
 
 #[tokio::test]
