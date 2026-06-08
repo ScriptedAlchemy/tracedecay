@@ -3,7 +3,9 @@
 //! Installs tokensave's Cursor plugin bundle into Cursor's local plugin
 //! directory. The plugin owns MCP, hooks, and rule configuration.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use serde_json::json;
 
@@ -60,6 +62,13 @@ impl AgentIntegration for CursorIntegration {
         Ok(())
     }
 
+    fn post_install<'a>(
+        &'a self,
+        project_path: Option<&'a Path>,
+    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move { track_branch_after_install(project_path).await })
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         remove_cursor_plugin_install(&cursor_plugin_install_dir(&ctx.home))?;
         let mcp_path = ctx.home.join(".cursor/mcp.json");
@@ -94,6 +103,42 @@ impl AgentIntegration for CursorIntegration {
     fn has_tokensave(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
             || legacy_mcp_has_tokensave(&home.join(".cursor/mcp.json"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-install hook
+// ---------------------------------------------------------------------------
+
+/// Registers the project's current git branch for tokensave indexing after a
+/// Cursor plugin install, so per-branch graphs stay in sync from the moment
+/// the integration is set up.
+///
+/// No-ops when there is no project path, no branch can be resolved, or the
+/// project has not been indexed yet (so it never bootstraps an index on its
+/// own).
+async fn track_branch_after_install(project_path: Option<&Path>) {
+    let Some(project_path) = project_path else {
+        return;
+    };
+    let Some(branch_name) = crate::branch::current_branch(project_path) else {
+        return;
+    };
+    match crate::branch::add_branch_tracking(project_path, &branch_name).await {
+        Ok(crate::branch::BranchAddOutcome::Added) => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tokensave indexing"
+            );
+        }
+        Ok(
+            crate::branch::BranchAddOutcome::AlreadyTracked
+            | crate::branch::BranchAddOutcome::NotIndexed,
+        ) => {}
+        Err(err) => {
+            eprintln!(
+                "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tokensave indexing: {err}"
+            );
+        }
     }
 }
 
@@ -562,5 +607,32 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
             "Cursor plugin tokensave rule is incomplete in {} — run `tokensave install --agent cursor`",
             rule_path.display()
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::CursorIntegration;
+    use crate::agents::AgentIntegration;
+
+    /// The Cursor `post_install` hook (the branch-tracking logic that moved
+    /// off `main` and onto the integration) must be safe to run on a project
+    /// tokensave has not indexed: it must not bootstrap a `.tokensave/` index
+    /// or panic.
+    #[tokio::test]
+    async fn post_install_does_not_bootstrap_index() {
+        let project = tempfile::tempdir().expect("tempdir");
+        CursorIntegration.post_install(Some(project.path())).await;
+        assert!(
+            !project.path().join(".tokensave").exists(),
+            "post_install must not create an index on an unindexed project"
+        );
+    }
+
+    /// A `None` project path is a no-op and must not panic.
+    #[tokio::test]
+    async fn post_install_handles_missing_project_path() {
+        CursorIntegration.post_install(None).await;
     }
 }
