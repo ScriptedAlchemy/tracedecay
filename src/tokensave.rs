@@ -531,7 +531,7 @@ fn print_corruption_warning() {
     eprintln!("[tokensave]");
     eprintln!("[tokensave] This was likely caused by a crash or kill during indexing.");
     eprintln!("[tokensave] Please report this at:");
-    eprintln!("[tokensave]   https://github.com/aovestdipaperino/tokensave/issues");
+    eprintln!("[tokensave]   https://github.com/ScriptedAlchemy/tokensave/issues");
     eprintln!(
         "[tokensave]   Include: tokensave version (v{version}), OS, and what happened before the crash."
     );

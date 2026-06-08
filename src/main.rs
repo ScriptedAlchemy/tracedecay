@@ -559,9 +559,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             })?;
             let tokensave_bin = tokensave::agents::which_tokensave().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
-                    message: "tokensave not found on PATH. Install it first:\n  \
-                          cargo install tokensave\n  \
-                          brew install aovestdipaperino/tap/tokensave"
+                    message: "tokensave not found on PATH. Install it from this repo first:\n  \
+                          cargo binstall --git https://github.com/ScriptedAlchemy/tokensave tokensave\n  \
+                          cargo install --git https://github.com/ScriptedAlchemy/tokensave tokensave"
                         .to_string(),
                 }
             })?;
@@ -582,6 +582,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 if let Some(id) = agent {
                     let ag = tokensave::agents::get_integration(&id)?;
                     ag.install_local(&ctx, &project_path)?;
+                    ag.post_install(Some(&project_path)).await;
                     installed_names.push(ag.name().to_string());
                 } else {
                     let (to_install, _) =
@@ -590,6 +591,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         let ag = tokensave::agents::get_integration(id)?;
                         if ag.supports_local_install() {
                             ag.install_local(&ctx, &project_path)?;
+                            ag.post_install(Some(&project_path)).await;
                             installed_names.push(ag.name().to_string());
                         } else {
                             eprintln!(
@@ -616,6 +618,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
 
             let mut installed_names: Vec<String> = Vec::new();
             let mut removed_names: Vec<String> = Vec::new();
+            let project_path = std::env::current_dir().ok();
 
             if let Some(id) = agent {
                 let ag = tokensave::agents::get_integration(&id)?;
@@ -627,6 +630,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     profile: profile.clone(),
                 };
                 ag.install(&ctx)?;
+                ag.post_install(project_path.as_deref()).await;
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
                     installed_names.push(name);
@@ -659,6 +663,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: profile.clone(),
                     };
                     ag.install(&ctx)?;
+                    ag.post_install(project_path.as_deref()).await;
                     installed_names.push(ag.name().to_string());
                     if !user_cfg.installed_agents.contains(id) {
                         user_cfg.installed_agents.push(id.clone());
@@ -702,6 +707,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 eprintln!("No installed agents found. Run `tokensave install` first.");
             } else {
                 let agents = user_cfg.installed_agents.clone();
+                let project_path = std::env::current_dir().ok();
                 eprintln!(
                     "Reinstalling {} agent(s): {}",
                     agents.len(),
@@ -716,6 +722,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: None,
                     };
                     ag.install(&ctx)?;
+                    ag.post_install(project_path.as_deref()).await;
                 }
                 eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
                 user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();

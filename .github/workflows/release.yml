@@ -188,18 +188,18 @@ jobs:
           ARM64_SONOMA_SHA="${{ steps.hashes.outputs.arm64_sonoma_sha }}"
           X86_64_LINUX_SHA="${{ steps.hashes.outputs.x86_64_linux_sha }}"
 
-          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/aovestdipaperino/homebrew-tap.git" tap
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
 
           cat > tap/Formula/tokensave.rb << EOF
           class Tokensave < Formula
             desc "Code intelligence tool that builds semantic knowledge graphs from source code"
-            homepage "https://github.com/aovestdipaperino/tokensave"
-            url "https://github.com/aovestdipaperino/tokensave/archive/refs/tags/v${VERSION}.tar.gz"
+            homepage "https://github.com/ScriptedAlchemy/tokensave"
+            url "https://github.com/ScriptedAlchemy/tokensave/archive/refs/tags/v${VERSION}.tar.gz"
             sha256 "${SOURCE_SHA}"
             license "MIT"
 
             bottle do
-              root_url "https://github.com/aovestdipaperino/tokensave/releases/download/v${VERSION}"
+              root_url "https://github.com/ScriptedAlchemy/tokensave/releases/download/v${VERSION}"
               sha256 cellar: :any_skip_relocation, arm64_sonoma: "${ARM64_SONOMA_SHA}"
               sha256 cellar: :any_skip_relocation, x86_64_linux: "${X86_64_LINUX_SHA}"
             end
@@ -272,29 +272,29 @@ jobs:
           {
             "version": "${VERSION}",
             "description": "Code intelligence tool that builds semantic knowledge graphs from source code",
-            "homepage": "https://github.com/aovestdipaperino/tokensave",
+            "homepage": "https://github.com/ScriptedAlchemy/tokensave",
             "license": "MIT",
             "architecture": {
               "64bit": {
-                "url": "https://github.com/aovestdipaperino/tokensave/releases/download/${TAG}/tokensave-${TAG}-x86_64-windows.zip",
+                "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/${TAG}/tokensave-${TAG}-x86_64-windows.zip",
                 "hash": "${SHA256}"
               }
             },
             "bin": "tokensave.exe",
             "checkver": {
-              "github": "https://github.com/aovestdipaperino/tokensave"
+              "github": "https://github.com/ScriptedAlchemy/tokensave"
             },
             "autoupdate": {
               "architecture": {
                 "64bit": {
-                  "url": "https://github.com/aovestdipaperino/tokensave/releases/download/v\$version/tokensave-v\$version-x86_64-windows.zip"
+                  "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/v\$version/tokensave-v\$version-x86_64-windows.zip"
                 }
               }
             }
           }
           EOF
 
-          git clone "https://x-access-token:${SCOOP_GITHUB_TOKEN}@github.com/aovestdipaperino/scoop-bucket.git" scoop-repo
+          git clone "https://x-access-token:${SCOOP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/scoop-bucket.git" scoop-repo
           cd scoop-repo
           mkdir -p bucket
           cp ../tokensave.json bucket/tokensave.json

@@ -195,7 +195,7 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
         If you find a gap where tokensave could answer a question natively, propose opening \
-        an issue at https://github.com/aovestdipaperino/tokensave. Remind the user to strip \
+        an issue at https://github.com/ScriptedAlchemy/tokensave. Remind the user to strip \
         sensitive or proprietary code from any issue text before submitting.\n\n\
         When a tokensave tool result contains a `tokensave_metrics:` line, report the \
         savings to the user (e.g. \"TokenSave'd ~N tokens\"). Never silently omit this.\n"

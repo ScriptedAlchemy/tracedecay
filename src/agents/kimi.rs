@@ -169,7 +169,7 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tokensave tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
-        at https://github.com/aovestdipaperino/tokensave describing the limitation. \
+        at https://github.com/ScriptedAlchemy/tokensave describing the limitation. \
         **Remind the user to strip any sensitive or proprietary code from the bug description \
         before submitting.**\n"
     )
