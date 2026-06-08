@@ -13,7 +13,7 @@ This skill runs the toolchain, so treat it as **user-triggered only**: never sta
 1. **Changed paths** — working tree, or explicit `changed_paths`.
 2. **Preview coverage:** `tokensave_affected` (`files`) and `tokensave_test_map` (which tests cover the changes).
 3. **Run → `tokensave_run_affected_tests`** (`changed_paths`, `max_tests`, `profile`, `timeout_secs`): pass/fail per test, with the source nodes each test covers.
-4. **On failure → `tokensave_diagnostics`** (structured errors) or **`tokensave_diagnose`** (paste raw `cargo check` / `clippy` stderr → mapped to nodes with callers attached).
+4. **On failure → `tokensave_diagnostics`** (structured errors) or **`tokensave_diagnose`** (paste raw `cargo check` / `clippy` stderr → mapped to nodes with callers attached). For standalone compile/type errors (not test failures), use `tokensave:fixing-build-and-type-errors`.
 5. **Coverage gaps → `tokensave_test_risk`** to recommend where the next test goes.
 
 ## Guardrails

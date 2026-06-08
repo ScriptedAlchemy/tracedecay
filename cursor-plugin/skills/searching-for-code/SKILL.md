@@ -18,7 +18,7 @@ Use the tokensave code graph before Grep/Glob/file reads. Pick the cheapest tool
 4. **Half-remembered name → `tokensave_similar`** (fuzzy / substring).
 5. **Stable cross-run identity → `tokensave_by_qualified_name`** (when content-hash node IDs changed).
 6. **By shape, not name → `tokensave_signature_search`** (return type / param substring / `async` / path), e.g. "every fn returning `Result<_, MyError>`".
-7. **Orient in a file → `tokensave_outline`** (cheap table of contents), then zoom with `tokensave_node` / `tokensave_body` / `tokensave_read` (`mode:"lines"` for slices).
+7. **Orient in a file → `tokensave_outline`** (cheap table of contents), then zoom with `tokensave_node` / `tokensave_body` / `tokensave_read` (`mode:"lines"` for slices); for just the API surface of a known symbol, `tokensave_signature` (no bodies).
 8. **Public surface of a module → `tokensave_module_api`**; list files with `tokensave_files`.
 9. **Type details:** `tokensave_constructors` (struct-literal sites), `tokensave_field_sites` (field reads/writes), `tokensave_derives` (avoid dead-end searches for derive-generated methods), `tokensave_impls`.
 

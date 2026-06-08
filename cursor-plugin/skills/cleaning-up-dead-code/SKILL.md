@@ -13,7 +13,7 @@ disable-model-invocation: true
 3. **Duplication → `tokensave_redundancy`** (`min_lines`, `similarity_threshold`; buckets: definite / likely / naming_only).
 4. **Focused pass on a subset → `tokensave_simplify_scan`** (`files`).
 5. **Before deleting anything → confirm zero real callers** with `tokensave_callers` / `tokensave_rename_preview`. Be conservative with `pub` items (they may be used outside the indexed scope).
-6. **Apply edits** with `tokensave_str_replace` / `tokensave_replace_symbol` / `tokensave_multi_str_replace` (or your normal edit tools).
+6. **Apply edits** with the `tokensave:atomic-code-edits` primitives (`tokensave_str_replace` / `tokensave_replace_symbol` / `tokensave_multi_str_replace`) or your normal edit tools.
 7. **Verify → `tokensave_diagnostics`**, then the `tokensave:running-impacted-tests` skill.
 
 ## Measuring (optional)

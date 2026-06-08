@@ -14,7 +14,7 @@ disable-model-invocation: true
    - Pull source with `tokensave_body` / `tokensave_node`.
    - Map dependencies with `tokensave_callees`; map incoming use with `tokensave_callers`.
    - Confirm the contract with `tokensave_signature`.
-   - Apply the ported code with the editing tools (`tokensave_replace_symbol` / `tokensave_str_replace` / `tokensave_insert_at_symbol`) or your normal edit tools.
+   - Apply the ported code with the `tokensave:atomic-code-edits` primitives (`tokensave_replace_symbol` / `tokensave_str_replace` / `tokensave_insert_at_symbol`) or your normal edit tools.
 4. **After each batch:** re-run `tokensave_port_status` to update progress; run `tokensave_diagnostics` to typecheck the target.
 5. **Cross-branch parity (if porting across refs):** `tokensave_branch_diff` / `tokensave_changelog`.
 

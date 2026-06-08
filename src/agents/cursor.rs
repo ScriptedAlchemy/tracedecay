@@ -128,8 +128,20 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/architecture-overview/SKILL.md"),
     ),
     (
+        "skills/atomic-code-edits/SKILL.md",
+        include_str!("../../cursor-plugin/skills/atomic-code-edits/SKILL.md"),
+    ),
+    (
         "skills/cleaning-up-dead-code/SKILL.md",
         include_str!("../../cursor-plugin/skills/cleaning-up-dead-code/SKILL.md"),
+    ),
+    (
+        "skills/code-health-report/SKILL.md",
+        include_str!("../../cursor-plugin/skills/code-health-report/SKILL.md"),
+    ),
+    (
+        "skills/cross-branch-investigation/SKILL.md",
+        include_str!("../../cursor-plugin/skills/cross-branch-investigation/SKILL.md"),
     ),
     (
         "skills/drafting-commit-and-pr/SKILL.md",
@@ -140,8 +152,16 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/finding-impacted-areas/SKILL.md"),
     ),
     (
+        "skills/fixing-build-and-type-errors/SKILL.md",
+        include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
+    ),
+    (
         "skills/porting-code/SKILL.md",
         include_str!("../../cursor-plugin/skills/porting-code/SKILL.md"),
+    ),
+    (
+        "skills/project-status/SKILL.md",
+        include_str!("../../cursor-plugin/skills/project-status/SKILL.md"),
     ),
     (
         "skills/recalling-project-memory/SKILL.md",
@@ -168,8 +188,24 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/agents/code-explorer.md"),
     ),
     (
+        "agents/code-health-auditor.md",
+        include_str!("../../cursor-plugin/agents/code-health-auditor.md"),
+    ),
+    (
         "commands/tokensave-arch.md",
         include_str!("../../cursor-plugin/commands/tokensave-arch.md"),
+    ),
+    (
+        "commands/tokensave-branch.md",
+        include_str!("../../cursor-plugin/commands/tokensave-branch.md"),
+    ),
+    (
+        "commands/tokensave-diagnose.md",
+        include_str!("../../cursor-plugin/commands/tokensave-diagnose.md"),
+    ),
+    (
+        "commands/tokensave-health.md",
+        include_str!("../../cursor-plugin/commands/tokensave-health.md"),
     ),
     (
         "commands/tokensave-port.md",
