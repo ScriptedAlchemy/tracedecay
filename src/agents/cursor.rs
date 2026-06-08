@@ -12,7 +12,7 @@ use crate::errors::{Result, TokenSaveError};
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
     load_jsonc_file_strict, safe_write_json_file, tool_names, AgentIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext,
+    HealthcheckContext, InstallContext, InstallScope,
 };
 
 /// Cursor agent.
@@ -31,8 +31,7 @@ impl AgentIntegration for CursorIntegration {
         install_mcp_server(
             &ctx.home.join(".cursor/mcp.json"),
             &ctx.tokensave_bin,
-            false,
-            true,
+            InstallScope::Global,
         )?;
 
         eprintln!();
@@ -59,8 +58,7 @@ impl AgentIntegration for CursorIntegration {
         install_mcp_server(
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,
-            true,
-            false,
+            InstallScope::ProjectLocal,
         )?;
         install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
         install_permissions(&cursor_dir.join("permissions.json"))?;
@@ -115,12 +113,7 @@ impl AgentIntegration for CursorIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_mcp_server(
-    mcp_path: &Path,
-    tokensave_bin: &str,
-    is_local_install: bool,
-    enable_global_db: bool,
-) -> Result<()> {
+fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str, scope: InstallScope) -> Result<()> {
     if let Some(parent) = mcp_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -140,11 +133,13 @@ fn install_mcp_server(
         "command": tokensave_bin,
         "args": ["serve"]
     });
-    if is_local_install {
-        server["args"] = json!(["serve", "--path", "."]);
-    }
-    if enable_global_db {
-        server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");
+    match scope {
+        InstallScope::Global => {
+            server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");
+        }
+        InstallScope::ProjectLocal => {
+            server["args"] = json!(["serve", "--path", "."]);
+        }
     }
     settings["mcpServers"]["tokensave"] = server;
 
@@ -325,7 +320,7 @@ fn install_cursor_hook_entry(
         .collect();
 
     let mut entry = json!({
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout
     });
     if let Some(matcher) = matcher {
@@ -345,10 +340,6 @@ fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Remove MCP server entry from ~/.cursor/mcp.json.
