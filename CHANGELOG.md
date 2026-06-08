@@ -796,7 +796,7 @@ The largest functional jump since 4.0: nine new MCP tools, a cross-session respo
 ## [3.3.2] - 2026-04-05
 
 ### Fixed
-- **Windows build failure blocking Homebrew/Scoop updates** — `SHELLEXECUTEINFOW` in `windows-sys` 0.59 requires the `Win32_System_Registry` feature flag, which was missing. This caused Windows CI builds to fail since v3.2.0, and because the release workflow used `fail-fast: true`, the failure cascaded to skip the Homebrew tap and Scoop bucket update jobs entirely. Users on Homebrew were stuck on v3.1.0. ([#12](https://github.com/aovestdipaperino/tokensave/issues/12))
+- **Windows build failure blocking Homebrew/Scoop updates** — `SHELLEXECUTEINFOW` in `windows-sys` 0.59 requires the `Win32_System_Registry` feature flag, which was missing. This caused Windows CI builds to fail since v3.2.0, and because the release workflow used `fail-fast: true`, the failure cascaded to skip the Homebrew tap and Scoop bucket update jobs entirely. Users on Homebrew were stuck on v3.1.0. ([#12](https://github.com/ScriptedAlchemy/tokensave/issues/12))
 - **`HANDLE` type mismatch on Windows** — `windows-sys` 0.59 changed `HANDLE` from `usize` to `*mut c_void`. The UAC elevation code now uses `std::ptr::null_mut()` and `.is_null()` instead of literal `0`.
 - **Release workflow resilience** — changed build matrix to `fail-fast: false` and downstream jobs (`update-homebrew`, `update-scoop`) to `if: !cancelled()`, so a single platform build failure no longer blocks formula/manifest updates for platforms that succeeded.
 
@@ -847,13 +847,13 @@ The largest functional jump since 4.0: nine new MCP tools, a cross-session respo
 ## [3.1.1] - 2026-04-02
 
 ### Fixed
-- **Windows daemon service installation** — `tokensave install` and `tokensave daemon --enable-autostart` no longer fail on non-elevated Windows terminals. When administrator privileges are required to register the Windows Service, the process now automatically requests UAC elevation for just the service installation step; everything else continues non-elevated. ([#7](https://github.com/aovestdipaperino/tokensave/issues/7))
+- **Windows daemon service installation** — `tokensave install` and `tokensave daemon --enable-autostart` no longer fail on non-elevated Windows terminals. When administrator privileges are required to register the Windows Service, the process now automatically requests UAC elevation for just the service installation step; everything else continues non-elevated. ([#7](https://github.com/ScriptedAlchemy/tokensave/issues/7))
 - **Quieter version update warnings** — the CLI no longer warns about patch-only releases (e.g. 3.2.0 → 3.2.1); warnings now appear only for minor or major version bumps. The status page (`tokensave_status` MCP tool) continues to show all available updates.
 
 ## [3.1.0] - 2026-04-01
 
 ### Fixed
-- **Edge duplication during incremental sync** — reference resolution was re-resolving ALL unresolved refs on every sync (not just from changed files) and inserting duplicate edges with no deduplication. Over many syncs this caused unbounded DB growth (e.g. 5.1 GB for a 108 MB codebase). A unique index on edges and `INSERT OR IGNORE` now prevent duplicates entirely. A V5 migration automatically deduplicates existing databases on upgrade. ([#5](https://github.com/aovestdipaperino/tokensave/issues/5))
+- **Edge duplication during incremental sync** — reference resolution was re-resolving ALL unresolved refs on every sync (not just from changed files) and inserting duplicate edges with no deduplication. Over many syncs this caused unbounded DB growth (e.g. 5.1 GB for a 108 MB codebase). A unique index on edges and `INSERT OR IGNORE` now prevent duplicates entirely. A V5 migration automatically deduplicates existing databases on upgrade. ([#5](https://github.com/ScriptedAlchemy/tokensave/issues/5))
 
 ### Added
 - **Concurrent sync prevention** — a PID-based lockfile (`.tokensave/sync.lock`) prevents the CLI and the background daemon from running sync simultaneously. If a sync is already in progress, the second attempt fails immediately with a clear error message. Stale locks from crashed processes are reclaimed automatically.
@@ -1372,5 +1372,5 @@ tokensave sync --force           # re-index to pick up new language extractors
 - libsql database layer with full CRUD operations
 - Configuration module with glob-based file filtering
 - Core types and error handling scaffold
-[6.1.1]: https://github.com/aovestdipaperino/tokensave/releases/tag/v6.1.1
-[--help]: https://github.com/aovestdipaperino/tokensave/releases/tag/v--help
+[6.1.1]: https://github.com/ScriptedAlchemy/tokensave/releases/tag/v6.1.1
+[--help]: https://github.com/ScriptedAlchemy/tokensave/releases/tag/v--help

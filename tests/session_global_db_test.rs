@@ -1,6 +1,6 @@
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tokensave::sessions::{SessionMessageRecord, SessionRecord, SessionSearchScope};
 
 async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
     let db_path = tmp.path().join(".tokensave").join("global.db");
@@ -18,6 +18,10 @@ fn sample_session(provider: &str, session_id: &str, project_key: &str) -> Sessio
         ended_at: None,
         transcript_path: Some("/tmp/project/transcript.jsonl".to_string()),
         metadata_json: Some(r#"{"source":"test"}"#.to_string()),
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
     }
 }
 
@@ -173,4 +177,132 @@ async fn search_session_messages_uses_fts_and_filters_provider_project() {
     assert_eq!(results[0].message.message_id, "cursor-msg-a");
     assert_eq!(results[0].session.project_key, "project-a");
     assert!(results[0].score > 0.0);
+}
+
+#[tokio::test]
+async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tokensave").join("global.db");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let old_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = old_db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            title TEXT,
+            started_at INTEGER,
+            ended_at INTEGER,
+            transcript_path TEXT,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, session_id)
+        );
+        INSERT INTO sessions (
+            provider, session_id, project_key, project_path, title, started_at,
+            ended_at, transcript_path, metadata_json
+        ) VALUES (
+            'cursor', 'old-parent', 'project-a', '/tmp/project', 'Old title',
+            1715000000, NULL, '/tmp/project/old.jsonl', '{\"source\":\"old\"}'
+        );",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(old_db);
+
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let session = db
+        .get_session("cursor", "old-parent")
+        .await
+        .expect("old row should survive schema upgrade");
+
+    assert_eq!(session.parent_session_id, None);
+    assert!(!session.is_subagent);
+    assert_eq!(session.agent_id, None);
+    assert_eq!(session.parent_tool_use_id, None);
+
+    let child = SessionRecord {
+        session_id: "child-agent".to_string(),
+        parent_session_id: Some("old-parent".to_string()),
+        is_subagent: true,
+        agent_id: Some("child-agent".to_string()),
+        ..sample_session("cursor", "child-agent", "project-a")
+    };
+    assert!(db.upsert_session(&child).await);
+
+    let fetched = db
+        .get_session("cursor", "child-agent")
+        .await
+        .expect("child row should round-trip");
+    assert_eq!(fetched.parent_session_id.as_deref(), Some("old-parent"));
+    assert!(fetched.is_subagent);
+    assert_eq!(fetched.agent_id.as_deref(), Some("child-agent"));
+}
+
+#[tokio::test]
+async fn search_session_messages_filters_parent_and_subagent_scope() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let parent = sample_session("cursor", "parent", "project-a");
+    let child = SessionRecord {
+        session_id: "agent-worker".to_string(),
+        parent_session_id: Some("parent".to_string()),
+        is_subagent: true,
+        agent_id: Some("worker".to_string()),
+        ..sample_session("cursor", "agent-worker", "project-a")
+    };
+    db.upsert_session(&parent).await;
+    db.upsert_session(&child).await;
+    db.upsert_session_message(&sample_message(
+        "cursor",
+        "parent-msg",
+        "parent",
+        "The orchard dispatch plan is ready.",
+    ))
+    .await;
+    db.upsert_session_message(&sample_message(
+        "cursor",
+        "child-msg",
+        "agent-worker",
+        "The orchard dispatch result came from the worker.",
+    ))
+    .await;
+
+    let all = db
+        .search_session_messages("cursor", Some("project-a"), "orchard dispatch", 10)
+        .await;
+    assert_eq!(all.len(), 2);
+
+    let parents_only = db
+        .search_session_messages_filtered(
+            "cursor",
+            Some("project-a"),
+            "orchard dispatch",
+            10,
+            SessionSearchScope::ParentsOnly,
+            None,
+        )
+        .await;
+    assert_eq!(parents_only.len(), 1);
+    assert_eq!(parents_only[0].session.session_id, "parent");
+
+    let subagents_only = db
+        .search_session_messages_filtered(
+            "cursor",
+            Some("project-a"),
+            "orchard dispatch",
+            10,
+            SessionSearchScope::SubagentsOnly,
+            Some("parent"),
+        )
+        .await;
+    assert_eq!(subagents_only.len(), 1);
+    assert_eq!(subagents_only[0].session.session_id, "agent-worker");
+    assert_eq!(
+        subagents_only[0].session.parent_session_id.as_deref(),
+        Some("parent")
+    );
 }

@@ -5,7 +5,7 @@
 **Homebrew (macOS):**
 
 ```bash
-brew install aovestdipaperino/tap/tokensave
+brew install ScriptedAlchemy/tap/tokensave
 ```
 
 **Cargo (any platform):**

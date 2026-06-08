@@ -639,9 +639,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             })?;
             let tokensave_bin = tokensave::agents::which_tokensave().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
-                    message: "tokensave not found on PATH. Install it first:\n  \
-                          cargo install tokensave\n  \
-                          brew install aovestdipaperino/tap/tokensave"
+                    message: "tokensave not found on PATH. Install it from this repo first:\n  \
+                          cargo binstall --git https://github.com/ScriptedAlchemy/tokensave tokensave\n  \
+                          cargo install --git https://github.com/ScriptedAlchemy/tokensave tokensave"
                         .to_string(),
                 }
             })?;
@@ -671,6 +671,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             profile: target_profile,
                         };
                         ag.install_local(&ctx, &project_path)?;
+                        ag.post_install(Some(&project_path)).await;
                     }
                     installed_names.push(ag.name().to_string());
                 } else {
@@ -680,6 +681,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         let ag = tokensave::agents::get_integration(id)?;
                         if ag.supports_local_install() {
                             ag.install_local(&ctx, &project_path)?;
+                            ag.post_install(Some(&project_path)).await;
                             installed_names.push(ag.name().to_string());
                         } else {
                             eprintln!(
@@ -706,6 +708,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
 
             let mut installed_names: Vec<String> = Vec::new();
             let mut removed_names: Vec<String> = Vec::new();
+            let project_path = std::env::current_dir().ok();
 
             if let Some(id) = agent {
                 let ag = tokensave::agents::get_integration(&id)?;
@@ -720,6 +723,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: target_profile,
                     };
                     ag.install(&ctx)?;
+                    ag.post_install(project_path.as_deref()).await;
                 }
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
@@ -753,6 +757,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: profile.clone(),
                     };
                     ag.install(&ctx)?;
+                    ag.post_install(project_path.as_deref()).await;
                     installed_names.push(ag.name().to_string());
                     if !user_cfg.installed_agents.contains(id) {
                         user_cfg.installed_agents.push(id.clone());
@@ -796,6 +801,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 eprintln!("No installed agents found. Run `tokensave install` first.");
             } else {
                 let agents = user_cfg.installed_agents.clone();
+                let project_path = std::env::current_dir().ok();
                 eprintln!(
                     "Reinstalling {} agent(s): {}",
                     agents.len(),
@@ -810,6 +816,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         profile: None,
                     };
                     ag.install(&ctx)?;
+                    ag.post_install(project_path.as_deref()).await;
                 }
                 eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
                 user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
@@ -1316,6 +1323,12 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Reinstall
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::HookPreToolUse
+            | Commands::HookPromptSubmit
+            | Commands::HookStop
+            | Commands::HookKiroPreToolUse
+            | Commands::HookKiroPromptSubmit
+            | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
             | Commands::HookCursorPreToolUse
             | Commands::HookCursorBeforeSubmitPrompt
@@ -1468,6 +1481,27 @@ mod startup_tests {
             path: None,
             timings: false,
         }));
+    }
+
+    #[test]
+    fn claude_and_kiro_hooks_skip_startup_maintenance() {
+        // Claude and Kiro lifecycle hooks are agent-invoked hot-path
+        // commands, exactly like the Cursor/Codex hooks already in the
+        // skip-list. They must skip the synchronous `try_flush` network
+        // round-trip (and the rest of the pre-command startup maintenance)
+        // so they stay fast on every tool-use/prompt/stop event (#84).
+        assert!(should_skip_startup_maintenance(&Commands::HookPreToolUse));
+        assert!(should_skip_startup_maintenance(&Commands::HookPromptSubmit));
+        assert!(should_skip_startup_maintenance(&Commands::HookStop));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPreToolUse
+        ));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPromptSubmit
+        ));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPostToolUse
+        ));
     }
 }
 

@@ -29,7 +29,7 @@ What it does, idempotently
   Case C — `[Unreleased]` has no content:
     No-op. Exit 0. Re-runs of the workflow are safe.
 
-Also appends a `[X.Y.Z]: https://github.com/aovestdipaperino/tokensave/releases/tag/vX.Y.Z`
+Also appends a `[X.Y.Z]: https://github.com/ScriptedAlchemy/tokensave/releases/tag/vX.Y.Z`
 link reference at the bottom of the file when missing (idempotent).
 
 Usage
@@ -53,7 +53,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG_PATH = REPO_ROOT / "CHANGELOG.md"
 CARGO_TOML_PATH = REPO_ROOT / "Cargo.toml"
-GITHUB_URL = "https://github.com/aovestdipaperino/tokensave"
+GITHUB_URL = "https://github.com/ScriptedAlchemy/tokensave"
 
 VERSION_HEADER_RE = re.compile(r"^## \[([^\]]+)\](?:\s+-\s+(.+))?\s*$")
 SUBSECTION_RE = re.compile(r"^### (\w+)\s*$")

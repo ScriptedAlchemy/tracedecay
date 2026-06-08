@@ -26,7 +26,7 @@ HOOK_SRC="$SCRIPT_DIR/block-explore-agent.sh"
 if ! command -v tokensave &>/dev/null; then
     echo "Error: tokensave not found on PATH. Install it first:" >&2
     echo "  cargo install --path .    # from the repo" >&2
-    echo "  brew install aovestdipaperino/tap/tokensave  # or via Homebrew" >&2
+    echo "  brew install ScriptedAlchemy/tap/tokensave  # or via Homebrew" >&2
     exit 1
 fi
 

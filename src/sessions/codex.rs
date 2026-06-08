@@ -10,6 +10,9 @@
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
 //!   (`payload.message`).
+//! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
+//!   `session_meta` has `thread_source == "subagent"` and parent ids in
+//!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
 //! `response_item` entries are intentionally skipped: they carry auto-injected
 //! synthetic context and duplicate the `agent_message`/`user_message` turns, so
@@ -37,6 +40,12 @@ struct CodexMeta {
     cwd: PathBuf,
     session_id: String,
     model: Option<String>,
+    parent_session_id: Option<String>,
+    is_subagent: bool,
+    agent_id: Option<String>,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+    thread_source: Option<String>,
 }
 
 /// Codex CLI transcript locator + parser.
@@ -97,10 +106,11 @@ impl TranscriptSource for CodexSource {
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: serde_json::to_string(&serde_json::json!({
-                "source": "codex_rollout",
-            }))
-            .ok(),
+            metadata_json: codex_metadata_json(&meta),
+            parent_session_id: meta.parent_session_id.clone(),
+            is_subagent: meta.is_subagent,
+            agent_id: meta.agent_id.clone(),
+            parent_tool_use_id: None,
         };
 
         Some(ParsedTranscript {
@@ -152,13 +162,72 @@ fn session_meta(path: &Path) -> Option<CodexMeta> {
             .or_else(|| payload.get("model_provider"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let parent_session_id = string_field(payload, "forked_from_id").or_else(|| {
+            nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id")
+        });
+        let thread_source = string_field(payload, "thread_source");
+        let agent_nickname = string_field(payload, "agent_nickname").or_else(|| {
+            nested_string_field(payload, "/source/subagent/thread_spawn/agent_nickname")
+        });
+        let agent_role = string_field(payload, "agent_role")
+            .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/agent_role"));
+        let is_subagent = thread_source.as_deref() == Some("subagent")
+            || parent_session_id.is_some()
+            || payload.pointer("/source/subagent").is_some();
+        let agent_id = is_subagent.then(|| session_id.clone());
         return Some(CodexMeta {
             cwd,
             session_id,
             model,
+            parent_session_id,
+            is_subagent,
+            agent_id,
+            agent_nickname,
+            agent_role,
+            thread_source,
         });
     }
     None
+}
+
+fn string_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+    payload
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn codex_metadata_json(meta: &CodexMeta) -> Option<String> {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("codex_rollout".to_string()),
+    );
+    if let Some(thread_source) = &meta.thread_source {
+        metadata.insert(
+            "thread_source".to_string(),
+            Value::String(thread_source.clone()),
+        );
+    }
+    if let Some(agent_role) = &meta.agent_role {
+        metadata.insert("agent_role".to_string(), Value::String(agent_role.clone()));
+    }
+    if let Some(agent_nickname) = &meta.agent_nickname {
+        metadata.insert(
+            "agent_nickname".to_string(),
+            Value::String(agent_nickname.clone()),
+        );
+    }
+    serde_json::to_string(&Value::Object(metadata)).ok()
 }
 
 /// Map one rollout line to a provider-neutral message, or `None` for non-message

@@ -3484,8 +3484,28 @@ async fn message_search_reads_project_local_session_db() {
         ended_at: None,
         transcript_path: Some("cursor-session.jsonl".to_string()),
         metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
     };
     assert!(db.upsert_session(&session).await);
+    let child_session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "worker-1".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Cursor subagent".to_string()),
+        started_at: Some(3),
+        ended_at: None,
+        transcript_path: Some("worker-1.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: Some("cursor-session".to_string()),
+        is_subagent: true,
+        agent_id: Some("worker-1".to_string()),
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&child_session).await);
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
@@ -3499,6 +3519,24 @@ async fn message_search_reads_project_local_session_db() {
             model: Some("test-model".to_string()),
             tool_names: None,
             source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "worker-message".to_string(),
+            session_id: "worker-1".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(4),
+            ordinal: 1,
+            text: "Subagent citrus evidence is linked to its parent.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("worker-1.jsonl".to_string()),
             source_offset: Some(0),
             metadata_json: None,
         })
@@ -3524,6 +3562,35 @@ async fn message_search_reads_project_local_session_db() {
     assert_eq!(
         parsed["results"][0]["session"]["project_key"],
         cg.project_root().to_string_lossy().to_string()
+    );
+
+    let subagent_result = handle_tool_call(
+        &cg,
+        "tokensave_message_search",
+        json!({
+            "query": "citrus evidence",
+            "provider": "cursor",
+            "parent_session_id": "cursor-session",
+            "scope": "subagents_only"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let subagent_parsed: Value =
+        serde_json::from_str(extract_text(&subagent_result.value)).unwrap();
+    assert_eq!(subagent_parsed["status"], "ok");
+    assert_eq!(subagent_parsed["scope"], "subagents_only");
+    assert_eq!(subagent_parsed["parent_session_id"], "cursor-session");
+    assert_eq!(subagent_parsed["count"], 1);
+    assert_eq!(
+        subagent_parsed["results"][0]["session"]["parent_session_id"],
+        "cursor-session"
+    );
+    assert_eq!(
+        subagent_parsed["results"][0]["session"]["is_subagent"],
+        true
     );
 }
 
@@ -3615,6 +3682,16 @@ fn message_search_provider_schema_matches_ingested_providers() {
         message_search.input_schema["properties"]["provider"]["enum"],
         serde_json::json!(["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"])
     );
+    assert_eq!(
+        message_search.input_schema["properties"]["scope"]["enum"],
+        serde_json::json!(["all", "parents_only", "subagents_only"])
+    );
+    assert!(message_search.input_schema["properties"]
+        .get("parent_session_id")
+        .is_some());
+    assert!(message_search.input_schema["properties"]
+        .get("include_subagents")
+        .is_some());
 }
 
 #[tokio::test]

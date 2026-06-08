@@ -34,13 +34,13 @@ Pick whichever method suits your platform.
 **Homebrew (macOS):**
 
 ```bash
-brew install aovestdipaperino/tap/tokensave
+brew install ScriptedAlchemy/tap/tokensave
 ```
 
 **Scoop (Windows):**
 
 ```powershell
-scoop bucket add tokensave https://github.com/aovestdipaperino/scoop-bucket
+scoop bucket add tokensave https://github.com/ScriptedAlchemy/scoop-bucket
 scoop install tokensave
 ```
 
@@ -59,7 +59,7 @@ cargo install tokensave --no-default-features    # 11 languages (lite)
 
 **Prebuilt binaries:**
 
-Download from the [latest release](https://github.com/aovestdipaperino/tokensave/releases/latest) and place the binary somewhere on your `PATH`. Archives are available for macOS (Apple Silicon), Linux (x86_64 and ARM64), and Windows (x86_64).
+Download from the [latest release](https://github.com/ScriptedAlchemy/tokensave/releases/latest) and place the binary somewhere on your `PATH`. Archives are available for macOS (Apple Silicon), Linux (x86_64 and ARM64), and Windows (x86_64).
 
 ---
 
@@ -202,7 +202,7 @@ tokensave install --agent kimi        # Moonshot Kimi CLI
 tokensave install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor's global install currently registers the MCP server only; use project-local install for Cursor rules, permissions, and hooks that can live with the repository.
+Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tokensave`; the plugin bundles MCP, hooks, and the tokensave rule.
 
 Codex setup registers tokensave in `~/.codex/config.toml` (MCP server + per-tool
 auto-approval), writes prompt rules to `~/.codex/AGENTS.md`, and installs a
@@ -259,14 +259,15 @@ tokensave install --local --agent cursor
 tokensave install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins require `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching Hermes. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins require `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching Hermes. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
 
-Cursor local install creates a stronger project-local setup:
+Cursor install is plugin-based:
 
-- `.cursor/mcp.json` registers the tokensave MCP server.
-- `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
-- `.cursor/permissions.json` auto-allows the local tokensave MCP tools using Cursor's `mcpAllowlist` format for that workspace.
-- `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
+- `tokensave install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tokensave`.
+- `tokensave install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
+- The plugin MCP config runs `tokensave serve --path ${workspaceFolder}`, so the server resolves the active workspace/repo-local `.tokensave/` DB instead of the plugin directory.
+- Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tokensave.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
+- The plugin bundles Cursor-specific, fail-open hooks (each acts only when a `.tokensave/` index exists):
   - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
   - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
   - `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) injects a nonblocking `additional_context` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files`.
@@ -276,6 +277,15 @@ Cursor local install creates a stronger project-local setup:
   - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
   Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. Cursor `preToolUse` remains nonblocking to avoid noisy denials.
+
+Manual Cursor plugin install for local development:
+
+```bash
+mkdir -p ~/.cursor/plugins/local
+ln -s /path/to/tokensave/cursor-plugin ~/.cursor/plugins/local/tokensave
+```
+
+Reload Cursor after installing or replacing the plugin. The plugin expects the `tokensave` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
 
 Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tokensave` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
 
@@ -299,7 +309,7 @@ The generated MCP entries use the resolved absolute path to the current `tokensa
 Whenever tokensave rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:
 
 - `~/.codex/config.toml` → `~/.codex/config.toml.bak`
-- `~/.cursor/mcp.json` → `~/.cursor/mcp.json.bak`
+- `~/.codex/hooks.json` → `~/.codex/hooks.json.bak`
 - `~/.claude.json` → `~/.claude.json.bak`
 
 If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tokensave never deletes or rotates it, so the most recent backup is the file you want.
@@ -819,4 +829,4 @@ This updates tool permissions, hooks, and prompt rules to match the new version.
 
 ### Getting help
 
-If you run into something not covered here, check the [GitHub repository](https://github.com/aovestdipaperino/tokensave) or open an issue.
+If you run into something not covered here, check the [GitHub repository](https://github.com/ScriptedAlchemy/tokensave) or open an issue.

@@ -3,6 +3,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tokensave::agents::*;
+use tokensave::branch_meta;
+use tokensave::config::get_tokensave_dir;
+use tokensave::tokensave::TokenSave;
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -187,18 +190,94 @@ fn assert_python_compiles(paths: &[&Path]) {
     );
 }
 
-fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) {
-    let mut node = json;
-    for key in command_path {
-        node = node
-            .get(*key)
-            .unwrap_or_else(|| panic!("missing key {key} in {json:?}"));
-    }
-    let expected = expected_tokensave_bin();
+fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".cursor/plugins/local/tokensave")
+}
+
+fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+    let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
+    assert_eq!(manifest["name"], "tokensave");
+    assert_eq!(manifest["displayName"], "TokenSave");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["license"], "MIT");
+    assert_eq!(manifest["mcpServers"], "mcp.json");
+    assert_eq!(manifest["hooks"], "hooks/hooks.json");
+    assert!(
+        manifest["rules"]
+            .as_array()
+            .is_some_and(|rules| rules.iter().any(|rule| rule == "rules/tokensave.mdc")),
+        "plugin manifest should reference the tokensave Cursor rule"
+    );
+
+    let mcp = read_json(&plugin_dir.join("mcp.json"));
+    let server = &mcp["mcpServers"]["tokensave"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], expected_command);
     assert_eq!(
-        node.as_str(),
-        Some(expected.as_str()),
-        "local MCP config must use the resolved absolute tokensave executable"
+        server["args"],
+        serde_json::json!(["serve", "--path", "${workspaceFolder}"])
+    );
+
+    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    let expected_hooks = [
+        ("sessionStart", "hook-cursor-session-start", None),
+        ("subagentStart", "hook-cursor-subagent-start", None),
+        (
+            "preToolUse",
+            "hook-cursor-pre-tool-use",
+            Some("Shell|Bash|Grep|Glob|Search"),
+        ),
+        (
+            "beforeSubmitPrompt",
+            "hook-cursor-before-submit-prompt",
+            None,
+        ),
+        (
+            "afterFileEdit",
+            "hook-cursor-after-file-edit",
+            Some("Write"),
+        ),
+        ("afterShellExecution", "hook-cursor-after-shell", None),
+        ("workspaceOpen", "hook-cursor-workspace-open", None),
+        ("stop", "hook-cursor-stop", None),
+    ];
+    for (event, subcommand, matcher) in expected_hooks {
+        let entries = hooks["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("plugin hook {event} should be an array"));
+        let hook = entries
+            .iter()
+            .find(|entry| {
+                entry["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(subcommand))
+            })
+            .unwrap_or_else(|| panic!("plugin hook {event} should call {subcommand}"));
+        assert!(
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
+            "plugin hook commands should use the installed tokensave binary"
+        );
+        if let Some(matcher) = matcher {
+            assert_eq!(hook["matcher"], matcher);
+        }
+    }
+
+    let rule = std::fs::read_to_string(plugin_dir.join("rules/tokensave.mdc")).unwrap();
+    assert!(rule.contains("alwaysApply: true"));
+    assert!(rule.contains("tokensave MCP tools"));
+    assert!(rule.contains("fall back"));
+    assert!(plugin_dir.join("README.md").exists());
+}
+
+#[test]
+fn test_cursor_plugin_bundle_files_are_valid() {
+    assert_cursor_plugin_bundle(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("cursor-plugin")
+            .as_path(),
+        "tokensave",
     );
 }
 
@@ -233,149 +312,59 @@ fn assert_hermes_config_enables_tokensave_memory(config_path: &Path) -> String {
 }
 
 #[test]
-fn test_local_install_cursor_writes_project_config_only() {
+fn test_cursor_install_installs_local_plugin_without_global_mcp() {
+    let home = TempDir::new().unwrap();
+    let ctx = make_install_ctx(home.path());
+
+    CursorIntegration.install(&ctx).unwrap();
+
+    let plugin_dir = cursor_plugin_install_dir(home.path());
+    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tokensave_bin);
+    assert!(
+        !std::fs::symlink_metadata(&plugin_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Cursor install should write a real plugin directory, not a symlink"
+    );
+    assert!(
+        !home.path().join(".cursor/mcp.json").exists(),
+        "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
+    );
+}
+
+#[test]
+fn test_local_install_cursor_installs_plugin_without_project_config() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
     assert_local_install_success("cursor", project.path(), home.path());
 
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(home.path()),
+        &expected_tokensave_bin(),
+    );
+
     let mcp_path = project.path().join(".cursor/mcp.json");
-    assert!(mcp_path.exists(), "Cursor local MCP config should exist");
-    let config = read_json(&mcp_path);
-    assert_command_is_tokensave(&config, &["mcpServers", "tokensave", "command"]);
-    assert_eq!(
-        config["mcpServers"]["tokensave"]["args"],
-        serde_json::json!(["serve", "--path", "."])
-    );
-    assert_eq!(
-        config["mcpServers"]["tokensave"]["type"],
-        serde_json::json!("stdio")
+    assert!(
+        !mcp_path.exists(),
+        "Cursor local install should not write legacy project MCP config"
     );
     assert!(
-        config["mcpServers"]["tokensave"].get("env").is_none(),
-        "local Cursor config should not need env flags for repo-local mode"
+        !project.path().join(".cursor/hooks.json").exists(),
+        "Cursor local install should not write legacy project hooks"
     );
-
-    let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
-    assert!(rule_path.exists(), "Cursor local rule should exist");
-    let rule = std::fs::read_to_string(&rule_path).unwrap();
-    assert!(rule.contains("alwaysApply: true"));
-    assert!(rule.contains("tokensave MCP tools"));
-    assert!(rule.contains("fall back"));
-
-    let permissions_path = project.path().join(".cursor/permissions.json");
     assert!(
-        permissions_path.exists(),
-        "Cursor local permissions should exist"
+        !project.path().join(".cursor/rules/tokensave.mdc").exists(),
+        "Cursor local install should not write legacy project rule"
     );
-    let permissions = read_json(&permissions_path);
-    let allow = permissions["mcpAllowlist"]
-        .as_array()
-        .expect("mcpAllowlist should be an array");
-    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    for tool in tool_names() {
-        let expected = format!("tokensave:{tool}");
-        assert!(
-            allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should allow MCP tool {expected}"
-        );
-    }
-    let hooks_path = project.path().join(".cursor/hooks.json");
     assert!(
-        hooks_path.exists(),
-        "Cursor local hooks config should exist"
+        !project.path().join(".cursor/permissions.json").exists(),
+        "Cursor local install should leave permissions to Cursor approval/run-mode behavior"
     );
-    let hooks = read_json(&hooks_path);
-    let subagent_hooks = hooks["hooks"]["subagentStart"]
-        .as_array()
-        .expect("subagentStart hooks should be an array");
-    let tokensave_hook = subagent_hooks
-        .iter()
-        .find(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-subagent-start"))
-        })
-        .expect("Cursor subagentStart hook should call tokensave hook-cursor-subagent-start");
-    assert_eq!(tokensave_hook["timeout"], serde_json::json!(5));
-    let before_submit_hooks = hooks["hooks"]["beforeSubmitPrompt"]
-        .as_array()
-        .expect("beforeSubmitPrompt hooks should be an array");
-    assert!(
-        before_submit_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-before-submit-prompt"))
-        }),
-        "Cursor beforeSubmitPrompt hook should reset tokensave's local counter"
-    );
-    let after_edit_hooks = hooks["hooks"]["afterFileEdit"]
-        .as_array()
-        .expect("afterFileEdit hooks should be an array");
-    let after_edit_hook = after_edit_hooks
-        .iter()
-        .find(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
-        })
-        .expect("Cursor afterFileEdit hook should keep tokensave's index fresh after writes");
-    assert_eq!(
-        after_edit_hook["matcher"], "Write",
-        "afterFileEdit hook should target agent Write edits via a matcher"
-    );
-
-    let session_start_hooks = hooks["hooks"]["sessionStart"]
-        .as_array()
-        .expect("sessionStart hooks should be an array");
-    assert!(
-        session_start_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-session-start"))
-        }),
-        "Cursor sessionStart hook should steer the agent toward tokensave MCP tools"
-    );
-
-    let after_shell_hooks = hooks["hooks"]["afterShellExecution"]
-        .as_array()
-        .expect("afterShellExecution hooks should be an array");
-    assert!(
-        after_shell_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-shell"))
-        }),
-        "Cursor afterShellExecution hook should resync after git state changes"
-    );
-
-    let workspace_open_hooks = hooks["hooks"]["workspaceOpen"]
-        .as_array()
-        .expect("workspaceOpen hooks should be an array");
-    assert!(
-        workspace_open_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-workspace-open"))
-        }),
-        "Cursor workspaceOpen hook should run a catch-up sync"
-    );
-
-    let stop_hooks = hooks["hooks"]["stop"]
-        .as_array()
-        .expect("stop hooks should be an array");
-    assert!(
-        stop_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-stop"))
-        }),
-        "Cursor stop hook should ingest the session transcript at end of turn"
-    );
-
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
-        "local install must not write the global Cursor config"
+        "local install must not write the legacy global Cursor MCP config"
     );
     assert!(
         !home.path().join(".tokensave/config.toml").exists(),
@@ -383,8 +372,50 @@ fn test_local_install_cursor_writes_project_config_only() {
     );
 }
 
+#[tokio::test]
+async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let git_init = Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(project.path())
+        .output()
+        .expect("git init should run");
+    assert!(
+        git_init.status.success(),
+        "git init should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    TokenSave::init(project.path()).await.unwrap();
+    let checkout = Command::new("git")
+        .arg("checkout")
+        .arg("-b")
+        .arg("feature/install")
+        .current_dir(project.path())
+        .output()
+        .expect("git checkout should run");
+    assert!(
+        checkout.status.success(),
+        "git checkout should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let meta = branch_meta::load_branch_meta(&get_tokensave_dir(project.path()))
+        .expect("Cursor install should bootstrap branch tracking metadata");
+    assert!(meta.is_tracked("main"));
+    assert!(meta.is_tracked("feature/install"));
+}
+
 #[test]
-fn test_local_install_cursor_refreshes_memory_permissions() {
+fn test_local_install_cursor_preserves_existing_permissions_file() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let cursor_dir = project.path().join(".cursor");
@@ -404,22 +435,51 @@ fn test_local_install_cursor_refreshes_memory_permissions() {
 
     assert_local_install_success("cursor", project.path(), home.path());
 
-    let permissions = read_json(&cursor_dir.join("permissions.json"));
-    let allow = permissions["mcpAllowlist"]
-        .as_array()
-        .expect("mcpAllowlist should be an array");
-    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    assert!(allow_strs.contains(&"other:custom_tool"));
-    for tool in tool_names() {
-        let expected = format!("tokensave:{tool}");
-        assert!(
-            allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should refresh every current tokensave tool {expected}"
-        );
-    }
-    assert!(
-        !allow_strs.contains(&"tokensave:tokensave_not_a_real_tool"),
-        "unknown tokensave permissions should be pruned"
+    let permissions = std::fs::read_to_string(cursor_dir.join("permissions.json")).unwrap();
+    assert!(permissions.contains("other:custom_tool"));
+    assert!(permissions.contains("tokensave:tokensave_not_a_real_tool"));
+    assert!(permissions.contains("tokensave:tokensave_str_replace"));
+}
+
+#[test]
+fn test_cursor_healthcheck_ignores_foreign_project_cursor_files() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    CursorIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other-bin"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"other-hook","timeout":30}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tokensave.mdc"),
+        "---\nalwaysApply: false\n---\nforeign rule\n",
+    )
+    .unwrap();
+
+    let mut dc = DoctorCounters::new();
+    CursorIntegration.healthcheck(
+        &mut dc,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(dc.warnings, 0, "foreign Cursor files should not warn");
+    assert_eq!(
+        dc.issues, 0,
+        "foreign Cursor files should not fail healthcheck"
     );
 }
 
@@ -1370,68 +1430,42 @@ fn test_hermes_uninstall_preserves_unknown_files_in_tokensave_plugin_dir() {
 }
 
 #[test]
-fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
+fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    // Pre-seed a hooks.json with a tokensave afterFileEdit entry that lacks
-    // the `Write` matcher (mirrors a config from an earlier tokensave version).
     let cursor_dir = project.path().join(".cursor");
-    std::fs::create_dir_all(&cursor_dir).unwrap();
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"tokensave":{"type":"stdio","command":"/old/tokensave","args":["serve","--path","."]}}}"#,
+    )
+    .unwrap();
     std::fs::write(
         cursor_dir.join("hooks.json"),
         r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"/old/tokensave hook-cursor-after-file-edit","timeout":30}]}}"#,
     )
     .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tokensave.mdc"),
+        "---\ndescription: Prefer tokensave MCP tools for codebase exploration\nalwaysApply: true\n---\n\n# Prefer tokensave MCP tools\n",
+    )
+    .unwrap();
 
-    // Install twice to prove idempotent reconciliation.
     assert_local_install_success("cursor", project.path(), home.path());
     assert_local_install_success("cursor", project.path(), home.path());
 
-    let hooks = read_json(&cursor_dir.join("hooks.json"));
-    let after = hooks["hooks"]["afterFileEdit"]
-        .as_array()
-        .expect("afterFileEdit should be an array");
-    let tokensave_entries: Vec<_> = after
-        .iter()
-        .filter(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
-        })
-        .collect();
-    assert_eq!(
-        tokensave_entries.len(),
-        1,
-        "reinstall must keep exactly one tokensave afterFileEdit entry, got {after:?}"
-    );
-    assert_eq!(
-        tokensave_entries[0]["matcher"], "Write",
-        "reinstall must reconcile the matcher onto a pre-existing entry"
-    );
-
-    let pre = hooks["hooks"]["preToolUse"]
-        .as_array()
-        .expect("preToolUse should be an array");
-    let pre_tokensave_entries: Vec<_> = pre
-        .iter()
-        .filter(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-pre-tool-use"))
-        })
-        .collect();
-    assert_eq!(
-        pre_tokensave_entries.len(),
-        1,
-        "install should add exactly one Cursor preToolUse hint hook"
+    assert!(
+        !cursor_dir.join("mcp.json").exists(),
+        "local install should remove legacy tokensave-only project MCP config"
     );
     assert!(
-        pre_tokensave_entries[0]["matcher"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Grep"),
-        "preToolUse hook should match Grep/search tools"
+        !cursor_dir.join("hooks.json").exists(),
+        "local install should remove legacy tokensave-only project hooks"
+    );
+    assert!(
+        !cursor_dir.join("rules/tokensave.mdc").exists(),
+        "local install should remove legacy tokensave project rule"
     );
 }
 
@@ -1484,15 +1518,6 @@ fn test_local_install_supported_agents_write_project_paths() {
         ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
         ("kilo", vec!["kilo.json"]),
         ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
-        (
-            "cursor",
-            vec![
-                ".cursor/mcp.json",
-                ".cursor/rules/tokensave.mdc",
-                ".cursor/permissions.json",
-                ".cursor/hooks.json",
-            ],
-        ),
     ];
 
     for (agent, paths) in cases {
@@ -1530,8 +1555,7 @@ fn test_local_install_supported_agents_write_project_paths() {
                     path.display()
                 );
             }
-            let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
-            if !is_instruction_file && !is_cursor_permissions {
+            if !is_instruction_file {
                 let expected = expected_tokensave_bin();
                 assert!(
                     body.contains(&expected),
@@ -2029,20 +2053,16 @@ fn test_kimi_is_detected_and_has_tokensave() {
 }
 
 #[test]
-fn test_cursor_install_creates_config() {
+fn test_cursor_install_creates_plugin() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
 
-    let mcp_path = home.join(".cursor/mcp.json");
-    assert!(mcp_path.exists(), "mcp.json should exist after install");
-    let content: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
-    assert!(content["mcpServers"]["tokensave"].is_object());
-    assert_eq!(
-        content["mcpServers"]["tokensave"]["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"],
-        serde_json::json!("1")
+    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tokensave_bin);
+    assert!(
+        !home.join(".cursor/mcp.json").exists(),
+        "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
 }
 
@@ -2476,13 +2496,33 @@ fn test_gemini_install_preserves_existing_config() {
 }
 
 #[test]
-fn test_cursor_install_preserves_existing_config() {
+fn test_cursor_install_preserves_existing_legacy_mcp_config() {
     let dir = TempDir::new().unwrap();
+    let path = dir.path().join(".cursor/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let original = r#"{
   "mcpServers": { "other": { "command": "other-bin" } }
 }
 "#;
-    assert_install_backs_up_and_preserves(&CursorIntegration, dir.path(), original, "other-bin");
+    std::fs::write(&path, original).unwrap();
+
+    CursorIntegration
+        .install(&make_install_ctx(dir.path()))
+        .unwrap();
+
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(dir.path()),
+        &make_install_ctx(dir.path()).tokensave_bin,
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "plugin install should not rewrite legacy Cursor MCP config"
+    );
+    assert!(
+        !dir.path().join(".cursor/mcp.json.bak").exists(),
+        "plugin install should not create backups for untouched legacy MCP config"
+    );
 }
 
 #[test]
@@ -2739,21 +2779,15 @@ fn test_cursor_install_then_uninstall() {
     let ctx = make_install_ctx(home);
 
     CursorIntegration.install(&ctx).unwrap();
-    let mcp_path = home.join(".cursor/mcp.json");
-    assert!(mcp_path.exists());
+    let plugin_dir = cursor_plugin_install_dir(home);
+    assert!(plugin_dir.exists());
 
     CursorIntegration.uninstall(&ctx).unwrap();
 
-    // mcp.json should be removed (was only tokensave)
-    if mcp_path.exists() {
-        let content: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
-        let has_tokensave = content
-            .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some();
-        assert!(!has_tokensave, "tokensave should be removed from mcp.json");
-    }
+    assert!(
+        !plugin_dir.exists(),
+        "Cursor uninstall should remove the local plugin install"
+    );
 }
 
 #[test]
