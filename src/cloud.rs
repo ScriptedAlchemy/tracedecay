@@ -11,11 +11,11 @@ const WORKER_URL: &str = "https://tokensave-counter.enzinol.workers.dev";
 
 /// GitHub API endpoint for the latest stable release.
 const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/aovestdipaperino/tokensave/releases/latest";
+    "https://api.github.com/repos/ScriptedAlchemy/tokensave/releases/latest";
 
 /// GitHub API endpoint for listing releases (used to find latest beta).
 const GITHUB_RELEASES_LIST_URL: &str =
-    "https://api.github.com/repos/aovestdipaperino/tokensave/releases?per_page=10";
+    "https://api.github.com/repos/ScriptedAlchemy/tokensave/releases?per_page=10";
 
 /// Timeout for flush (upload) requests.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);

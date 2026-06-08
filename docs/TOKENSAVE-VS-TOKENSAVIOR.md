@@ -13,7 +13,7 @@ results from a synthetic indexer benchmark and a 96-task agent benchmark
 | **Index freshness** | on-demand staleness check per MCP call + catch-up sync on connect | no |
 | **Health analytics** | 11 dedicated tools (complexity, hotspots, dead-code, redundancy, doc-coverage, coupling, dsm, gini, …) | 2 (dead-code, complexity) |
 | **Edit primitives** | symbol-aware (`replace_symbol`, `insert_at_symbol`) + range (`str_replace`, `insert_at`, `ast_grep_rewrite`) | `replace_symbol_source`, `insert_near_symbol`, `add_field_to_model`, `move_symbol` |
-| **Shell-output compaction** | out of scope — pair with [RTK](https://github.com/aovestdipaperino/rtk) | yes (34 compactors in v4.3+) |
+| **Shell-output compaction** | out of scope — pair with [RTK](https://github.com/ScriptedAlchemy/rtk) | yes (34 compactors in v4.3+) |
 | **Config / Docker linting** | no | yes (`analyze_config`, `analyze_docker`) |
 | **Indexer cold time (FastAPI)** | **2.15 s** | 6.21 s |
 | **Impact analysis (FastAPI)** | **0.57 ms** | 24.4 ms |
@@ -227,7 +227,7 @@ multi-thousand-LoC commitments per dialect.
 
 tokensave's scope is the *code-graph query layer*; it deliberately does not
 intercept shell-tool output. For that layer, pair tokensave with
-[RTK (Rust Token Killer)](https://github.com/aovestdipaperino/rtk) — a
+[RTK (Rust Token Killer)](https://github.com/ScriptedAlchemy/rtk) — a
 transparent CLI proxy that compacts verbose `git diff`, `kubectl logs`,
 `pytest`, `gh run view`, etc. before they hit the agent's context. RTK is
 a separate concern with no overlap with tokensave's code-graph
@@ -390,5 +390,5 @@ Reproduction harness, patch, and full per-task summary in
 
 For shell-output token reduction (verbose `git diff` / `kubectl logs` /
 `pytest` outputs), pair tokensave with
-[RTK](https://github.com/aovestdipaperino/rtk) — that's a separate
+[RTK](https://github.com/ScriptedAlchemy/rtk) — that's a separate
 problem from code-graph queries and RTK addresses it directly.

@@ -1,6 +1,6 @@
 # Rust Parser Migration
 
-Migrate tokensave's tree-sitter grammar dependencies from C/C++ generated parsers to pure-Rust generated parsers, eliminating an entire class of `abort()`-based failures. Motivated by [issue #50](https://github.com/aovestdipaperino/tokensave/issues/50), follow-up to [#49](https://github.com/aovestdipaperino/tokensave/issues/49).
+Migrate tokensave's tree-sitter grammar dependencies from C/C++ generated parsers to pure-Rust generated parsers, eliminating an entire class of `abort()`-based failures. Motivated by [issue #50](https://github.com/ScriptedAlchemy/tokensave/issues/50), follow-up to [#49](https://github.com/ScriptedAlchemy/tokensave/issues/49).
 
 ---
 
@@ -18,7 +18,7 @@ A pure-Rust parser fixes both: panics are catchable, and there is no C compilati
 
 ## What's available
 
-[`aovestdipaperino/tree-sitter`](https://github.com/aovestdipaperino/tree-sitter) is a fork of the upstream tree-sitter with a `--rust` flag added to `tree-sitter generate` (commit [`6d5c136a`](https://github.com/aovestdipaperino/tree-sitter/commit/6d5c136a)). It emits a `parser.rs` file targeting [`aovestdipaperino/tree-sitter-runtime`](https://github.com/aovestdipaperino/tree-sitter-runtime), a `no_std` crate that defines the runtime types (`Language`, `Lexer` trait, `ParseAction`, `ExternalScanner` vtable, etc.).
+[`ScriptedAlchemy/tree-sitter`](https://github.com/ScriptedAlchemy/tree-sitter) is a fork of the upstream tree-sitter with a `--rust` flag added to `tree-sitter generate` (commit [`6d5c136a`](https://github.com/ScriptedAlchemy/tree-sitter/commit/6d5c136a)). It emits a `parser.rs` file targeting [`ScriptedAlchemy/tree-sitter-runtime`](https://github.com/ScriptedAlchemy/tree-sitter-runtime), a `no_std` crate that defines the runtime types (`Language`, `Lexer` trait, `ParseAction`, `ExternalScanner` vtable, etc.).
 
 The fork includes a parity test (`crates/generate/tests/rust_c_parity.rs`) that compares constants, symbol arrays, and structural exports between the C and Rust renderers across five inline grammars and any file-based grammar passed via `GRAMMAR_JSON_PATH`. This gives some confidence that the table data is structurally equivalent.
 

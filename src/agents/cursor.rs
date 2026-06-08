@@ -66,7 +66,7 @@ impl AgentIntegration for CursorIntegration {
         &'a self,
         project_path: Option<&'a Path>,
     ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(async move { track_branch_after_install(project_path).await })
+        Box::pin(track_branch_after_install(project_path))
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -390,9 +390,7 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
         return false;
     };
     let managed = cursor_plugin_managed_paths(install_dir);
-    entries
-        .iter()
-        .all(|entry| managed.iter().any(|managed| managed == entry))
+    entries.iter().all(|entry| managed.contains(entry))
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
@@ -435,20 +433,24 @@ fn legacy_project_cursor_has_tokensave(cursor_dir: &Path) -> bool {
         || legacy_rule_has_tokensave(&cursor_dir.join("rules/tokensave.mdc"))
 }
 
+/// A Cursor hook entry is tokensave-owned when its `command` runs a
+/// `hook-cursor-*` subcommand.
+fn is_legacy_tokensave_hook(entry: &serde_json::Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|value| value.as_str())
+        .is_some_and(|command| command.contains("hook-cursor-"))
+}
+
 fn legacy_hooks_have_tokensave(hooks_path: &Path) -> bool {
     load_json_file(hooks_path)
         .get("hooks")
         .and_then(|value| value.as_object())
         .is_some_and(|events| {
             events.values().any(|value| {
-                value.as_array().is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry
-                            .get("command")
-                            .and_then(|value| value.as_str())
-                            .is_some_and(|command| command.contains("hook-cursor-"))
-                    })
-                })
+                value
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().any(is_legacy_tokensave_hook))
             })
         })
 }
@@ -529,12 +531,7 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
             continue;
         };
         let before = entries.len();
-        entries.retain(|entry| {
-            !entry
-                .get("command")
-                .and_then(|value| value.as_str())
-                .is_some_and(|command| command.contains("hook-cursor-"))
-        });
+        entries.retain(|entry| !is_legacy_tokensave_hook(entry));
         removed |= entries.len() != before;
     }
     events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
