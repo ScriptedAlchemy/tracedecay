@@ -6,7 +6,9 @@
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
-use tokensave::mcp::handle_tool_call;
+use tokensave::mcp::{get_tool_definitions, handle_tool_call};
+use tokensave::sessions::cursor::open_project_session_db;
+use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,13 @@ fn extract_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
         .unwrap_or("<missing text>")
+}
+
+fn expect_tool_error<T>(result: tokensave::errors::Result<T>) -> String {
+    match result {
+        Ok(_) => panic!("expected tool call to fail"),
+        Err(err) => format!("{err}"),
+    }
 }
 
 /// Searches for `name` via the search handler and returns the first matching
@@ -3108,94 +3117,536 @@ async fn test_by_qualified_name_requires_param() {
     assert!(format!("{err}").contains("qualified_name"));
 }
 
-// ---------------------------------------------------------------------------
-// Memory handler tests (record_decision, record_code_area, session_recall)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn test_handle_record_decision() {
+async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
+
+    let added = handle_tool_call(
         &cg,
-        "tokensave_record_decision",
-        json!({"text": "use JWT", "reason": "legal flagged sessions"}),
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project Phoenix uses Amari Memory in src/memory/types.rs",
+            "category": "project",
+            "entity": "Project Phoenix",
+            "entities": ["Amari Memory"],
+            "tags": ["memory", "holographic"],
+            "source": "mcp-test",
+            "metadata": {"plan": "holographic"}
+        }),
         None,
         None,
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+    assert!(added["fact"].get("id").is_none());
+    assert!(added["fact"].get("trust").is_none());
+    assert!(added["fact"]["trust_score"].as_f64().is_some());
+    assert_eq!(added["action"], "add");
+    assert_eq!(added["fact"]["category"], "project");
+    assert_eq!(added["fact"]["source"], "mcp-test");
+
+    let search = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "search",
+            "query": "Amari Memory",
+            "category": "project",
+            "min_trust": 0.1,
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    assert_eq!(search["action"], "search");
+    assert_eq!(search["count"].as_u64(), Some(1));
+    assert_eq!(search["results"], search["facts"]);
     assert!(
-        output.get("id").is_some(),
-        "response should contain 'id', got: {output}"
+        search["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id)),
+        "search results should include added fact: {search}"
     );
-    assert_eq!(
-        output["status"].as_str().unwrap(),
-        "recorded",
-        "status should be 'recorded', got: {output}"
-    );
-}
 
-#[tokio::test]
-async fn test_handle_record_code_area() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
+    for (action, payload) in [
+        ("probe", json!({"entity": "Project Phoenix"})),
+        ("related", json!({"entity": "Amari Memory"})),
+        (
+            "reason",
+            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
+        ),
+        (
+            "contradict",
+            json!({"category": "project", "threshold": 0.8}),
+        ),
+        ("list", json!({"category": "project", "min_trust": 0.1})),
+    ] {
+        let mut args = payload;
+        args["action"] = json!(action);
+        let result = handle_tool_call(&cg, "tokensave_fact_store", args, None, None)
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        assert_eq!(output["action"], action, "{action} should echo action");
+        assert!(
+            output["results"].is_array(),
+            "{action} should include results array: {output}"
+        );
+        assert!(
+            output["count"].is_number(),
+            "{action} should include count: {output}"
+        );
+        if action == "related" {
+            assert!(
+                output["count"].as_u64().unwrap_or_default() > 0,
+                "related should return facts connected through adjacent entities: {output}"
+            );
+        }
+    }
+
+    let updated = handle_tool_call(
         &cg,
-        "tokensave_record_code_area",
-        json!({"path": "src/auth.rs", "description": "OAuth provider"}),
+        "tokensave_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": fact_id,
+            "content": "Project Phoenix uses deterministic Amari Memory",
+            "entities": ["Project Phoenix", "Amari Memory"],
+            "metadata": {"updated": true}
+        }),
         None,
         None,
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
+    let updated: Value = serde_json::from_str(extract_text(&updated.value)).unwrap();
     assert_eq!(
-        output["status"].as_str().unwrap(),
-        "recorded",
-        "status should be 'recorded', got: {output}"
+        updated["fact"]["content"],
+        "Project Phoenix uses deterministic Amari Memory"
     );
+    assert_eq!(updated["count"].as_u64(), Some(1));
+
+    let removed = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({"action": "remove", "fact_id": fact_id.to_string()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
+    assert_eq!(removed["removed"], true);
 }
 
 #[tokio::test]
-async fn test_handle_session_recall_returns_recorded_decision() {
+async fn memory_recall_updates_retrieval_count() {
     let (cg, _dir) = setup_project().await;
-    // Seed a decision first
+    let added = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "Retrieval counters move after search",
+            "entity": "Counter Entity"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+
     handle_tool_call(
         &cg,
-        "tokensave_record_decision",
-        json!({"text": "use JWT", "reason": "legal flagged sessions"}),
+        "tokensave_fact_store",
+        json!({"action": "search", "query": "Retrieval counters", "limit": 5}),
         None,
         None,
     )
     .await
     .unwrap();
-    // Recall and verify the seeded decision appears
+
+    let status = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({"action": "list", "min_trust": 0.0, "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    let fact = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["fact_id"].as_i64() == Some(fact_id))
+        .unwrap();
+    assert!(
+        fact["retrieval_count"].as_i64().unwrap_or_default() > 0,
+        "returned facts should increment retrieval_count: {status}"
+    );
+}
+
+#[tokio::test]
+async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
+    let (cg, _dir) = setup_project().await;
+    let first = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "First fact should remain updateable after many later facts",
+            "trust": 0.4
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    let first_id = first["fact"]["fact_id"].as_i64().unwrap();
+
+    for i in 0..205 {
+        handle_tool_call(
+            &cg,
+            "tokensave_fact_store",
+            json!({
+                "action": "add",
+                "content": format!("Later fact {i} should not hide the first fact"),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let updated = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": first_id,
+            "trust_delta": 0.2
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let updated: Value = serde_json::from_str(extract_text(&updated.value)).unwrap();
+    assert_eq!(updated["fact"]["fact_id"].as_i64(), Some(first_id));
+    assert!(
+        (updated["fact"]["trust_score"].as_f64().unwrap() - 0.6).abs() < 0.000_001,
+        "trust_delta should apply through direct fact lookup: {updated}"
+    );
+}
+
+#[tokio::test]
+async fn memory_feedback_and_status_include_trust_fields() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "Helpful memory fact for feedback",
+            "category": "general"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    assert!(added["fact"].get("id").is_none());
+    assert!(added["fact"].get("trust").is_none());
+    assert!(added["fact"]["trust_score"].as_f64().is_some());
+
+    let helpful = handle_tool_call(
+        &cg,
+        "tokensave_fact_feedback",
+        json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "matched"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let helpful: Value = serde_json::from_str(extract_text(&helpful.value)).unwrap();
+    assert!(helpful["feedback"]["event_id"].as_i64().unwrap() > 0);
+    assert_eq!(helpful["feedback"]["fact_id"], fact_id);
+    assert_eq!(helpful["feedback"]["action"], "helpful");
+    assert_eq!(helpful["feedback"]["old_trust"], 0.5);
+    assert!(helpful["feedback"]["new_trust"].as_f64().unwrap() > 0.5);
+    assert!(helpful["feedback"]["trust_delta"].as_f64().unwrap() > 0.0);
+    assert_eq!(helpful["feedback"]["helpful_count"], 1);
+    assert_eq!(helpful["feedback"]["unhelpful_count"], 0);
+
+    let unhelpful = handle_tool_call(
+        &cg,
+        "tokensave_fact_feedback",
+        json!({"fact_id": fact_id, "unhelpful": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let unhelpful: Value = serde_json::from_str(extract_text(&unhelpful.value)).unwrap();
+    assert_eq!(unhelpful["feedback"]["action"], "unhelpful");
+    assert!(
+        unhelpful["feedback"]["new_trust"].as_f64().unwrap()
+            < helpful["feedback"]["new_trust"].as_f64().unwrap()
+    );
+    assert_eq!(unhelpful["feedback"]["helpful_count"], 1);
+    assert_eq!(unhelpful["feedback"]["unhelpful_count"], 1);
+
+    let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    assert!(status["memory"]["fact_count"].as_u64().unwrap() >= 1);
+    assert!(status["memory"].get("trust_0_025_count").is_some());
+    assert!(status["memory"].get("trust_025_050_count").is_some());
+    assert!(status["memory"].get("trust_050_075_count").is_some());
+    assert!(status["memory"].get("trust_075_100_count").is_some());
+    assert!(status["memory"].get("helpful_count").is_some());
+    assert!(status["memory"].get("unhelpful_count").is_some());
+    assert!(status["memory"].get("missing_vector_count").is_some());
+}
+
+#[tokio::test]
+async fn memory_tools_validate_malformed_inputs() {
+    let (cg, _dir) = setup_project().await;
+
+    let missing_action = handle_tool_call(&cg, "tokensave_fact_store", json!({}), None, None).await;
+    assert!(expect_tool_error(missing_action).contains("action"));
+
+    let bad_action = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({"action": "teleport"}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(bad_action).contains("unknown fact_store action"));
+
+    let bad_category = handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({"action": "list", "category": "definitely-not-a-category"}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(bad_category).contains("category"));
+
+    let missing_feedback_action = handle_tool_call(
+        &cg,
+        "tokensave_fact_feedback",
+        json!({"fact_id": 123}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(missing_feedback_action).contains("helpful"));
+}
+
+#[tokio::test]
+async fn message_search_reads_project_local_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "cursor-session".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Cursor transcript".to_string()),
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: Some("cursor-session.jsonl".to_string()),
+        metadata_json: None,
+    };
+    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "cursor-message".to_string(),
+            session_id: "cursor-session".to_string(),
+            role: "user".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: "Project-local transcript search is working.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
     let result = handle_tool_call(
         &cg,
-        "tokensave_session_recall",
-        json!({"query": "JWT"}),
+        "tokensave_message_search",
+        json!({"query": "transcript search", "provider": "cursor", "limit": 5}),
         None,
         None,
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let decisions = output["decisions"]
-        .as_array()
-        .expect("decisions should be an array");
-    assert!(
-        !decisions.is_empty(),
-        "recall should return at least one decision after seeding"
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["count"], 1);
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"],
+        "cursor-message"
     );
-    let found = decisions
+    assert_eq!(
+        parsed["results"][0]["session"]["project_key"],
+        cg.project_root().to_string_lossy().to_string()
+    );
+}
+
+#[test]
+fn memory_tool_definitions_include_hermes_payload_fields() {
+    let tools = get_tool_definitions();
+    let tool_names: std::collections::HashSet<_> =
+        tools.iter().map(|tool| tool.name.as_str()).collect();
+    let fact_store = tools
         .iter()
-        .any(|d| d["text"].as_str().unwrap_or("").contains("JWT"));
+        .find(|tool| tool.name == "tokensave_fact_store")
+        .expect("tokensave_fact_store definition");
+    let feedback = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_fact_feedback")
+        .expect("tokensave_fact_feedback definition");
+    let status = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_memory_status")
+        .expect("tokensave_memory_status definition");
+
+    assert_eq!(
+        fact_store.annotations.as_ref().unwrap()["readOnlyHint"],
+        false
+    );
+    assert_eq!(
+        feedback.annotations.as_ref().unwrap()["readOnlyHint"],
+        false
+    );
+    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], false);
+
+    for field in [
+        "action",
+        "content",
+        "query",
+        "entity",
+        "entities",
+        "fact_id",
+        "category",
+        "tags",
+        "min_trust",
+        "trust",
+        "trust_delta",
+        "threshold",
+        "limit",
+        "source",
+        "metadata",
+        "note",
+    ] {
+        assert!(
+            fact_store.input_schema["properties"].get(field).is_some(),
+            "fact_store schema missing Hermes field {field}"
+        );
+    }
+    assert_eq!(
+        feedback.input_schema["required"],
+        serde_json::json!(["fact_id"])
+    );
+    assert_eq!(
+        fact_store.input_schema["properties"]["trust"]["type"],
+        "number"
+    );
+    assert_eq!(fact_store.input_schema["properties"]["trust"]["minimum"], 0);
+    assert_eq!(fact_store.input_schema["properties"]["trust"]["maximum"], 1);
+
     assert!(
-        found,
-        "seeded 'JWT' decision should appear in recall results"
+        !tool_names.contains("tokensave_record_decision"),
+        "unshipped legacy decision tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tokensave_record_code_area"),
+        "unshipped legacy code-area tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tokensave_session_recall"),
+        "unshipped legacy recall tool should not be exposed"
+    );
+}
+
+#[test]
+fn message_search_provider_schema_matches_ingested_providers() {
+    let tools = get_tool_definitions();
+    let message_search = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_message_search")
+        .expect("tokensave_message_search definition");
+
+    assert_eq!(
+        message_search.input_schema["properties"]["provider"]["enum"],
+        serde_json::json!(["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"])
+    );
+}
+
+#[tokio::test]
+async fn memory_status_repairs_dirty_banks_before_reporting() {
+    let (cg, _dir) = setup_project().await;
+    handle_tool_call(
+        &cg,
+        "tokensave_fact_store",
+        json!({
+            "action": "add",
+            "content": "Status should repair dirty holographic banks",
+            "category": "project",
+            "entity": "Holographic Banks"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    assert!(
+        status["memory"]["bank_count"].as_u64().unwrap_or_default() >= 2,
+        "memory_status should rebuild all and category banks before reporting: {status}"
+    );
+    assert_eq!(
+        status["memory"]["missing_vector_count"].as_u64(),
+        Some(0),
+        "status-triggered bank repair should not leave missing vectors"
     );
 }
 
@@ -4637,9 +5088,15 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
         "find_stale_files should detect newly written b.rs"
     );
     server.cg().sync_if_stale_silent(&stale).await.unwrap();
-    server.refresh_file_token_map().await;
-
-    let after_count = server.file_token_map_snapshot().len();
+    let mut after_count = initial_count;
+    for _ in 0..10 {
+        server.refresh_file_token_map().await;
+        after_count = server.file_token_map_snapshot().len();
+        if after_count > initial_count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert!(
         after_count > initial_count,
         "lazy sync should have refreshed map ({initial_count} -> {after_count})"

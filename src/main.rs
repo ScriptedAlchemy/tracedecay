@@ -832,6 +832,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCursorStop => {
+            let code = tokensave::hooks::hook_cursor_stop().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::HookCodexSessionStart => {
             let code = tokensave::hooks::hook_codex_session_start().await;
             if code != 0 {
@@ -1212,6 +1218,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookCursorSessionStart
             | Commands::HookCursorAfterShell
             | Commands::HookCursorWorkspaceOpen
+            | Commands::HookCursorStop
             | Commands::HookCodexSessionStart
             | Commands::HookCodexUserPromptSubmit
             | Commands::HookCodexSubagentStart

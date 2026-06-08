@@ -399,7 +399,9 @@ fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
         that go beyond what the built-in tools expose.\n\n\
         For durable project/user facts, prefer `tokensave_fact_store`, \
         `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
-        Do not store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
+        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        prior conversation context matters. Do not store secrets, credentials, or \
+        unnecessary PII in persistent facts.\n\n\
         If you find a gap where tokensave could answer a question natively, propose opening \
         an issue at https://github.com/aovestdipaperino/tokensave. Remind the user to strip \
         sensitive or proprietary code from any issue text before submitting.\n"

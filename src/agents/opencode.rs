@@ -191,8 +191,14 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
         faster than file reads.\n\n\
         If a code analysis question cannot be fully answered by tokensave MCP tools, \
         try querying the SQLite database directly at `.tokensave/tokensave.db` \
-        (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries \
+        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
+        `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
+        For durable project/user facts, prefer `tokensave_fact_store`, \
+        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
+        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        prior conversation context matters. Do not store secrets, credentials, or \
+        unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tokensave tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/aovestdipaperino/tokensave describing the limitation. \

@@ -324,6 +324,18 @@ fn test_local_install_cursor_writes_project_config_only() {
         "Cursor workspaceOpen hook should run a catch-up sync"
     );
 
+    let stop_hooks = hooks["hooks"]["stop"]
+        .as_array()
+        .expect("stop hooks should be an array");
+    assert!(
+        stop_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-stop"))
+        }),
+        "Cursor stop hook should ingest the session transcript at end of turn"
+    );
+
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
         "local install must not write the global Cursor config"
@@ -946,6 +958,18 @@ fn test_local_install_supported_agents_write_project_paths() {
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("md" | "mdc")
             );
+            if is_instruction_file {
+                assert!(
+                    body.contains("tokensave_fact_store"),
+                    "{agent} local instruction file {} should mention fact memory tools",
+                    path.display()
+                );
+                assert!(
+                    body.contains("tokensave_message_search"),
+                    "{agent} local instruction file {} should mention transcript message search",
+                    path.display()
+                );
+            }
             let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
             if !is_instruction_file && !is_cursor_permissions {
                 let expected = expected_tokensave_bin();

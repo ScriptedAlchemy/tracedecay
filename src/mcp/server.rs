@@ -41,6 +41,12 @@ impl ServerStats {
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
+fn global_db_enabled() -> bool {
+    std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
 /// Hand-maintained schema documentation for the `tokensave://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tokensave SQLite schema
@@ -100,8 +106,35 @@ Unique constraint: `(source, target, kind, COALESCE(line, -1))`. Indexes on `sou
 ### `metadata` — key/value store
 Common keys: `tokens_saved`, schema-version markers.
 
-### `memory_decisions`, `memory_code_areas`
-Hand-recorded notes from `tokensave_record_decision` / `tokensave_record_code_area`. FTS5 mirror tables exist for `nodes` (`nodes_fts`) and `memory_decisions` (`memory_decisions_fts`).
+### `node_fingerprints` — redundancy cache
+- `node_id` PRIMARY KEY FK → `nodes.id`
+- `ast_hash`, `cfg_hash`, `call_seq_hash`, `shingles`
+- `body_tokens`, `source_hash`
+
+### `read_cache` — rendered `tokensave_read` responses
+- primary key: `(project_id, session_id, file_path, mode, args_hash)`
+- stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
+
+### v11: `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_feedback_events`
+The holographic fact store replaces narrow decision rows with durable facts
+linked to named entities:
+
+- `memory_facts` — numeric `fact_id`, unique fact content, category, source,
+  tags JSON, computed trust score, retrieval/feedback counts, timestamps, and
+  structured metadata.
+- `memory_entities` — normalized recall keys for symbols, files,
+  directories, branches, people, subsystems, and concepts. Facts can attach
+  multiple entities so recall can start from code or natural-language names.
+- `memory_fact_entities` — many-to-many join table linking facts to entities
+  with cascade deletes.
+- `memory_banks` — optional holographic memory-bank vectors by category or
+  bank name (`bank_name`, `vector`, `hrr_algebra`, `hrr_dim`, `fact_count`,
+  `updated_at`).
+- `memory_feedback_events` — append-only `helpful`/`unhelpful` audit events
+  keyed by numeric `fact_id`, with source, note, old/new trust, and trust delta.
+
+Older `memory_decisions` / `memory_code_areas` tables are migration-only inputs:
+v11 backfills them into `memory_facts` and then drops the legacy tables.
 
 ## Recipes
 
@@ -273,7 +306,11 @@ impl McpServer {
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
-        let global_db = GlobalDb::open().await;
+        let global_db = if global_db_enabled() {
+            GlobalDb::open().await
+        } else {
+            None
+        };
         // Register this project in the global DB with its current tokens
         if let Some(ref gdb) = global_db {
             gdb.upsert(cg.project_root(), persisted).await;
@@ -440,6 +477,27 @@ impl McpServer {
             .unwrap_or_default()
             .as_secs() as i64;
         self.last_staleness_check_at.store(now, Ordering::Release);
+
+        // Best-effort transcript ingestion sweep for hookless agents (Claude,
+        // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
+        // agents register no hook, so their transcripts are reconciled here.
+        // Detached + timeout-guarded so it never delays MCP readiness, and
+        // independent of the catch-up completion flag below; per-file
+        // parse_offsets make repeat sweeps cheap no-ops.
+        {
+            let project_root = self.cg.project_root().to_path_buf();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
+                    if let Some(db) =
+                        crate::sessions::cursor::open_project_session_db(&project_root).await
+                    {
+                        let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
+                    }
+                })
+                .await;
+            });
+        }
+
         self.startup_catch_up_done.store(true, Ordering::Release);
     }
 
@@ -544,6 +602,10 @@ impl McpServer {
             return;
         }
         let delta = current - last_flushed;
+
+        if self.global_db.is_none() {
+            return;
+        }
 
         let success = tokio::task::spawn_blocking(move || {
             let mut config = crate::user_config::UserConfig::load();
@@ -768,7 +830,7 @@ impl McpServer {
 
         // Flush remaining delta to worldwide counter (what periodic flushes missed)
         let last_flushed = self.last_flushed_tokens.load(Ordering::Relaxed);
-        if tokens_saved > last_flushed {
+        if self.global_db.is_some() && tokens_saved > last_flushed {
             let delta = tokens_saved - last_flushed;
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
@@ -1235,7 +1297,7 @@ impl McpServer {
                 }
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
-                {
+                if self.global_db.is_some() {
                     let project_path_str = self.cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();

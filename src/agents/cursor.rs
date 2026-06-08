@@ -161,6 +161,7 @@ alwaysApply: true
 
 - For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first.
 - Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
+- For durable project/user facts, prefer `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use `tokensave_message_search` for project-local Cursor transcript recall when prior conversation context matters.
 - Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
 "#;
     write_generated_text(rule_path, contents)?;
@@ -282,6 +283,17 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         tokensave_bin,
         "hook-cursor-workspace-open",
         60,
+        None,
+    );
+    // End-of-turn transcript ingestion. This is the primary, off-hot-path place
+    // we capture Cursor transcripts (beforeSubmitPrompt only does a tiny tail
+    // read), so it gets a generous timeout for the incremental catch-up.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "stop",
+        tokensave_bin,
+        "hook-cursor-stop",
+        30,
         None,
     );
 
@@ -502,6 +514,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
         ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
     ];
     let missing: Vec<&str> = expected
         .iter()
