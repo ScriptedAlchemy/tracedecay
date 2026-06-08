@@ -265,11 +265,11 @@ Cursor local install creates a stronger project-local setup:
 
 - `.cursor/mcp.json` registers the tokensave MCP server.
 - `.cursor/rules/tokensave.mdc` tells Cursor Agent to prefer tokensave MCP tools for codebase exploration and to fall back to file reads/search only when needed.
-- `.cursor/permissions.json` auto-allows read-only tokensave MCP tools using Cursor's `mcpAllowlist` format while leaving mutating edit/session tools subject to normal approval.
+- `.cursor/permissions.json` auto-allows the local tokensave MCP tools using Cursor's `mcpAllowlist` format for that workspace.
 - `.cursor/hooks.json` installs Cursor-specific, fail-open project hooks (each acts only when a `.tokensave/` index exists):
   - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
   - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape.
-  - `beforeSubmitPrompt` resets the local token counter.
+  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
   - `afterFileEdit` (matcher `Write`) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
   - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
   - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
@@ -401,12 +401,6 @@ chmod +x ~/.git-hooks/post-commit
 cp scripts/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
-
-### MCP staleness checks
-
-When you start the tokensave MCP server (e.g. via your agent), tool calls perform an on-demand staleness check and catch up changed files before returning results. There is no long-running file watcher process.
-
----
 
 ## MCP Staleness Checks
 
@@ -613,63 +607,28 @@ The holographic memory tools store durable facts linked to entities:
 |------|--------------|
 | `tokensave_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
 | `tokensave_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
-| `tokensave_memory_status` | Report fact/entity counts, four trust-score buckets, feedback counts, and missing-vector count. |
+| `tokensave_memory_status` | Repair dirty memory banks, then report fact/entity counts, trust-score buckets, feedback counts, and missing-vector count. |
 
 Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status`.
 
-`tokensave_fact_store` request schema:
+Common `tokensave_fact_store` payloads:
 
 ```json
-{
-  "type": "object",
-  "properties": {
-    "action": {
-      "type": "string",
-      "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"]
-    },
-    "content": { "type": "string" },
-    "query": { "type": "string" },
-    "entity": { "type": "string" },
-    "entities": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
-    "category": { "type": "string" },
-    "source": { "type": "string" },
-    "trust": { "type": "number", "minimum": 0, "maximum": 1 },
-    "trust_delta": { "type": "number" },
-    "threshold": { "type": "number" },
-    "limit": { "type": "number" },
-    "metadata": { "type": "object" },
-    "tags": { "type": "array", "items": { "type": "string" } }
-  },
-  "required": ["action"]
-}
+{"action": "add", "content": "Repository prefers local installs during active development.", "entities": ["install", "tokensave"], "category": "project", "source": "user", "tags": ["preference"], "trust": 0.9}
+{"action": "search", "query": "local install preference", "min_trust": 0.5, "limit": 10}
+{"action": "probe", "entity": "tokensave"}
 ```
 
-`tokensave_fact_feedback` request schema:
+Common `tokensave_fact_feedback` payloads:
 
 ```json
-{
-  "type": "object",
-  "properties": {
-    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
-    "action": {
-      "type": "string",
-      "enum": ["helpful", "unhelpful"]
-    },
-    "source": { "type": "string" },
-    "note": { "type": "string" },
-    "trust_delta": { "type": "number" }
-  },
-  "required": ["fact_id"]
-}
+{"fact_id": 42, "action": "helpful", "source": "agent", "note": "Matched the current code path."}
+{"fact_id": "42", "unhelpful": true, "source": "user", "note": "Superseded by a newer decision."}
 ```
 
-Provide either `"action": "helpful"|"unhelpful"` or the compatibility shorthand `"helpful": true` / `"unhelpful": true`.
+For exact fields, inspect the live MCP descriptors; the generated schemas are the source of truth.
 
-Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tokensave/session_baseline.json`, memory-recording and future fact-feedback tools update the project database, and edit tools modify source files.
+Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tokensave/session_baseline.json`, memory and feedback/status tools update the project database, and edit tools modify source files.
 
 ---
 

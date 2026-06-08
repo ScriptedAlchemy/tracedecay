@@ -8,8 +8,13 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
+
+pub mod tool_hints;
+
+use tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 
 const TOKENSAVE_RESEARCH_BLOCK_REASON: &str = "STOP: Use tokensave MCP tools \
 (tokensave_context, tokensave_search, tokensave_callees, tokensave_callers, \
@@ -17,6 +22,19 @@ tokensave_impact, tokensave_files, tokensave_affected) instead of agents for \
 code research. Tokensave is faster and more precise for symbol relationships, \
 call paths, and code structure. Only use agents for code exploration if you \
 have already tried tokensave and it cannot answer the question.";
+
+fn research_block_reason(hint: Option<ToolHint>) -> String {
+    hint.map_or_else(
+        || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
+        |hint| {
+            format!(
+                "{}\n\n{}",
+                TOKENSAVE_RESEARCH_BLOCK_REASON,
+                format_tool_hint(&hint)
+            )
+        },
+    )
+}
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
 ///
@@ -37,26 +55,41 @@ pub fn hook_pre_tool_use() {
 /// Takes the raw `TOOL_INPUT` JSON string and returns the JSON decision
 /// string to print to stdout.
 pub fn evaluate_hook_decision(tool_input: &str) -> String {
-    let block_msg = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": TOKENSAVE_RESEARCH_BLOCK_REASON
-        }
-    });
-
     let parsed: serde_json::Value =
         serde_json::from_str(tool_input).unwrap_or_else(|_| serde_json::json!({}));
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Claude,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("Agent".to_string()),
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: parsed
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        file_path: None,
+        hints_enabled: true,
+    });
+    let block_reason = research_block_reason(hint);
+    let block_msg = || {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": block_reason
+            }
+        })
+    };
 
     // Block Explore agents outright
     if parsed.get("subagent_type").and_then(|v| v.as_str()) == Some("Explore") {
-        return block_msg.to_string();
+        return block_msg().to_string();
     }
 
     // Check if the prompt is exploration/research work that tokensave can handle
     if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str()) {
         if is_code_research_prompt(prompt) {
-            return block_msg.to_string();
+            return block_msg().to_string();
         }
     }
 
@@ -117,13 +150,38 @@ pub fn hook_cursor_subagent_start() -> i32 {
 
 /// Cursor `beforeSubmitPrompt` hook handler.
 ///
-/// Resets the project-local counter for a new prompt turn. The output uses
-/// Cursor's documented `beforeSubmitPrompt` shape and never blocks submission.
+/// Resets the project-local counter for a new prompt turn and does at most a
+/// small, time-boxed *tail* ingest of newly-appended transcript lines (the bulk
+/// catch-up lives on the lower-frequency `sessionStart` / `stop` hooks). The
+/// output uses Cursor's documented `beforeSubmitPrompt` shape and never blocks
+/// submission, even if the tail ingest times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_stdin_to_string();
     reset_counter_for_cursor_event(&event).await;
-    ingest_cursor_transcript_for_event(&event).await;
-    println!("{}", serde_json::json!({ "continue": true }));
+    ingest_cursor_transcript_for_event(
+        &event,
+        Some(CURSOR_HOT_INGEST_MAX_BYTES),
+        CURSOR_HOT_INGEST_BUDGET,
+    )
+    .await;
+    let mut output = serde_json::json!({ "continue": true });
+    if let Some(hint) = cursor_prompt_hint(&event) {
+        output["additional_context"] = Value::String(format_tool_hint(&hint));
+    }
+    println!("{output}");
+    0
+}
+
+/// Cursor `stop` hook handler (fire-and-forget).
+///
+/// Fires at the end of an agent turn and performs the primary transcript
+/// ingest: a time-boxed, unbounded incremental catch-up that picks up every
+/// line appended during the turn. The `stop` output is informational only, so
+/// we emit an empty object and never ask the agent to continue. Fail-open.
+pub async fn hook_cursor_stop() -> i32 {
+    let event = read_stdin_to_string();
+    ingest_cursor_transcript_for_event(&event, None, CURSOR_STOP_INGEST_BUDGET).await;
+    println!("{}", serde_json::json!({}));
     0
 }
 
@@ -149,6 +207,9 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_stdin_to_string();
+    // Catch-up ingest for resumed sessions whose transcript grew while no agent
+    // was attached. No-op (no transcript_path) for brand-new sessions. Fail-open.
+    ingest_cursor_transcript_for_event(&event, None, CURSOR_SESSION_INGEST_BUDGET).await;
     let root = cursor_project_root_from_event(&event);
     let context = session_steering_context_for_root(root.as_deref()).await;
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
@@ -208,12 +269,22 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("subagentStart".to_string()),
+        command: None,
+        prompt: (!task.is_empty()).then(|| task.to_string()),
+        subagent_type: (!subagent_type.is_empty()).then(|| subagent_type.to_string()),
+        file_path: None,
+        hints_enabled: true,
+    });
     let is_explore = subagent_type.eq_ignore_ascii_case("explore");
     if is_explore || is_code_research_prompt(task) {
         return Some(
             serde_json::json!({
                 "permission": "deny",
-                "user_message": TOKENSAVE_RESEARCH_BLOCK_REASON
+                "user_message": research_block_reason(hint)
             })
             .to_string(),
         );
@@ -831,7 +902,10 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_stdin_to_string();
     let root = codex_project_root_from_event(&event);
     reset_counter_for_codex_event(&event).await;
-    let context = session_steering_context_for_root(root.as_deref()).await;
+    let mut context = session_steering_context_for_root(root.as_deref()).await;
+    if let Some(hint) = codex_prompt_hint(&event) {
+        append_tool_hint(&mut context, &hint);
+    }
     println!(
         "{}",
         codex_additional_context_json("UserPromptSubmit", &context)
@@ -898,12 +972,20 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: Some("SubagentStart".to_string()),
+        command: None,
+        prompt: (!task.is_empty()).then(|| task.to_string()),
+        subagent_type: (!agent_type.is_empty()).then(|| agent_type.to_string()),
+        file_path: None,
+        hints_enabled: true,
+    });
     let is_explore = agent_type.eq_ignore_ascii_case("explore");
     if is_explore || is_code_research_prompt(task) {
-        return Some(codex_additional_context_json(
-            "SubagentStart",
-            TOKENSAVE_RESEARCH_BLOCK_REASON,
-        ));
+        let context = research_block_reason(hint);
+        return Some(codex_additional_context_json("SubagentStart", &context));
     }
     None
 }
@@ -1036,15 +1118,26 @@ async fn reset_counter_for_codex_event(event_json: &str) {
 /// Returns a block reason only for Kiro delegation/subagent tool calls whose
 /// task text looks like codebase research that tokensave MCP tools should
 /// answer first.
-pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<&'static str> {
+pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
     if !is_kiro_delegation_tool(tool_name) {
         return None;
     }
 
-    if kiro_event_has_research_text(parsed.get("tool_input").unwrap_or(&Value::Null)) {
-        Some(TOKENSAVE_RESEARCH_BLOCK_REASON)
+    let tool_input = parsed.get("tool_input").unwrap_or(&Value::Null);
+    if let Some(prompt) = kiro_event_text(tool_input).filter(|text| is_code_research_prompt(text)) {
+        let hint = decide_hint(&ToolHintInput {
+            agent: HintAgent::Kiro,
+            session_id: event_session_id(&parsed),
+            tool_name: Some(tool_name.to_string()),
+            command: None,
+            prompt: Some(prompt),
+            subagent_type: Some(tool_name.to_string()),
+            file_path: None,
+            hints_enabled: true,
+        });
+        Some(research_block_reason(hint))
     } else {
         None
     }
@@ -1054,13 +1147,13 @@ fn is_kiro_delegation_tool(tool_name: &str) -> bool {
     matches!(tool_name, "delegate" | "subagent" | "use_subagent")
 }
 
-fn kiro_event_has_research_text(value: &Value) -> bool {
+fn kiro_event_text(value: &Value) -> Option<String> {
     let mut text = Vec::new();
     collect_kiro_task_strings(value, &mut text);
     if text.is_empty() {
         collect_strings(value, &mut text);
     }
-    text.iter().any(|s| is_code_research_prompt(s))
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 fn collect_kiro_task_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
@@ -1162,14 +1255,43 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
     }
 }
 
-async fn ingest_cursor_transcript_for_event(event_json: &str) {
-    let Some(project_root) = cursor_project_root_from_event(event_json) else {
-        return;
+/// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
+/// backlogs are left for the `sessionStart` / `stop` catch-up ingests.
+const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+/// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
+/// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
+const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
+/// Budget for the `sessionStart` catch-up ingest (registered with a 5s timeout).
+const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
+/// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
+const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
+
+/// Incrementally ingests the Cursor transcript referenced by `event_json` into
+/// the project-local session DB, bounded by `max_new_bytes` (the hot-path cap)
+/// and an overall `budget`. Always fails open: a timeout, missing transcript, or
+/// any error is swallowed so the calling hook never blocks the agent.
+async fn ingest_cursor_transcript_for_event(
+    event_json: &str,
+    max_new_bytes: Option<u64>,
+    budget: Duration,
+) {
+    let work = async {
+        let Some(project_root) = cursor_project_root_from_event(event_json) else {
+            return;
+        };
+        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+            return;
+        };
+        let _ = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
+            event_json,
+            &db,
+            max_new_bytes,
+        )
+        .await;
     };
-    let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-        return;
-    };
-    let _ = crate::sessions::cursor::ingest_cursor_transcript_event(event_json, &db).await;
+    // Short-lived CLI hook processes exit immediately, so the ingest must run
+    // inline (not on a detached task); the timeout keeps it inside budget.
+    let _ = tokio::time::timeout(budget, work).await;
 }
 
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
@@ -1195,6 +1317,72 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
         Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    decide_hint(&ToolHintInput {
+        agent: HintAgent::Cursor,
+        session_id: event_session_id(&parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: None,
+        file_path: parsed
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        hints_enabled: true,
+    })
+}
+
+fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    decide_hint(&ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(&parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(&parsed),
+        subagent_type: None,
+        file_path: None,
+        hints_enabled: true,
+    })
+}
+
+fn prompt_like_text(parsed: &Value) -> Option<String> {
+    [
+        "prompt",
+        "user_prompt",
+        "message",
+        "input",
+        "task",
+        "description",
+    ]
+    .iter()
+    .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+    .filter(|text| !text.is_empty())
+    .map(str::to_string)
+}
+
+fn event_session_id(parsed: &Value) -> Option<String> {
+    ["session_id", "conversation_id", "chat_id"]
+        .iter()
+        .find_map(|key| parsed.get(*key).and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn format_tool_hint(hint: &ToolHint) -> String {
+    format!("tokensave hint: {}\n{}", hint.message, hint.context)
+}
+
+fn append_tool_hint(context: &mut String, hint: &ToolHint) {
+    if !context.ends_with('\n') {
+        context.push('\n');
+    }
+    context.push_str(&format_tool_hint(hint));
+    context.push('\n');
 }
 
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {

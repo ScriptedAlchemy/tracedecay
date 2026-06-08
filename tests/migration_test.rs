@@ -736,19 +736,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    // Query user_version through the public conn
-    let mut rows = db
-        .conn()
-        .query("PRAGMA user_version", ())
-        .await
-        .expect("failed to query user_version");
-    let row = rows
-        .next()
-        .await
-        .expect("failed to read row")
-        .expect("should have row");
-    let version: i64 = row.get(0).expect("failed to read version");
-    assert_eq!(version, 11);
+    assert_eq!(get_user_version(db.conn()).await, 11);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -803,19 +791,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    // Verify the schema is now at latest
-    let mut rows = db
-        .conn()
-        .query("PRAGMA user_version", ())
-        .await
-        .expect("failed to query user_version");
-    let row = rows
-        .next()
-        .await
-        .expect("failed to read row")
-        .expect("should have row");
-    let version: i64 = row.get(0).expect("failed to read version");
-    assert_eq!(version, 11);
+    assert_eq!(get_user_version(db.conn()).await, 11);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -966,10 +942,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let v: i64 = row.get(0).unwrap();
-    assert_eq!(v, 11);
+    assert_eq!(get_user_version(&conn).await, 11);
 
     let mut rows = conn
         .query(
@@ -1149,19 +1122,6 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     assert!(table_exists(&conn, "memory_bank_dirty").await);
     assert!(table_exists(&conn, "memory_feedback_events").await);
     assert!(table_exists(&conn, "memory_facts_fts").await);
-}
-
-#[tokio::test]
-async fn test_v11_is_latest_and_includes_memory_bank_dirty_table() {
-    let (conn, _db, _dir) = create_raw_db().await;
-    create_schema(&conn).await.unwrap();
-
-    assert_eq!(get_user_version(&conn).await, 11);
-    assert!(table_exists(&conn, "memory_bank_dirty").await);
-
-    let did_migrate = migrate(&conn).await.expect("v11 should be current");
-    assert!(!did_migrate);
-    assert_eq!(get_user_version(&conn).await, 11);
 }
 
 #[tokio::test]

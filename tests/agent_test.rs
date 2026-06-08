@@ -324,6 +324,18 @@ fn test_local_install_cursor_writes_project_config_only() {
         "Cursor workspaceOpen hook should run a catch-up sync"
     );
 
+    let stop_hooks = hooks["hooks"]["stop"]
+        .as_array()
+        .expect("stop hooks should be an array");
+    assert!(
+        stop_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-stop"))
+        }),
+        "Cursor stop hook should ingest the session transcript at end of turn"
+    );
+
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
         "local install must not write the global Cursor config"
@@ -863,6 +875,28 @@ fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_rejects_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    let output = run_local_install("cursor", project.path(), home.path());
+    assert!(
+        !output.status.success(),
+        "local Cursor install should reject symlinked .cursor directories"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "error should explain the symlink refusal, got:\n{stderr}"
+    );
+}
+
 #[test]
 fn test_local_install_supported_agents_write_project_paths() {
     let cases = [
@@ -924,6 +958,18 @@ fn test_local_install_supported_agents_write_project_paths() {
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("md" | "mdc")
             );
+            if is_instruction_file {
+                assert!(
+                    body.contains("tokensave_fact_store"),
+                    "{agent} local instruction file {} should mention fact memory tools",
+                    path.display()
+                );
+                assert!(
+                    body.contains("tokensave_message_search"),
+                    "{agent} local instruction file {} should mention transcript message search",
+                    path.display()
+                );
+            }
             let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
             if !is_instruction_file && !is_cursor_permissions {
                 let expected = expected_tokensave_bin();
@@ -1123,9 +1169,11 @@ fn test_codex_install_creates_config() {
         let section_start = content.find(&section).unwrap_or_else(|| {
             panic!("Codex config should include auto-approval section {section}")
         });
-        let after_section = &content[section_start..];
+        let section_body = content[section_start..]
+            .split_once("\n[")
+            .map_or(&content[section_start..], |(body, _)| body);
         assert!(
-            after_section.contains("approval_mode = \"auto\""),
+            section_body.contains("approval_mode = \"auto\""),
             "Codex should auto-approve tokensave tool {tool}"
         );
     }
@@ -2288,6 +2336,30 @@ fn test_healthcheck_codex_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Codex healthcheck should pass without global ~/.codex config"
+    );
+}
+
+#[test]
+fn test_healthcheck_codex_ignores_unrelated_project_agents_md() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "Project-specific agent instructions without tokensave.\n",
+    )
+    .unwrap();
+    let ctx = make_install_ctx(home.path());
+    CodexIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "global Codex healthcheck should be used when project AGENTS.md is unrelated"
     );
 }
 

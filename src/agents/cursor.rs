@@ -12,7 +12,7 @@ use crate::errors::{Result, TokenSaveError};
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
     load_jsonc_file_strict, safe_write_json_file, tool_names, AgentIntegration, DoctorCounters,
-    HealthcheckContext, InstallContext,
+    HealthcheckContext, InstallContext, InstallScope,
 };
 
 /// Cursor agent.
@@ -31,8 +31,7 @@ impl AgentIntegration for CursorIntegration {
         install_mcp_server(
             &ctx.home.join(".cursor/mcp.json"),
             &ctx.tokensave_bin,
-            false,
-            true,
+            InstallScope::Global,
         )?;
 
         eprintln!();
@@ -48,11 +47,18 @@ impl AgentIntegration for CursorIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let cursor_dir = project_path.join(".cursor");
+        for path in [
+            cursor_dir.join("mcp.json"),
+            cursor_dir.join("rules/tokensave.mdc"),
+            cursor_dir.join("permissions.json"),
+            cursor_dir.join("hooks.json"),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
         install_mcp_server(
             &cursor_dir.join("mcp.json"),
             &ctx.tokensave_bin,
-            true,
-            false,
+            InstallScope::ProjectLocal,
         )?;
         install_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
         install_permissions(&cursor_dir.join("permissions.json"))?;
@@ -107,12 +113,7 @@ impl AgentIntegration for CursorIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_mcp_server(
-    mcp_path: &Path,
-    tokensave_bin: &str,
-    is_local_install: bool,
-    enable_global_db: bool,
-) -> Result<()> {
+fn install_mcp_server(mcp_path: &Path, tokensave_bin: &str, scope: InstallScope) -> Result<()> {
     if let Some(parent) = mcp_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -132,11 +133,13 @@ fn install_mcp_server(
         "command": tokensave_bin,
         "args": ["serve"]
     });
-    if is_local_install {
-        server["args"] = json!(["serve", "--path", "."]);
-    }
-    if enable_global_db {
-        server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");
+    match scope {
+        InstallScope::Global => {
+            server["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"] = json!("1");
+        }
+        InstallScope::ProjectLocal => {
+            server["args"] = json!(["serve", "--path", "."]);
+        }
     }
     settings["mcpServers"]["tokensave"] = server;
 
@@ -158,6 +161,7 @@ alwaysApply: true
 
 - For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first.
 - Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
+- For durable project/user facts, prefer `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use `tokensave_message_search` for project-local Cursor transcript recall when prior conversation context matters.
 - Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
 "#;
     write_generated_text(rule_path, contents)?;
@@ -180,11 +184,9 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         }
     };
 
-    let tokensave_tools = tool_names();
-    let known_tokensave_entries: std::collections::HashSet<String> = tokensave_tools
-        .iter()
-        .map(|tool| format!("tokensave:{tool}"))
-        .collect();
+    let tokensave_entries = cursor_permission_entries();
+    let known_tokensave_entries: std::collections::HashSet<String> =
+        tokensave_entries.iter().cloned().collect();
     let existing = permissions["mcpAllowlist"]
         .as_array()
         .map(|arr| {
@@ -197,8 +199,7 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         })
         .unwrap_or_default();
     let mut allow = existing;
-    for tool in tokensave_tools {
-        let entry = format!("tokensave:{tool}");
+    for entry in tokensave_entries {
         if !allow.iter().any(|existing| existing == &entry) {
             allow.push(entry);
         }
@@ -211,6 +212,13 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         permissions_path.display()
     );
     Ok(())
+}
+
+fn cursor_permission_entries() -> Vec<String> {
+    tool_names()
+        .into_iter()
+        .map(|tool| format!("tokensave:{tool}"))
+        .collect()
 }
 
 fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
@@ -277,6 +285,17 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         60,
         None,
     );
+    // End-of-turn transcript ingestion. This is the primary, off-hot-path place
+    // we capture Cursor transcripts (beforeSubmitPrompt only does a tiny tail
+    // read), so it gets a generous timeout for the incremental catch-up.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "stop",
+        tokensave_bin,
+        "hook-cursor-stop",
+        30,
+        None,
+    );
 
     safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
     eprintln!(
@@ -313,7 +332,7 @@ fn install_cursor_hook_entry(
         .collect();
 
     let mut entry = json!({
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout
     });
     if let Some(matcher) = matcher {
@@ -333,10 +352,6 @@ fn write_generated_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Remove MCP server entry from ~/.cursor/mcp.json.
@@ -456,19 +471,16 @@ fn doctor_check_permissions(dc: &mut DoctorCounters, permissions_path: &Path) {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    let expected: Vec<String> = tool_names()
-        .into_iter()
-        .map(|tool| format!("tokensave:{tool}"))
-        .collect();
+    let expected = cursor_permission_entries();
+    let expected_set: std::collections::HashSet<&str> =
+        expected.iter().map(String::as_str).collect();
     let missing = expected
         .iter()
         .filter(|entry| !installed.contains(entry.as_str()))
         .count();
     let stale = installed
         .iter()
-        .filter(|entry| {
-            entry.starts_with("tokensave:") && !expected.iter().any(|expected| expected == **entry)
-        })
+        .filter(|entry| entry.starts_with("tokensave:") && !expected_set.contains(*entry))
         .count();
     if missing == 0 && stale == 0 {
         dc.pass(&format!(
@@ -502,6 +514,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
         ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
     ];
     let missing: Vec<&str> = expected
         .iter()

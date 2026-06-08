@@ -183,10 +183,6 @@ fn mcp_server_entry(tokensave_bin: &str) -> serde_json::Value {
     })
 }
 
-fn hook_command(tokensave_bin: &str, subcommand: &str) -> String {
-    format!("{tokensave_bin} {subcommand}")
-}
-
 fn file_resource_uri(path: &Path) -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     let path = percent_encode_file_uri_path(&path);
@@ -226,26 +222,26 @@ fn managed_agent_config(tokensave_bin: &str, steering_path: &Path) -> serde_json
         "hooks": {
             "userPromptSubmit": [
                 {
-                    "command": hook_command(tokensave_bin, KIRO_PROMPT_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PROMPT_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 }
             ],
             "preToolUse": [
                 {
                     "matcher": "delegate",
-                    "command": hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 },
                 {
                     "matcher": "subagent",
-                    "command": hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_PRE_TOOL_HOOK),
                     "timeout_ms": KIRO_SHORT_HOOK_TIMEOUT_MS
                 }
             ],
             "postToolUse": [
                 {
                     "matcher": "fs_write",
-                    "command": hook_command(tokensave_bin, KIRO_POST_TOOL_HOOK),
+                    "command": super::hook_command(tokensave_bin, KIRO_POST_TOOL_HOOK),
                     "timeout_ms": KIRO_SYNC_HOOK_TIMEOUT_MS
                 }
             ]
@@ -453,7 +449,13 @@ have been tried. Delegation is still appropriate for long-running execution work
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
 If a code analysis question cannot be fully answered by tokensave MCP tools, try \
 querying the SQLite database directly at `.tokensave/tokensave.db` (tables: `nodes`, \
-`edges`, `files`). Use SQL for structural queries that go beyond the MCP tools.\n\n\
+`edges`, `files`, `memory_facts`, `memory_entities`, `memory_feedback_events`). \
+Use SQL for structural queries that go beyond the MCP tools.\n\n\
+For durable project/user facts, prefer `tokensave_fact_store`, \
+`tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use \
+`tokensave_message_search` for project-local Cursor transcript recall when prior \
+conversation context matters. Do not store secrets, credentials, or unnecessary PII \
+in persistent facts.\n\n\
 If you discover a gap where an extractor, schema, or tokensave tool could answer a \
 question natively, propose opening an issue at \
 https://github.com/aovestdipaperino/tokensave. Remind the user to strip sensitive \

@@ -21,6 +21,7 @@ use crate::errors::{Result, TokenSaveError};
 use super::{
     backup_config_file, load_json_file_strict, load_toml_file, safe_write_json_file, tool_names,
     write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    InstallScope,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -40,7 +41,7 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin, false, true)?;
+        install_mcp_server(&config_path, &ctx.tokensave_bin, InstallScope::Global)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -61,12 +62,18 @@ impl AgentIntegration for CodexIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
+        for path in [
+            codex_dir.join("config.toml"),
+            codex_dir.join("hooks.json"),
+            project_path.join("AGENTS.md"),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
         std::fs::create_dir_all(&codex_dir).ok();
         install_mcp_server(
             &codex_dir.join("config.toml"),
             &ctx.tokensave_bin,
-            true,
-            false,
+            InstallScope::ProjectLocal,
         )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
         install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
@@ -96,7 +103,7 @@ impl AgentIntegration for CodexIntegration {
         let local_codex_dir = ctx.project_path.join(".codex");
         if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || ctx.project_path.join("AGENTS.md").exists()
+            || local_agents_md_has_tokensave(&ctx.project_path.join("AGENTS.md"))
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
@@ -133,17 +140,19 @@ impl AgentIntegration for CodexIntegration {
     }
 }
 
+fn local_agents_md_has_tokensave(path: &Path) -> bool {
+    path.exists()
+        && std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains("## Prefer tokensave MCP tools")
+}
+
 // ---------------------------------------------------------------------------
 // Install helpers
 // ---------------------------------------------------------------------------
 
 /// Register MCP server and auto-approve tools in ~/.codex/config.toml.
-fn install_mcp_server(
-    config_path: &Path,
-    tokensave_bin: &str,
-    is_local_install: bool,
-    enable_global_db: bool,
-) -> Result<()> {
+fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallScope) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
 
     // Ensure [mcp_servers.tokensave] exists
@@ -166,17 +175,16 @@ fn install_mcp_server(
         "command".to_string(),
         toml::Value::String(tokensave_bin.to_string()),
     );
-    let args = if is_local_install {
-        vec![
+    let args = match scope {
+        InstallScope::Global => vec![toml::Value::String("serve".to_string())],
+        InstallScope::ProjectLocal => vec![
             toml::Value::String("serve".to_string()),
             toml::Value::String("--path".to_string()),
             toml::Value::String(".".to_string()),
-        ]
-    } else {
-        vec![toml::Value::String("serve".to_string())]
+        ],
     };
     server_table.insert("args".to_string(), toml::Value::Array(args));
-    if enable_global_db {
+    if scope == InstallScope::Global {
         let mut env_table = toml::map::Map::new();
         env_table.insert(
             "TOKENSAVE_ENABLE_GLOBAL_DB".to_string(),
@@ -236,8 +244,14 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         faster than file reads.\n\n\
         If a code analysis question cannot be fully answered by tokensave MCP tools, \
         try querying the SQLite database directly at `.tokensave/tokensave.db` \
-        (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries \
+        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
+        `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
+        For durable project/user facts, prefer `tokensave_fact_store`, \
+        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
+        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        prior conversation context matters. Do not store secrets, credentials, or \
+        unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tokensave tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/aovestdipaperino/tokensave describing the limitation. \
@@ -338,7 +352,7 @@ fn install_codex_hook_event(
 
     let handler = json!({
         "type": "command",
-        "command": format!("{} {subcommand}", shell_quote(tokensave_bin)),
+        "command": super::hook_command(tokensave_bin, subcommand),
         "timeout": timeout,
     });
     let mut group = json!({ "hooks": [handler] });
@@ -359,10 +373,6 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
                 .is_some_and(|command| command.contains(subcommand))
         })
     })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Codex requires non-managed command hooks to be trusted via `/hooks` before

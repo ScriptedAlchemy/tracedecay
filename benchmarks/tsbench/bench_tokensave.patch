@@ -20,7 +20,7 @@
 +SYSTEM_PROMPT_TS = """You PREFER `mcp__tokensave__*` tools for code navigation and editing. NEVER spawn a sub-agent via Agent — do all work in the main session. Read / Grep / Glob / Edit / Write / Bash are ALLOWED only as a fallback when no tokensave tool covers the task (env-var orphan audits in `.env*` files, Dockerfile inspection, add-field-to-model on `.prisma`/`.ts`, multi-file symbol moves). For everything else, use `mcp__tokensave__*`.
  
 -Active project: "tsbench" (preset — no switch_project needed). Do NOT call memory_search or memory_save.
-+Active project: "tsbench" (indexed in-place — no init needed). Do NOT call any memory/recording tools (`tokensave_fact_store`, `tokensave_fact_feedback`, `tokensave_session_start`, `tokensave_session_end`).
++Active project: "tsbench" (indexed in-place — no init needed). Do NOT call any memory/recording tools (`tokensave_fact_store`, `tokensave_fact_feedback`, `tokensave_memory_status`, `tokensave_session_start`, `tokensave_session_end`).
  
  CORE
 -- Locate: find_symbol(name, level=2). One call.

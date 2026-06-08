@@ -46,14 +46,33 @@ impl<'a> FactRetriever<'a> {
         let fts_scores = self
             .fts_candidates(query, category, min_trust, limit.saturating_mul(5))
             .await?;
+        let entity_candidate_ids = self
+            .entity_candidates(
+                query,
+                &query_tokens,
+                category,
+                min_trust,
+                limit.saturating_mul(10),
+            )
+            .await?;
         let mut candidates = self
             .store
             .list_facts(category, Some(min_trust), limit.saturating_mul(10))
             .await?;
         let mut candidate_ids: HashSet<i64> = candidates.iter().map(|fact| fact.fact_id).collect();
-        for fact_id in fts_scores.keys() {
-            if candidate_ids.insert(*fact_id) {
-                if let Some(fact) = self.store.get_fact(*fact_id).await? {
+        // Collect the union of ids surfaced by FTS and entity matching that the
+        // `list_facts` baseline did not already include, then hydrate them with a
+        // single batched `get_facts` call instead of one round-trip per id.
+        let mut missing_ids: Vec<i64> = Vec::new();
+        for fact_id in fts_scores.keys().copied().chain(entity_candidate_ids) {
+            if candidate_ids.insert(fact_id) {
+                missing_ids.push(fact_id);
+            }
+        }
+        if !missing_ids.is_empty() {
+            let mut hydrated = self.store.get_facts(&missing_ids).await?;
+            for fact_id in &missing_ids {
+                if let Some(fact) = hydrated.remove(fact_id) {
                     candidates.push(fact);
                 }
             }
@@ -67,11 +86,25 @@ impl<'a> FactRetriever<'a> {
             });
         }
 
+        // Preload every candidate's stored vector in one batched query so the
+        // scoring loop never makes a per-fact round-trip. Facts without a stored
+        // vector are absent from the map and fall back to on-the-fly encoding.
+        let candidate_vectors = self
+            .store
+            .fact_vectors(
+                &candidates
+                    .iter()
+                    .map(|fact| fact.fact_id)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+
         let mut results = Vec::with_capacity(candidates.len());
         for fact in candidates {
             let fts_score = fts_scores.get(&fact.fact_id).copied().unwrap_or(0.0);
             let jaccard_score = jaccard(&query_tokens, &fact_search_tokens(&fact));
-            let holographic_score = self.holographic_score(query, &fact).await?;
+            let holographic_score =
+                self.holographic_score_with(query, &fact, candidate_vectors.get(&fact.fact_id));
             let trust_score = fact.trust_score;
             let temporal_decay = temporal_decay_factor(fact.updated_at);
             let score = combined_score(
@@ -173,58 +206,62 @@ impl<'a> FactRetriever<'a> {
             return Ok(Vec::new());
         }
 
-        let entity_names = normalized
+        let placeholders = normalized
             .iter()
-            .map(|entity| sql_string_literal(entity))
+            .map(|_| "?")
             .collect::<Vec<_>>()
             .join(", ");
         let required_count = normalized.len() as i64;
         let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
         let limit_usize = normalized_limit(limit);
         let limit_i64 = limit_usize as i64;
-        let sql = if category.is_some() {
+        // Bind the entity names (and the trailing scalars) as anonymous `?`
+        // placeholders in positional order rather than interpolating them.
+        let mut values: Vec<libsql::Value> = normalized
+            .iter()
+            .map(|entity| libsql::Value::Text(entity.clone()))
+            .collect();
+        let sql = if let Some(category) = category {
+            values.push(libsql::Value::Text(category.as_str().to_string()));
+            values.push(libsql::Value::Real(min_trust));
+            values.push(libsql::Value::Integer(required_count));
+            values.push(libsql::Value::Integer(limit_i64));
             format!(
                 "SELECT f.fact_id
                  FROM memory_facts f
                  JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
                  JOIN memory_entities e ON e.entity_id = fe.entity_id
-                 WHERE e.normalized_name IN ({entity_names})
-                   AND f.category = ?1
-                   AND f.trust_score >= ?2
+                 WHERE e.normalized_name IN ({placeholders})
+                   AND f.category = ?
+                   AND f.trust_score >= ?
                  GROUP BY f.fact_id
-                 HAVING COUNT(DISTINCT e.normalized_name) = ?3
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?
                  ORDER BY f.updated_at DESC, f.fact_id DESC
-                 LIMIT ?4"
+                 LIMIT ?"
             )
         } else {
+            values.push(libsql::Value::Real(min_trust));
+            values.push(libsql::Value::Integer(required_count));
+            values.push(libsql::Value::Integer(limit_i64));
             format!(
                 "SELECT f.fact_id
                  FROM memory_facts f
                  JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
                  JOIN memory_entities e ON e.entity_id = fe.entity_id
-                 WHERE e.normalized_name IN ({entity_names})
-                   AND f.trust_score >= ?1
+                 WHERE e.normalized_name IN ({placeholders})
+                   AND f.trust_score >= ?
                  GROUP BY f.fact_id
-                 HAVING COUNT(DISTINCT e.normalized_name) = ?2
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?
                  ORDER BY f.updated_at DESC, f.fact_id DESC
-                 LIMIT ?3"
+                 LIMIT ?"
             )
         };
-        let mut rows = if let Some(category) = category {
-            self.store
-                .conn()
-                .query(
-                    &sql,
-                    params![category.as_str(), min_trust, required_count, limit_i64],
-                )
-                .await
-        } else {
-            self.store
-                .conn()
-                .query(&sql, params![min_trust, required_count, limit_i64])
-                .await
-        }
-        .map_err(|e| db_error("reason", e))?;
+        let mut rows = self
+            .store
+            .conn()
+            .query(&sql, values)
+            .await
+            .map_err(|e| db_error("reason", e))?;
         let mut fact_ids = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| db_error("reason", e))? {
             fact_ids.push(row.get::<i64>(0).map_err(|e| db_error("reason", e))?);
@@ -351,6 +388,91 @@ impl<'a> FactRetriever<'a> {
         Ok(scores)
     }
 
+    async fn entity_candidates(
+        &self,
+        query: &str,
+        query_tokens: &[String],
+        category: Option<MemoryCategory>,
+        min_trust: f64,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let mut terms = Vec::new();
+        let normalized_query = normalize_entity(query).to_ascii_lowercase();
+        if !normalized_query.is_empty() {
+            terms.push(normalized_query);
+        }
+        terms.extend(query_tokens.iter().cloned());
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Bind each term's exact and LIKE values as anonymous `?` placeholders in
+        // positional order. `escape_like` still governs wildcard semantics on the
+        // LIKE value, but the value is bound rather than interpolated.
+        let mut values: Vec<libsql::Value> = Vec::with_capacity(terms.len() * 2 + 3);
+        let predicates = terms
+            .iter()
+            .map(|term| {
+                values.push(libsql::Value::Text(term.clone()));
+                values.push(libsql::Value::Text(format!("%{}%", escape_like(term))));
+                "(e.normalized_name = ? OR e.normalized_name LIKE ? ESCAPE '\\')".to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let sql = if let Some(category) = category {
+            values.push(libsql::Value::Text(category.as_str().to_string()));
+            values.push(libsql::Value::Real(min_trust));
+            values.push(libsql::Value::Integer(normalized_limit(limit) as i64));
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.category = ?
+                   AND f.trust_score >= ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        } else {
+            values.push(libsql::Value::Real(min_trust));
+            values.push(libsql::Value::Integer(normalized_limit(limit) as i64));
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.trust_score >= ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        };
+
+        let mut rows = self
+            .store
+            .conn()
+            .query(sql.as_str(), values)
+            .await
+            .map_err(|e| db_error("entity_candidates", e))?;
+
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_candidates", e))?
+        {
+            fact_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("entity_candidates", e))?,
+            );
+        }
+        Ok(fact_ids)
+    }
+
     async fn fact_ids_for_entity(
         &self,
         entity: &str,
@@ -428,9 +550,15 @@ impl<'a> FactRetriever<'a> {
         fact_ids: &[i64],
         why: &str,
     ) -> Result<Vec<FactSearchResult>> {
-        let mut results = Vec::new();
+        if fact_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One batched fetch, then iterate the ORIGINAL `fact_ids` order so the
+        // ordering callers rely on (probe/reason) is preserved exactly.
+        let facts = self.store.get_facts(fact_ids).await?;
+        let mut results = Vec::with_capacity(fact_ids.len());
         for fact_id in fact_ids {
-            if let Some(fact) = self.store.get_fact(*fact_id).await? {
+            if let Some(fact) = facts.get(fact_id).cloned() {
                 let trust_score = fact.trust_score;
                 results.push(FactSearchResult {
                     score: trust_score,
@@ -446,16 +574,25 @@ impl<'a> FactRetriever<'a> {
         Ok(results)
     }
 
-    async fn holographic_score(&self, query: &str, fact: &FactRecord) -> Result<f64> {
+    /// Holographic similarity between `query` and `fact`, using `stored_vector`
+    /// when present and otherwise encoding the fact's vector on the fly. This is
+    /// the pure form of the former `holographic_score`: callers preload vectors
+    /// in bulk via [`MemoryStore::fact_vectors`] and pass the result in here.
+    fn holographic_score_with(
+        &self,
+        query: &str,
+        fact: &FactRecord,
+        stored_vector: Option<&Vec<f64>>,
+    ) -> f64 {
         let query_entities: Vec<String> = tokenize(query);
         let query_vector = self.encoder.encode_fact(query, &query_entities);
-        let fact_vector = if let Some(vector) = self.store.fact_vector(fact.fact_id).await? {
-            vector
+        let similarity = if let Some(vector) = stored_vector {
+            self.encoder.similarity(&query_vector, vector)
         } else {
-            self.encoder.encode_fact(&fact.content, &fact.entities)
+            let fact_vector = self.encoder.encode_fact(&fact.content, &fact.entities);
+            self.encoder.similarity(&query_vector, &fact_vector)
         };
-        let similarity = self.encoder.similarity(&query_vector, &fact_vector);
-        Ok(f64::midpoint(similarity, 1.0).clamp(0.0, 1.0))
+        f64::midpoint(similarity, 1.0).clamp(0.0, 1.0)
     }
 }
 
@@ -519,8 +656,11 @@ fn token_overlap(left: &[String], right: &[String]) -> usize {
         .count()
 }
 
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn jaccard(left: &[String], right: &[String]) -> f64 {

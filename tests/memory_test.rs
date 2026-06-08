@@ -55,7 +55,7 @@ async fn dirty_bank_names(db: &Database) -> Vec<String> {
     names
 }
 
-async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> Option<i64> {
+async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> i64 {
     let mut rows = db
         .conn()
         .query(
@@ -67,7 +67,9 @@ async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> Option<i64> {
     rows.next()
         .await
         .unwrap()
-        .map(|row| row.get::<i64>(0).unwrap())
+        .expect("dirty bank should exist")
+        .get::<i64>(0)
+        .unwrap()
 }
 
 async fn memory_bank_count(db: &Database) -> i64 {
@@ -136,6 +138,20 @@ async fn fact_updated_at(cg: &TokenSave, fact_id: i64) -> i64 {
     let updated_at = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
     db.close();
     updated_at
+}
+
+async fn fact_hrr_vector(db: &Database, fact_id: i64) -> Vec<f64> {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT hrr_vector FROM memory_facts WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let bytes = row.get::<Vec<u8>>(0).unwrap();
+    HolographicEncoder::deserialize(&bytes).unwrap()
 }
 
 #[test]
@@ -412,7 +428,7 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
         )
         .await
         .unwrap();
-    let before = dirty_bank_updated_at(&db, "project").await.unwrap();
+    let before = dirty_bank_updated_at(&db, "project").await;
 
     db.conn()
         .execute_batch(
@@ -430,7 +446,39 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
 
     assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
     assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
-    assert!(dirty_bank_updated_at(&db, "project").await.unwrap() > before);
+    assert!(dirty_bank_updated_at(&db, "project").await > before);
+}
+
+#[tokio::test]
+async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    store
+        .add_fact(
+            fact_request("First project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let first = dirty_bank_updated_at(&db, "project").await;
+
+    store
+        .add_fact(
+            fact_request("Second project fact", MemoryCategory::Project, 0.8),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let second = dirty_bank_updated_at(&db, "project").await;
+
+    // The dirty marker is an optimistic-concurrency token, so re-marking a bank must move it
+    // strictly forward even when both writes land in the same wall-clock second; otherwise a
+    // re-dirty during a rebuild snapshot could be silently cleared.
+    assert!(
+        second > first,
+        "dirty marker must strictly increase on re-dirty (first={first}, second={second})"
+    );
 }
 
 #[tokio::test]
@@ -469,6 +517,40 @@ async fn memory_store_add_list_get_and_deduplicates_by_content() {
     assert!(store.remove_fact(first.fact_id).await.unwrap());
     assert!(store.get_fact(first.fact_id).await.unwrap().is_none());
     assert!(!store.remove_fact(first.fact_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let encoder = HolographicEncoder;
+    let content = "persist duplicate vector content";
+
+    let mut first_request = fact_request(content, MemoryCategory::Project, 0.8);
+    first_request.entities = vec!["FirstEntity".to_string()];
+    let first = store.add_fact(first_request, DEFAULT_TRUST).await.unwrap();
+    assert_eq!(
+        fact_hrr_vector(&db, first.fact_id).await,
+        encoder.encode_fact(content, &["FirstEntity".to_string()])
+    );
+
+    let mut duplicate_request = fact_request(content, MemoryCategory::Project, 0.8);
+    duplicate_request.entities = vec!["SecondEntity".to_string()];
+    let duplicate = store
+        .add_fact(duplicate_request, DEFAULT_TRUST)
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.fact_id, first.fact_id);
+    assert!(duplicate.entities.contains(&"FirstEntity".to_string()));
+    assert!(duplicate.entities.contains(&"SecondEntity".to_string()));
+    assert_eq!(
+        fact_hrr_vector(&db, first.fact_id).await,
+        encoder.encode_fact(
+            content,
+            &["FirstEntity".to_string(), "SecondEntity".to_string()]
+        )
+    );
 }
 
 #[tokio::test]
@@ -841,6 +923,43 @@ async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() 
     assert_eq!(results[0].trust_score, results[0].fact.trust_score);
     assert!(results[0].why.as_deref().unwrap_or("").contains("trust"));
     assert_eq!(results[0].fact.content, "Rust HRR auth memory is preferred");
+}
+
+#[tokio::test]
+async fn fact_retriever_search_includes_old_entity_only_matches() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let retriever = FactRetriever::new(db.conn());
+
+    let mut matching = fact_request(
+        "Older durable fact without the query words",
+        MemoryCategory::Project,
+        0.9,
+    );
+    matching.entities = vec!["EntityNeedle".to_string()];
+    store.add_fact(matching, DEFAULT_TRUST).await.unwrap();
+
+    for i in 0..125 {
+        let mut unrelated = fact_request(
+            &format!("Newer unrelated project fact {i}"),
+            MemoryCategory::Project,
+            0.9,
+        );
+        unrelated.entities = vec![format!("UnrelatedEntity{i}")];
+        store.add_fact(unrelated, DEFAULT_TRUST).await.unwrap();
+    }
+
+    let results = retriever
+        .search("EntityNeedle", Some(MemoryCategory::Project), Some(0.3), 5)
+        .await
+        .unwrap();
+
+    assert!(
+        results
+            .iter()
+            .any(|result| result.fact.content == "Older durable fact without the query words"),
+        "search should include facts found only through stored entities"
+    );
 }
 
 #[tokio::test]
