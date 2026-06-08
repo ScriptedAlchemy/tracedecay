@@ -1,10 +1,13 @@
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::global_db::GlobalDb;
-use crate::sessions::{SessionMessageRecord, SessionRecord};
+use crate::sessions::source::{
+    ingest_source, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
+    StoredCursor, TranscriptSource,
+};
+use crate::sessions::SessionMessageRecord;
 
 const PROJECT_SESSION_DB_FILENAME: &str = "sessions.db";
 
@@ -22,15 +25,87 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
     GlobalDb::open_at(&project_session_db_path(project_root)).await
 }
 
+/// A Cursor hook event scoped to one transcript file. Cursor is hook-driven —
+/// the transcript path, session id, and project all come from the event payload
+/// rather than from a directory scan — so the source wraps the parsed event and
+/// yields exactly that one path.
+struct CursorEventSource {
+    event: Value,
+    transcript_path: PathBuf,
+}
+
+impl TranscriptSource for CursorEventSource {
+    fn provider(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+        vec![self.transcript_path.clone()]
+    }
+
+    fn parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        _project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
+        let session_id = event_session_id(&self.event, path);
+        let mut messages = Vec::new();
+        for line in &new.lines {
+            // The byte offset doubles as the message ordinal and source_offset,
+            // matching the original Cursor ingestion.
+            if let Some(message) = event_message(
+                &line.value,
+                &self.event,
+                &session_id,
+                path,
+                line.offset,
+                line.offset,
+            ) {
+                messages.push(message);
+            }
+        }
+
+        // Defer the (filesystem-walking) project/title/metadata derivation until
+        // we actually have new messages; the driver ignores the draft otherwise.
+        let draft = if messages.is_empty() {
+            SessionDraft {
+                session_id,
+                project_key: String::new(),
+                project_path: String::new(),
+                title: None,
+                metadata_json: None,
+            }
+        } else {
+            let (project_key, project_path) = event_project(&self.event);
+            SessionDraft {
+                session_id,
+                project_key,
+                project_path,
+                title: title_from_messages(&messages),
+                metadata_json: serde_json::to_string(&session_metadata(&self.event)).ok(),
+            }
+        };
+
+        Some(ParsedTranscript {
+            draft,
+            messages,
+            new_cursor: new.new_cursor,
+        })
+    }
+}
+
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
 /// hooks should pass the project-local DB from [`open_project_session_db`].
 ///
 /// Ingestion is **incremental**: it resumes from the byte offset recorded in the
-/// DB's `parse_offsets` table (mirroring the Claude accounting parser), so each
-/// call only parses and upserts transcript lines appended since the last run
-/// rather than re-reading the whole file. Repeated calls on an unchanged file
-/// are a no-op.
+/// DB's `parse_offsets` table (via the shared [`crate::sessions::source`]
+/// driver), so each call only parses and upserts transcript lines appended since
+/// the last run rather than re-reading the whole file. Repeated calls on an
+/// unchanged file are a no-op.
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &GlobalDb,
@@ -60,147 +135,20 @@ pub async fn ingest_cursor_transcript_event_capped(
         return CursorTranscriptIngestStats::default();
     };
 
-    ingest_cursor_transcript(&event, &transcript_path, db, max_new_bytes).await
-}
-
-async fn ingest_cursor_transcript(
-    event: &Value,
-    transcript_path: &Path,
-    db: &GlobalDb,
-    max_new_bytes: Option<u64>,
-) -> CursorTranscriptIngestStats {
-    let path_str = transcript_path.to_string_lossy().to_string();
-    let Ok(meta) = std::fs::metadata(transcript_path) else {
-        return CursorTranscriptIngestStats::default();
+    // Cursor derives its project from the event, so the driver's project_root
+    // argument is unused by `CursorEventSource`; the transcript path's parent is
+    // a cheap, side-effect-free placeholder.
+    let project_root = transcript_path
+        .parent()
+        .map_or_else(|| transcript_path.clone(), Path::to_path_buf);
+    let source = CursorEventSource {
+        event,
+        transcript_path,
     };
-    let file_size = meta.len();
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
-
-    let (prev_offset, prev_mtime) = db.get_parse_offset(&path_str).await.unwrap_or((0, 0));
-
-    // Resume from the saved offset on an append; restart from the beginning when
-    // the file shrank (truncation) or its mtime regressed (rewrite).
-    let resume_from_prev = prev_offset > 0 && file_size >= prev_offset && mtime >= prev_mtime;
-    let seek_to = if resume_from_prev { prev_offset } else { 0 };
-
-    // Nothing new to read. Refresh the stored mtime so we don't keep re-stat-ing,
-    // then no-op.
-    if seek_to >= file_size {
-        if mtime != prev_mtime {
-            db.set_parse_offset(&path_str, seek_to, mtime).await;
-        }
-        return CursorTranscriptIngestStats::default();
-    }
-
-    // Hot-path guard: defer large backlogs to the lower-frequency hooks rather
-    // than risk the prompt-submit budget.
-    if let Some(cap) = max_new_bytes {
-        if file_size.saturating_sub(seek_to) > cap {
-            return CursorTranscriptIngestStats::default();
-        }
-    }
-
-    let Ok(file) = std::fs::File::open(transcript_path) else {
-        return CursorTranscriptIngestStats::default();
-    };
-    let mut reader = BufReader::new(file);
-    if seek_to > 0 && reader.seek(SeekFrom::Start(seek_to)).is_err() {
-        return CursorTranscriptIngestStats::default();
-    }
-
-    let session_id = event_session_id(event, transcript_path);
-    let mut parsed = Vec::new();
-    let mut offset = seek_to;
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                // A line without a trailing newline is a partial write at EOF:
-                // stop without consuming it so the next call re-reads it whole.
-                if !line.ends_with('\n') {
-                    break;
-                }
-                let line_offset = offset;
-                offset = offset.saturating_add(n as u64);
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
-                    continue;
-                };
-                if let Some(message) = event_message(
-                    &record,
-                    event,
-                    &session_id,
-                    transcript_path,
-                    line_offset as i64,
-                    line_offset as i64,
-                ) {
-                    parsed.push(message);
-                }
-            }
-        }
-    }
-
-    // Persist progress (even when no messages were parsed) so subsequent calls
-    // only see genuinely new bytes.
-    db.set_parse_offset(&path_str, offset, mtime).await;
-
-    if parsed.is_empty() {
-        return CursorTranscriptIngestStats::default();
-    }
-
-    let (project_key, project_path) = event_project(event);
-    let existing = db.get_session("cursor", &session_id).await;
-    // Preserve the session's original start time and title across incremental
-    // appends; only advance ended_at to the latest message seen.
-    let started_at = existing
-        .as_ref()
-        .and_then(|session| session.started_at)
-        .or_else(|| parsed.first().and_then(|message| message.timestamp));
-    let title = existing
-        .as_ref()
-        .and_then(|session| session.title.clone())
-        .or_else(|| {
-            parsed
-                .iter()
-                .find(|message| message.role == "user")
-                .map(|message| preview_title(&message.text))
-        });
-    let ended_at = parsed
-        .last()
-        .and_then(|message| message.timestamp)
-        .or_else(|| existing.as_ref().and_then(|session| session.ended_at));
-    let session = SessionRecord {
-        provider: "cursor".to_string(),
-        session_id,
-        project_key,
-        project_path,
-        title,
-        started_at,
-        ended_at,
-        transcript_path: Some(transcript_path.to_string_lossy().to_string()),
-        metadata_json: serde_json::to_string(&session_metadata(event)).ok(),
-    };
-
-    let sessions_upserted = u64::from(db.upsert_session(&session).await);
-    let mut messages_upserted = 0_u64;
-    for message in &parsed {
-        if db.upsert_session_message(message).await {
-            messages_upserted = messages_upserted.saturating_add(1);
-        }
-    }
-
+    let stats = ingest_source(db, &source, &project_root, max_new_bytes).await;
     CursorTranscriptIngestStats {
-        sessions_upserted,
-        messages_upserted,
+        sessions_upserted: stats.sessions_upserted,
+        messages_upserted: stats.messages_upserted,
     }
 }
 
@@ -368,17 +316,6 @@ fn record_timestamp(value: &Value) -> Option<i64> {
                 .as_i64()
                 .or_else(|| timestamp.as_str().and_then(|s| s.parse::<i64>().ok()))
         })
-}
-
-fn preview_title(text: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 80;
-
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_TITLE_CHARS {
-        collapsed
-    } else {
-        collapsed.chars().take(MAX_TITLE_CHARS).collect()
-    }
 }
 
 fn session_metadata(event: &Value) -> Value {

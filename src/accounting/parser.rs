@@ -163,7 +163,7 @@ fn parse_line(line: &str, project_hash: &str, session_id: &str) -> Option<CostTu
 }
 
 /// Parse an ISO 8601 timestamp to unix epoch seconds.
-fn parse_timestamp(ts: &str) -> Option<u64> {
+pub(crate) fn parse_timestamp(ts: &str) -> Option<u64> {
     // Handle "2026-04-14T10:32:15.039Z" format
     // Simple parsing without pulling in chrono: split on known positions
     if ts.len() < 19 {
