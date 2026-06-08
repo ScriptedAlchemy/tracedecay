@@ -151,7 +151,7 @@ Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
 - `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
-- `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) — fail-open; injects a soft `additional_context` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files` before spending a Grep/rg call.
+- `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) — fail-open; injects a soft `hookSpecificOutput.additionalContext` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files` before spending a Grep/rg call.
 - `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
 - `afterFileEdit` (matcher `Write`) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
 - `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tokensave branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
