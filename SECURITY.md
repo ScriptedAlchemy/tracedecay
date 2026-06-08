@@ -37,7 +37,7 @@ tokensave builds a **local** code graph stored in a SQLite (libSQL) database (`.
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The database is local-only — there is no cloud sync, remote database, or server-side storage.
 
-A second database (`~/.tokensave/global.db`) tracks which projects have been indexed, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Project-local Cursor transcript search is stored in the repository's `.tokensave/sessions.db`, which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both databases remain local-only and are not synced to a remote service.
+The user-level `~/.tokensave/global.db` tracks indexed projects, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Project-local Cursor transcript search is stored in the repository's `.tokensave/sessions.db`, which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both databases remain local-only and are not synced to a remote service.
 
 ### Network access
 
@@ -72,7 +72,7 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 **Local-state tools** (write only inside `.tokensave/`, never your source):
 
 - `tokensave_session_start`, `tokensave_session_end` — health-metric baselines
-- `tokensave_fact_store`, `tokensave_fact_feedback` — store fact text, entity names, feedback events, and trust-score inputs in the local project database. `tokensave_memory_status` is read-only.
+- `tokensave_fact_store`, `tokensave_fact_feedback`, `tokensave_memory_status` — store fact text, entity names, feedback events, trust-score inputs, and memory-bank repair state in the local project database.
 
 **Test execution:**
 
