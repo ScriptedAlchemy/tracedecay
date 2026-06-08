@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
 use crate::mcp::tools::ToolResult;
+use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
 
 use super::truncate_response;
@@ -34,6 +35,28 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|project_key| !project_key.is_empty());
+    let parent_session_id = args
+        .get("parent_session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|parent_session_id| !parent_session_id.is_empty());
+    let include_subagents = args
+        .get("include_subagents")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut scope = match args
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("all")
+    {
+        "parents_only" => SessionSearchScope::ParentsOnly,
+        "subagents_only" => SessionSearchScope::SubagentsOnly,
+        _ => SessionSearchScope::All,
+    };
+    if !include_subagents && matches!(scope, SessionSearchScope::All) {
+        scope = SessionSearchScope::ParentsOnly;
+    }
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
@@ -49,13 +72,27 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         })));
     };
     let results = db
-        .search_session_messages(provider, project_key, query, limit)
+        .search_session_messages_filtered(
+            provider,
+            project_key,
+            query,
+            limit,
+            scope,
+            parent_session_id,
+        )
         .await;
 
     Ok(tool_json(&json!({
         "status": "ok",
         "provider": provider,
         "project_key": project_key,
+        "parent_session_id": parent_session_id,
+        "include_subagents": include_subagents,
+        "scope": match scope {
+            SessionSearchScope::All => "all",
+            SessionSearchScope::ParentsOnly => "parents_only",
+            SessionSearchScope::SubagentsOnly => "subagents_only",
+        },
         "query": query,
         "count": results.len(),
         "results": results,

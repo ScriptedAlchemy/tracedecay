@@ -1698,6 +1698,19 @@ fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional project key/path filter. For Cursor transcripts this is the project root path."
                 },
+                "include_subagents": {
+                    "type": "boolean",
+                    "description": "Whether to include child subagent sessions in results (default: true)."
+                },
+                "parent_session_id": {
+                    "type": "string",
+                    "description": "Optional parent session id filter. Primarily useful with scope=subagents_only."
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "Relationship scope for search results (default: all).",
+                    "enum": ["all", "parents_only", "subagents_only"]
+                },
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of messages to return (default: 10, max: 50)."

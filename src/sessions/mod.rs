@@ -68,6 +68,10 @@ pub struct SessionRecord {
     pub ended_at: Option<i64>,
     pub transcript_path: Option<String>,
     pub metadata_json: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub is_subagent: bool,
+    pub agent_id: Option<String>,
+    pub parent_tool_use_id: Option<String>,
 }
 
 /// Provider-neutral message payload extracted from an agent transcript.
@@ -94,4 +98,12 @@ pub struct SessionMessageSearchResult {
     pub session: SessionRecord,
     pub message: SessionMessageRecord,
     pub score: f64,
+}
+
+/// Scope filter for session-message full-text search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionSearchScope {
+    All,
+    ParentsOnly,
+    SubagentsOnly,
 }

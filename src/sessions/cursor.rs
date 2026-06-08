@@ -32,6 +32,7 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
+    include_subagents: bool,
 }
 
 impl TranscriptSource for CursorEventSource {
@@ -40,7 +41,15 @@ impl TranscriptSource for CursorEventSource {
     }
 
     fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        vec![self.transcript_path.clone()]
+        let mut paths = vec![self.transcript_path.clone()];
+        if self.include_subagents {
+            let parent_session_id = event_session_id(&self.event, &self.transcript_path);
+            paths.extend(cursor_subagent_paths(
+                &self.transcript_path,
+                &parent_session_id,
+            ));
+        }
+        paths
     }
 
     fn parse_new(
@@ -51,7 +60,12 @@ impl TranscriptSource for CursorEventSource {
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let session_id = event_session_id(&self.event, path);
+        let parent_session_id = event_session_id(&self.event, &self.transcript_path);
+        let subagent = cursor_subagent_identity(path, &parent_session_id);
+        let session_id = subagent
+            .as_ref()
+            .map(|(session_id, _agent_id)| session_id.clone())
+            .unwrap_or_else(|| parent_session_id.clone());
         let mut messages = Vec::new();
         for line in &new.lines {
             // The byte offset doubles as the message ordinal and source_offset,
@@ -66,6 +80,13 @@ impl TranscriptSource for CursorEventSource {
             ) {
                 messages.push(message);
             }
+            messages.extend(event_dispatch_messages(
+                &line.value,
+                &self.event,
+                &session_id,
+                path,
+                line.offset,
+            ));
         }
 
         // Defer the (filesystem-walking) project/title/metadata derivation until
@@ -77,15 +98,27 @@ impl TranscriptSource for CursorEventSource {
                 project_path: String::new(),
                 title: None,
                 metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
             }
         } else {
             let (project_key, project_path) = event_project(&self.event);
+            let (draft_parent_session_id, agent_id) = subagent
+                .map(|(_session_id, agent_id)| (Some(parent_session_id), Some(agent_id)))
+                .unwrap_or((None, None));
+            let is_subagent = draft_parent_session_id.is_some();
             SessionDraft {
                 session_id,
                 project_key,
                 project_path,
                 title: title_from_messages(&messages),
                 metadata_json: serde_json::to_string(&session_metadata(&self.event)).ok(),
+                parent_session_id: draft_parent_session_id,
+                is_subagent,
+                agent_id,
+                parent_tool_use_id: None,
             }
         };
 
@@ -144,12 +177,62 @@ pub async fn ingest_cursor_transcript_event_capped(
     let source = CursorEventSource {
         event,
         transcript_path,
+        include_subagents: max_new_bytes.is_none(),
     };
     let stats = ingest_source(db, &source, &project_root, max_new_bytes).await;
     CursorTranscriptIngestStats {
         sessions_upserted: stats.sessions_upserted,
         messages_upserted: stats.messages_upserted,
     }
+}
+
+fn cursor_subagent_paths(transcript_path: &Path, parent_session_id: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent_dir) = transcript_path.parent() {
+        if transcript_path.file_stem().and_then(|stem| stem.to_str()) == Some(parent_session_id) {
+            candidates.push(parent_dir.join(parent_session_id).join("subagents"));
+        }
+        if parent_dir.file_name().and_then(|name| name.to_str()) == Some(parent_session_id) {
+            candidates.push(parent_dir.join("subagents"));
+        }
+    }
+
+    let mut paths = Vec::new();
+    for dir in candidates {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(String, String)> {
+    let is_subagent_path = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("subagents");
+    if !is_subagent_path {
+        return None;
+    }
+    let parent_dir = path.parent()?.parent()?;
+    if parent_dir.file_name().and_then(|name| name.to_str()) != Some(parent_session_id) {
+        return None;
+    }
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    Some((session_id.clone(), session_id))
 }
 
 fn event_message(
@@ -202,6 +285,94 @@ fn event_message(
         source_offset: Some(source_offset),
         metadata_json: serde_json::to_string(&message_metadata(record)).ok(),
     })
+}
+
+fn event_dispatch_messages(
+    record: &Value,
+    event: &Value,
+    session_id: &str,
+    transcript_path: &Path,
+    source_offset: i64,
+) -> Vec<SessionMessageRecord> {
+    let Some(role) = record
+        .get("role")
+        .and_then(Value::as_str)
+        .filter(|role| !role.is_empty())
+    else {
+        return Vec::new();
+    };
+    let message = record.get("message").unwrap_or(record);
+    let content = message.get("content").unwrap_or(message);
+    let Some(items) = content.as_array() else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_subagent_dispatch_tool(name) {
+            continue;
+        }
+        let Some(text) = dispatch_text(item) else {
+            continue;
+        };
+        let tool_use_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let message_id = tool_use_id.map_or_else(
+            || format!("{session_id}:tool_dispatch:{source_offset}:{index}"),
+            |id| format!("{session_id}:tool_dispatch:{id}"),
+        );
+        out.push(SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id,
+            session_id: session_id.to_string(),
+            role: role.to_string(),
+            timestamp: record_timestamp(record).or_else(|| record_timestamp(event)),
+            ordinal: source_offset.saturating_add(index as i64),
+            text,
+            kind: Some("tool_dispatch".to_string()),
+            model: record
+                .get("model")
+                .or_else(|| message.get("model"))
+                .or_else(|| event.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            tool_names: Some(name.to_string()),
+            source_path: Some(transcript_path.to_string_lossy().to_string()),
+            source_offset: Some(source_offset),
+            metadata_json: serde_json::to_string(&serde_json::json!({
+                "source": "cursor_transcript",
+                "raw_type": record.get("type").cloned(),
+                "tool_use_id": tool_use_id,
+            }))
+            .ok(),
+        });
+    }
+    out
+}
+
+fn is_subagent_dispatch_tool(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
+}
+
+fn dispatch_text(item: &Value) -> Option<String> {
+    let input = item.get("input").unwrap_or(item);
+    let mut parts = Vec::new();
+    for key in ["description", "prompt", "subagent_type"] {
+        if let Some(value) = input
+            .get(key)
+            .or_else(|| item.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(value.to_string());
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {

@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use libsql::{params, Builder, Connection, Database as LibsqlDatabase, Value};
 
-use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
+use crate::sessions::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
+};
 
 const MAX_SESSION_MESSAGE_TEXT_BYTES: usize = 256 * 1024;
 const SESSION_MESSAGE_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
@@ -81,6 +83,10 @@ fn row_to_session(row: &libsql::Row) -> Option<SessionRecord> {
         ended_at: row.get(6).ok()?,
         transcript_path: row.get(7).ok()?,
         metadata_json: row.get(8).ok()?,
+        parent_session_id: row.get(9).ok()?,
+        is_subagent: row.get::<i64>(10).unwrap_or(0) != 0,
+        agent_id: row.get(11).ok()?,
+        parent_tool_use_id: row.get(12).ok()?,
     })
 }
 
@@ -115,6 +121,48 @@ fn session_fts_query(query: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+async fn session_column_exists(conn: &Connection, column: &str) -> bool {
+    let Ok(mut rows) = conn.query("PRAGMA table_info(sessions)", ()).await else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).ok().as_deref() == Some(column) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
+    for (column, ddl) in [
+        (
+            "parent_session_id",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+        ),
+        (
+            "is_subagent",
+            "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
+        (
+            "parent_tool_use_id",
+            "ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT",
+        ),
+    ] {
+        if !session_column_exists(conn, column).await {
+            conn.execute(ddl, ()).await.ok()?;
+        }
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent
+            ON sessions(provider, parent_session_id)",
+        (),
+    )
+    .await
+    .ok()?;
+    Some(())
 }
 
 impl GlobalDb {
@@ -188,6 +236,10 @@ impl GlobalDb {
                 ended_at INTEGER,
                 transcript_path TEXT,
                 metadata_json TEXT,
+                parent_session_id TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT,
+                parent_tool_use_id TEXT,
                 PRIMARY KEY(provider, session_id)
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_project
@@ -242,6 +294,7 @@ impl GlobalDb {
         )
         .await
         .ok()?;
+        ensure_session_parent_columns(&conn).await?;
 
         Some(Self { conn, _db: db })
     }
@@ -443,8 +496,9 @@ impl GlobalDb {
             .execute(
                 "INSERT INTO sessions
                  (provider, session_id, project_key, project_path, title, started_at, ended_at,
-                  transcript_path, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+                  parent_tool_use_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(provider, session_id) DO UPDATE SET
                     project_key = excluded.project_key,
                     project_path = excluded.project_path,
@@ -452,7 +506,11 @@ impl GlobalDb {
                     started_at = excluded.started_at,
                     ended_at = excluded.ended_at,
                     transcript_path = excluded.transcript_path,
-                    metadata_json = excluded.metadata_json",
+                    metadata_json = excluded.metadata_json,
+                    parent_session_id = excluded.parent_session_id,
+                    is_subagent = excluded.is_subagent,
+                    agent_id = excluded.agent_id,
+                    parent_tool_use_id = excluded.parent_tool_use_id",
                 params![
                     session.provider.as_str(),
                     session.session_id.as_str(),
@@ -463,6 +521,10 @@ impl GlobalDb {
                     opt_i64(session.ended_at),
                     opt_text(session.transcript_path.as_deref()),
                     opt_text(session.metadata_json.as_deref()),
+                    opt_text(session.parent_session_id.as_deref()),
+                    if session.is_subagent { 1_i64 } else { 0_i64 },
+                    opt_text(session.agent_id.as_deref()),
+                    opt_text(session.parent_tool_use_id.as_deref()),
                 ],
             )
             .await
@@ -475,7 +537,8 @@ impl GlobalDb {
             .conn
             .query(
                 "SELECT provider, session_id, project_key, project_path, title, started_at,
-                        ended_at, transcript_path, metadata_json
+                        ended_at, transcript_path, metadata_json, parent_session_id,
+                        is_subagent, agent_id, parent_tool_use_id
                  FROM sessions WHERE provider = ?1 AND session_id = ?2",
                 params![provider, session_id],
             )
@@ -552,6 +615,27 @@ impl GlobalDb {
         query: &str,
         limit: usize,
     ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered(
+            provider,
+            project_key,
+            query,
+            limit,
+            SessionSearchScope::All,
+            None,
+        )
+        .await
+    }
+
+    /// Searches message text with optional parent/subagent relationship filters.
+    pub async fn search_session_messages_filtered(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        scope: SessionSearchScope,
+        parent_session_id: Option<&str>,
+    ) -> Vec<SessionMessageSearchResult> {
         let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
             return Vec::new();
@@ -559,32 +643,38 @@ impl GlobalDb {
 
         let select = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-                s.ended_at, s.transcript_path, s.metadata_json,
+                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+                s.is_subagent, s.agent_id, s.parent_tool_use_id,
                 m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
                 m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
                 bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
              FROM session_messages_fts
              JOIN session_messages m ON session_messages_fts.rowid = m.rowid
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2";
+             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2
+               AND (?3 IS NULL OR s.project_key = ?3)
+               AND (?4 IS NULL OR s.parent_session_id = ?4)
+               AND (?5 != 1 OR s.is_subagent = 0)
+               AND (?6 != 1 OR s.is_subagent = 1)";
         let order = " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
-                      LIMIT ?";
-
-        let rows_result = if let Some(project_key) = project_key {
-            self.conn
-                .query(
-                    &format!("{select} AND s.project_key = ?3{order}"),
-                    params![fts_query.as_str(), provider, project_key, limit as i64],
-                )
-                .await
-        } else {
-            self.conn
-                .query(
-                    &format!("{select}{order}"),
-                    params![fts_query.as_str(), provider, limit as i64],
-                )
-                .await
-        };
+                      LIMIT ?7";
+        let parents_only = i64::from(matches!(scope, SessionSearchScope::ParentsOnly));
+        let subagents_only = i64::from(matches!(scope, SessionSearchScope::SubagentsOnly));
+        let rows_result = self
+            .conn
+            .query(
+                &format!("{select}{order}"),
+                params![
+                    fts_query.as_str(),
+                    provider,
+                    opt_text(project_key),
+                    opt_text(parent_session_id),
+                    parents_only,
+                    subagents_only,
+                    limit as i64,
+                ],
+            )
+            .await;
 
         let Ok(mut rows) = rows_result else {
             return Vec::new();
@@ -595,10 +685,10 @@ impl GlobalDb {
             let Some(session) = row_to_session(&row) else {
                 continue;
             };
-            let Some(message) = row_to_message(&row, 9) else {
+            let Some(message) = row_to_message(&row, 13) else {
                 continue;
             };
-            let score = row.get::<f64>(22).map_or(0.0, |rank| -rank);
+            let score = row.get::<f64>(26).map_or(0.0, |rank| -rank);
             results.push(SessionMessageSearchResult {
                 session,
                 message,

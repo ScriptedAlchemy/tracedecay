@@ -69,19 +69,29 @@ impl TranscriptSource for ClaudeSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        // Cheap project scoping: a transcript belongs to exactly one cwd, so
-        // skip files that are not this project's without advancing the cursor.
-        match transcript_cwd(path) {
+        let subagent = claude_subagent_identity(path);
+        // Cheap project scoping: a transcript belongs to exactly one cwd. Claude
+        // subagent files in the verified nested layout may omit cwd, so fall
+        // back to the parent transcript's cwd when the path proves parentage.
+        match transcript_cwd(path).or_else(|| {
+            subagent
+                .as_ref()
+                .and_then(|info| transcript_cwd(&info.parent_transcript_path))
+        }) {
             Some(cwd) if paths_equal(&cwd, project_root) => {}
             _ => return None,
         }
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
-        let session_id = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let session_id = subagent.as_ref().map_or_else(
+            || {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            },
+            |info| info.session_id.clone(),
+        );
 
         let mut messages = Vec::new();
         for line in &new.lines {
@@ -100,6 +110,10 @@ impl TranscriptSource for ClaudeSource {
                 "source": "claude_transcript",
             }))
             .ok(),
+            parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),
+            is_subagent: subagent.is_some(),
+            agent_id: subagent.as_ref().map(|info| info.agent_id.clone()),
+            parent_tool_use_id: None,
         };
 
         Some(ParsedTranscript {
@@ -108,6 +122,32 @@ impl TranscriptSource for ClaudeSource {
             new_cursor: new.new_cursor,
         })
     }
+}
+
+struct ClaudeSubagentInfo {
+    session_id: String,
+    parent_session_id: String,
+    agent_id: String,
+    parent_transcript_path: PathBuf,
+}
+
+fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
+    if path.parent()?.file_name().and_then(|name| name.to_str()) != Some("subagents") {
+        return None;
+    }
+    let parent_dir = path.parent()?.parent()?;
+    let parent_session_id = parent_dir.file_name()?.to_str()?.to_string();
+    let session_id = path.file_stem()?.to_str()?.to_string();
+    let agent_id = session_id
+        .strip_prefix("agent-")
+        .unwrap_or(&session_id)
+        .to_string();
+    Some(ClaudeSubagentInfo {
+        session_id,
+        parent_session_id: parent_session_id.clone(),
+        agent_id,
+        parent_transcript_path: parent_dir.with_file_name(format!("{parent_session_id}.jsonl")),
+    })
 }
 
 /// Reads the session `cwd` from an early line of a Claude transcript.
