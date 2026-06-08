@@ -130,23 +130,29 @@ fn make_install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-fn run_local_install(agent: &str, project: &Path, home: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tokensave"))
-        .arg("install")
-        .arg("--local")
-        .arg("--agent")
-        .arg(agent)
+fn tokensave_command(project: &Path, home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tokensave"));
+    command
         .current_dir(project)
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("KIRO_HOME", home.join(".kiro"))
-        .env("VIBE_HOME", home.join(".vibe"))
+        .env("VIBE_HOME", home.join(".vibe"));
+    command
+}
+
+fn run_local_install(agent: &str, project: &Path, home: &Path) -> std::process::Output {
+    tokensave_command(project, home)
+        .arg("install")
+        .arg("--local")
+        .arg("--agent")
+        .arg(agent)
         .output()
         .unwrap_or_else(|e| panic!("failed to run local install for {agent}: {e}"))
 }
 
-fn assert_local_install_success(agent: &str, project: &Path, home: &Path) {
+fn assert_local_install_success(agent: &str, project: &Path, home: &Path) -> std::process::Output {
     let output = run_local_install(agent, project, home);
     assert!(
         output.status.success(),
@@ -154,6 +160,7 @@ fn assert_local_install_success(agent: &str, project: &Path, home: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    output
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
@@ -272,6 +279,36 @@ fn test_cursor_plugin_bundle_files_are_valid() {
             .as_path(),
         "tokensave",
     );
+}
+
+fn assert_hermes_config_enables_tokensave_memory(config_path: &Path) -> String {
+    let config = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read Hermes config {}: {e}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("memory:"),
+        "missing memory block:\n{config}"
+    );
+    assert!(
+        config.contains("  provider: tokensave"),
+        "missing tokensave memory provider:\n{config}"
+    );
+    assert!(
+        config.contains("plugins:"),
+        "missing plugins block:\n{config}"
+    );
+    assert!(
+        config.contains("enabled:"),
+        "missing enabled block:\n{config}"
+    );
+    assert!(
+        config.contains("- tokensave"),
+        "missing tokensave plugin enablement:\n{config}"
+    );
+    config
 }
 
 #[test]
@@ -451,7 +488,7 @@ fn test_hermes_local_install_writes_profile_plugin() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    assert_local_install_success("hermes", project.path(), home.path());
+    let output = assert_local_install_success("hermes", project.path(), home.path());
 
     let plugin_dir = project.path().join(".hermes/plugins/tokensave");
     let manifest = std::fs::read_to_string(plugin_dir.join("plugin.yaml")).unwrap();
@@ -466,10 +503,13 @@ fn test_hermes_local_install_writes_profile_plugin() {
 
     let init_py = std::fs::read_to_string(plugin_dir.join("__init__.py")).unwrap();
     assert!(init_py.contains("def register(ctx):"));
+    assert!(init_py.contains("class TokensaveMemoryProvider"));
+    assert!(init_py.contains("ctx.register_memory_provider("));
     assert!(init_py.contains("ctx.register_tool("));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
-    assert!(init_py.contains("ctx.register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
+    assert!(init_py.contains("register_skill(\"tokensave:tokensave\""));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
@@ -498,13 +538,23 @@ fn test_hermes_local_install_writes_profile_plugin() {
     let skill = std::fs::read_to_string(plugin_dir.join("skills/tokensave/SKILL.md")).unwrap();
     assert!(skill.contains("Use tokensave"));
 
-    let config = std::fs::read_to_string(project.path().join(".hermes/config.yaml")).unwrap();
-    assert!(config.contains("plugins:"));
-    assert!(config.contains("enabled:"));
-    assert!(config.contains("- tokensave"));
+    assert_hermes_config_enables_tokensave_memory(&project.path().join(".hermes/config.yaml"));
     assert!(
         !home.path().join(".hermes/config.yaml").exists(),
         "plain local install must not mutate the user profile config"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_hermes_homes = [
+        project.path().join(".hermes"),
+        std::fs::canonicalize(project.path())
+            .unwrap_or_else(|_| project.path().to_path_buf())
+            .join(".hermes"),
+    ];
+    assert!(
+        expected_hermes_homes
+            .iter()
+            .any(|path| stderr.contains(&format!("HERMES_HOME={}", path.display()))),
+        "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
     );
 }
 
@@ -553,6 +603,7 @@ class Result:
 def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
     assert argv[1:] == ["tool", "tokensave_context", "--json", "--args", "{\"query\": \"x\"}"]
+    assert "cwd" not in kwargs
     assert kwargs["timeout"] == 600
     assert kwargs["shell"] is False
     return Result()
@@ -583,6 +634,361 @@ assert payload["stderr"].endswith("...<truncated>")
 }
 
 #[test]
+fn test_hermes_generated_python_registers_memory_provider() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_memory_provider.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib
+import importlib.machinery
+import importlib.util
+import abc
+import json
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+
+parent_name = "_hermes_user_memory"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class FullCtx:
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+        self.commands = []
+        self.skills = []
+        self.memory_providers = []
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_command(self, name, handler, **kwargs):
+        self.commands.append((name, handler, kwargs))
+
+    def register_skill(self, name, path):
+        self.skills.append((name, path))
+
+    def register_memory_provider(self, provider):
+        self.memory_providers.append(provider)
+
+ctx = FullCtx()
+plugin.register(ctx)
+assert any(tool["name"] == "tokensave_context" for tool in ctx.tools)
+assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
+assert ctx.commands and ctx.commands[0][0] == "/tokensave_status"
+assert ctx.skills and ctx.skills[0][0] == "tokensave:tokensave"
+assert len(ctx.memory_providers) == 1
+
+provider = ctx.memory_providers[0]
+assert isinstance(provider, MemoryProvider)
+assert provider.name == "tokensave"
+assert provider.provider_id == "tokensave"
+assert provider.is_available() is True
+original_bin = plugin.tools.TOKENSAVE_BIN
+plugin.tools.TOKENSAVE_BIN = "/definitely/missing/tokensave"
+assert provider.is_available() is False
+plugin.tools.TOKENSAVE_BIN = original_bin
+provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
+assert provider.hermes_home == "/tmp/hermes-profile"
+assert provider.session_id == "session-123"
+provider.initialize("session-only")
+assert provider.hermes_home is None
+assert provider.session_id == "session-only"
+
+schemas = provider.get_tool_schemas()
+schema_names = [schema.get("name") for schema in schemas]
+assert schema_names == [
+    "fact_store",
+    "fact_add",
+    "fact_search",
+    "fact_probe",
+    "fact_related",
+    "fact_reason",
+    "fact_contradict",
+    "fact_update",
+    "fact_remove",
+    "fact_list",
+    "fact_feedback",
+    "memory_status",
+]
+assert all("function" not in schema for schema in schemas)
+schema_by_name = {schema["name"]: schema for schema in schemas}
+fact_store_schema = schema_by_name["fact_store"]
+fact_feedback_schema = schema_by_name["fact_feedback"]
+assert fact_store_schema["parameters"]["required"] == ["action"]
+assert "action" not in schema_by_name["fact_search"]["parameters"].get("required", [])
+assert fact_feedback_schema["parameters"]["required"] == ["fact_id"]
+
+calls = []
+
+def fake_call(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return json.dumps({"name": name, "args": args})
+
+plugin.tools.call_tokensave_tool = fake_call
+store_result = provider.handle_tool_call("fact_store", {"action": "list"}, request_id="r1")
+feedback_result = provider.handle_tool_call("fact_feedback", {"fact_id": 7, "helpful": True})
+search_result = provider.handle_tool_call("fact_search", {"query": "Project Phoenix"})
+status_result = provider.handle_tool_call("memory_status", None)
+assert isinstance(store_result, str)
+assert isinstance(feedback_result, str)
+assert isinstance(search_result, str)
+assert isinstance(status_result, str)
+assert json.loads(store_result)["name"] == "tokensave_fact_store"
+assert json.loads(feedback_result)["name"] == "tokensave_fact_feedback"
+assert json.loads(search_result)["name"] == "tokensave_fact_store"
+assert json.loads(status_result)["name"] == "tokensave_memory_status"
+assert calls[0][0] == "tokensave_fact_store"
+assert calls[0][1] == {"action": "list"}
+assert calls[0][2]["request_id"] == "r1"
+assert calls[1][0] == "tokensave_fact_feedback"
+assert calls[2][0] == "tokensave_fact_store"
+assert calls[2][1] == {"query": "Project Phoenix", "action": "search"}
+assert calls[3][0] == "tokensave_memory_status"
+assert calls[3][1] == {}
+
+class LegacyCtx:
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_skill(self, name, path):
+        pass
+
+legacy = LegacyCtx()
+plugin.register(legacy)
+assert any(tool["name"] == "tokensave_context" for tool in legacy.tools)
+assert legacy.hooks and legacy.hooks[0][0] == "pre_llm_call"
+
+class ProviderCollector:
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+collector = ProviderCollector()
+plugin.register(collector)
+assert collector.provider is not None
+assert collector.provider.name == "tokensave"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes memory provider check");
+    assert!(
+        output.status.success(),
+        "generated plugin should register a Hermes memory provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_hermes_generated_memory_provider_is_discovered_from_active_home() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let hermes_home = home.path().join(".hermes");
+    let plugin_dir = hermes_home.join("plugins/tokensave");
+    let script = plugin_dir.join("check_hermes_discovery.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+import types
+
+hermes_home = pathlib.Path(sys.argv[1])
+
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+    def get_config_schema(self):
+        return []
+
+    def save_config(self, values, hermes_home):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+
+def is_memory_provider_dir(path):
+    init_file = path / "__init__.py"
+    if not init_file.exists():
+        return False
+    source = init_file.read_text(errors="replace")[:8192]
+    return "register_memory_provider" in source or "MemoryProvider" in source
+
+def iter_user_provider_dirs():
+    plugins_dir = hermes_home / "plugins"
+    for child in sorted(plugins_dir.iterdir()):
+        if child.is_dir() and not child.name.startswith(("_", ".")) and is_memory_provider_dir(child):
+            yield child.name, child
+
+def load_provider(provider_dir):
+    parent_name = "_hermes_user_memory"
+    if parent_name not in sys.modules:
+        parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+        parent_spec.submodule_search_locations = []
+        sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+    module_name = f"{parent_name}.{provider_dir.name}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        provider_dir / "__init__.py",
+        submodule_search_locations=[str(provider_dir)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    class ProviderCollector:
+        def __init__(self):
+            self.provider = None
+        def register_memory_provider(self, provider):
+            self.provider = provider
+        def register_tool(self, *args, **kwargs):
+            pass
+        def register_hook(self, *args, **kwargs):
+            pass
+        def register_cli_command(self, *args, **kwargs):
+            pass
+
+    collector = ProviderCollector()
+    module.register(collector)
+    return collector.provider
+
+config = (hermes_home / "config.yaml").read_text()
+assert "memory:" in config
+assert "provider: tokensave" in config
+
+providers = dict(iter_user_provider_dirs())
+assert "tokensave" in providers
+provider = load_provider(providers["tokensave"])
+assert provider is not None
+assert isinstance(provider, MemoryProvider)
+assert provider.name == "tokensave"
+assert provider.is_available() is True
+assert provider.get_config_schema() == []
+provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
+assert provider.hermes_home == str(hermes_home)
+assert "fact_search" in [schema["name"] for schema in provider.get_tool_schemas()]
+assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(hermes_home)
+        .output()
+        .expect("python3 should run Hermes memory provider discovery check");
+    assert!(
+        output.status.success(),
+        "Hermes-style memory provider discovery should find the generated tokensave provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_hermes_global_install_and_uninstall_plugin() {
     let home = TempDir::new().unwrap();
     let ctx = make_install_ctx(home.path());
@@ -604,6 +1010,10 @@ fn test_hermes_global_install_and_uninstall_plugin() {
     assert!(
         !config.contains("- tokensave"),
         "uninstall should remove tokensave from plugins.enabled"
+    );
+    assert!(
+        !config.contains("memory:\n"),
+        "uninstall should remove the empty tokensave-created memory block"
     );
 }
 
@@ -629,6 +1039,11 @@ fn test_hermes_profile_install_targets_named_profile() {
             .join(".hermes/profiles/work_profile/config.yaml"),
     )
     .expect("profile config should be written");
+    assert_hermes_config_enables_tokensave_memory(
+        &home
+            .path()
+            .join(".hermes/profiles/work_profile/config.yaml"),
+    );
     assert!(config.contains("- tokensave"));
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -637,20 +1052,128 @@ fn test_hermes_profile_install_targets_named_profile() {
 }
 
 #[test]
+fn test_hermes_install_all_profiles_configures_default_and_named_profiles() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let default_profile = home.path().join(".hermes");
+    let work_profile = home.path().join(".hermes/profiles/work");
+    let personal_profile = home.path().join(".hermes/profiles/personal");
+    std::fs::create_dir_all(&work_profile).unwrap();
+    std::fs::create_dir_all(&personal_profile).unwrap();
+    std::fs::write(
+        default_profile.join("config.yaml"),
+        "theme: dark\nplugins:\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work_profile.join("config.yaml"),
+        "theme: light\nmemory:\n  retention: session\nplugins:\n  disabled:\n    - tokensave\n    - other-disabled\n",
+    )
+    .unwrap();
+
+    let output = tokensave_command(project.path(), home.path())
+        .arg("install")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--all-profiles")
+        .output()
+        .expect("run hermes all-profiles install");
+    assert!(
+        output.status.success(),
+        "hermes all-profiles install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        assert!(
+            profile.join("plugins/tokensave/plugin.yaml").exists(),
+            "tokensave plugin should be installed in {}",
+            profile.display()
+        );
+        assert_hermes_config_enables_tokensave_memory(&profile.join("config.yaml"));
+    }
+    let default_config = std::fs::read_to_string(default_profile.join("config.yaml")).unwrap();
+    assert!(default_config.contains("    - other"));
+    let work_config = std::fs::read_to_string(work_profile.join("config.yaml")).unwrap();
+    assert!(work_config.contains("  retention: session"));
+    assert!(!work_config.contains("  disabled:\n    - tokensave"));
+    assert!(
+        !project
+            .path()
+            .join(".hermes/plugins/tokensave/plugin.yaml")
+            .exists(),
+        "profile-level all-profiles install must not write a project-local plugin"
+    );
+}
+
+#[test]
+fn test_hermes_uninstall_all_profiles_cleans_only_tokensave_from_each_profile() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let default_profile = home.path().join(".hermes");
+    let work_profile = home.path().join(".hermes/profiles/work");
+    let personal_profile = home.path().join(".hermes/profiles/personal");
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        let plugin_dir = profile.join("plugins/tokensave");
+        let other_plugin_dir = profile.join("plugins/other");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::create_dir_all(&other_plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.yaml"), "name: tokensave\n").unwrap();
+        std::fs::write(other_plugin_dir.join("plugin.yaml"), "name: other\n").unwrap();
+        std::fs::write(
+            profile.join("config.yaml"),
+            "theme: dark\nmemory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n    - other\n",
+        )
+        .unwrap();
+    }
+
+    let output = tokensave_command(project.path(), home.path())
+        .arg("uninstall")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--all-profiles")
+        .output()
+        .expect("run hermes all-profiles uninstall");
+    assert!(
+        output.status.success(),
+        "hermes all-profiles uninstall should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        assert!(
+            !profile.join("plugins/tokensave/plugin.yaml").exists(),
+            "tokensave plugin should be removed from {}",
+            profile.display()
+        );
+        assert!(
+            profile.join("plugins/other/plugin.yaml").exists(),
+            "uninstall must preserve unrelated plugins in {}",
+            profile.display()
+        );
+        let config = std::fs::read_to_string(profile.join("config.yaml")).unwrap();
+        assert!(config.contains("theme: dark"));
+        assert!(config.contains("    - other"));
+        assert!(!config.contains("    - tokensave"));
+        assert!(!config.contains("provider: tokensave"));
+    }
+}
+
+#[test]
 fn test_hermes_local_install_with_profile_targets_named_profile() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let output = tokensave_command(project.path(), home.path())
         .arg("install")
         .arg("--local")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("project")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes local install with profile");
     assert!(
@@ -663,6 +1186,9 @@ fn test_hermes_local_install_with_profile_targets_named_profile() {
         .path()
         .join(".hermes/profiles/project/plugins/tokensave/plugin.yaml")
         .exists());
+    assert_hermes_config_enables_tokensave_memory(
+        &home.path().join(".hermes/profiles/project/config.yaml"),
+    );
     assert!(
         !project
             .path()
@@ -692,15 +1218,12 @@ fn test_profile_flag_is_only_valid_for_hermes_install() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let output = tokensave_command(project.path(), home.path())
         .arg("install")
         .arg("--agent")
         .arg("cursor")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run install with invalid --profile agent");
 
@@ -714,15 +1237,12 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let install = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let install = tokensave_command(project.path(), home.path())
         .arg("install")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes profile install");
     assert!(
@@ -733,15 +1253,12 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
     let plugin_dir = home.path().join(".hermes/profiles/work/plugins/tokensave");
     assert!(plugin_dir.exists());
 
-    let uninstall = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let uninstall = tokensave_command(project.path(), home.path())
         .arg("uninstall")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes profile uninstall");
     assert!(
@@ -751,15 +1268,12 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
     );
     assert!(!plugin_dir.exists());
 
-    let invalid = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let invalid = tokensave_command(project.path(), home.path())
         .arg("uninstall")
         .arg("--agent")
         .arg("cursor")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run non-Hermes uninstall with profile");
     assert!(!invalid.status.success());
@@ -814,6 +1328,28 @@ fn test_hermes_install_backs_up_existing_config() {
         std::fs::read_to_string(backup).unwrap(),
         original,
         "backup should preserve the exact original config"
+    );
+}
+
+#[test]
+fn test_hermes_install_rejects_existing_memory_provider_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original =
+        "theme: dark\nmemory:\n  provider: other-memory\nplugins:\n  enabled:\n    - other\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("Hermes memory provider already configured"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "install must not overwrite an existing Hermes memory provider"
     );
 }
 
@@ -2452,6 +2988,50 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: Some("work".to_string()),
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes profile install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize named profile installs"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_local_install_checks_project_hermes_home() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("hermes", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes local install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize project-local HERMES_HOME installs"
     );
 }
 

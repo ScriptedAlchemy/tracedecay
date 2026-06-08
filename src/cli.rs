@@ -91,6 +91,9 @@ pub enum Commands {
         /// Hermes profile to install into (only used with --agent hermes)
         #[arg(long)]
         profile: Option<String>,
+        /// Install into the default profile and every Hermes profile directory
+        #[arg(long, conflicts_with = "profile")]
+        all_profiles: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
@@ -103,6 +106,9 @@ pub enum Commands {
         /// Hermes profile to uninstall from (only used with --agent hermes)
         #[arg(long)]
         profile: Option<String>,
+        /// Uninstall from the default profile and every Hermes profile directory
+        #[arg(long, conflicts_with = "profile")]
+        all_profiles: bool,
     },
     /// Extraction worker (spawned by tokensave itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]

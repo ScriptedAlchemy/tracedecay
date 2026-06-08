@@ -52,7 +52,8 @@ impl AgentIntegration for HermesIntegration {
         install_plugin(&plugin_dir, &ctx.tokensave_bin)?;
         if profile.is_none() {
             eprintln!(
-                "  Hermes project plugins require HERMES_ENABLE_PROJECT_PLUGINS=true when launching Hermes."
+                "  Launch Hermes with HERMES_HOME={} so it reads this project-local plugin and memory provider config.",
+                project_path.join(".hermes").display()
             );
         }
         Ok(())
@@ -69,7 +70,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mHermes integration\x1b[0m");
-        doctor_check_plugin(dc, &ctx.home);
+        doctor_check_plugin(dc, &ctx.home, &ctx.project_path);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -121,19 +122,62 @@ fn normalize_profile(profile: Option<&str>) -> Result<Option<String>> {
     Ok(Some(normalized))
 }
 
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
-    let plugin = hermes_plugin_dir(home, None).join("plugin.yaml");
-    if plugin.exists() {
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path) {
+    let candidates = hermes_healthcheck_plugin_paths(home, project_path);
+    let plugin = candidates.iter().find(|plugin| plugin.exists());
+    if let Some(plugin) = plugin {
         dc.pass(&format!(
             "Hermes tokensave plugin found at {}",
             plugin.display()
         ));
-    } else {
+    } else if let Some(plugin) = candidates.first() {
         dc.warn(&format!(
             "{} not found — run `tokensave install --agent hermes` if you use Hermes",
             plugin.display()
         ));
+    } else {
+        dc.warn("Hermes tokensave plugin not found — run `tokensave install --agent hermes` if you use Hermes");
     }
+}
+
+fn hermes_healthcheck_plugin_paths(home: &Path, project_path: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.push(hermes_home(home));
+
+    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
+        if !env_home.is_empty() {
+            roots.push(PathBuf::from(env_home));
+        }
+    }
+
+    roots.extend(hermes_profile_dirs(home));
+    roots.push(project_path.join(".hermes"));
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut plugins = Vec::new();
+    for root in roots {
+        let plugin = root.join("plugins/tokensave/plugin.yaml");
+        if seen.insert(plugin.clone()) {
+            plugins.push(plugin);
+        }
+    }
+    plugins
+}
+
+fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
+    let profiles_dir = hermes_home(home).join("profiles");
+    let Ok(entries) = std::fs::read_dir(&profiles_dir) else {
+        return Vec::new();
+    };
+    let mut profiles = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_type = entry.file_type().ok()?;
+            file_type.is_dir().then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    profiles.sort();
+    profiles
 }
 
 fn install_plugin(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
@@ -228,7 +272,9 @@ fn disable_plugin(config_path: &Path) -> Result<()> {
 
 fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
-        return Ok("plugins:\n  enabled:\n    - tokensave\n".to_string());
+        return Ok(
+            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n".to_string(),
+        );
     }
 
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
@@ -242,7 +288,7 @@ fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
             out.push_str("\n\n");
         }
         out.push_str("plugins:\n  enabled:\n    - tokensave\n");
-        return Ok(out);
+        return enable_memory_provider_config(&out);
     }
 
     let (plugins_start, plugins_end) = find_top_level_section(existing, "plugins")
@@ -266,7 +312,7 @@ fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
         lines.insert(plugins_start + 2, "    - tokensave".to_string());
     }
 
-    Ok(join_lines(lines, had_trailing_newline))
+    enable_memory_provider_config(&join_lines(lines, had_trailing_newline))
 }
 
 fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
@@ -284,6 +330,66 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
     if let Some((enabled_start, enabled_end)) = enabled {
         lines = remove_list_item(lines, enabled_start, enabled_end, "tokensave");
     }
+    disable_memory_provider_config(&join_lines(lines, had_trailing_newline))
+}
+
+fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
+    if existing.trim().is_empty() {
+        return Ok("memory:\n  provider: tokensave\n".to_string());
+    }
+
+    validate_top_level_memory_shape(existing)?;
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let had_trailing_newline = existing.ends_with('\n');
+
+    let Some((memory_start, memory_end)) = find_top_level_section(existing, "memory") else {
+        let mut out = existing.trim_end().to_string();
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("memory:\n  provider: tokensave\n");
+        return Ok(out);
+    };
+
+    let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
+        .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
+    if let Some(provider_line) = provider_line {
+        if lines[provider_line].trim() != "provider: tokensave" {
+            return Err(
+                "Hermes memory provider already configured; refusing to overwrite it".to_string(),
+            );
+        }
+    } else {
+        lines.insert(memory_start + 1, "  provider: tokensave".to_string());
+    }
+
+    Ok(join_lines(lines, had_trailing_newline))
+}
+
+fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
+    if existing.trim().is_empty() {
+        return Ok(existing.to_string());
+    }
+
+    validate_top_level_memory_shape(existing)?;
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let had_trailing_newline = existing.ends_with('\n');
+    let Some((memory_start, memory_end)) = find_top_level_section(existing, "memory") else {
+        return Ok(existing.to_string());
+    };
+    let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
+        .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
+    let mut removed_provider = false;
+    if let Some(provider_line) = provider_line {
+        if lines[provider_line].trim() == "provider: tokensave" {
+            lines.remove(provider_line);
+            removed_provider = true;
+        }
+    }
+    if removed_provider {
+        remove_empty_top_level_section(&mut lines, "memory");
+    }
+
     Ok(join_lines(lines, had_trailing_newline))
 }
 
@@ -300,6 +406,24 @@ fn validate_top_level_plugins_shape(existing: &str) -> std::result::Result<(), S
         [line] if line.trim() == "plugins:" => Ok(()),
         _ => Err(
             "unsupported Hermes plugins config; expected a block-style `plugins:` mapping"
+                .to_string(),
+        ),
+    }
+}
+
+fn validate_top_level_memory_shape(existing: &str) -> std::result::Result<(), String> {
+    let memory_lines = existing
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            line_indent(line) == 0 && !trimmed.starts_with('#') && trimmed.starts_with("memory:")
+        })
+        .collect::<Vec<_>>();
+    match memory_lines.as_slice() {
+        [] => Ok(()),
+        [line] if line.trim() == "memory:" => Ok(()),
+        _ => Err(
+            "unsupported Hermes memory config; expected a block-style `memory:` mapping"
                 .to_string(),
         ),
     }
@@ -386,6 +510,40 @@ fn find_child_section_in(
         })
         .unwrap_or(plugins_end);
     Some(Some((start, end)))
+}
+
+fn find_memory_provider_line(
+    lines: &[String],
+    memory_start: usize,
+    memory_end: usize,
+) -> Option<Option<usize>> {
+    for (idx, line) in lines
+        .iter()
+        .enumerate()
+        .take(memory_end)
+        .skip(memory_start + 1)
+    {
+        if line.trim_start().starts_with('\t') {
+            return None;
+        }
+        if line_indent(line) == 2 && line.trim_start().starts_with("provider:") {
+            return Some(Some(idx));
+        }
+    }
+    Some(None)
+}
+
+fn remove_empty_top_level_section(lines: &mut Vec<String>, key: &str) {
+    let Some((start, end)) = find_top_level_section_from_strings(lines, key) else {
+        return;
+    };
+    let has_content = lines.iter().take(end).skip(start + 1).any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty()
+    });
+    if !has_content {
+        lines.drain(start..end);
+    }
 }
 
 fn list_contains_item_strings(lines: &[String], start: usize, end: usize, item: &str) -> bool {
@@ -618,9 +776,51 @@ def make_handler(name: str):
 
 fn plugin_init() -> String {
     r#""""tokensave Hermes plugin registration."""
+import json
+import os
+import shutil
 from pathlib import Path
 
 from . import schemas, tools
+
+try:
+    from agent.memory_provider import MemoryProvider
+except Exception:
+    class MemoryProvider:
+        pass
+
+MEMORY_FACT_ACTIONS = {
+    "fact_add": "add",
+    "fact_search": "search",
+    "fact_probe": "probe",
+    "fact_related": "related",
+    "fact_reason": "reason",
+    "fact_contradict": "contradict",
+    "fact_update": "update",
+    "fact_remove": "remove",
+    "fact_list": "list",
+}
+
+MEMORY_ACTION_DESCRIPTIONS = {
+    "fact_add": "Add a holographic memory fact.",
+    "fact_search": "Search holographic memory facts by query.",
+    "fact_probe": "Find facts connected to one entity.",
+    "fact_related": "List entities related to one entity.",
+    "fact_reason": "Reason over facts that connect multiple entities.",
+    "fact_contradict": "Scan memory facts for likely contradictions.",
+    "fact_update": "Update an existing holographic memory fact.",
+    "fact_remove": "Remove a holographic memory fact.",
+    "fact_list": "List holographic memory facts.",
+}
+
+MEMORY_TOOL_MAP = {"fact_store": {"tokensave_name": "tokensave_fact_store"}}
+for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
+    MEMORY_TOOL_MAP[_hermes_name] = {
+        "tokensave_name": "tokensave_fact_store",
+        "fixed_args": {"action": _action},
+    }
+MEMORY_TOOL_MAP["fact_feedback"] = {"tokensave_name": "tokensave_fact_feedback"}
+MEMORY_TOOL_MAP["memory_status"] = {"tokensave_name": "tokensave_memory_status"}
 
 def _pre_llm_call(*args, **kwargs):
     return (
@@ -630,6 +830,99 @@ def _pre_llm_call(*args, **kwargs):
 
 def _tokensave_status(raw_args: str = ""):
     return tools.call_tokensave_tool("tokensave_status", {})
+
+def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) -> dict:
+    for schema in schemas.TOOL_SCHEMAS:
+        if schema.get("name") == tokensave_name:
+            parameters = json.loads(json.dumps(schema.get("parameters", {})))
+            if action is not None:
+                properties = parameters.get("properties")
+                if isinstance(properties, dict):
+                    properties.pop("action", None)
+                required = parameters.get("required")
+                if isinstance(required, list):
+                    required = [field for field in required if field != "action"]
+                    if required:
+                        parameters["required"] = required
+                    else:
+                        parameters.pop("required", None)
+            return {
+                "name": hermes_name,
+                "description": MEMORY_ACTION_DESCRIPTIONS.get(
+                    hermes_name, schema.get("description", "")
+                ),
+                "parameters": parameters,
+            }
+    return {
+        "name": hermes_name,
+        "description": f"Tokensave memory tool {hermes_name}.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+
+def _decode_tool_args(arguments):
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return {}
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return {"arguments": arguments}
+    return {"arguments": arguments}
+
+def _normalize_memory_tool_call(name, arguments):
+    if isinstance(name, dict):
+        function = name.get("function") or {}
+        tool_name = name.get("name") or function.get("name")
+        tool_args = name.get("arguments", function.get("arguments", arguments))
+        return tool_name, _decode_tool_args(tool_args)
+    return name, _decode_tool_args(arguments)
+
+def _tokensave_binary_available() -> bool:
+    if os.path.dirname(tools.TOKENSAVE_BIN):
+        return Path(tools.TOKENSAVE_BIN).is_file() and os.access(tools.TOKENSAVE_BIN, os.X_OK)
+    return shutil.which(tools.TOKENSAVE_BIN) is not None
+
+class TokensaveMemoryProvider(MemoryProvider):
+    provider_id = "tokensave"
+
+    def __init__(self):
+        self.hermes_home = None
+        self.session_id = None
+
+    @property
+    def name(self) -> str:
+        return "tokensave"
+
+    def is_available(self) -> bool:
+        return _tokensave_binary_available()
+
+    def initialize(self, session_id=None, **kwargs):
+        self.hermes_home = kwargs.get("hermes_home")
+        self.session_id = session_id
+
+    def get_tool_schemas(self):
+        memory_schemas = [_memory_schema("tokensave_fact_store", "fact_store")]
+        for hermes_name, action in MEMORY_FACT_ACTIONS.items():
+            memory_schemas.append(_memory_schema("tokensave_fact_store", hermes_name, action))
+        memory_schemas.append(_memory_schema("tokensave_fact_feedback", "fact_feedback"))
+        memory_schemas.append(_memory_schema("tokensave_memory_status", "memory_status"))
+        return memory_schemas
+
+    def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
+        tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
+        mapping = MEMORY_TOOL_MAP.get(tool_name)
+        if mapping is None:
+            return tools.error_payload(f"unknown memory tool: {tool_name}")
+        tokensave_name = mapping["tokensave_name"]
+        fixed_args = mapping.get("fixed_args")
+        if fixed_args:
+            tool_args = dict(tool_args)
+            tool_args.update(fixed_args)
+        return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
 
 def register(ctx):
     for schema in schemas.TOOL_SCHEMAS:
@@ -650,10 +943,14 @@ def register(ctx):
             description="Show tokensave project status.",
         )
 
+    if callable(getattr(ctx, "register_memory_provider", None)):
+        ctx.register_memory_provider(TokensaveMemoryProvider())
+
     skills_dir = Path(__file__).parent / "skills"
     skill_path = skills_dir / "tokensave" / "SKILL.md"
-    if skill_path.exists():
-        ctx.register_skill("tokensave:tokensave", skill_path)
+    register_skill = getattr(ctx, "register_skill", None)
+    if skill_path.exists() and callable(register_skill):
+        register_skill("tokensave:tokensave", skill_path)
 "#
     .to_string()
 }
