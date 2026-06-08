@@ -61,6 +61,13 @@ impl AgentIntegration for CodexIntegration {
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let codex_dir = project_path.join(".codex");
+        for path in [
+            codex_dir.join("config.toml"),
+            codex_dir.join("hooks.json"),
+            project_path.join("AGENTS.md"),
+        ] {
+            super::ensure_project_local_safe_path(project_path, &path)?;
+        }
         std::fs::create_dir_all(&codex_dir).ok();
         install_mcp_server(
             &codex_dir.join("config.toml"),
