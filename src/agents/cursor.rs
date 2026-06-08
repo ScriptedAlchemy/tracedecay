@@ -188,11 +188,9 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         }
     };
 
-    let tokensave_tools = tool_names();
-    let known_tokensave_entries: std::collections::HashSet<String> = tokensave_tools
-        .iter()
-        .map(|tool| format!("tokensave:{tool}"))
-        .collect();
+    let tokensave_entries = cursor_permission_entries();
+    let known_tokensave_entries: std::collections::HashSet<String> =
+        tokensave_entries.iter().cloned().collect();
     let existing = permissions["mcpAllowlist"]
         .as_array()
         .map(|arr| {
@@ -205,8 +203,7 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         })
         .unwrap_or_default();
     let mut allow = existing;
-    for tool in tokensave_tools {
-        let entry = format!("tokensave:{tool}");
+    for entry in tokensave_entries {
         if !allow.iter().any(|existing| existing == &entry) {
             allow.push(entry);
         }
@@ -219,6 +216,13 @@ fn install_permissions(permissions_path: &Path) -> Result<()> {
         permissions_path.display()
     );
     Ok(())
+}
+
+fn cursor_permission_entries() -> Vec<String> {
+    tool_names()
+        .into_iter()
+        .map(|tool| format!("tokensave:{tool}"))
+        .collect()
 }
 
 fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
@@ -464,19 +468,16 @@ fn doctor_check_permissions(dc: &mut DoctorCounters, permissions_path: &Path) {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    let expected: Vec<String> = tool_names()
-        .into_iter()
-        .map(|tool| format!("tokensave:{tool}"))
-        .collect();
+    let expected = cursor_permission_entries();
+    let expected_set: std::collections::HashSet<&str> =
+        expected.iter().map(String::as_str).collect();
     let missing = expected
         .iter()
         .filter(|entry| !installed.contains(entry.as_str()))
         .count();
     let stale = installed
         .iter()
-        .filter(|entry| {
-            entry.starts_with("tokensave:") && !expected.iter().any(|expected| expected == **entry)
-        })
+        .filter(|entry| entry.starts_with("tokensave:") && !expected_set.contains(*entry))
         .count();
     if missing == 0 && stale == 0 {
         dc.pass(&format!(

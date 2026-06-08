@@ -22,6 +22,19 @@ code research. Tokensave is faster and more precise for symbol relationships, \
 call paths, and code structure. Only use agents for code exploration if you \
 have already tried tokensave and it cannot answer the question.";
 
+fn research_block_reason(hint: Option<ToolHint>) -> String {
+    hint.map_or_else(
+        || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
+        |hint| {
+            format!(
+                "{}\n\n{}",
+                TOKENSAVE_RESEARCH_BLOCK_REASON,
+                format_tool_hint(&hint)
+            )
+        },
+    )
+}
+
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
 ///
 /// Reads the `TOOL_INPUT` environment variable (JSON), inspects the
@@ -56,16 +69,7 @@ pub fn evaluate_hook_decision(tool_input: &str) -> String {
         file_path: None,
         hints_enabled: true,
     });
-    let block_reason = hint.map_or_else(
-        || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
-        |hint| {
-            format!(
-                "{}\n\n{}",
-                TOKENSAVE_RESEARCH_BLOCK_REASON,
-                format_tool_hint(&hint)
-            )
-        },
-    );
+    let block_reason = research_block_reason(hint);
     let block_msg = || {
         serde_json::json!({
             "hookSpecificOutput": {
@@ -254,10 +258,7 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
         return Some(
             serde_json::json!({
                 "permission": "deny",
-                "user_message": hint
-                    .map_or_else(|| TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(), |hint| {
-                        format!("{}\n\n{}", TOKENSAVE_RESEARCH_BLOCK_REASON, format_tool_hint(&hint))
-                    })
+                "user_message": research_block_reason(hint)
             })
             .to_string(),
         );
@@ -957,16 +958,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     });
     let is_explore = agent_type.eq_ignore_ascii_case("explore");
     if is_explore || is_code_research_prompt(task) {
-        let context = hint.map_or_else(
-            || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
-            |hint| {
-                format!(
-                    "{}\n\n{}",
-                    TOKENSAVE_RESEARCH_BLOCK_REASON,
-                    format_tool_hint(&hint)
-                )
-            },
-        );
+        let context = research_block_reason(hint);
         return Some(codex_additional_context_json("SubagentStart", &context));
     }
     None
@@ -1108,27 +1100,18 @@ pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
     }
 
     let tool_input = parsed.get("tool_input").unwrap_or(&Value::Null);
-    if kiro_event_has_research_text(tool_input) {
+    if let Some(prompt) = kiro_event_text(tool_input).filter(|text| is_code_research_prompt(text)) {
         let hint = decide_hint(&ToolHintInput {
             agent: HintAgent::Kiro,
             session_id: event_session_id(&parsed),
             tool_name: Some(tool_name.to_string()),
             command: None,
-            prompt: kiro_event_text(tool_input),
+            prompt: Some(prompt),
             subagent_type: Some(tool_name.to_string()),
             file_path: None,
             hints_enabled: true,
         });
-        Some(hint.map_or_else(
-            || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
-            |hint| {
-                format!(
-                    "{}\n\n{}",
-                    TOKENSAVE_RESEARCH_BLOCK_REASON,
-                    format_tool_hint(&hint)
-                )
-            },
-        ))
+        Some(research_block_reason(hint))
     } else {
         None
     }
@@ -1136,10 +1119,6 @@ pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
 
 fn is_kiro_delegation_tool(tool_name: &str) -> bool {
     matches!(tool_name, "delegate" | "subagent" | "use_subagent")
-}
-
-fn kiro_event_has_research_text(value: &Value) -> bool {
-    kiro_event_text(value).is_some_and(|text| is_code_research_prompt(&text))
 }
 
 fn kiro_event_text(value: &Value) -> Option<String> {
