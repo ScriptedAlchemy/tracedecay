@@ -1236,6 +1236,10 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     can blow that budget, so it must stay off `serve`.
     //   - `Install` / `Reinstall`: already perform installation — don't
     //     double-install as an implicit prelude to the explicit command.
+    //   - `Uninstall`: about to remove agent configs — don't reinstall them
+    //     first (per the original #84 intent).
+    //   - `Doctor`: a read-only diagnostic — must not mutate agent configs as
+    //     a side effect (per the original #84 intent).
     //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
     //     reinstall scan there too.
     // Every other command (the normal everyday invocations) runs maintenance.
@@ -1244,6 +1248,8 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
         Commands::Serve { .. }
             | Commands::Install { .. }
             | Commands::Reinstall
+            | Commands::Uninstall { .. }
+            | Commands::Doctor { .. }
             | Commands::Tool { .. }
     )
 }
@@ -1307,6 +1313,18 @@ mod startup_tests {
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
             name: Some("message_search".to_string()),
             args: Vec::new(),
+        }));
+
+        // Also skip for uninstall (about to remove configs) and doctor (a
+        // read-only diagnostic) — restoring the original #84 intent.
+        assert!(should_skip_agent_install_maintenance(
+            &Commands::Uninstall {
+                agent: Some("cursor".to_string()),
+                profile: None,
+            }
+        ));
+        assert!(should_skip_agent_install_maintenance(&Commands::Doctor {
+            agent: Some("cursor".to_string()),
         }));
 
         // Run maintenance for normal everyday command invocations so a binary
