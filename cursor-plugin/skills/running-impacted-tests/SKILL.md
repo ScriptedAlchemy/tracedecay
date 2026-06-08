@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Running impacted tests
 
-This skill runs the toolchain, so treat it as **user-triggered only**: never start a test run on its own — wait for the user to ask before invoking `tokensave_run_affected_tests`.
+**User-triggered only:** never start a run yourself — wait for the user before invoking `tokensave_run_affected_tests`.
 
 ## Workflow
 
