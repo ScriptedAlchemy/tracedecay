@@ -1218,6 +1218,12 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::Reinstall
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::HookPreToolUse
+            | Commands::HookPromptSubmit
+            | Commands::HookStop
+            | Commands::HookKiroPreToolUse
+            | Commands::HookKiroPromptSubmit
+            | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
             | Commands::HookCursorPreToolUse
             | Commands::HookCursorBeforeSubmitPrompt
@@ -1366,6 +1372,27 @@ mod startup_tests {
             path: None,
             timings: false,
         }));
+    }
+
+    #[test]
+    fn claude_and_kiro_hooks_skip_startup_maintenance() {
+        // Claude and Kiro lifecycle hooks are agent-invoked hot-path
+        // commands, exactly like the Cursor/Codex hooks already in the
+        // skip-list. They must skip the synchronous `try_flush` network
+        // round-trip (and the rest of the pre-command startup maintenance)
+        // so they stay fast on every tool-use/prompt/stop event (#84).
+        assert!(should_skip_startup_maintenance(&Commands::HookPreToolUse));
+        assert!(should_skip_startup_maintenance(&Commands::HookPromptSubmit));
+        assert!(should_skip_startup_maintenance(&Commands::HookStop));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPreToolUse
+        ));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPromptSubmit
+        ));
+        assert!(should_skip_startup_maintenance(
+            &Commands::HookKiroPostToolUse
+        ));
     }
 }
 
