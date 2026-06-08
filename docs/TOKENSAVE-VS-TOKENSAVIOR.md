@@ -248,10 +248,10 @@ substitutes for batch lookups.
 ### 2.6 Cross-project memory
 
 token-savior maintains a project-keyed memory store (`memory_search`,
-`memory_save`) so notes from one project surface in another. tokensave has
-narrower `tokensave_record_decision` / `tokensave_record_code_area` /
-`tokensave_session_recall` tools but they're scoped to a single project
-and not yet wired into a global recall mechanism.
+`memory_save`) so notes from one project surface in another. tokensave uses
+project-local holographic fact memory via `tokensave_fact_store`,
+`tokensave_fact_feedback`, and `tokensave_memory_status`; cross-project memory
+recall remains out of scope.
 
 ---
 

@@ -73,7 +73,7 @@ AI coding agents waste tokens exploring codebases. Every grep, glob, and file re
 | **70+ MCP Tools** | **50+ Languages** | **12+ Agent Integrations** |
 | From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Hermes, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
 | **Multi-Branch Indexing (opt-in)** | **100% Local** | **Always Fresh** |
-| Optional per-branch databases. Cross-branch diff and search without switching your checkout. | No data leaves your machine. No API keys. No external services. Everything runs on a local libSQL database. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and the index diverges are merged by git, not by a file watcher. |
+| Optional per-branch databases. Cross-branch diff and search without switching your checkout. | Source code and memory content stay on your machine. No API keys or hosted database are required; the index runs on local libSQL. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and the index diverges are merged by git, not by a file watcher. |
 | **Subprocess-Isolated Extraction** | **Code-Health Analytics** | **Atomic Edit Primitives** |
 | A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. | Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. |
 
@@ -147,11 +147,11 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Hermes requires `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching with project-local plugins. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow only read-only tokensave MCP tools. The project hooks are:
+Local install writes only workspace files such as `.cursor/mcp.json`, `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Hermes requires `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching with project-local plugins. For Cursor, local install also writes `.cursor/rules/tokensave.mdc`, `.cursor/permissions.json`, and `.cursor/hooks.json`: the rule tells Cursor Agent to prefer tokensave MCP tools for codebase exploration, and permissions auto-allow the full local tokensave MCP surface for that workspace. The project hooks are:
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
 - `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
-- `beforeSubmitPrompt` — resets the local token counter for the new turn.
+- `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
 - `afterFileEdit` (matcher `Write`) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
 - `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tokensave branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
 - `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
@@ -254,15 +254,101 @@ See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for the full gu
 
 ## Cross-Session Memory
 
-Three MCP tools persist decisions and code-area context across sessions, stored in the per-project `.tokensave/tokensave.db`.
+tokensave memory is stored in the per-project `.tokensave/tokensave.db` as durable, entity-linked facts:
 
 | Tool | Purpose |
 |------|---------|
-| `tokensave_record_decision` | Save a design/architecture decision with optional reason, files, and tags |
-| `tokensave_record_code_area` | Mark a path the agent has worked in (touch counter + last_touched_at) |
-| `tokensave_session_recall` | FTS5 query over saved decisions; pair with the two write tools |
+| `tokensave_fact_store` | Store a fact with entities, source, reason, related facts, contradictions, tags, and an initial confidence signal |
+| `tokensave_fact_feedback` | Record user or agent feedback that raises, lowers, supersedes, or contradicts a fact's trust score |
+| `tokensave_memory_status` | Inspect fact-store readiness, schema version, entity counts, trust-score distribution, and vector/backfill health |
 
-Use these so the agent doesn't have to re-explain architecture choices session-to-session.
+Trust scoring is fact-level, not just text-level. The store combines source metadata, feedback history, retrieval counters, contradiction scans, and recency into the returned score components. Entity recall returns facts linked to the requested symbol, file, subsystem, or named concept with `why` metadata so agents can explain why a memory was surfaced.
+
+### Fact-store JSON schemas
+
+`tokensave_fact_store` request schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+      "description": "Fact-store action to perform."
+    },
+    "content": {
+      "type": "string",
+      "description": "Durable fact statement for add/update actions."
+    },
+    "query": {
+      "type": "string",
+      "description": "Search query for search actions."
+    },
+    "entity": { "type": "string" },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fact_id": { "oneOf": [{ "type": "number" }, { "type": "string" }] },
+    "category": { "type": "string", "enum": ["general", "user_pref", "project", "tool", "decision", "code_area"] },
+    "source": {
+      "type": "string",
+      "description": "Where the fact came from."
+    },
+    "trust": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Initial or replacement trust score."
+    },
+    "trust_delta": { "type": "number" },
+    "threshold": { "type": "number" },
+    "limit": { "type": "number" },
+    "metadata": { "type": "object" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["action"]
+}
+```
+
+`tokensave_fact_feedback` request schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "fact_id": {
+      "oneOf": [{ "type": "number" }, { "type": "string" }],
+      "description": "Numeric fact_id returned by tokensave_fact_store or recall. Numeric strings are accepted."
+    },
+    "action": {
+      "type": "string",
+      "enum": ["helpful", "unhelpful"],
+      "description": "Feedback event to apply to the fact's trust score."
+    },
+    "source": {
+      "type": "string",
+      "description": "Optional feedback source label."
+    },
+    "note": {
+      "type": "string",
+      "description": "Optional note explaining the feedback."
+    },
+    "trust_delta": {
+      "type": "number",
+      "description": "Compatibility field; built-in helpful/unhelpful deltas are applied."
+    }
+  },
+  "required": ["fact_id"]
+}
+```
+
+Provide either `"action": "helpful"|"unhelpful"` or the compatibility shorthand
+`"helpful": true` / `"unhelpful": true`.
 
 ---
 

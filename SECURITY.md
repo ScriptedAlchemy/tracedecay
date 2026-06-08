@@ -32,12 +32,12 @@ tokensave builds a **local** code graph stored in a SQLite (libSQL) database (`.
 - File paths, sizes, and content hashes
 - Call relationships and dependency edges
 - FTS5 search index
-- Cross-session memory (recorded decisions and code-area notes)
+- Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
 - A response cache for `tokensave_read` (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The database is local-only — there is no cloud sync, remote database, or server-side storage.
 
-A second database (`~/.tokensave/global.db`) tracks which projects have been indexed, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. It contains directory paths, counters, per-turn cost/token/category records, and JSONL parse offsets. No source code or conversation content is stored.
+A second database (`~/.tokensave/global.db`) tracks which projects have been indexed, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Project-local Cursor transcript search is stored in the repository's `.tokensave/sessions.db`, which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both databases remain local-only and are not synced to a remote service.
 
 ### Network access
 
@@ -72,7 +72,7 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 **Local-state tools** (write only inside `.tokensave/`, never your source):
 
 - `tokensave_session_start`, `tokensave_session_end` — health-metric baselines
-- `tokensave_record_decision`, `tokensave_record_code_area` — cross-session memory
+- `tokensave_fact_store`, `tokensave_fact_feedback` — store fact text, entity names, feedback events, and trust-score inputs in the local project database. `tokensave_memory_status` is read-only.
 
 **Test execution:**
 
