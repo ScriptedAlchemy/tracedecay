@@ -3,6 +3,9 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tokensave::agents::*;
+use tokensave::branch_meta;
+use tokensave::config::get_tokensave_dir;
+use tokensave::tokensave::TokenSave;
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -317,6 +320,48 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
         !home.path().join(".tokensave/config.toml").exists(),
         "local install must not create or mutate user-level install tracking"
     );
+}
+
+#[tokio::test]
+async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let git_init = Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(project.path())
+        .output()
+        .expect("git init should run");
+    assert!(
+        git_init.status.success(),
+        "git init should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    TokenSave::init(project.path()).await.unwrap();
+    let checkout = Command::new("git")
+        .arg("checkout")
+        .arg("-b")
+        .arg("feature/install")
+        .current_dir(project.path())
+        .output()
+        .expect("git checkout should run");
+    assert!(
+        checkout.status.success(),
+        "git checkout should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let meta = branch_meta::load_branch_meta(&get_tokensave_dir(project.path()))
+        .expect("Cursor install should bootstrap branch tracking metadata");
+    assert!(meta.is_tracked("main"));
+    assert!(meta.is_tracked("feature/install"));
 }
 
 #[test]
