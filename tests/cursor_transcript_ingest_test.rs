@@ -275,7 +275,7 @@ async fn cursor_subagent_transcript_ingests_as_child_session() {
 }
 
 #[tokio::test]
-async fn cursor_hot_path_does_not_sweep_subagents() {
+async fn cursor_capped_ingest_discovers_subagents() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
@@ -284,9 +284,15 @@ async fn cursor_hot_path_does_not_sweep_subagents() {
     let event = cursor_event(&project, &parent);
 
     let stats = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(4096)).await;
-    assert_eq!(stats.sessions_upserted, 1);
-    assert_eq!(stats.messages_upserted, 1);
-    assert!(db.get_session("cursor", "worker-1").await.is_none());
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let child = db
+        .get_session("cursor", "worker-1")
+        .await
+        .expect("subagent session should be stored");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent-session"));
+    assert!(child.is_subagent);
 }
 
 #[tokio::test]

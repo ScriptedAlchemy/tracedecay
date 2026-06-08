@@ -152,7 +152,7 @@ async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
         ),
     ] {
         if !session_column_exists(conn, column).await {
-            conn.execute(ddl, ()).await.ok()?;
+            add_session_parent_column_after_missing_check(conn, column, ddl).await?;
         }
     }
     conn.execute(
@@ -163,6 +163,18 @@ async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
     .await
     .ok()?;
     Some(())
+}
+
+async fn add_session_parent_column_after_missing_check(
+    conn: &Connection,
+    column: &str,
+    ddl: &str,
+) -> Option<()> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Some(()),
+        Err(_) if session_column_exists(conn, column).await => Some(()),
+        Err(_) => None,
+    }
 }
 
 impl GlobalDb {
@@ -864,5 +876,42 @@ impl GlobalDb {
             .conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_column_migration_tolerates_duplicate_column_race() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("sessions.db");
+        let db = Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .unwrap();
+
+        assert!(!session_column_exists(&conn, "parent_session_id").await);
+
+        conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", ())
+            .await
+            .unwrap();
+
+        assert!(add_session_parent_column_after_missing_check(
+            &conn,
+            "parent_session_id",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+        )
+        .await
+        .is_some());
     }
 }

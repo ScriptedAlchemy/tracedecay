@@ -147,10 +147,9 @@ pub async fn ingest_cursor_transcript_event(
 }
 
 /// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
-/// bytes a single call will read. The Cursor `beforeSubmitPrompt` hot path passes
-/// a small cap so it can never threaten the 5s hook budget; backlogs larger than
-/// the cap are left for the lower-frequency `sessionStart` / `stop` hooks (which
-/// pass `None` for an unbounded catch-up read).
+/// bytes a single call will read. Cursor hooks pass byte caps to stay within hook
+/// budgets; capped reads still discover subagent transcript files, with each file
+/// independently subject to the same cap.
 pub async fn ingest_cursor_transcript_event_capped(
     event_json: &str,
     db: &GlobalDb,
@@ -177,7 +176,7 @@ pub async fn ingest_cursor_transcript_event_capped(
     let source = CursorEventSource {
         event,
         transcript_path,
-        include_subagents: max_new_bytes.is_none(),
+        include_subagents: true,
     };
     let stats = ingest_source(db, &source, &project_root, max_new_bytes).await;
     CursorTranscriptIngestStats {
