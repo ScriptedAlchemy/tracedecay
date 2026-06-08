@@ -8,6 +8,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -161,17 +162,38 @@ pub fn hook_cursor_pre_tool_use() -> i32 {
 
 /// Cursor `beforeSubmitPrompt` hook handler.
 ///
-/// Resets the project-local counter for a new prompt turn. The output uses
-/// Cursor's documented `beforeSubmitPrompt` shape and never blocks submission.
+/// Resets the project-local counter for a new prompt turn and does at most a
+/// small, time-boxed *tail* ingest of newly-appended transcript lines (the bulk
+/// catch-up lives on the lower-frequency `sessionStart` / `stop` hooks). The
+/// output uses Cursor's documented `beforeSubmitPrompt` shape and never blocks
+/// submission, even if the tail ingest times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_stdin_to_string();
     reset_counter_for_cursor_event(&event).await;
-    ingest_cursor_transcript_for_event(&event).await;
+    ingest_cursor_transcript_for_event(
+        &event,
+        Some(CURSOR_HOT_INGEST_MAX_BYTES),
+        CURSOR_HOT_INGEST_BUDGET,
+    )
+    .await;
     let mut output = serde_json::json!({ "continue": true });
     if let Some(hint) = cursor_prompt_hint(&event) {
         output["additional_context"] = Value::String(format_tool_hint(&hint));
     }
     println!("{output}");
+    0
+}
+
+/// Cursor `stop` hook handler (fire-and-forget).
+///
+/// Fires at the end of an agent turn and performs the primary transcript
+/// ingest: a time-boxed, unbounded incremental catch-up that picks up every
+/// line appended during the turn. The `stop` output is informational only, so
+/// we emit an empty object and never ask the agent to continue. Fail-open.
+pub async fn hook_cursor_stop() -> i32 {
+    let event = read_stdin_to_string();
+    ingest_cursor_transcript_for_event(&event, None, CURSOR_STOP_INGEST_BUDGET).await;
+    println!("{}", serde_json::json!({}));
     0
 }
 
@@ -197,6 +219,9 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_stdin_to_string();
+    // Catch-up ingest for resumed sessions whose transcript grew while no agent
+    // was attached. No-op (no transcript_path) for brand-new sessions. Fail-open.
+    ingest_cursor_transcript_for_event(&event, None, CURSOR_SESSION_INGEST_BUDGET).await;
     let root = cursor_project_root_from_event(&event);
     let context = session_steering_context_for_root(root.as_deref()).await;
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
@@ -1258,14 +1283,43 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
     }
 }
 
-async fn ingest_cursor_transcript_for_event(event_json: &str) {
-    let Some(project_root) = cursor_project_root_from_event(event_json) else {
-        return;
+/// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
+/// backlogs are left for the `sessionStart` / `stop` catch-up ingests.
+const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+/// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
+/// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
+const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
+/// Budget for the `sessionStart` catch-up ingest (registered with a 5s timeout).
+const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
+/// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
+const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
+
+/// Incrementally ingests the Cursor transcript referenced by `event_json` into
+/// the project-local session DB, bounded by `max_new_bytes` (the hot-path cap)
+/// and an overall `budget`. Always fails open: a timeout, missing transcript, or
+/// any error is swallowed so the calling hook never blocks the agent.
+async fn ingest_cursor_transcript_for_event(
+    event_json: &str,
+    max_new_bytes: Option<u64>,
+    budget: Duration,
+) {
+    let work = async {
+        let Some(project_root) = cursor_project_root_from_event(event_json) else {
+            return;
+        };
+        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+            return;
+        };
+        let _ = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
+            event_json,
+            &db,
+            max_new_bytes,
+        )
+        .await;
     };
-    let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-        return;
-    };
-    let _ = crate::sessions::cursor::ingest_cursor_transcript_event(event_json, &db).await;
+    // Short-lived CLI hook processes exit immediately, so the ingest must run
+    // inline (not on a detached task); the timeout keeps it inside budget.
+    let _ = tokio::time::timeout(budget, work).await;
 }
 
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {

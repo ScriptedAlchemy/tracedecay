@@ -324,6 +324,18 @@ fn test_local_install_cursor_writes_project_config_only() {
         "Cursor workspaceOpen hook should run a catch-up sync"
     );
 
+    let stop_hooks = hooks["hooks"]["stop"]
+        .as_array()
+        .expect("stop hooks should be an array");
+    assert!(
+        stop_hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("hook-cursor-stop"))
+        }),
+        "Cursor stop hook should ingest the session transcript at end of turn"
+    );
+
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
         "local install must not write the global Cursor config"
