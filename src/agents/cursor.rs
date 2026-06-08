@@ -290,6 +290,17 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         60,
         None,
     );
+    // End-of-turn transcript ingestion. This is the primary, off-hot-path place
+    // we capture Cursor transcripts (beforeSubmitPrompt only does a tiny tail
+    // read), so it gets a generous timeout for the incremental catch-up.
+    install_cursor_hook_entry(
+        &mut hooks,
+        "stop",
+        tokensave_bin,
+        "hook-cursor-stop",
+        30,
+        None,
+    );
 
     safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
     eprintln!(
@@ -512,6 +523,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
         ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
     ];
     let missing: Vec<&str> = expected
         .iter()
