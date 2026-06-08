@@ -1,6 +1,7 @@
 ---
 name: porting-code
 description: Port or migrate code between directories or languages in dependency-safe order and track progress. Use when porting, migrating, or rewriting a module from one location/language to another (e.g. legacy → new, src → crate).
+disable-model-invocation: true
 ---
 
 # Porting code

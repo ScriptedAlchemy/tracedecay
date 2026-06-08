@@ -7,7 +7,7 @@ description: Find code by concept, symbol, signature, or qualified name in this 
 
 Use the tokensave code graph before Grep/Glob/file reads. Pick the cheapest tool that answers the question.
 
-## Tool ladder
+## Workflow
 
 1. **Conceptual / "how does X work" / names unknown → `tokensave_context`.**
    - `task` = the question. Add `keywords` to expand synonyms (e.g. auth → `["login","session","token","credential"]`).
@@ -31,4 +31,4 @@ Use the tokensave code graph before Grep/Glob/file reads. Pick the cheapest tool
 ## Output
 
 - The file + symbol the user needs (path, qualified name, signature), and how you found it.
-- If any result includes a `tokensave_metrics:` line, report the savings to the user (e.g. "TokenSave'd ~N tokens").
+- If any result includes a `tokensave_metrics:` line, report the savings to the user.

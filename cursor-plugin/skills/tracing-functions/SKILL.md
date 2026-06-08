@@ -7,7 +7,7 @@ description: Trace call relationships — who calls a function, what it calls, t
 
 ## Workflow
 
-1. **Resolve symbol(s) → node ID(s)** with `tokensave_search` / `tokensave_find_exact_symbol` / `tokensave_by_qualified_name`.
+1. **Resolve symbol(s) → node ID(s)** with `tokensave_search` / `tokensave_find_exact_symbol` / `tokensave_by_qualified_name` (see `tokensave:searching-for-code` for the full resolver ladder).
 2. **Upstream (callers) → `tokensave_callers`** (`node_id`, `max_depth` 1–2 first). For many symbols at once → `tokensave_callers_for` (`node_ids[]`, one round-trip).
 3. **Downstream (callees) → `tokensave_callees`** (resolves trait dispatch; watch for `dispatch_via_trait: true` / `dispatch_from`). Pass `resolve_dispatch: false` for direct edges only.
 4. **Path between two symbols → `tokensave_call_chain`** (`from_id`, `to_id`, `max_depth`).

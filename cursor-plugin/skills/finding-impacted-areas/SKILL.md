@@ -7,7 +7,7 @@ description: Determine the blast radius of a change — every symbol/file that d
 
 ## Workflow
 
-1. **Resolve the target → node ID** with `tokensave_search` / `tokensave_find_exact_symbol` / `tokensave_by_qualified_name`.
+1. **Resolve the target → node ID** with `tokensave_search` / `tokensave_find_exact_symbol` / `tokensave_by_qualified_name` (see `tokensave:searching-for-code` for the full resolver ladder).
 2. **Symbol blast radius → `tokensave_impact`** (`node_id`, small `max_depth` first, widen if needed): all direct + transitive dependents.
 3. **File-level fan-in → `tokensave_file_dependents`** (every file that imports the changed file).
 4. **Already have changed paths → `tokensave_diff_context`** (`files`): modified symbols + dependents + affected tests in one call.

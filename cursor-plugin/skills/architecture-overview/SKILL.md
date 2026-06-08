@@ -10,16 +10,15 @@ disable-model-invocation: true
 
 1. **Shape & size:** `tokensave_status` (node/edge/file counts), `tokensave_files` + `tokensave_distribution` (what lives where).
 2. **Public surface:** `tokensave_module_api` per top-level directory.
-3. **Dependency structure:** `tokensave_dsm` (clusters, density, layering violations), `tokensave_coupling` (`fan_in`/`fan_out`), `tokensave_dependency_depth` (fragile long chains), `tokensave_circular` (cycles).
-4. **Focal points:** `tokensave_hotspots`, `tokensave_god_class`, `tokensave_largest`, `tokensave_gini` (inequality / god files).
-5. **Health → `tokensave_health`** (`details: true`) for the 5-dimension breakdown (acyclicity, depth, equality, redundancy, modularity).
+3. **Triage → `tokensave_health`** (`details: true`): one 0–10000 signal plus the 5-dimension breakdown (acyclicity, depth, equality, redundancy, modularity). Let the weak dimensions decide which drill-downs to run — don't run them all by reflex.
+4. **Drill into weak dimensions:** acyclicity → `tokensave_circular` (cycles); modularity → `tokensave_dsm` (clusters, layering violations) + `tokensave_coupling` (`fan_in`/`fan_out`); depth → `tokensave_dependency_depth` (fragile long chains); equality → `tokensave_gini` + `tokensave_largest` (god files). Add `tokensave_hotspots` / `tokensave_god_class` for the worst offenders.
 
 ## Guardrails
 
-- All tools here are read-only and parallel-safe. This skill maps and explains; it does not edit.
+- All tools here are read-only and parallel-safe. Several recompute structure `tokensave_health` already scores, so lead with `health` and drill only where it's weak. This skill maps and explains; it does not edit.
 
 ## Output
 
 - A layered module map, the dependency hotspots/violations, and a prioritized risk list.
-- Pairs with the `docs-canvas` plugin for a rendered overview.
+- Pairs with the `docs-canvas` plugin (if installed) for a rendered overview.
 - If any result includes a `tokensave_metrics:` line, report the savings to the user.

@@ -12,7 +12,7 @@ disable-model-invocation: true
 2. **Semantic change summary:**
    - Working tree / file list → `tokensave_diff_context` (`files`): modified symbols + dependents + affected tests.
    - Ref-to-ref PR → `tokensave_pr_context` (`base_ref`, `head_ref`).
-3. **Blast radius → `tokensave_impact`** on the key changed symbols; **`tokensave_affected`** (`files`) for the test set.
+3. **Go deeper only if needed:** `tokensave_diff_context` already returns dependents + affected tests — reuse those first. Use **`tokensave_impact`** (`node_id`) to widen the blast radius on a specific high-risk changed symbol, and **`tokensave_affected`** (`files`) only when you need the full test set beyond what step 2 surfaced.
 4. **Quality scan of just the changed files → `tokensave_simplify_scan`** (`files`): duplications, dead code, coupling, complexity hotspots.
 5. **Risk surfacing:** `tokensave_test_risk` on changed paths; `tokensave_unsafe_patterns` on changed files (unwrap/expect/panic/unsafe).
 
