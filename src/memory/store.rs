@@ -33,22 +33,25 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-    pub async fn add_fact(
+    /// Runs `work` inside a `BEGIN IMMEDIATE` transaction, committing on success
+    /// and rolling back on error. The inner future is built before the
+    /// transaction opens, which is safe because async fns do no work until
+    /// polled — `work.await` is the first time any statement runs.
+    async fn with_immediate_tx<T>(
         &self,
-        request: AddFactRequest,
-        default_trust: f64,
-    ) -> Result<FactRecord> {
+        operation: &str,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
         self.conn
             .execute("BEGIN IMMEDIATE", ())
             .await
-            .map_err(|e| db_error("add_fact", e))?;
-        let result = self.add_fact_inner(request, default_trust).await;
-        match result {
+            .map_err(|e| db_error(operation, e))?;
+        match work.await {
             Ok(value) => {
                 self.conn
                     .execute("COMMIT", ())
                     .await
-                    .map_err(|e| db_error("add_fact", e))?;
+                    .map_err(|e| db_error(operation, e))?;
                 Ok(value)
             }
             Err(error) => {
@@ -56,6 +59,15 @@ impl<'a> MemoryStore<'a> {
                 Err(error)
             }
         }
+    }
+
+    pub async fn add_fact(
+        &self,
+        request: AddFactRequest,
+        default_trust: f64,
+    ) -> Result<FactRecord> {
+        self.with_immediate_tx("add_fact", self.add_fact_inner(request, default_trust))
+            .await
     }
 
     async fn add_fact_inner(
@@ -140,24 +152,8 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        self.with_immediate_tx("update_fact", self.update_fact_inner(request))
             .await
-            .map_err(|e| db_error("update_fact", e))?;
-        let result = self.update_fact_inner(request).await;
-        match result {
-            Ok(value) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(|e| db_error("update_fact", e))?;
-                Ok(value)
-            }
-            Err(error) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                Err(error)
-            }
-        }
     }
 
     async fn update_fact_inner(&self, request: UpdateFactRequest) -> Result<FactRecord> {
@@ -233,24 +229,8 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        self.with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
             .await
-            .map_err(|e| db_error("remove_fact", e))?;
-        let result = self.remove_fact_inner(fact_id).await;
-        match result {
-            Ok(value) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(|e| db_error("remove_fact", e))?;
-                Ok(value)
-            }
-            Err(error) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                Err(error)
-            }
-        }
     }
 
     async fn remove_fact_inner(&self, fact_id: i64) -> Result<bool> {
@@ -345,6 +325,92 @@ impl<'a> MemoryStore<'a> {
         Ok(Some(self.row_to_fact(&row, "get_fact").await?))
     }
 
+    /// Bulk-loads facts by id, returning a map keyed by `fact_id`. Missing ids
+    /// are simply absent from the map. Entities are batch-loaded for the whole
+    /// set via [`Self::load_entities_for_facts`] rather than per fact, so this
+    /// replaces the per-id `get_fact` round-trips in the retrieval hot path.
+    ///
+    /// Ids are chunked at 256 per `IN (...)` statement to stay well clear of
+    /// `SQLite`'s 999-parameter limit.
+    pub async fn get_facts(&self, fact_ids: &[i64]) -> Result<HashMap<i64, FactRecord>> {
+        const CHUNK: usize = 256;
+        let mut facts: HashMap<i64, FactRecord> = HashMap::new();
+        for chunk in fact_ids.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT fact_id, content, category, tags, trust_score, source,
+                        retrieval_count, helpful_count, unhelpful_count,
+                        created_at, updated_at, last_retrieved_at, last_feedback_at,
+                        metadata
+                 FROM memory_facts
+                 WHERE fact_id IN ({placeholders})"
+            );
+            let values: Vec<libsql::Value> =
+                chunk.iter().map(|id| libsql::Value::Integer(*id)).collect();
+            let mut rows = self
+                .conn
+                .query(&sql, values)
+                .await
+                .map_err(|e| db_error("get_facts", e))?;
+            while let Some(row) = rows.next().await.map_err(|e| db_error("get_facts", e))? {
+                let fact = fact_from_row(&row, "get_facts", Vec::new())?;
+                facts.insert(fact.fact_id, fact);
+            }
+        }
+
+        if facts.is_empty() {
+            return Ok(facts);
+        }
+        let ids: Vec<i64> = facts.keys().copied().collect();
+        let mut entities_by_fact = self.load_entities_for_facts(&ids).await?;
+        for fact in facts.values_mut() {
+            fact.entities = entities_by_fact.remove(&fact.fact_id).unwrap_or_default();
+        }
+        Ok(facts)
+    }
+
+    /// Bulk-loads stored HRR vectors by `fact_id`. Facts whose vector is NULL or
+    /// fails to decode are omitted from the map so callers fall back to encoding
+    /// the vector on the fly (preserving the per-fact fallback behaviour).
+    ///
+    /// Ids are chunked at 256 per `IN (...)` statement to stay well clear of
+    /// `SQLite`'s 999-parameter limit.
+    pub async fn fact_vectors(&self, fact_ids: &[i64]) -> Result<HashMap<i64, Vec<f64>>> {
+        const CHUNK: usize = 256;
+        let mut vectors: HashMap<i64, Vec<f64>> = HashMap::new();
+        for chunk in fact_ids.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT fact_id, hrr_vector FROM memory_facts WHERE fact_id IN ({placeholders})"
+            );
+            let values: Vec<libsql::Value> =
+                chunk.iter().map(|id| libsql::Value::Integer(*id)).collect();
+            let mut rows = self
+                .conn
+                .query(&sql, values)
+                .await
+                .map_err(|e| db_error("fact_vectors", e))?;
+            while let Some(row) = rows.next().await.map_err(|e| db_error("fact_vectors", e))? {
+                let fact_id = row.get::<i64>(0).map_err(|e| db_error("fact_vectors", e))?;
+                let value = row
+                    .get::<libsql::Value>(1)
+                    .map_err(|e| db_error("fact_vectors", e))?;
+                if let libsql::Value::Blob(bytes) = value {
+                    if let Ok(vector) = HolographicEncoder::deserialize(&bytes) {
+                        vectors.insert(fact_id, vector);
+                    }
+                }
+            }
+        }
+        Ok(vectors)
+    }
+
     pub async fn increment_retrieval_counts(&self, fact_ids: &[i64]) -> Result<()> {
         if fact_ids.is_empty() {
             return Ok(());
@@ -380,24 +446,11 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn record_feedback_event(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
-            .await
-            .map_err(|e| db_error("record_feedback_event", e))?;
-        let result = self.record_feedback_event_inner(request).await;
-        match result {
-            Ok(value) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(|e| db_error("record_feedback_event", e))?;
-                Ok(value)
-            }
-            Err(error) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                Err(error)
-            }
-        }
+        self.with_immediate_tx(
+            "record_feedback_event",
+            self.record_feedback_event_inner(request),
+        )
+        .await
     }
 
     async fn record_feedback_event_inner(
@@ -660,10 +713,6 @@ impl<'a> MemoryStore<'a> {
         self.conn
     }
 
-    pub(crate) async fn fact_vector(&self, fact_id: i64) -> Result<Option<Vec<f64>>> {
-        self.load_fact_vector(fact_id).await
-    }
-
     async fn get_fact_by_content(&self, content: &str) -> Result<Option<FactRecord>> {
         let mut rows = self
             .conn
@@ -823,29 +872,6 @@ impl<'a> MemoryStore<'a> {
             );
         }
         Ok(entities)
-    }
-
-    async fn load_fact_vector(&self, fact_id: i64) -> Result<Option<Vec<f64>>> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT hrr_vector FROM memory_facts WHERE fact_id = ?1",
-                params![fact_id],
-            )
-            .await
-            .map_err(|e| db_error("load_fact_vector", e))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("load_fact_vector", e))?
-        else {
-            return Ok(None);
-        };
-
-        let value = row
-            .get::<libsql::Value>(0)
-            .map_err(|e| db_error("load_fact_vector", e))?;
-        deserialize_vector_value(value, "load_fact_vector")
     }
 
     async fn load_bank_vectors(
