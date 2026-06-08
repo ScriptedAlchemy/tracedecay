@@ -9,5 +9,8 @@
   "hooks": "hooks/hooks.json",
   "rules": [
     "rules/tokensave.mdc"
-  ]
+  ],
+  "skills": "skills/",
+  "agents": "agents/",
+  "commands": "commands/"
 }

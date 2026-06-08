@@ -146,11 +146,129 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
 // Plugin install helpers
 // ---------------------------------------------------------------------------
 
-const PLUGIN_MANIFEST: &str = include_str!("../../cursor-plugin/.cursor-plugin/plugin.json");
-const PLUGIN_MCP: &str = include_str!("../../cursor-plugin/mcp.json");
-const PLUGIN_HOOKS: &str = include_str!("../../cursor-plugin/hooks/hooks.json");
-const PLUGIN_RULE: &str = include_str!("../../cursor-plugin/rules/tokensave.mdc");
-const PLUGIN_README: &str = include_str!("../../cursor-plugin/README.md");
+/// Every file in the Cursor plugin bundle, embedded into the binary so installs
+/// work from a released binary without the repo `cursor-plugin/` source tree.
+/// Each entry is `(relative_path, file_contents)`. This is the single source of
+/// truth for the embedded writer, the managed-path set used for uninstall, and
+/// the coverage-guard test. The manifest, `mcp.json`, and `hooks/hooks.json`
+/// entries are rendered through helpers at install time to inject the package
+/// version and the absolute tokensave binary path.
+const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".cursor-plugin/plugin.json",
+        include_str!("../../cursor-plugin/.cursor-plugin/plugin.json"),
+    ),
+    ("README.md", include_str!("../../cursor-plugin/README.md")),
+    ("mcp.json", include_str!("../../cursor-plugin/mcp.json")),
+    (
+        "hooks/hooks.json",
+        include_str!("../../cursor-plugin/hooks/hooks.json"),
+    ),
+    (
+        "rules/tokensave.mdc",
+        include_str!("../../cursor-plugin/rules/tokensave.mdc"),
+    ),
+    (
+        "skills/architecture-overview/SKILL.md",
+        include_str!("../../cursor-plugin/skills/architecture-overview/SKILL.md"),
+    ),
+    (
+        "skills/atomic-code-edits/SKILL.md",
+        include_str!("../../cursor-plugin/skills/atomic-code-edits/SKILL.md"),
+    ),
+    (
+        "skills/cleaning-up-dead-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/cleaning-up-dead-code/SKILL.md"),
+    ),
+    (
+        "skills/code-health-report/SKILL.md",
+        include_str!("../../cursor-plugin/skills/code-health-report/SKILL.md"),
+    ),
+    (
+        "skills/cross-branch-investigation/SKILL.md",
+        include_str!("../../cursor-plugin/skills/cross-branch-investigation/SKILL.md"),
+    ),
+    (
+        "skills/drafting-commit-and-pr/SKILL.md",
+        include_str!("../../cursor-plugin/skills/drafting-commit-and-pr/SKILL.md"),
+    ),
+    (
+        "skills/finding-impacted-areas/SKILL.md",
+        include_str!("../../cursor-plugin/skills/finding-impacted-areas/SKILL.md"),
+    ),
+    (
+        "skills/fixing-build-and-type-errors/SKILL.md",
+        include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
+    ),
+    (
+        "skills/memorizing-subject/SKILL.md",
+        include_str!("../../cursor-plugin/skills/memorizing-subject/SKILL.md"),
+    ),
+    (
+        "skills/porting-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/porting-code/SKILL.md"),
+    ),
+    (
+        "skills/project-status/SKILL.md",
+        include_str!("../../cursor-plugin/skills/project-status/SKILL.md"),
+    ),
+    (
+        "skills/recalling-project-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/reviewing-a-diff/SKILL.md",
+        include_str!("../../cursor-plugin/skills/reviewing-a-diff/SKILL.md"),
+    ),
+    (
+        "skills/running-impacted-tests/SKILL.md",
+        include_str!("../../cursor-plugin/skills/running-impacted-tests/SKILL.md"),
+    ),
+    (
+        "skills/searching-for-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/searching-for-code/SKILL.md"),
+    ),
+    (
+        "skills/tracing-functions/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tracing-functions/SKILL.md"),
+    ),
+    (
+        "agents/code-explorer.md",
+        include_str!("../../cursor-plugin/agents/code-explorer.md"),
+    ),
+    (
+        "agents/code-health-auditor.md",
+        include_str!("../../cursor-plugin/agents/code-health-auditor.md"),
+    ),
+    (
+        "commands/memorize-subject.md",
+        include_str!("../../cursor-plugin/commands/memorize-subject.md"),
+    ),
+    (
+        "commands/tokensave-arch.md",
+        include_str!("../../cursor-plugin/commands/tokensave-arch.md"),
+    ),
+    (
+        "commands/tokensave-branch.md",
+        include_str!("../../cursor-plugin/commands/tokensave-branch.md"),
+    ),
+    (
+        "commands/tokensave-diagnose.md",
+        include_str!("../../cursor-plugin/commands/tokensave-diagnose.md"),
+    ),
+    (
+        "commands/tokensave-health.md",
+        include_str!("../../cursor-plugin/commands/tokensave-health.md"),
+    ),
+    (
+        "commands/tokensave-port.md",
+        include_str!("../../cursor-plugin/commands/tokensave-port.md"),
+    ),
+    (
+        "commands/tokensave-review.md",
+        include_str!("../../cursor-plugin/commands/tokensave-review.md"),
+    ),
+];
 
 fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tokensave")
@@ -178,39 +296,32 @@ fn install_cursor_plugin(home: &Path, tokensave_bin: &str) -> Result<()> {
 }
 
 fn write_embedded_plugin(install_dir: &Path, tokensave_bin: &str) -> Result<()> {
-    safe_write_text_file(
-        &install_dir.join(".cursor-plugin/plugin.json"),
-        &cursor_plugin_manifest()?,
-        None,
-    )?;
-    safe_write_text_file(
-        &install_dir.join("mcp.json"),
-        &cursor_plugin_mcp(tokensave_bin)?,
-        None,
-    )?;
-    safe_write_text_file(
-        &install_dir.join("hooks/hooks.json"),
-        &cursor_plugin_hooks(tokensave_bin)?,
-        None,
-    )?;
-    safe_write_text_file(&install_dir.join("rules/tokensave.mdc"), PLUGIN_RULE, None)?;
-    safe_write_text_file(&install_dir.join("README.md"), PLUGIN_README, None)
+    for &(relative, contents) in EMBEDDED_PLUGIN_FILES {
+        let rendered = match relative {
+            ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
+            "mcp.json" => cursor_plugin_mcp(contents, tokensave_bin)?,
+            "hooks/hooks.json" => cursor_plugin_hooks(contents, tokensave_bin)?,
+            _ => contents.to_string(),
+        };
+        safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
+    }
+    Ok(())
 }
 
-fn cursor_plugin_manifest() -> Result<String> {
-    let mut manifest: serde_json::Value = serde_json::from_str(PLUGIN_MANIFEST)?;
+fn cursor_plugin_manifest(raw: &str) -> Result<String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
     manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
-fn cursor_plugin_mcp(tokensave_bin: &str) -> Result<String> {
-    let mut mcp: serde_json::Value = serde_json::from_str(PLUGIN_MCP)?;
+fn cursor_plugin_mcp(raw: &str, tokensave_bin: &str) -> Result<String> {
+    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
     mcp["mcpServers"]["tokensave"]["command"] = json!(tokensave_bin);
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
-fn cursor_plugin_hooks(tokensave_bin: &str) -> Result<String> {
-    let mut hooks: serde_json::Value = serde_json::from_str(PLUGIN_HOOKS)?;
+fn cursor_plugin_hooks(raw: &str, tokensave_bin: &str) -> Result<String> {
+    let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
     if let Some(events) = hooks
         .get_mut("hooks")
         .and_then(|value| value.as_object_mut())
@@ -283,16 +394,10 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    [
-        ".cursor-plugin/plugin.json",
-        "mcp.json",
-        "hooks/hooks.json",
-        "rules/tokensave.mdc",
-        "README.md",
-    ]
-    .into_iter()
-    .map(|relative| install_dir.join(relative))
-    .collect()
+    EMBEDDED_PLUGIN_FILES
+        .iter()
+        .map(|&(relative, _)| install_dir.join(relative))
+        .collect()
 }
 
 fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -610,8 +715,104 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::CursorIntegration;
-    use crate::agents::AgentIntegration;
+    use super::*;
+    use tempfile::TempDir;
+
+    fn cursor_plugin_source_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("cursor-plugin")
+    }
+
+    fn relative_paths_under(root: &Path) -> Vec<String> {
+        let mut paths: Vec<String> = collect_regular_files(root)
+            .expect("source bundle should be readable")
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .expect("collected paths live under root")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn write_embedded_plugin_writes_core_and_bundle_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
+
+        // The four core files land, and the manifest is valid JSON carrying the
+        // mcpServers key released binaries rely on.
+        let manifest_path = install_dir.join(".cursor-plugin/plugin.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["name"], "tokensave");
+        assert_eq!(manifest["mcpServers"], "mcp.json");
+        assert!(install_dir.join("README.md").exists());
+        assert!(install_dir.join("mcp.json").exists());
+        assert!(install_dir.join("hooks/hooks.json").exists());
+        assert!(install_dir.join("rules/tokensave.mdc").exists());
+
+        // A representative skill, the agent, and a command also ship, so released
+        // installs are no longer missing the bundle that the symlink path provides.
+        assert!(
+            install_dir
+                .join("skills/searching-for-code/SKILL.md")
+                .exists(),
+            "a representative skill should be embedded"
+        );
+        assert!(
+            install_dir.join("agents/code-explorer.md").exists(),
+            "the code-explorer agent should be embedded"
+        );
+        assert!(
+            install_dir.join("commands/tokensave-arch.md").exists(),
+            "a representative command should be embedded"
+        );
+
+        // Every embedded file is also a managed path so uninstall can clean it.
+        let managed = cursor_plugin_managed_paths(&install_dir);
+        for &(relative, _) in EMBEDDED_PLUGIN_FILES {
+            assert!(
+                managed.contains(&install_dir.join(relative)),
+                "{relative} should be a managed path"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_file_list_covers_the_whole_source_bundle() {
+        let on_disk = relative_paths_under(&cursor_plugin_source_dir());
+        let mut expected: Vec<String> = EMBEDDED_PLUGIN_FILES
+            .iter()
+            .map(|&(relative, _)| relative.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            on_disk, expected,
+            "EMBEDDED_PLUGIN_FILES must cover every cursor-plugin file"
+        );
+    }
+
+    #[test]
+    fn embedded_install_uninstalls_completely() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
+        assert!(install_dir
+            .join("skills/searching-for-code/SKILL.md")
+            .exists());
+
+        // Because managed paths cover every embedded file, uninstall recognises a
+        // tokensave-only directory and removes it entirely.
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+        assert!(
+            !install_dir.exists(),
+            "embedded install should be fully removed on uninstall"
+        );
+    }
 
     /// The Cursor `post_install` hook (the branch-tracking logic that moved
     /// off `main` and onto the integration) must be safe to run on a project
