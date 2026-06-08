@@ -1,7 +1,6 @@
 ---
 name: code-health-report
 description: Produce a code-health scorecard for the repo or a directory — composite health signal, inequality, complexity, duplication, documentation gaps, risk-weighted test gaps, and structural hotspots. Use for "code health report", "tech-debt audit", "what's the worst code", complexity/duplication review, or tracking quality across a work session.
-disable-model-invocation: true
 ---
 
 # Code-health report
@@ -23,7 +22,7 @@ Quality-scorecard companion to `tokensave:architecture-overview` (which maps str
 
 ## Guardrails
 
-- Discovery/analysis tools are read-only and parallel-safe. `tokensave_session_start` / `tokensave_session_end` write/remove `.tokensave/session_baseline.json` — only bracket a session when the user wants the delta.
+- Discovery/analysis tools are read-only and parallel-safe. `tokensave_session_start` / `tokensave_session_end` write/remove `.tokensave/session_baseline.json`; use them only when a before/after delta is relevant and respect Cursor approval/run-mode.
 - `tokensave_redundancy` is computed lazily and cached; the first call on a fresh index can be slow on large repos — keep `path`/`max_pairs` tight.
 - This skill reports and prioritizes; it does not edit. To fix findings, hand off to `tokensave:atomic-code-edits` / `tokensave:cleaning-up-dead-code`; to verify, `tokensave:running-impacted-tests`.
 

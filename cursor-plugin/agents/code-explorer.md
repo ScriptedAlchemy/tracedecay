@@ -2,6 +2,7 @@
 name: code-explorer
 description: Read-only code exploration subagent powered by the tokensave code graph. Answers how/where/what questions about this repo (context, search, callers/callees, impact) without editing files. Use to parallelize codebase research or isolate a deep exploration from the main thread.
 model: inherit
+readonly: true
 ---
 
 # Code explorer (read-only)

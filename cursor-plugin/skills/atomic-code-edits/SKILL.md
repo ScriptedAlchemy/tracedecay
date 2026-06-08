@@ -1,12 +1,11 @@
 ---
 name: atomic-code-edits
-description: Apply safe, anchored source edits with tokensave's atomic edit primitives (unique-match string replace, atomic multi-replace, anchored insert, symbol-level rewrite) that auto re-index after writing. Use when the user asks to apply an edit via tokensave, do a precise/anchored replacement, or rewrite a whole symbol without regex/shell-quoting hazards.
-disable-model-invocation: true
+description: Apply safe, anchored source edits with tokensave's atomic edit primitives (unique-match string replace, atomic multi-replace, anchored insert, symbol-level rewrite) that auto re-index after writing. Use to apply precise/anchored edits or rewrite a whole symbol without regex/shell-quoting hazards.
 ---
 
 # Atomic code edits
 
-User-triggered and **mutating**: only run these when the user wants edits applied, and respect Cursor approval/run-mode. Each writer targets a single file and triggers an in-place re-index, so the graph never goes stale.
+These tools mutate files; invoke them only when an edit is relevant to the task and respect Cursor approval/run-mode. Each writer targets a single file and triggers an in-place re-index, so the graph stays fresh.
 
 ## Pick the primitive
 
@@ -23,7 +22,7 @@ User-triggered and **mutating**: only run these when the user wants edits applie
 
 ## Guardrails
 
-- These mutate files; never run them unprompted. `str_replace` / `multi_str_replace` / `insert_at` are single-file; `insert_at_symbol` / `replace_symbol` resolve by (qualified) name and refuse ambiguous matches — disambiguate rather than forcing.
+- `str_replace` / `multi_str_replace` / `insert_at` are single-file; `insert_at_symbol` / `replace_symbol` resolve by (qualified) name and refuse ambiguous matches — disambiguate rather than forcing.
 - For structural multi-file rewrites the graph can't anchor, fall back to your normal edit tools.
 
 ## Output

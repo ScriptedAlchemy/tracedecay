@@ -9,13 +9,13 @@ description: Recall prior decisions, durable facts, and past agent conversations
 
 1. **Past conversations → `tokensave_message_search`** (`query`, optional `provider`, `limit`) over ingested Cursor/Codex/agent transcripts (project-local FTS index).
 2. **Durable facts → `tokensave_fact_store`** with `action: "search"` (or `"probe"` / `"reason"`), plus `query` and `min_trust`.
-3. **If results look stale/empty → `tokensave_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
-4. **After using a fact → `tokensave_fact_feedback`** (`helpful` / `unhelpful`) to tune its trust score.
-5. **Persist a NEW durable decision → `tokensave_fact_store`** `action: "add"` (`content`, `category`, `tags`, `trust`). Use this when the user says "remember this" (aligns with the repo `AGENTS.md` preference to persist durable facts).
+3. **If the user asks to inspect or repair memory health → `tokensave_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
+4. **If the user rates a recalled fact → `tokensave_fact_feedback`** (`helpful` / `unhelpful`) to tune its trust score.
+5. **Persist a new durable decision → `tokensave_fact_store`** `action: "add"` (`content`, `category`, `tags`, `trust`) only when the user asks to remember it.
 
 ## Guardrails
 
-- `tokensave_message_search` and `fact_store` searches are read-only. `fact_store` writes, `fact_feedback`, and `memory_status` mutate memory state — only use them to record feedback or a decision the user asked to keep.
+- `tokensave_message_search` and `fact_store` searches are read-only. `fact_store` adds, `fact_feedback`, and `memory_status` mutate memory state; use them only for explicit user requests or ratings.
 
 ## Output
 

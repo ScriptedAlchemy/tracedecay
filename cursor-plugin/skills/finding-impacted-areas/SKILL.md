@@ -12,9 +12,9 @@ description: Determine the blast radius of a change — every symbol/file that d
 3. **File-level fan-in → `tokensave_file_dependents`** (every file that imports the changed file).
 4. **Already have changed paths → `tokensave_diff_context`** (`files`): modified symbols + dependents + affected tests in one call.
 5. **Tests to run:**
-   - `tokensave_affected` (`files`) → affected test files via dependency traversal.
-   - `tokensave_test_map` (`file` / `node_id`) → which tests cover the target.
-   - `tokensave_test_risk` → high-risk, weakly-tested dependents (where coverage gaps bite).
+   - Reuse `tokensave_diff_context` affected tests first.
+   - Need more detail? `tokensave_affected` (`files`) finds affected tests; `tokensave_test_map` (`file` / `node_id`) shows direct coverage.
+   - Use `tokensave_test_risk` for high-risk, weakly-tested dependents.
 6. **Structural fragility (optional):** `tokensave_coupling` / `tokensave_dependency_depth` to see if the target is a high-fan-in hub.
 
 ## Guardrails
@@ -24,7 +24,7 @@ description: Determine the blast radius of a change — every symbol/file that d
 
 ## Handoff
 
-- To actually run the tests, use the `tokensave:running-impacted-tests` skill (user-triggered; it runs cargo).
+- To run the selected tests, use the `tokensave:running-impacted-tests` skill.
 
 ## Output
 

@@ -114,6 +114,7 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         ".cursor-plugin/plugin.json",
         include_str!("../../cursor-plugin/.cursor-plugin/plugin.json"),
     ),
+    ("README.md", include_str!("../../cursor-plugin/README.md")),
     ("mcp.json", include_str!("../../cursor-plugin/mcp.json")),
     (
         "hooks/hooks.json",
@@ -331,12 +332,9 @@ fn cursor_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
 }
 
 fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
-    // Every embedded file, plus `README.md` which the symlink install ships but
-    // the embedded writer does not — kept here as a best-effort cleanup guard.
     EMBEDDED_PLUGIN_FILES
         .iter()
         .map(|&(relative, _)| relative)
-        .chain(std::iter::once("README.md"))
         .map(|relative| install_dir.join(relative))
         .collect()
 }
@@ -657,6 +655,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
         assert_eq!(manifest["name"], "tokensave");
         assert_eq!(manifest["mcpServers"], "mcp.json");
+        assert!(install_dir.join("README.md").exists());
         assert!(install_dir.join("mcp.json").exists());
         assert!(install_dir.join("hooks/hooks.json").exists());
         assert!(install_dir.join("rules/tokensave.mdc").exists());
@@ -690,19 +689,15 @@ mod tests {
 
     #[test]
     fn embedded_file_list_covers_the_whole_source_bundle() {
-        // Guards against adding a file to cursor-plugin/ without embedding it:
-        // every source file must be embedded, except README.md which the symlink
-        // install ships but the embedded writer intentionally omits.
         let on_disk = relative_paths_under(&cursor_plugin_source_dir());
         let mut expected: Vec<String> = EMBEDDED_PLUGIN_FILES
             .iter()
             .map(|&(relative, _)| relative.to_string())
-            .chain(std::iter::once("README.md".to_string()))
             .collect();
         expected.sort();
         assert_eq!(
             on_disk, expected,
-            "EMBEDDED_PLUGIN_FILES must cover every cursor-plugin file (README is symlink-only)"
+            "EMBEDDED_PLUGIN_FILES must cover every cursor-plugin file"
         );
     }
 

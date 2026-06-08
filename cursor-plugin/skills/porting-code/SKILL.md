@@ -1,7 +1,6 @@
 ---
 name: porting-code
 description: Port or migrate code between directories or languages in dependency-safe order and track progress. Use when porting, migrating, or rewriting a module from one location/language to another (e.g. legacy → new, src → crate).
-disable-model-invocation: true
 ---
 
 # Porting code
@@ -21,7 +20,7 @@ disable-model-invocation: true
 ## Guardrails
 
 - Never port a symbol before its dependencies (respect `tokensave_port_order`).
-- `tokensave_port_status` / `tokensave_port_order` and the lookups are read-only; the editing tools and `tokensave_diagnostics` mutate the working tree / run the toolchain. Only use them when the user wants edits applied, and respect Cursor approval/run-mode.
+- `tokensave_port_status` / `tokensave_port_order` and the lookups are read-only; the editing tools and `tokensave_diagnostics` mutate the working tree / run the toolchain. Use them when porting/verification is relevant and respect Cursor approval/run-mode.
 - `tokensave_diagnostics` forces target dir `.tokensave/target/`; the first run can take minutes.
 
 ## Output

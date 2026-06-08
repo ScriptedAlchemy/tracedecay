@@ -1,7 +1,6 @@
 ---
 name: reviewing-a-diff
 description: Review a PR or working-tree diff for impact, risk, and quality using the code graph. Use for "review this diff", "review this PR", "tokensave review", change-set risk review, or pre-merge checks.
-disable-model-invocation: true
 ---
 
 # Reviewing a diff
@@ -18,7 +17,7 @@ disable-model-invocation: true
 
 ## Guardrails
 
-- Read-only review. Do not edit or run tests from this skill; to verify behavior, hand off to the `tokensave:running-impacted-tests` skill (user-triggered).
+- Read-only review. Do not edit or run tests from this skill; to verify behavior, hand off to the `tokensave:running-impacted-tests` skill.
 
 ## Output
 

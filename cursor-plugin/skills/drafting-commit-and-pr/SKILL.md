@@ -1,7 +1,6 @@
 ---
 name: drafting-commit-and-pr
 description: Draft a commit message, PR description, or changelog from the semantic meaning of your changes. Use for "write a commit message", "draft the PR description", "generate release notes", or summarizing a changeset. Does not commit or push.
-disable-model-invocation: true
 ---
 
 # Drafting commit & PR text

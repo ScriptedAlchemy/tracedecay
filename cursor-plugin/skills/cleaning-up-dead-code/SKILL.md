@@ -1,7 +1,6 @@
 ---
 name: cleaning-up-dead-code
 description: Find and safely remove dead code, unused imports, and duplication using the code graph. Use for "clean up dead code", "remove unused code", "dedupe helpers", or codebase health cleanup.
-disable-model-invocation: true
 ---
 
 # Cleaning up dead code
@@ -22,7 +21,7 @@ disable-model-invocation: true
 
 ## Guardrails
 
-- Discovery tools are read-only. The editing tools, `tokensave_diagnostics`, and `session_start`/`session_end` mutate state — only use them when the user wants the cleanup applied, and respect Cursor approval/run-mode. Never delete a symbol whose callers/references are non-empty.
+- Discovery tools are read-only. The editing tools, `tokensave_diagnostics`, and `session_start`/`session_end` mutate state or run checks; use them when cleanup/verification is relevant and respect Cursor approval/run-mode. Never delete a symbol whose callers/references are non-empty.
 
 ## Output
 

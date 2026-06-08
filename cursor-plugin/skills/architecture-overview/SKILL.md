@@ -1,7 +1,6 @@
 ---
 name: architecture-overview
 description: Produce a high-level architecture map of the repo or a directory — modules, dependencies, layering, coupling, and hotspots. Use for onboarding, "explain the architecture", "give me a structural overview", or structural review.
-disable-model-invocation: true
 ---
 
 # Architecture overview
@@ -15,7 +14,7 @@ disable-model-invocation: true
 
 ## Guardrails
 
-- All tools here are read-only and parallel-safe. Several recompute structure `tokensave_health` already scores, so lead with `health` and drill only where it's weak. This skill maps and explains; it does not edit. For a quality scorecard (complexity, duplication, doc gaps, risk-weighted test gaps, session deltas), use `tokensave:code-health-report`.
+- All tools here are read-only and parallel-safe. Several recompute structure `tokensave_health` already scores, so use `health` before deeper drill-downs and go only where it's weak. This skill maps and explains; it does not edit. For a quality scorecard (complexity, duplication, doc gaps, risk-weighted test gaps, session deltas), use `tokensave:code-health-report`.
 
 ## Output
 
