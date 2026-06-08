@@ -307,19 +307,15 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
 
 /// Pure decision logic for Cursor `preToolUse` hook events.
 ///
-/// Returns a soft `hookSpecificOutput.additionalContext` hint only for
-/// high-confidence broad search tools. Invalid or unrelated tool events fail
-/// open with no output.
+/// Returns a soft native Cursor `additional_context` hint only for high-confidence
+/// broad search tools. Invalid or unrelated tool events fail open with no output.
 pub fn evaluate_cursor_pre_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_pre_tool_hint_input(&parsed))?;
     Some(
         serde_json::json!({
             "continue": true,
-            "hookSpecificOutput": {
-                "hookEventName": "preToolUse",
-                "additionalContext": format_tool_hint(&hint),
-            },
+            "additional_context": format_tool_hint(&hint),
         })
         .to_string(),
     )

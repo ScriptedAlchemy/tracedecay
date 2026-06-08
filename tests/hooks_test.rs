@@ -264,19 +264,15 @@ fn test_cursor_pre_tool_use_hints_for_grep_search() {
     let output = evaluate_cursor_pre_tool_use(input).expect("Grep should get a tokensave hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(v["continue"].as_bool(), Some(true));
-    assert_eq!(
-        v["hookSpecificOutput"]["hookEventName"].as_str(),
-        Some("preToolUse")
-    );
-    assert!(v["hookSpecificOutput"]["additionalContext"]
+    assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
         .contains("tokensave hint:"));
-    assert!(v["hookSpecificOutput"]["additionalContext"]
+    assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
         .contains("tokensave_search"));
-    assert!(v.get("additional_context").is_none());
+    assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
 }
 
@@ -294,7 +290,7 @@ fn test_cursor_pre_tool_use_hints_for_shell_rg() {
     let output = evaluate_cursor_pre_tool_use(input).expect("rg shell command should get a hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(v["continue"].as_bool(), Some(true));
-    assert!(v["hookSpecificOutput"]["additionalContext"]
+    assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
         .contains("tokensave hint:"));
