@@ -695,6 +695,7 @@ impl TokenSave {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
+        self.ensure_branch_writable("full index")?;
         let _lock = try_acquire_sync_lock(&self.project_root)?;
         write_dirty_sentinel(&self.project_root);
         let start = Instant::now();
