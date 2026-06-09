@@ -1,6 +1,6 @@
 use std::path::{Component, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::errors::{Result, TokenSaveError};
 use crate::global_db::GlobalDb;
@@ -51,6 +51,210 @@ fn truncated_json_envelope(formatted: &str) -> String {
         }
         end = end.saturating_sub(1024);
     }
+}
+
+fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
+    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
+        formatted
+    } else if value
+        .get("needs_synthesis")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let compact = compact_lcm_expand_query_payload(value, formatted.len());
+        serde_json::to_string_pretty(&compact).unwrap_or_default()
+    } else {
+        truncated_json_envelope(&formatted)
+    };
+    let text = if text.len() <= MAX_RESPONSE_CHARS {
+        text
+    } else {
+        truncated_json_envelope(&text)
+    };
+    ToolResult {
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files: Vec::new(),
+    }
+}
+
+fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Value {
+    const MAX_CONTEXT_BLOCKS: usize = 3;
+    const MAX_CONTEXT_BLOCK_CHARS: usize = 600;
+    const MAX_MATCHES: usize = 10;
+    const MAX_MATCH_SNIPPET_CHARS: usize = 160;
+    const MAX_PAGINATION_ITEMS: usize = 50;
+
+    let mut object = Map::new();
+    for key in [
+        "status",
+        "provider",
+        "session_id",
+        "storage_scope",
+        "prompt",
+        "query",
+        "answer",
+        "needs_synthesis",
+        "max_tokens",
+        "context_max_tokens",
+        "context_budget",
+        "context_truncated",
+        "node_ids",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert(
+        "mcp_original_response_chars".to_string(),
+        json!(original_chars),
+    );
+    object.insert(
+        "mcp_truncation_reason".to_string(),
+        json!("expand-query response compacted to preserve synthesis contract fields"),
+    );
+
+    let (context_blocks, context_blocks_truncated) = compact_context_blocks(
+        value.get("context_blocks"),
+        MAX_CONTEXT_BLOCKS,
+        MAX_CONTEXT_BLOCK_CHARS,
+    );
+    let (matches, matches_truncated) =
+        compact_matches(value.get("matches"), MAX_MATCHES, MAX_MATCH_SNIPPET_CHARS);
+    let (context_pagination, pagination_truncated) =
+        compact_array(value.get("context_pagination"), MAX_PAGINATION_ITEMS);
+
+    object.insert("context_blocks".to_string(), context_blocks.clone());
+    object.insert(
+        "context_blocks_truncated_for_mcp".to_string(),
+        json!(context_blocks_truncated),
+    );
+    object.insert("matches".to_string(), matches);
+    object.insert(
+        "matches_truncated_for_mcp".to_string(),
+        json!(matches_truncated),
+    );
+    object.insert("context_pagination".to_string(), context_pagination);
+    object.insert(
+        "context_pagination_truncated_for_mcp".to_string(),
+        json!(pagination_truncated),
+    );
+    object.insert(
+        "synthesis_prompt".to_string(),
+        compact_synthesis_prompt(value, &context_blocks),
+    );
+
+    Value::Object(object)
+}
+
+fn compact_array(value: Option<&Value>, limit: usize) -> (Value, bool) {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return (json!([]), false);
+    };
+    (
+        Value::Array(array.iter().take(limit).cloned().collect()),
+        array.len() > limit,
+    )
+}
+
+fn compact_matches(value: Option<&Value>, limit: usize, snippet_chars: usize) -> (Value, bool) {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return (json!([]), false);
+    };
+    let matches = array
+        .iter()
+        .take(limit)
+        .map(|item| {
+            let mut object = Map::new();
+            for key in ["kind", "node_id", "store_id"] {
+                if let Some(field) = item.get(key) {
+                    object.insert(key.to_string(), field.clone());
+                }
+            }
+            if let Some(snippet) = item.get("snippet").and_then(Value::as_str) {
+                let (snippet, truncated) = truncate_chars(snippet, snippet_chars);
+                object.insert("snippet".to_string(), json!(snippet));
+                object.insert("snippet_truncated_for_mcp".to_string(), json!(truncated));
+            }
+            Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    (Value::Array(matches), array.len() > limit)
+}
+
+fn compact_context_blocks(
+    value: Option<&Value>,
+    limit: usize,
+    content_chars: usize,
+) -> (Value, bool) {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return (json!([]), false);
+    };
+    let mut truncated = array.len() > limit;
+    let blocks = array
+        .iter()
+        .take(limit)
+        .map(|item| {
+            let mut object = Map::new();
+            for key in ["kind", "node_id", "source_ref", "content_range"] {
+                if let Some(field) = item.get(key) {
+                    object.insert(key.to_string(), field.clone());
+                }
+            }
+            let content = item
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let (content, content_truncated) = truncate_chars(content, content_chars);
+            truncated |= content_truncated;
+            object.insert("content".to_string(), json!(content));
+            object.insert(
+                "content_truncated_for_mcp".to_string(),
+                json!(content_truncated),
+            );
+            object.insert("raw_message".to_string(), Value::Null);
+            object.insert("summary_node".to_string(), Value::Null);
+            Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    (Value::Array(blocks), truncated)
+}
+
+fn compact_synthesis_prompt(value: &Value, context_blocks: &Value) -> Value {
+    let default_system = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
+    let system = value
+        .get("synthesis_prompt")
+        .and_then(|prompt| prompt.get("system"))
+        .and_then(Value::as_str)
+        .unwrap_or(default_system);
+    let prompt = value
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
+    let truncation_note = if value
+        .get("context_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "\n\nNOTE: Some LCM context was truncated before MCP response compaction; pagination metadata is included in the tool response."
+    } else {
+        ""
+    };
+    json!({
+        "system": system,
+        "user": format!(
+            "QUESTION:\n{prompt}\n\nCOMPACT EXPANDED CONTEXT:\n{context_json}{truncation_note}\n\nNOTE: The MCP response was compacted to preserve the synthesis contract. Use node_ids and context_pagination for follow-up expansion if more context is needed."
+        ),
+    })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let truncated = value.chars().count() > max_chars;
+    let text = chars.by_ref().take(max_chars).collect::<String>();
+    (text, truncated)
 }
 
 fn string_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
@@ -603,7 +807,7 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
         object.insert("session_id".to_string(), json!(session_id));
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(tool_json(&payload))
+    Ok(lcm_expand_query_tool_json(&payload))
 }
 
 pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {

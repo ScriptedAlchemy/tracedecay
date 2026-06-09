@@ -599,6 +599,8 @@ class Aux:
         self.calls.append(kwargs)
         if self.mode == "timeout":
             raise TimeoutError("slow route")
+        if self.mode == "unexpected":
+            raise RuntimeError("schema bug")
         if self.mode == "empty":
             return "<reasoning>hidden</reasoning>   "
         return "<reasoning>hidden</reasoning>Final answer from context"
@@ -635,6 +637,15 @@ empty_payload = engine.expand_query(prompt="What changed?", query="orchard")
 assert empty_payload["degraded"] is True
 assert "empty answer" in empty_payload["error"]
 assert empty_payload["needs_synthesis"] is False
+
+agent.auxiliary_client.mode = "unexpected"
+responses.append(needs_synthesis())
+try:
+    engine.expand_query(prompt="What changed?", query="orchard")
+except RuntimeError as exc:
+    assert "schema bug" in str(exc)
+else:
+    raise AssertionError("unexpected synthesis exceptions must propagate")
 "#,
     )
     .unwrap();

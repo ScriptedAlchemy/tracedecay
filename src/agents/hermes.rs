@@ -1132,11 +1132,6 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
             f"lcm_expand_query synthesis timed out after {float(timeout):.3g}s",
             timeout_seconds=timeout,
         )
-    except Exception as exc:
-        return _expand_query_degraded_payload(
-            retrieval,
-            f"lcm_expand_query synthesis failed: {exc}",
-        )
 
     answer = _strip_reasoning(_llm_response_text(response)).strip()
     if not answer:

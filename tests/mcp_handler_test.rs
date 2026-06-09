@@ -4628,6 +4628,69 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 }
 
 #[tokio::test]
+async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-large-expand-query",
+        "lcm-large-expand-query-message",
+        format!(
+            "oversized expand-query evidence {}",
+            "context ".repeat(4000)
+        ),
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-expand-query",
+            "prompt": "Summarize oversized expand-query evidence",
+            "query": "oversized expand-query evidence",
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("large expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(
+        payload["prompt"],
+        "Summarize oversized expand-query evidence"
+    );
+    assert!(payload["synthesis_prompt"]["system"]
+        .as_str()
+        .unwrap()
+        .contains("expanded LCM retrieval context"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize oversized expand-query evidence"));
+    assert!(payload["context_truncated"].as_bool().is_some());
+    assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
+    assert!(!payload["matches"].as_array().unwrap().is_empty());
+    assert!(
+        payload["context_blocks"].as_array().unwrap().len() <= 3,
+        "MCP expand-query context should stay compact"
+    );
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
 async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
     let (cg, _dir) = setup_project().await;
     let db = open_project_session_db(cg.project_root())
