@@ -168,6 +168,14 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_feedback(),
         def_memory_status(),
         def_message_search(),
+        def_lcm_status(),
+        def_lcm_load_session(),
+        def_lcm_grep(),
+        def_lcm_describe(),
+        def_lcm_expand(),
+        def_lcm_expand_query(),
+        def_lcm_preflight(),
+        def_lcm_compress(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -1717,6 +1725,279 @@ fn def_message_search() -> ToolDefinition {
                 }
             },
             "required": ["query"]
+        }),
+    )
+}
+
+fn def_lcm_status() -> ToolDefinition {
+    def(
+        "tokensave_lcm_status",
+        "LCM Status",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts from the project-local sessions.db.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id to inspect (default: cursor)."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional provider-local session id filter."
+                }
+            }
+        }),
+    )
+}
+
+fn def_lcm_load_session() -> ToolDefinition {
+    def(
+        "tokensave_lcm_load_session",
+        "LCM Load Session",
+        "Load ordered lossless raw session messages with stable pagination and bounded content slices.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "after_store_id": {
+                    "type": "number",
+                    "description": "Return rows after this raw store id."
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum rows, clamped to 100."
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Optional role filter."
+                },
+                "start_time": {
+                    "type": "number",
+                    "description": "Optional inclusive minimum message timestamp."
+                },
+                "end_time": {
+                    "type": "number",
+                    "description": "Optional inclusive maximum message timestamp."
+                },
+                "content_offset": {
+                    "type": "number",
+                    "description": "Character offset for each returned content slice."
+                },
+                "content_limit": {
+                    "type": "number",
+                    "description": "Maximum characters returned per message, clamped by the handler."
+                }
+            },
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_grep() -> ToolDefinition {
+    def(
+        "tokensave_lcm_grep",
+        "LCM Grep",
+        "Search bounded LCM raw-message snippets and optional summary text in the project-local sessions.db.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Full-text query for LCM snippets."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["current", "session", "all"],
+                    "description": "Search scope. current/session require session_id; all is the default."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id used when scope is current or session."
+                },
+                "include_summaries": {
+                    "type": "boolean",
+                    "description": "Include summary node text after raw-message matches (default: true)."
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum hits, clamped to 100."
+                }
+            },
+            "required": ["query"]
+        }),
+    )
+}
+
+fn def_lcm_describe() -> ToolDefinition {
+    def(
+        "tokensave_lcm_describe",
+        "LCM Describe",
+        "Describe one session's LCM raw-message and summary-DAG shape without exposing full payload bodies.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                }
+            },
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_expand() -> ToolDefinition {
+    def(
+        "tokensave_lcm_expand",
+        "LCM Expand",
+        "Expand one raw message, summary node, or external payload through the bounded LCM query API.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Expansion target.",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["raw_message", "summary_node", "external_payload"]
+                        },
+                        "store_id": {
+                            "type": "number",
+                            "description": "Raw-message store id when kind=raw_message."
+                        },
+                        "node_id": {
+                            "type": "string",
+                            "description": "Summary node id when kind=summary_node."
+                        },
+                        "payload_ref": {
+                            "type": "string",
+                            "description": "Payload ref when kind=external_payload."
+                        }
+                    },
+                    "required": ["kind"]
+                },
+                "content_offset": {
+                    "type": "number",
+                    "description": "Character offset for returned content."
+                },
+                "content_limit": {
+                    "type": "number",
+                    "description": "Maximum characters returned, clamped by the handler."
+                }
+            },
+            "required": ["session_id", "target"]
+        }),
+    )
+}
+
+fn def_lcm_expand_query() -> ToolDefinition {
+    def(
+        "tokensave_lcm_expand_query",
+        "LCM Expand Query",
+        "Answer a prompt from bounded LCM expansions. Registered for compatibility; synthesis awaits the Hermes/LLM bridge.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional provider-local session id."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional search query to select candidate LCM context."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Question or instruction to answer from LCM context."
+                },
+                "node_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional summary node ids to expand."
+                },
+                "max_results": {
+                    "type": "number",
+                    "description": "Maximum candidate results."
+                },
+                "max_tokens": {
+                    "type": "number",
+                    "description": "Desired synthesized answer token budget."
+                }
+            }
+        }),
+    )
+}
+
+fn def_lcm_preflight() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_preflight",
+        "LCM Preflight",
+        "Run compression preflight checks. Registered now; lifecycle mutation is implemented in a later task.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                }
+            }
+        }),
+    )
+}
+
+fn def_lcm_compress() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_compress",
+        "LCM Compress",
+        "Advance the LCM compression lifecycle. Registered now; compression is implemented in a later task.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview lifecycle work without mutating state once compression is implemented."
+                }
+            }
         }),
     )
 }

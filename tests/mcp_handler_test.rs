@@ -85,6 +85,72 @@ fn expect_tool_error<T>(result: tokensave::errors::Result<T>) -> String {
     }
 }
 
+#[test]
+fn lcm_tool_schemas_are_registered_with_stable_names() {
+    let tools = get_tool_definitions();
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for expected in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+    ] {
+        assert!(names.contains(expected), "missing {expected}");
+    }
+
+    for read_only in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == read_only)
+            .unwrap_or_else(|| panic!("{read_only} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    }
+
+    for mutating in ["tokensave_lcm_preflight", "tokensave_lcm_compress"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == mutating)
+            .unwrap_or_else(|| panic!("{mutating} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
+    }
+
+    let load = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_load_session")
+        .expect("tokensave_lcm_load_session definition");
+    assert_eq!(load.input_schema["required"], json!(["session_id"]));
+    assert!(load.input_schema["properties"]
+        .get("content_limit")
+        .is_some());
+
+    let expand = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_expand")
+        .expect("tokensave_lcm_expand definition");
+    assert_eq!(
+        expand.input_schema["required"],
+        json!(["session_id", "target"])
+    );
+    assert!(expand.input_schema["properties"].get("target").is_some());
+}
+
 /// Searches for `name` via the search handler and returns the first matching
 /// node id whose name field equals `name`.
 async fn find_node_id(cg: &TokenSave, name: &str) -> String {
@@ -3592,6 +3658,305 @@ async fn message_search_reads_project_local_session_db() {
         subagent_parsed["results"][0]["session"]["is_subagent"],
         true
     );
+}
+
+#[tokio::test]
+async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "lcm-session".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("LCM session".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("lcm-session.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "lcm-message".to_string(),
+            session_id: "lcm-session".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: full_text,
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("lcm-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-message")
+        .await
+        .expect("LCM raw message should be created by compatibility ingest");
+
+    let status = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({"provider": "cursor"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "ok");
+    assert_eq!(status_payload["lcm"]["raw_message_count"], 1);
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "content_limit": 24
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert!(loaded_payload["messages"][0]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        loaded_payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        24
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
+    assert!(
+        grep_payload["hits"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 4096,
+        "grep snippets must stay bounded"
+    );
+
+    let described = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({"provider": "cursor", "session_id": "lcm-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let described_payload: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
+    assert_eq!(described_payload["status"], "ok");
+    assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    assert!(described_payload["description"]["raw_messages"][0]
+        .get("content_preview")
+        .is_some());
+    assert!(
+        described_payload["description"]["raw_messages"][0]
+            .get("content")
+            .is_none(),
+        "describe must not expose raw payload bodies"
+    );
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "target": {"kind": "raw_message", "store_id": raw.store_id},
+            "content_offset": 8,
+            "content_limit": 16
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["expansion"]["kind"], "raw_message");
+    assert_eq!(
+        expanded_payload["expansion"]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        16
+    );
+    assert!(expanded_payload["expansion"]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+
+    for tool_name in [
+        "tokensave_lcm_expand_query",
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+    ] {
+        let result = handle_tool_call(
+            &cg,
+            tool_name,
+            json!({"provider": "cursor", "session_id": "lcm-session", "prompt": "summarize"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        assert_eq!(payload["status"], "not_implemented", "{tool_name}");
+    }
+}
+
+#[tokio::test]
+async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "parent".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Parent session".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("parent.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "child".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Child session".to_string()),
+            started_at: Some(2),
+            ended_at: None,
+            transcript_path: Some("child.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: Some("parent".to_string()),
+            is_subagent: true,
+            agent_id: Some("child".to_string()),
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "child-message".to_string(),
+            session_id: "child".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(3),
+            ordinal: 1,
+            text: "orchard dispatch compatibility result".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("child.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_message_search",
+        json!({
+            "query": "orchard dispatch",
+            "provider": "cursor",
+            "project_key": cg.project_root().to_string_lossy(),
+            "scope": "subagents_only",
+            "parent_session_id": "parent",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["scope"], "subagents_only");
+    assert_eq!(payload["provider"], "cursor");
+    assert_eq!(payload["parent_session_id"], "parent");
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
+    assert!(payload["results"][0]["message"].get("text").is_some());
+    assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
+}
+
+#[tokio::test]
+async fn lcm_status_cli_bridge_accepts_json_args() {
+    let (cg, _dir) = setup_project().await;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(cg.project_root())
+        .args([
+            "tool",
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor"}"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "tokensave tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["content"][0]["type"], "text");
+    let payload: Value =
+        serde_json::from_str(json["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["status"], "ok");
 }
 
 #[test]

@@ -209,6 +209,14 @@ pub async fn handle_tool_call(
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
+        "tokensave_lcm_status" => session::handle_lcm_status(cg, args).await,
+        "tokensave_lcm_load_session" => session::handle_lcm_load_session(cg, args).await,
+        "tokensave_lcm_grep" => session::handle_lcm_grep(cg, args).await,
+        "tokensave_lcm_describe" => session::handle_lcm_describe(cg, args).await,
+        "tokensave_lcm_expand" => session::handle_lcm_expand(cg, args).await,
+        "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(cg, args).await,
+        "tokensave_lcm_preflight" => session::handle_lcm_preflight(cg, args).await,
+        "tokensave_lcm_compress" => session::handle_lcm_compress(cg, args).await,
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
         }),
@@ -236,9 +244,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            77
+            85
         } else {
-            76
+            84
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -314,6 +322,14 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
         assert!(tool_names.contains(&"tokensave_message_search"));
+        assert!(tool_names.contains(&"tokensave_lcm_status"));
+        assert!(tool_names.contains(&"tokensave_lcm_load_session"));
+        assert!(tool_names.contains(&"tokensave_lcm_grep"));
+        assert!(tool_names.contains(&"tokensave_lcm_describe"));
+        assert!(tool_names.contains(&"tokensave_lcm_expand"));
+        assert!(tool_names.contains(&"tokensave_lcm_expand_query"));
+        assert!(tool_names.contains(&"tokensave_lcm_preflight"));
+        assert!(tool_names.contains(&"tokensave_lcm_compress"));
         assert!(tool_names.contains(&"tokensave_read"));
         assert!(tool_names.contains(&"tokensave_outline"));
         assert!(tool_names.contains(&"tokensave_implementations"));
@@ -357,6 +373,8 @@ mod tests {
             "tokensave_fact_store",
             "tokensave_fact_feedback",
             "tokensave_memory_status",
+            "tokensave_lcm_preflight",
+            "tokensave_lcm_compress",
         ];
         for tool in &tools {
             let ann = tool
