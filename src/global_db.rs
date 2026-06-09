@@ -299,6 +299,40 @@ impl GlobalDb {
         })
     }
 
+    /// Opens a writable database at an explicit path assuming its schema was
+    /// already ensured by a prior [`Self::open_at`] in this process: skips the
+    /// DDL batch and LCM migrations while still applying the per-connection
+    /// PRAGMAs. Long-lived servers use this to avoid re-paying the schema
+    /// ensure on every tool call (the caller tracks which paths are ensured).
+    pub async fn open_at_assuming_schema(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        let db = Builder::new_local(db_path).build().await.ok()?;
+        let conn = db.connect().ok()?;
+
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )
+        .await
+        .ok()?;
+
+        Some(Self {
+            conn,
+            storage_root,
+            db_path: db_path.to_path_buf(),
+            _db: db,
+        })
+    }
+
     /// Opens an existing database without creating directories, creating schema,
     /// or running LCM carry-forward migrations.
     pub async fn open_read_only_at(db_path: &std::path::Path) -> Option<Self> {

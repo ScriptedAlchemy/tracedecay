@@ -8389,3 +8389,63 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(lcm["config"]["summary_fan_in"], 4);
     assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
 }
+
+// Repeated LCM tool calls in one process must reuse the per-process
+// "schema already ensured" flag instead of re-opening the project DB with a
+// full DDL ensure each time. Observable via the version gate: after the
+// first call marks the path as ensured, a manually downgraded version
+// marker stays downgraded — a re-run of the migrations would bump it back
+// to LCM_SCHEMA_VERSION.
+#[tokio::test]
+async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
+    let (cg, _dir) = setup_project().await;
+
+    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(tokensave::sessions::lcm::LCM_SCHEMA_VERSION)
+    );
+
+    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE session_schema_migrations SET version = 1 WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(
+        payload["status"], "ok",
+        "repeated serve-mode call must work"
+    );
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(1),
+        "second call must take the per-process ensured fast path instead of re-running migrations"
+    );
+
+    // The on-disk marker is untouched as well.
+    let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+}

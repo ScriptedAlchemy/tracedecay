@@ -1178,6 +1178,101 @@ async fn test_initialize_advertises_logging_capability() {
 // search_call_writes_savings_ledger_row
 // ---------------------------------------------------------------------------
 
+// Repeated serve-mode LCM calls must keep working while the project session
+// DB schema is ensured at most once per process: after the first call, later
+// calls (even from a fresh `McpServer` in the same process) take the
+// version-gate fast path and never re-run the LCM migrations — observable
+// via the migration row's `applied_at`, which only a migration run rewrites.
+#[tokio::test]
+async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
+    let (server, dir) = setup_server().await;
+    let lcm_status_call = |id: i64| {
+        jsonrpc_request(
+            json!(id),
+            "tools/call",
+            json!({ "name": "tokensave_lcm_status", "arguments": {} }),
+        )
+    };
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_request(json!(1), "initialize", json!({})),
+            jsonrpc_notification("notifications/initialized"),
+            lcm_status_call(2),
+            lcm_status_call(3),
+        ],
+    )
+    .await;
+    for id in [2_i64, 3] {
+        let resp = responses
+            .iter()
+            .map(|r| parse_response(r))
+            .find(|r| r["id"] == json!(id))
+            .unwrap_or_else(|| panic!("missing response for id={id}"));
+        assert!(
+            resp["error"].is_null(),
+            "lcm_status id={id} should not error"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["status"], "ok", "lcm_status id={id} payload");
+    }
+
+    // Stamp a sentinel applied_at; only a re-run of the migrations would
+    // rewrite it (the version-gate fast path and the per-process ensured
+    // flag both leave the row untouched).
+    let db_path = tokensave::sessions::cursor::project_session_db_path(dir.path());
+    let applied_at = |db_path: std::path::PathBuf| async move {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    };
+    {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE session_schema_migrations SET applied_at = 123 WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(applied_at(db_path.clone()).await, 123);
+
+    // A second serve session over the same project in the same process.
+    let cg = TokenSave::open(dir.path()).await.unwrap();
+    let server = McpServer::new(cg, None).await;
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_request(json!(1), "initialize", json!({})),
+            lcm_status_call(2),
+            lcm_status_call(3),
+        ],
+    )
+    .await;
+    for id in [2_i64, 3] {
+        let resp = responses
+            .iter()
+            .map(|r| parse_response(r))
+            .find(|r| r["id"] == json!(id))
+            .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
+        assert!(resp["error"].is_null(), "second-session lcm_status id={id}");
+    }
+    assert_eq!(
+        applied_at(db_path).await,
+        123,
+        "repeated serve-mode LCM calls must not re-run the LCM migrations"
+    );
+}
+
 #[tokio::test]
 async fn search_call_writes_savings_ledger_row() {
     let tmp_home = tempfile::tempdir().unwrap();

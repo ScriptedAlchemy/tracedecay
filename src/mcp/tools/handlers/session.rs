@@ -1,4 +1,6 @@
-use std::path::{Component, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
@@ -756,6 +758,52 @@ struct LcmStorage {
     scope: &'static str,
 }
 
+/// Database paths whose schema (sessions DDL + LCM migrations) has already
+/// been ensured by this process. In `tokensave serve`, every LCM tool call
+/// re-opens the project session DB; once `GlobalDb::open_at` has ensured the
+/// schema for a path, later opens skip the DDL batch and the LCM version
+/// gate entirely via `open_at_assuming_schema`. The schema only ever grows
+/// and lives in the file itself, so a concurrent process cannot invalidate
+/// the flag; the `is_file` check below covers the file being deleted
+/// underneath a long-lived server. One-shot CLI invocations open each path
+/// once, so their behavior is unchanged.
+///
+/// Connections are deliberately NOT cached: each call still opens a fresh
+/// libsql local connection. Sharing a long-lived handle across tool calls
+/// would have to prove cross-process WAL safety and stale-handle recovery
+/// (other processes checkpoint and write the same file), which is not worth
+/// the risk for a per-call open that is cheap once the DDL is skipped.
+static ENSURED_SCHEMA_DB_PATHS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn schema_already_ensured(db_path: &Path) -> bool {
+    db_path.is_file()
+        && ENSURED_SCHEMA_DB_PATHS
+            .lock()
+            .is_ok_and(|paths| paths.contains(db_path))
+}
+
+fn mark_schema_ensured(db_path: &Path) {
+    if let Ok(mut paths) = ENSURED_SCHEMA_DB_PATHS.lock() {
+        paths.insert(db_path.to_path_buf());
+    }
+}
+
+/// Opens a writable session DB, ensuring the schema at most once per
+/// process per path (see [`ENSURED_SCHEMA_DB_PATHS`]).
+async fn open_session_db_with_cached_ensure(db_path: &Path) -> Option<GlobalDb> {
+    if schema_already_ensured(db_path) {
+        if let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await {
+            return Some(db);
+        }
+        // Fast path failed (e.g. file replaced mid-session): fall through to
+        // a full ensure rather than failing the tool call.
+    }
+    let db = GlobalDb::open_at(db_path).await?;
+    mark_schema_ensured(db_path);
+    Some(db)
+}
+
 enum LcmStorageResolution {
     Available(Box<LcmStorage>),
     Unavailable(ToolResult),
@@ -821,11 +869,11 @@ async fn open_lcm_storage_with_mode(
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
         "project_local" => {
+            let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
             let db = if read_only_existing {
-                let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
                 GlobalDb::open_read_only_at(&db_path).await
             } else {
-                crate::sessions::cursor::open_project_session_db(cg.project_root()).await
+                open_session_db_with_cached_ensure(&db_path).await
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
@@ -865,7 +913,7 @@ async fn open_lcm_storage_with_mode(
             let db = if read_only_existing {
                 GlobalDb::open_read_only_at(&db_path).await
             } else {
-                GlobalDb::open_at(&db_path).await
+                open_session_db_with_cached_ensure(&db_path).await
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
@@ -1018,7 +1066,8 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         .unwrap_or(10)
         .clamp(1, 50) as usize;
 
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
+    let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+    let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(&json!({
             "status": "unavailable",
             "message": "could not open project-local tokensave session database",
