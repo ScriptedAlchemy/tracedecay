@@ -42,7 +42,7 @@ async fn register_global_project(home: &Path, project: &Path) {
 
 fn tokensave_command_with_home(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tokensave"));
-    command.env("HOME", home);
+    command.env("HOME", home).env("USERPROFILE", home);
     command
 }
 
