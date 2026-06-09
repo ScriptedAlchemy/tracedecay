@@ -1,10 +1,13 @@
+use std::path::Path;
+
 use libsql::{params, Connection, Value};
 use sha2::{Digest, Sha256};
 
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    LcmStorageKind, DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+    payload, security, LcmError, LcmStorageKind, DERIVED_TRUNCATION_MARKER,
+    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
 
 pub fn derived_text_for_index(raw: &str) -> String {
@@ -69,6 +72,76 @@ pub(crate) async fn upsert_raw_message(conn: &Connection, message: &SessionMessa
     )
     .await
     .is_ok()
+}
+
+pub(crate) async fn upsert_raw_message_with_payload(
+    conn: &Connection,
+    storage_root: &Path,
+    message: &SessionMessageRecord,
+) -> Result<(), LcmError> {
+    if !security::should_externalize(&message.role, message.kind.as_deref(), &message.text) {
+        return if upsert_raw_message(conn, message).await {
+            Ok(())
+        } else {
+            Err(LcmError::Db(
+                "failed to upsert inline raw message".to_string(),
+            ))
+        };
+    }
+
+    let kind = message.kind.as_deref().unwrap_or("message");
+    let payload_ref = payload::write_external_payload(
+        storage_root,
+        &message.provider,
+        &message.session_id,
+        &message.message_id,
+        kind,
+        &message.text,
+        message.metadata_json.clone(),
+    )?;
+    payload::upsert_payload_metadata(conn, &payload_ref).await?;
+
+    let snippet = derived_text_for_snippet(&message.text);
+    let index = derived_text_for_index(&message.text);
+    conn.execute(
+        "INSERT INTO lcm_raw_messages (
+            provider, message_id, session_id, role, ordinal, timestamp,
+            content, content_hash, storage_kind, payload_ref, snippet_text,
+            index_text, legacy_source, legacy_truncated, metadata_json
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, 0, 0, ?12)
+         ON CONFLICT(provider, message_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            role = excluded.role,
+            ordinal = excluded.ordinal,
+            timestamp = excluded.timestamp,
+            content = excluded.content,
+            content_hash = excluded.content_hash,
+            storage_kind = excluded.storage_kind,
+            payload_ref = excluded.payload_ref,
+            snippet_text = excluded.snippet_text,
+            index_text = excluded.index_text,
+            legacy_source = 0,
+            legacy_truncated = 0,
+            metadata_json = excluded.metadata_json",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+            message.role.as_str(),
+            message.ordinal,
+            opt_i64(message.timestamp),
+            payload_ref.content_hash.as_str(),
+            LcmStorageKind::External.as_str(),
+            payload_ref.payload_ref.as_str(),
+            snippet.as_str(),
+            index.as_str(),
+            opt_text(message.metadata_json.as_deref()),
+        ],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(())
 }
 
 pub(crate) fn sha256_hex(content: &str) -> String {

@@ -636,6 +636,17 @@ impl GlobalDb {
         crate::sessions::lcm::schema::load_raw_message(&self.conn, provider, message_id).await
     }
 
+    /// Returns an LCM store bound to an explicit storage root for payload files.
+    pub fn lcm_store(
+        &self,
+        storage_root: impl AsRef<Path>,
+    ) -> crate::sessions::lcm::payload::LcmStore<'_> {
+        crate::sessions::lcm::payload::LcmStore::new(
+            &self.conn,
+            storage_root.as_ref().to_path_buf(),
+        )
+    }
+
     /// Searches message text for a provider, optionally constrained to one project.
     pub async fn search_session_messages(
         &self,

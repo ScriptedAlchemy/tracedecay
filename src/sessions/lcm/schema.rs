@@ -37,6 +37,23 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_order
             ON lcm_raw_messages(provider, session_id, store_id);
+        CREATE TABLE IF NOT EXISTS lcm_external_payloads (
+            payload_ref TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            char_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            metadata_json TEXT,
+            UNIQUE(provider, message_id, payload_ref),
+            FOREIGN KEY(provider, session_id)
+                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner
+            ON lcm_external_payloads(provider, session_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
             index_text, role, metadata_json,
             content='lcm_raw_messages',
@@ -110,6 +127,7 @@ pub(crate) async fn load_raw_message(
         .ok()?;
     let row = rows.next().await.ok()??;
     let storage_kind_text: String = row.get(9).ok()?;
+    let content: Option<String> = row.get(7).ok()?;
     Some(LcmRawMessage {
         provider: row.get(0).ok()?,
         message_id: row.get(1).ok()?,
@@ -118,7 +136,7 @@ pub(crate) async fn load_raw_message(
         role: row.get(4).ok()?,
         ordinal: row.get(5).ok()?,
         timestamp: row.get(6).ok()?,
-        content: row.get(7).ok()?,
+        content: content.unwrap_or_default(),
         content_hash: row.get(8).ok()?,
         storage_kind: LcmStorageKind::from_db(&storage_kind_text)?,
         payload_ref: row.get(10).ok()?,

@@ -20,6 +20,61 @@ pub struct LcmRawMessage {
     pub metadata_json: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadRef {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub char_count: u64,
+    pub created_at: i64,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadExpansion {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub content: String,
+    pub offset: u64,
+    pub char_count: u64,
+    pub total_char_count: u64,
+    pub byte_count: u64,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LcmError {
+    InvalidPayloadRef,
+    PayloadNotFound,
+    PayloadNotOwnedBySession,
+    PayloadMissing,
+    PayloadIntegrityMismatch,
+    Db(String),
+    Io(String),
+}
+
+impl std::fmt::Display for LcmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPayloadRef => write!(f, "invalid payload ref"),
+            Self::PayloadNotFound => write!(f, "payload not found"),
+            Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
+            Self::PayloadMissing => write!(f, "payload file missing"),
+            Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
+            Self::Db(message) => write!(f, "payload database error: {message}"),
+            Self::Io(message) => write!(f, "payload IO error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LcmError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcmStorageKind {
