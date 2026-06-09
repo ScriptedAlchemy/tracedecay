@@ -43,8 +43,7 @@ const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
 fn global_db_enabled() -> bool {
     std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 /// Hand-maintained schema documentation for the `tokensave://schema` resource.
@@ -232,6 +231,51 @@ fn humanize_age(secs: i64) -> String {
         format!("{}h ago", secs / 3_600)
     } else {
         format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn tool_result_has_semantic_error(value: &Value) -> bool {
+    value
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| {
+            content.iter().any(|item| {
+                let Some(text) = item.get("text").and_then(Value::as_str) else {
+                    return false;
+                };
+                let trimmed = text.trim_start();
+                if plain_text_tool_failure(trimmed) {
+                    return true;
+                }
+                if !trimmed.starts_with('{') {
+                    return false;
+                }
+                let Ok(payload) = serde_json::from_str::<Value>(trimmed) else {
+                    return false;
+                };
+                payload.get("success").and_then(Value::as_bool) == Some(false)
+                    || payload.get("error").is_some_and(|error| !error.is_null())
+                    || payload
+                        .get("failed")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|failed| failed > 0)
+                    || payload
+                        .get("exit_code")
+                        .is_some_and(|code| !code.is_null() && code.as_i64() != Some(0))
+            })
+        })
+}
+
+fn plain_text_tool_failure(text: &str) -> bool {
+    text.starts_with("git error:") || text.starts_with("git diff failed:")
+}
+
+fn mark_semantic_tool_error(value: &mut Value) {
+    if !tool_result_has_semantic_error(value) {
+        return;
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("isError".to_string(), json!(true));
     }
 }
 
@@ -684,7 +728,7 @@ impl McpServer {
         &self,
         line: &str,
         transport: &mut impl super::transport::McpTransport,
-    ) {
+    ) -> Result<()> {
         let parsed: std::result::Result<super::transport::JsonRpcRequest, _> =
             serde_json::from_str(line);
         let response = match parsed {
@@ -698,9 +742,10 @@ impl McpServer {
         if let Some(resp) = response {
             let mut json_str = serde_json::to_string(&resp).unwrap_or_default();
             json_str.push('\n');
-            let _ = transport.write_line(&json_str).await;
-            let _ = transport.flush().await;
+            transport.write_line(&json_str).await?;
+            transport.flush().await?;
         }
+        Ok(())
     }
 
     /// Runs the server, reading JSON-RPC requests from stdin and writing
@@ -719,7 +764,11 @@ impl McpServer {
                         result = transport.read_line() => {
                             match result {
                                 Ok(Some(line)) => line,
-                                _ => break,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    self.shutdown().await;
+                                    return Err(e.into());
+                                }
                             }
                         }
                         _ = tokio::signal::ctrl_c() => break,
@@ -732,7 +781,11 @@ impl McpServer {
                         result = transport.read_line() => {
                             match result {
                                 Ok(Some(line)) => line,
-                                _ => break,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    self.shutdown().await;
+                                    return Err(e.into());
+                                }
                             }
                         }
                         _ = tokio::signal::ctrl_c() => break,
@@ -766,8 +819,14 @@ impl McpServer {
                     .unwrap_or_default();
                 for notification in notifications {
                     if let Ok(s) = serde_json::to_string(&notification) {
-                        let _ = transport.write_line(&format!("{s}\n")).await;
-                        let _ = transport.flush().await;
+                        if let Err(e) = transport.write_line(&format!("{s}\n")).await {
+                            self.shutdown().await;
+                            return Err(e.into());
+                        }
+                        if let Err(e) = transport.flush().await {
+                            self.shutdown().await;
+                            return Err(e.into());
+                        }
                     }
                 }
             }
@@ -784,11 +843,13 @@ impl McpServer {
                 let output = format!("{json_line}\n");
                 if let Err(e) = transport.write_line(&output).await {
                     eprintln!("failed to write response: {e}");
-                    break;
+                    self.shutdown().await;
+                    return Err(e.into());
                 }
                 if let Err(e) = transport.flush().await {
                     eprintln!("failed to flush stdout: {e}");
-                    break;
+                    self.shutdown().await;
+                    return Err(e.into());
                 }
             }
         }
@@ -865,16 +926,16 @@ impl McpServer {
             "handle_request called with empty method"
         );
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        let id = request.id.clone();
+        let id = request.id.clone()?;
 
         let result = match request.method.as_str() {
             "initialize" => Some(Self::handle_initialize(id)),
             "initialized" => {
-                // Notification - no response required
+                // Some clients send this notification with an id; keep it a no-op.
                 None
             }
             "notifications/initialized" => {
-                // Alternative notification path - no response required
+                // Alternate initialized request path; also a compatibility no-op.
                 None
             }
             "tools/list" => Some(self.handle_tools_list(id).await),
@@ -1190,10 +1251,6 @@ impl McpServer {
 
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     async fn handle_tools_call(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
-        debug_assert!(
-            !id.is_null(),
-            "handle_tools_call called with null request id"
-        );
         let Some(params) = params else {
             return JsonRpcResponse::error(
                 id,
@@ -1439,6 +1496,7 @@ impl McpServer {
                     }
                 }
 
+                mark_semantic_tool_error(&mut result.value);
                 JsonRpcResponse::success(id, result.value)
             }
             Err(e) => JsonRpcResponse::error(

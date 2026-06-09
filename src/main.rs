@@ -1034,7 +1034,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let mut transport = tokensave::mcp::StdioTransport::new();
             // If we peeked at stdin to read `initialize` roots, replay that line.
             if let Some(line) = peeked_line {
-                server.handle_and_write(&line, &mut transport).await;
+                server.handle_and_write(&line, &mut transport).await?;
             }
             server.run(&mut transport).await?;
             server.shutdown().await;
