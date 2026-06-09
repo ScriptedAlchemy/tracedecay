@@ -911,9 +911,14 @@ class TokenSaveContextEngine(ContextEngine):
         self.project_root = None
 
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
-        self.active_session_id = session_id
-        self.hermes_home = hermes_home if hermes_home is not None else kwargs.get("hermes_home")
-        self.project_root = project_root or kwargs.get("project_root") or kwargs.get("cwd")
+        if session_id is not None:
+            self.active_session_id = session_id
+        next_hermes_home = hermes_home or kwargs.get("hermes_home")
+        if next_hermes_home:
+            self.hermes_home = next_hermes_home
+        next_project_root = project_root or kwargs.get("project_root") or kwargs.get("cwd")
+        if next_project_root:
+            self.project_root = next_project_root
 
     def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)

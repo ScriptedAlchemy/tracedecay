@@ -135,25 +135,47 @@ def fake_call_tokensave_tool(name, args, **kwargs):
 
 plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
 
-engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
-engine.should_compress_preflight(messages=[], current_tokens=123)
+profile_engine = plugin.TokenSaveContextEngine()
+profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
+profile_engine.should_compress_preflight(messages=[], current_tokens=123)
 name, args, kwargs = calls.pop()
 assert name == "tokensave_lcm_preflight"
 assert args["session_id"] == "session-1"
 assert args["storage_scope"] == "hermes_profile"
 assert args["hermes_home"] == "/tmp/hermes"
 
-engine.on_session_start(
+project_engine = plugin.TokenSaveContextEngine()
+project_engine.on_session_start(
     session_id="session-2",
     hermes_home="/tmp/hermes",
     project_root="/tmp/project",
 )
-engine.should_compress_preflight(messages=[], current_tokens=456)
+project_engine.should_compress_preflight(messages=[], current_tokens=456)
 name, args, kwargs = calls.pop()
 assert name == "tokensave_lcm_preflight"
 assert args["session_id"] == "session-2"
 assert args["storage_scope"] == "project_local"
 assert args["project_root"] == "/tmp/project"
+
+project_engine = plugin.TokenSaveContextEngine()
+project_engine.initialize(session_id="initial", project_root="/tmp/project")
+project_engine.on_session_start(session_id="next")
+project_engine.should_compress_preflight(messages=[], current_tokens=789)
+name, args, kwargs = calls.pop()
+assert name == "tokensave_lcm_preflight"
+assert args["session_id"] == "next"
+assert args["storage_scope"] == "project_local"
+assert args["project_root"] == "/tmp/project"
+
+profile_engine = plugin.TokenSaveContextEngine()
+profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
+profile_engine.on_session_start(session_id="next")
+profile_engine.should_compress_preflight(messages=[], current_tokens=321)
+name, args, kwargs = calls.pop()
+assert name == "tokensave_lcm_preflight"
+assert args["session_id"] == "next"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == "/tmp/hermes"
 
 class LegacyCtx:
     def register_tool(self, *args, **kwargs):
