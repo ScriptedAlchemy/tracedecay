@@ -719,8 +719,15 @@ pub enum LcmError {
     PayloadIntegrityMismatch,
     SummaryNodeNotFound,
     SummarySourceNotOwnedBySession,
+    LifecycleStateNotFound,
     Db(String),
     Io(String),
+}
+
+impl From<libsql::Error> for LcmError {
+    fn from(err: libsql::Error) -> Self {
+        Self::Db(err.to_string())
+    }
 }
 
 impl std::fmt::Display for LcmError {
@@ -734,6 +741,9 @@ impl std::fmt::Display for LcmError {
             Self::SummaryNodeNotFound => write!(f, "summary node not found"),
             Self::SummarySourceNotOwnedBySession => {
                 write!(f, "summary source not owned by session")
+            }
+            Self::LifecycleStateNotFound => {
+                write!(f, "payload database error: lifecycle state not found")
             }
             Self::Db(message) => write!(f, "payload database error: {message}"),
             Self::Io(message) => write!(f, "payload IO error: {message}"),
