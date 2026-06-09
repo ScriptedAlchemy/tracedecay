@@ -41,6 +41,15 @@ struct IngestedActiveMessages {
     changed_replay: bool,
 }
 
+struct ExistingActiveMessageState {
+    session_id: String,
+    role: String,
+    timestamp: Option<i64>,
+    ordinal: i64,
+    content_hash: String,
+    metadata_json: Option<String>,
+}
+
 pub(crate) async fn update_lifecycle(
     conn: &Connection,
     update: LcmLifecycleUpdate,
@@ -334,7 +343,7 @@ pub(crate) async fn preflight(
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    let ingested = ingest_active_messages(
+    let ingested = ingest_active_messages_in_transaction(
         conn,
         storage_root,
         &request.provider,
@@ -419,7 +428,11 @@ pub(crate) async fn compress(
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    let ingested = ingest_active_messages(
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let ingested = match ingest_active_messages(
         conn,
         storage_root,
         &request.provider,
@@ -427,7 +440,14 @@ pub(crate) async fn compress(
         &request.messages,
         &request.ignore_message_patterns,
     )
-    .await?;
+    .await
+    {
+        Ok(ingested) => ingested,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    };
 
     if matches!(request.summarizer, LcmSummarizerMode::Noop) {
         let frontier = lifecycle_state_or_default(
@@ -437,7 +457,7 @@ pub(crate) async fn compress(
             &request.session_id,
         )
         .await?;
-        return Ok(compression_response(
+        let response = compression_response(
             "ok",
             "noop_summarizer",
             Vec::new(),
@@ -445,12 +465,15 @@ pub(crate) async fn compress(
             frontier,
             None,
             request.max_assembly_tokens,
-        ));
+        );
+        return match conn.execute("COMMIT", ()).await {
+            Ok(_) => Ok(response),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(LcmError::Db(err.to_string()))
+            }
+        };
     }
-
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
 
     let response = match compress_in_transaction(conn, request).await {
         Ok(response) => response,
@@ -462,6 +485,44 @@ pub(crate) async fn compress(
 
     match conn.execute("COMMIT", ()).await {
         Ok(_) => Ok(response),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(LcmError::Db(err.to_string()))
+        }
+    }
+}
+
+async fn ingest_active_messages_in_transaction(
+    conn: &Connection,
+    storage_root: &Path,
+    provider: &str,
+    session_id: &str,
+    messages: &[Value],
+    ignore_message_patterns: &[String],
+) -> Result<IngestedActiveMessages, LcmError> {
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let ingested = match ingest_active_messages(
+        conn,
+        storage_root,
+        provider,
+        session_id,
+        messages,
+        ignore_message_patterns,
+    )
+    .await
+    {
+        Ok(ingested) => ingested,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    };
+
+    match conn.execute("COMMIT", ()).await {
+        Ok(_) => Ok(ingested),
         Err(err) => {
             let _ = conn.execute("ROLLBACK", ()).await;
             Err(LcmError::Db(err.to_string()))
@@ -1773,6 +1834,7 @@ async fn ingest_active_messages(
     let mut replay_messages = Vec::with_capacity(messages.len());
     let mut changed_replay = false;
     let mut next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
+    let compiled_ignore_patterns = security::compile_message_patterns(ignore_message_patterns);
 
     for (idx, message) in messages.iter().enumerate() {
         let role = message
@@ -1783,7 +1845,9 @@ async fn ingest_active_messages(
         let original_content = message_content_value(message);
         let storage_text = message_storage_text(&original_content);
         let search_text = message_content(message);
-        if security::ignore_message_reason(&role, &search_text, ignore_message_patterns).is_some() {
+        if security::ignore_message_reason_with_compiled(&search_text, &compiled_ignore_patterns)
+            .is_some()
+        {
             let mut replay = message.clone();
             replay["role"] = Value::String(role);
             replay_messages.push(replay);
@@ -1798,14 +1862,31 @@ async fn ingest_active_messages(
                 || deterministic_message_id(provider, session_id, idx, &role, &storage_text),
                 str::to_string,
             );
-        let ordinal = if let Some(existing_ordinal) =
-            existing_message_ordinal(conn, provider, &message_id).await?
-        {
-            existing_ordinal
+        let existing_state = existing_active_message_state(conn, provider, &message_id).await?;
+        let ordinal = if let Some(existing) = existing_state.as_ref() {
+            existing.ordinal
         } else {
             next_available_ordinal += 1;
             next_available_ordinal
         };
+        let message_timestamp = message.get("timestamp").and_then(Value::as_i64);
+        let mut replay = message.clone();
+        replay["role"] = Value::String(role.clone());
+        replay["content"] = original_content.clone();
+        let initial_metadata_json = active_message_metadata(message, &replay);
+        let expected_content_hash = raw::sha256_hex(&storage_text);
+        if let Some(existing) = existing_state.as_ref() {
+            let matches_stored_row = existing.ordinal == ordinal
+                && existing.content_hash == expected_content_hash
+                && existing.metadata_json.as_deref() == Some(initial_metadata_json.as_str())
+                && existing.session_id == session_id
+                && existing.role == role
+                && existing.timestamp == message_timestamp;
+            if matches_stored_row {
+                replay_messages.push(replay);
+                continue;
+            }
+        }
         let kind = message
             .get("kind")
             .and_then(Value::as_str)
@@ -1816,7 +1897,7 @@ async fn ingest_active_messages(
             message_id: message_id.clone(),
             session_id: session_id.to_string(),
             role: role.clone(),
-            timestamp: message.get("timestamp").and_then(Value::as_i64),
+            timestamp: message_timestamp,
             ordinal,
             text: storage_text.clone(),
             kind,
@@ -1827,7 +1908,7 @@ async fn ingest_active_messages(
             tool_names: None,
             source_path: None,
             source_offset: None,
-            metadata_json: Some(active_message_metadata(message, &role)),
+            metadata_json: Some(initial_metadata_json.clone()),
         };
         let upsert = raw::upsert_raw_message_with_payload(conn, storage_root, &record).await?;
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
@@ -1838,8 +1919,6 @@ async fn ingest_active_messages(
         if replay_content != original_content || raw.storage_kind == LcmStorageKind::External {
             changed_replay = true;
         }
-        let mut replay = message.clone();
-        replay["role"] = Value::String(record.role.clone());
         replay["content"] = replay_content;
         if let Some(tool_calls) = replay.get("tool_calls").cloned() {
             let protected_tool_calls = raw::protect_replay_field_value(
@@ -1857,7 +1936,9 @@ async fn ingest_active_messages(
         }
         let metadata_json =
             active_replay_metadata_json(upsert.projection_metadata_json.as_deref(), &replay);
-        update_active_replay_metadata(conn, provider, &message_id, &metadata_json).await?;
+        if metadata_json != initial_metadata_json {
+            update_active_replay_metadata(conn, provider, &message_id, &metadata_json).await?;
+        }
         replay_messages.push(replay);
     }
 
@@ -1889,13 +1970,10 @@ fn default_message_kind(role: &str) -> String {
     }
 }
 
-fn active_message_metadata(message: &Value, role: &str) -> String {
-    let mut replay = message.as_object().cloned().unwrap_or_else(Map::new);
-    replay.insert("role".to_string(), Value::String(role.to_string()));
-
+fn active_message_metadata(message: &Value, replay: &Value) -> String {
     let mut metadata = Map::new();
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
-    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), Value::Object(replay));
+    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), replay.clone());
     if let Some(lcm_ingest) = message.get("lcm_ingest") {
         metadata.insert("lcm_ingest".to_string(), lcm_ingest.clone());
     }
@@ -1966,14 +2044,14 @@ async fn ensure_session(
     Ok(())
 }
 
-async fn existing_message_ordinal(
+async fn existing_active_message_state(
     conn: &Connection,
     provider: &str,
     message_id: &str,
-) -> Result<Option<i64>, LcmError> {
+) -> Result<Option<ExistingActiveMessageState>, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT ordinal
+            "SELECT session_id, role, timestamp, ordinal, content_hash, metadata_json
              FROM lcm_raw_messages
              WHERE provider = ?1 AND message_id = ?2",
             params![provider, message_id],
@@ -1983,7 +2061,16 @@ async fn existing_message_ordinal(
     rows.next()
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?
-        .map(|row| row.get(0).map_err(|err| LcmError::Db(err.to_string())))
+        .map(|row| {
+            Ok(ExistingActiveMessageState {
+                session_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+                role: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+                timestamp: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+                ordinal: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
+                content_hash: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+                metadata_json: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+            })
+        })
         .transpose()
 }
 

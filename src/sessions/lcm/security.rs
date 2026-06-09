@@ -11,6 +11,17 @@ const QUARANTINED_ASSISTANT_MIN_CHARS: usize = 65_536;
 const QUARANTINED_ASSISTANT_MIN_TOKENS: usize = 1_000;
 const QUARANTINE_HIGH_REPETITION: &str = "high_repetition";
 
+#[derive(Default)]
+pub(crate) struct CompiledPatternSet {
+    regexes: Vec<Regex>,
+}
+
+impl CompiledPatternSet {
+    fn is_match(&self, value: &str) -> bool {
+        self.regexes.iter().any(|regex| regex.is_match(value))
+    }
+}
+
 pub fn should_externalize(role: &str, kind: Option<&str>, content: &str) -> bool {
     prefers_whole_message_externalization(role, kind, content)
         || contains_data_uri(content)
@@ -31,7 +42,7 @@ pub(crate) fn prefers_whole_message_externalization(
     if is_binaryish(content) {
         return true;
     }
-    is_tool_payload(role, kind) && content.chars().count() > LARGE_TOOL_OUTPUT_CHARS
+    is_tool_payload(role, kind) && char_count_exceeds(content, LARGE_TOOL_OUTPUT_CHARS)
 }
 
 pub fn contains_media_payload(content: &str) -> bool {
@@ -57,7 +68,7 @@ pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str>
         return None;
     }
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() || normalized.chars().count() > 256 {
+    if normalized.is_empty() || char_count_exceeds(&normalized, 256) {
         return None;
     }
     let lower = normalized
@@ -82,16 +93,39 @@ pub fn ignore_message_reason<S: AsRef<str>>(
     content: &str,
     ignore_message_patterns: &[S],
 ) -> Option<&'static str> {
-    ignore_message_patterns
-        .iter()
-        .any(|pattern| message_pattern_matches(pattern.as_ref(), content))
+    let patterns = compile_message_patterns(ignore_message_patterns);
+    ignore_message_reason_with_compiled(content, &patterns)
+}
+
+pub(crate) fn ignore_message_reason_with_compiled(
+    content: &str,
+    patterns: &CompiledPatternSet,
+) -> Option<&'static str> {
+    if content.is_empty() {
+        return None;
+    }
+    patterns
+        .is_match(content)
         .then_some("ignore_message_pattern")
 }
 
 pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern.as_ref(), value))
+    let compiled = compile_session_patterns(patterns);
+    matches_any_compiled_pattern(&compiled, value)
+}
+
+pub(crate) fn matches_any_compiled_pattern(patterns: &CompiledPatternSet, value: &str) -> bool {
+    patterns.is_match(value)
+}
+
+pub(crate) fn compile_session_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatternSet {
+    compile_patterns(patterns, |pattern| {
+        Regex::new(&session_pattern_regex(pattern)).ok()
+    })
+}
+
+pub(crate) fn compile_message_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatternSet {
+    compile_patterns(patterns, |pattern| Regex::new(pattern).ok())
 }
 
 pub fn pattern_matches(pattern: &str, value: &str) -> bool {
@@ -99,18 +133,7 @@ pub fn pattern_matches(pattern: &str, value: &str) -> bool {
     if pattern.is_empty() {
         return false;
     }
-    let Ok(regex) = regex::Regex::new(&session_pattern_regex(pattern)) else {
-        return false;
-    };
-    regex.is_match(value)
-}
-
-fn message_pattern_matches(pattern: &str, content: &str) -> bool {
-    let pattern = pattern.trim();
-    if pattern.is_empty() || content.is_empty() {
-        return false;
-    }
-    regex::Regex::new(pattern).is_ok_and(|regex| regex.is_match(content))
+    Regex::new(&session_pattern_regex(pattern)).is_ok_and(|regex| regex.is_match(value))
 }
 
 fn session_pattern_regex(pattern: &str) -> String {
@@ -176,7 +199,7 @@ fn is_data_uri_base64_char(ch: char) -> bool {
 }
 
 fn assistant_output_is_high_repetition(content: &str) -> bool {
-    if content.chars().count() < QUARANTINED_ASSISTANT_MIN_CHARS {
+    if !char_count_at_least(content, QUARANTINED_ASSISTANT_MIN_CHARS) {
         return false;
     }
 
@@ -238,7 +261,7 @@ fn repetition_segments(text: &str) -> Vec<String> {
     text.split(['\n', '.', '!', '?'])
         .map(|segment| segment.split_whitespace().collect::<Vec<_>>().join(" "))
         .map(|segment| segment.to_ascii_lowercase())
-        .filter(|segment| segment.chars().count() >= 32)
+        .filter(|segment| char_count_at_least(segment, 32))
         .collect()
 }
 
@@ -254,6 +277,34 @@ fn is_tool_payload(role: &str, kind: Option<&str>) -> bool {
             let value = value.to_ascii_lowercase();
             value == "tool_result" || value == "tool_output"
         })
+}
+
+fn compile_patterns<S: AsRef<str>, F>(patterns: &[S], mut compile: F) -> CompiledPatternSet
+where
+    F: FnMut(&str) -> Option<Regex>,
+{
+    let mut regexes = Vec::new();
+    for pattern in patterns {
+        let pattern = pattern.as_ref().trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        if let Some(regex) = compile(pattern) {
+            regexes.push(regex);
+        }
+    }
+    CompiledPatternSet { regexes }
+}
+
+fn char_count_at_least(content: &str, min_chars: usize) -> bool {
+    if min_chars == 0 {
+        return true;
+    }
+    content.chars().take(min_chars).count() == min_chars
+}
+
+fn char_count_exceeds(content: &str, max_chars: usize) -> bool {
+    content.chars().nth(max_chars).is_some()
 }
 
 pub fn has_long_base64_run(content: &str) -> bool {
