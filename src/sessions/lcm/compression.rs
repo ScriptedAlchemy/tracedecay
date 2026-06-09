@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use libsql::{params, Connection, Value as DbValue};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::sessions::SessionMessageRecord;
 
@@ -16,6 +16,7 @@ const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
 const DEFAULT_SUMMARY_FAN_IN: usize = 4;
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
+const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
 
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
@@ -1052,11 +1053,12 @@ async fn ingest_active_messages(
             .and_then(Value::as_str)
             .unwrap_or("user")
             .to_string();
-        let content = message_content(message);
-        if security::ignore_message_reason(&role, &content, ignore_message_patterns).is_some() {
+        let original_content = message_content_value(message);
+        let storage_text = message_storage_text(&original_content);
+        let search_text = message_content(message);
+        if security::ignore_message_reason(&role, &search_text, ignore_message_patterns).is_some() {
             let mut replay = message.clone();
             replay["role"] = Value::String(role);
-            replay["content"] = Value::String(content);
             replay_messages.push(replay);
             continue;
         }
@@ -1067,7 +1069,7 @@ async fn ingest_active_messages(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| {
-                deterministic_message_id(provider, session_id, idx, &role, &content)
+                deterministic_message_id(provider, session_id, idx, &role, &storage_text)
             });
         let ordinal = match existing_message_ordinal(conn, provider, &message_id).await? {
             Some(existing_ordinal) => existing_ordinal,
@@ -1080,15 +1082,15 @@ async fn ingest_active_messages(
             .get("kind")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| Some("message".to_string()));
+            .or_else(|| Some(default_message_kind(&role)));
         let record = SessionMessageRecord {
             provider: provider.to_string(),
             message_id: message_id.clone(),
             session_id: session_id.to_string(),
-            role,
+            role: role.clone(),
             timestamp: message.get("timestamp").and_then(Value::as_i64),
             ordinal,
-            text: content.clone(),
+            text: storage_text.clone(),
             kind,
             model: message
                 .get("model")
@@ -1097,21 +1099,23 @@ async fn ingest_active_messages(
             tool_names: None,
             source_path: None,
             source_offset: None,
-            metadata_json: serde_json::to_string(message).ok(),
+            metadata_json: Some(active_message_metadata(message, &role)),
         };
         let upsert = raw::upsert_raw_message_with_payload(conn, storage_root, &record).await?;
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
             .await
             .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
-        let replay_content = if raw.storage_kind == LcmStorageKind::External {
+        let replay_content =
+            replay_content_value(&original_content, &raw, upsert.projection_text.as_str());
+        if replay_content != original_content || raw.storage_kind == LcmStorageKind::External {
             changed_replay = true;
-            upsert.projection_text
-        } else {
-            content
-        };
+        }
         let mut replay = message.clone();
         replay["role"] = Value::String(record.role.clone());
-        replay["content"] = Value::String(replay_content);
+        replay["content"] = replay_content;
+        let metadata_json =
+            active_replay_metadata_json(upsert.projection_metadata_json.as_deref(), &replay);
+        update_active_replay_metadata(conn, provider, &message_id, &metadata_json).await?;
         replay_messages.push(replay);
     }
 
@@ -1119,6 +1123,80 @@ async fn ingest_active_messages(
         replay_messages,
         changed_replay,
     })
+}
+
+fn message_content_value(message: &Value) -> Value {
+    message
+        .get("content")
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()))
+}
+
+fn message_storage_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    serde_json::to_string(content).unwrap_or_else(|_| content.to_string())
+}
+
+fn default_message_kind(role: &str) -> String {
+    if role.eq_ignore_ascii_case("tool") {
+        "tool_result".to_string()
+    } else {
+        "message".to_string()
+    }
+}
+
+fn active_message_metadata(message: &Value, role: &str) -> String {
+    let mut metadata = message.as_object().cloned().unwrap_or_else(Map::new);
+    metadata.insert("role".to_string(), Value::String(role.to_string()));
+    metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
+    Value::Object(metadata).to_string()
+}
+
+fn replay_content_value(
+    original_content: &Value,
+    raw: &LcmRawMessage,
+    external_projection_text: &str,
+) -> Value {
+    if raw.storage_kind == LcmStorageKind::External {
+        return Value::String(external_projection_text.to_string());
+    }
+    if original_content.is_string() {
+        return Value::String(raw.content.clone());
+    }
+    serde_json::from_str(&raw.content).unwrap_or_else(|_| Value::String(raw.content.clone()))
+}
+
+fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Value) -> String {
+    let mut metadata = existing_metadata_json
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_else(Map::new);
+    if let Some(replay) = replay.as_object() {
+        for (key, value) in replay {
+            metadata.insert(key.clone(), value.clone());
+        }
+    }
+    metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
+    Value::Object(metadata).to_string()
+}
+
+async fn update_active_replay_metadata(
+    conn: &Connection,
+    provider: &str,
+    message_id: &str,
+    metadata_json: &str,
+) -> Result<(), LcmError> {
+    conn.execute(
+        "UPDATE lcm_raw_messages
+         SET metadata_json = ?3
+         WHERE provider = ?1 AND message_id = ?2",
+        params![provider, message_id, metadata_json],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(())
 }
 
 async fn ensure_session(
@@ -1281,11 +1359,42 @@ fn deterministic_message_id(
 }
 
 fn raw_replay_message(message: &LcmRawMessage) -> Value {
+    if let Some(mut replay) = active_replay_message_from_metadata(message) {
+        replay["role"] = Value::String(message.role.clone());
+        replay["store_id"] = Value::from(message.store_id);
+        return replay;
+    }
     json!({
         "role": message.role,
         "content": message.content,
         "store_id": message.store_id,
     })
+}
+
+fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value> {
+    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref()?).ok()?;
+    if metadata
+        .get(ACTIVE_REPLAY_METADATA_KEY)
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let mut replay = metadata.as_object()?.clone();
+    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
+    replay.remove("ingest_protection");
+    replay.remove("external_payload");
+    replay.remove("payload_ref");
+    replay.remove("byte_count");
+    replay.remove("char_count");
+    replay.remove("sha256");
+    if !replay.contains_key("content") {
+        replay.insert(
+            "content".to_string(),
+            Value::String(message.content.clone()),
+        );
+    }
+    Some(Value::Object(replay))
 }
 
 fn summary_replay_message(summary: &LcmSummaryNode) -> Value {

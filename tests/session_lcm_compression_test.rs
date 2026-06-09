@@ -1,9 +1,10 @@
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
-    LcmCompressionRequest, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt,
-    LcmPreflightRequest, LcmSourceRef, LcmSummarizerMode, LcmSummaryNodeDraft,
+    LcmCompressionRequest, LcmGrepRequest, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSourceRef, LcmStorageKind,
+    LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -315,6 +316,253 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 
     let status = db.lcm_status("cursor", Some("session-1")).await.unwrap();
     assert_eq!(status.summary_node_count, 0);
+}
+
+#[tokio::test]
+async fn active_structured_content_survives_preflight_and_noop_compress_replay() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-structured").await;
+
+    let content_array = json!([
+        {"type": "text", "text": "first structured block"},
+        {"type": "input_json", "value": {"answer": 42, "nested": ["a", "b"]}},
+    ]);
+    let content_object = json!({
+        "type": "structured_payload",
+        "parts": [
+            {"kind": "text", "content": "object structured block"},
+            {"kind": "data", "value": {"ok": true}},
+        ],
+    });
+    let messages = vec![
+        json!({"id": "structured-array", "role": "user", "content": content_array.clone()}),
+        json!({"id": "structured-object", "role": "assistant", "content": content_object.clone()}),
+    ];
+
+    let preflight = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-structured".into(),
+            messages: messages.clone(),
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preflight.status, "ok");
+    assert_eq!(preflight.replay_messages[0]["content"], content_array);
+    assert_eq!(preflight.replay_messages[1]["content"], content_object);
+
+    let compress = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-structured".into(),
+            messages,
+            current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            summarizer: LcmSummarizerMode::Noop,
+        })
+        .await
+        .unwrap();
+    assert_eq!(compress.status, "ok");
+    assert_eq!(
+        compress.replay_messages[0]["content"],
+        preflight.replay_messages[0]["content"]
+    );
+    assert_eq!(
+        compress.replay_messages[1]["content"],
+        preflight.replay_messages[1]["content"]
+    );
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "structured-array")
+        .await
+        .expect("structured raw message should exist");
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["content"], preflight.replay_messages[0]["content"]);
+}
+
+#[tokio::test]
+async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-tools").await;
+
+    let tool_call = json!({
+        "id": "call_lookup",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": "{\"query\":\"parity\"}"},
+    });
+    let messages = vec![
+        json!({
+            "id": "assistant-tools",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I will look that up."}],
+            "tool_calls": [tool_call.clone()],
+        }),
+        json!({
+            "id": "tool-result",
+            "role": "tool",
+            "tool_call_id": "call_lookup",
+            "name": "lookup",
+            "content": [{"type": "text", "text": "lookup result"}],
+        }),
+    ];
+
+    db.lcm_preflight(LcmPreflightRequest {
+        provider: "cursor".into(),
+        session_id: "session-tools".into(),
+        messages,
+        current_tokens: Some(100),
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let replay_from_raw = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-tools".into(),
+            messages: Vec::new(),
+            current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay_from_raw.replay_messages.len(), 2);
+    assert_eq!(replay_from_raw.replay_messages[0]["role"], "assistant");
+    assert_eq!(
+        replay_from_raw.replay_messages[0]["tool_calls"],
+        json!([tool_call])
+    );
+    assert_eq!(replay_from_raw.replay_messages[1]["role"], "tool");
+    assert_eq!(
+        replay_from_raw.replay_messages[1]["tool_call_id"],
+        "call_lookup"
+    );
+    assert_eq!(replay_from_raw.replay_messages[1]["name"], "lookup");
+}
+
+#[tokio::test]
+async fn nested_media_placeholder_remains_inside_structured_active_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-media").await;
+
+    let media_payload = format!("data:image/png;base64,{}", "A".repeat(100_000));
+    let response = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-media".into(),
+            messages: vec![json!({
+                "id": "structured-media",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please inspect the screenshot."},
+                    {"type": "image_url", "image_url": {"url": media_payload}},
+                ],
+            })],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "ingest_protection_changed_replay");
+    let replay_content = response.replay_messages[0]["content"]
+        .as_array()
+        .expect("structured content should stay an array");
+    assert_eq!(replay_content[0]["text"], "Please inspect the screenshot.");
+    let url = replay_content[1]["image_url"]["url"]
+        .as_str()
+        .expect("media URL should remain in structured position");
+    assert!(url.contains("[Externalized LCM ingest payload:"));
+    assert!(!url.contains("data:image/png;base64"));
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "structured-media")
+        .await
+        .expect("structured media raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(!raw.content.contains("data:image/png;base64"));
+}
+
+#[tokio::test]
+async fn structured_active_content_replay_preserves_shape_while_grep_snippet_stays_bounded() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-bounded").await;
+
+    let long_text = format!(
+        "bounded-structured-canary {} ::structured-tail",
+        "x".repeat(MAX_DERIVED_SNIPPET_CHARS * 4)
+    );
+    let content = json!([
+        {"type": "text", "text": long_text},
+        {"type": "metadata", "value": {"shape": "kept"}},
+    ]);
+    let response = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-bounded".into(),
+            messages: vec![json!({
+                "id": "structured-bounded",
+                "role": "user",
+                "content": content.clone(),
+            })],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.replay_messages[0]["content"], content);
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "bounded-structured-canary".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-bounded".into()),
+            include_summaries: false,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
+    assert!(!hits[0].snippet.contains("::structured-tail"));
 }
 
 #[tokio::test]
