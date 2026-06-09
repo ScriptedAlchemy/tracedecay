@@ -277,6 +277,11 @@ async fn payload_diagnostics(
 
     let mut orphan_files = 0;
     let mut orphan_refs = Vec::new();
+    let file_owner_refs = if session_id.is_some() {
+        all_payload_metadata_refs(conn).await?
+    } else {
+        metadata_refs
+    };
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
@@ -285,7 +290,7 @@ async fn payload_diagnostics(
             if payload::validate_payload_ref(&name).is_err() || !entry.path().is_file() {
                 continue;
             }
-            if !metadata_refs.contains(&name) {
+            if !file_owner_refs.contains(&name) {
                 orphan_files += 1;
                 if orphan_refs.len() < MAX_SAMPLES {
                     orphan_refs.push(name);
@@ -303,6 +308,23 @@ async fn payload_diagnostics(
         "orphan_payload_refs": orphan_refs,
         "unreferenced_metadata": unreferenced_metadata,
     }))
+}
+
+async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>, LcmError> {
+    let mut refs = BTreeSet::new();
+    let mut rows = conn
+        .query("SELECT payload_ref FROM lcm_external_payloads", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        refs.insert(payload_ref);
+    }
+    Ok(refs)
 }
 
 async fn count_unreferenced_payload_metadata(

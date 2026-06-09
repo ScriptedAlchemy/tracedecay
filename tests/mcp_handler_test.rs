@@ -4031,6 +4031,61 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
 }
 
 #[tokio::test]
+async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-target",
+        "lcm-doctor-payload-target-message",
+        format!("target payload\n{}", "target-body ".repeat(30_000)),
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-other",
+        "lcm-doctor-payload-other-message",
+        format!("other payload\n{}", "other-body ".repeat(30_000)),
+        2,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let other_raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-other-message")
+        .await
+        .expect("other externalized raw message should load");
+    let other_payload_ref = other_raw.payload_ref.expect("other external payload ref");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-payload-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 0);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 0);
+    assert!(!payload["diagnostics"]["payloads"]["orphan_payload_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some(&other_payload_ref)));
+    assert!(!extract_text(&result.value).contains(&other_payload_ref));
+}
+
+#[tokio::test]
 async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(
