@@ -1486,24 +1486,34 @@ def _lcm_context_threshold(config, hermes_home=None):
             pass
     return _hermes_yaml_compression_threshold(0.75, hermes_home=hermes_home)
 
-def _configured_threshold_tokens(config, hermes_home=None):
+def _configured_threshold_tokens(config, hermes_home=None, context_length_override=None):
     explicit = _configured_int(config, "threshold_tokens")
     if explicit is not None:
         return explicit
-    context_length = _configured_int(
-        config,
-        "context_length",
-        "max_context_tokens",
-        "model_context_tokens",
-    )
+    context_length = context_length_override
+    if context_length is None:
+        context_length = _configured_int(
+            config,
+            "context_length",
+            "max_context_tokens",
+            "model_context_tokens",
+        )
     if context_length is None:
         return None
     try:
-        return int(context_length * float(_lcm_context_threshold(config, hermes_home=hermes_home)))
+        return int(int(context_length) * float(_lcm_context_threshold(config, hermes_home=hermes_home)))
     except Exception:
         return None
 
-def _lcm_config_args(config, hermes_home=None) -> dict:
+def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> dict:
+    context_length = runtime_context_length
+    if context_length is None:
+        context_length = _configured_int(
+            config,
+            "context_length",
+            "max_context_tokens",
+            "model_context_tokens",
+        )
     args = {
         "fresh_tail_count": _lcm_int_setting(config, "LCM_FRESH_TAIL_COUNT", "fresh_tail_count", default=64),
         "leaf_chunk_tokens": _lcm_int_setting(config, "LCM_LEAF_CHUNK_TOKENS", "leaf_chunk_tokens", default=20000),
@@ -1529,12 +1539,7 @@ def _lcm_config_args(config, hermes_home=None) -> dict:
             "reserve_tokens_floor",
             default=0,
         ),
-        "context_length": _configured_int(
-            config,
-            "context_length",
-            "max_context_tokens",
-            "model_context_tokens",
-        ),
+        "context_length": context_length,
         "summary_fan_in": _lcm_int_setting(
             config,
             "LCM_CONDENSATION_FANIN",
@@ -1551,7 +1556,11 @@ def _lcm_config_args(config, hermes_home=None) -> dict:
             default=1,
         ),
     }
-    threshold_tokens = _configured_threshold_tokens(config, hermes_home=hermes_home)
+    threshold_tokens = _configured_threshold_tokens(
+        config,
+        hermes_home=hermes_home,
+        context_length_override=context_length,
+    )
     if threshold_tokens is not None:
         args["threshold_tokens"] = threshold_tokens
     for env_key, name in (
@@ -1563,6 +1572,34 @@ def _lcm_config_args(config, hermes_home=None) -> dict:
         if patterns:
             args[name] = patterns
     return {key: value for key, value in args.items() if value is not None}
+
+def _lcm_expansion_model(config):
+    value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
+    return str(value or "").strip()
+
+def _lcm_expansion_context_tokens(config):
+    value = _lcm_int_setting(
+        config,
+        "LCM_EXPANSION_CONTEXT_TOKENS",
+        "expansion_context_tokens",
+        default=32000,
+    )
+    try:
+        return max(1, int(value or 32000))
+    except Exception:
+        return 32000
+
+def _lcm_expansion_timeout_ms(config):
+    value = _lcm_int_setting(
+        config,
+        "LCM_EXPANSION_TIMEOUT_MS",
+        "expansion_timeout_ms",
+        default=120000,
+    )
+    try:
+        return max(1, int(value or 120000))
+    except Exception:
+        return 120000
 
 def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
     for key in keys:
@@ -2169,6 +2206,13 @@ class TokenSaveContextEngine(ContextEngine):
         self.hermes_home = _resolve_hermes_home(config, hermes_home)
         self.project_root = None
         self.agent = None
+        self.model = ""
+        self.base_url = ""
+        self.api_key = ""
+        self.provider = ""
+        self.api_mode = ""
+        self._runtime_context_length = None
+        self._session_start_context_length = None
         self._route_failures = {}
         self._cooldown_until = {}
 
@@ -2181,6 +2225,11 @@ class TokenSaveContextEngine(ContextEngine):
             self.active_session_id = session_id
         if kwargs.get("config") is not None:
             self.config = kwargs.get("config")
+        if "context_length" in kwargs:
+            try:
+                self._session_start_context_length = int(kwargs.get("context_length"))
+            except Exception:
+                pass
         next_agent = kwargs.get("agent")
         if next_agent is not None:
             self.agent = next_agent
@@ -2203,6 +2252,24 @@ class TokenSaveContextEngine(ContextEngine):
         bound_session_id = self.active_session_id
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
+
+    def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+        self.model = str(model or "")
+        self.base_url = str(base_url or "")
+        self.api_key = str(api_key or "")
+        self.provider = str(provider or "")
+        self.api_mode = str(api_mode or "")
+        try:
+            self._runtime_context_length = int(context_length)
+        except Exception:
+            self._runtime_context_length = None
+
+    def _effective_context_length(self):
+        if self._runtime_context_length is not None:
+            return self._runtime_context_length
+        if self._session_start_context_length is not None:
+            return self._session_start_context_length
+        return None
 
     def _tool_args(self, session_id=None):
         args = _storage_args(self.project_root, self.hermes_home)
@@ -2237,7 +2304,13 @@ class TokenSaveContextEngine(ContextEngine):
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         args = self._tool_args()
-        args.update(_lcm_config_args(self.config, self.hermes_home))
+        args.update(
+            _lcm_config_args(
+                self.config,
+                self.hermes_home,
+                runtime_context_length=self._effective_context_length(),
+            )
+        )
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
@@ -2260,6 +2333,12 @@ class TokenSaveContextEngine(ContextEngine):
             "ignore_message_patterns",
         ))
         return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
+
+    def should_compress(self, prompt_tokens=None, **kwargs):
+        response = self.should_compress_preflight([], current_tokens=prompt_tokens, **kwargs)
+        if isinstance(response, dict):
+            return bool(response.get("should_compress"))
+        return False
 
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
@@ -2287,7 +2366,13 @@ class TokenSaveContextEngine(ContextEngine):
         if not messages or not self.active_session_id:
             return
         args = _storage_args(self.project_root, self.hermes_home)
-        args.update(_lcm_config_args(self.config, self.hermes_home))
+        args.update(
+            _lcm_config_args(
+                self.config,
+                self.hermes_home,
+                runtime_context_length=self._effective_context_length(),
+            )
+        )
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
@@ -2345,6 +2430,7 @@ class TokenSaveContextEngine(ContextEngine):
         return tools.call_tokensave_tool(tokensave_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
+        kwargs = dict(kwargs)
         args = self._tool_args(kwargs.pop("session_id", None))
         args["prompt"] = prompt
         if query is not None:
@@ -2354,8 +2440,20 @@ class TokenSaveContextEngine(ContextEngine):
         for key in ("max_results", "max_tokens", "context_max_tokens"):
             if key in kwargs and kwargs[key] is not None:
                 args[key] = kwargs[key]
+        if "context_max_tokens" not in args:
+            args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
         retrieval = call_tokensave_json("tokensave_lcm_expand_query", args, **kwargs)
-        return _synthesize_expand_query_payload(retrieval, agent=self.agent, **kwargs)
+        synthesis_kwargs = dict(kwargs)
+        if synthesis_kwargs.get("model") is None:
+            expansion_model = _lcm_expansion_model(self.config)
+            if expansion_model:
+                synthesis_kwargs["model"] = expansion_model
+        if (
+            synthesis_kwargs.get("timeout") is None
+            and synthesis_kwargs.get("expansion_timeout") is None
+        ):
+            synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
+        return _synthesize_expand_query_payload(retrieval, agent=self.agent, **synthesis_kwargs)
 
     def _auxiliary_routes(self, summary_request=None, **kwargs):
         routes = (
@@ -2614,7 +2712,13 @@ class TokenSaveContextEngine(ContextEngine):
             "ignore_message_patterns",
         )
         args = self._tool_args()
-        args.update(_lcm_config_args(self.config, self.hermes_home))
+        args.update(
+            _lcm_config_args(
+                self.config,
+                self.hermes_home,
+                runtime_context_length=self._effective_context_length(),
+            )
+        )
         args.update({
             "messages": messages,
             "current_tokens": current_tokens,

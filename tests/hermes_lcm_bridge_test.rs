@@ -2935,6 +2935,190 @@ with tempfile.TemporaryDirectory() as tmp:
 }
 
 #[test]
+fn context_engine_propagates_runtime_context_window_from_update_model_and_session_start() {
+    run_generated_plugin_script(
+        "check_context_window_runtime_precedence.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_context_window_precedence"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+def fake_call_tokensave_tool(tool, args, **kwargs):
+    calls.append((tool, dict(args)))
+    if tool == "tokensave_lcm_preflight":
+        payload = {"status": "ok", "should_compress": True, "reason": "test", "replay_messages": []}
+    else:
+        payload = {"status": "ok", "reason": "test", "replay_messages": [], "summary_nodes": [], "frontier": {"provider": "cursor", "conversation_id": "session-1", "current_session_id": "session-1", "current_frontier_store_id": None, "last_finalized_session_id": None, "last_finalized_frontier_store_id": None, "maintenance_debt": []}}
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+engine = plugin.TokenSaveContextEngine(
+    config={"context_length": 100000, "context_threshold": 0.8}
+)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+# Fallback to ctx.config before runtime updates.
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
+_, args = calls.pop()
+assert args["context_length"] == 100000
+assert args["threshold_tokens"] == 80000
+
+# Session-start kwargs should arm threshold pressure by themselves.
+engine.on_session_start(session_id="session-1", context_length=200000)
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
+_, args = calls.pop()
+assert args["context_length"] == 200000
+assert args["threshold_tokens"] == 160000
+
+# update_model is authoritative over ctx.config/session-start metadata.
+engine.update_model(
+    model="deepseek-v4-flash",
+    context_length=1000000,
+    base_url="https://opencode.ai/zen/go",
+    api_key="test-key",
+    provider="opencode-go",
+    api_mode="anthropic_messages",
+)
+assert engine.model == "deepseek-v4-flash"
+assert engine.base_url == "https://opencode.ai/zen/go"
+assert engine.api_key == "test-key"
+assert engine.provider == "opencode-go"
+assert engine.api_mode == "anthropic_messages"
+
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
+_, args = calls.pop()
+assert args["context_length"] == 1000000
+assert args["threshold_tokens"] == 800000
+
+# compress must forward the same runtime window and threshold.
+engine.compress([{"role": "user", "content": "compress me"}], current_tokens=1)
+tool, args = calls.pop()
+assert tool == "tokensave_lcm_compress"
+assert args["context_length"] == 1000000
+assert args["threshold_tokens"] == 800000
+
+# should_compress mirrors post-response gating and returns a bool.
+assert engine.should_compress(prompt_tokens=1) is True
+"#,
+        "generated plugin should propagate update_model/session_start context windows into preflight/compress",
+    );
+}
+
+#[test]
+fn context_engine_expand_query_uses_expansion_model_context_and_timeout_knobs() {
+    run_generated_plugin_script(
+        "check_expand_query_expansion_knobs.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_EXPANSION_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_expand_query_knobs"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+tool_calls = []
+
+def fake_call_tokensave_tool(tool, args, **kwargs):
+    tool_calls.append((tool, dict(args)))
+    payload = {
+        "status": "ok",
+        "prompt": "What changed?",
+        "query": "orchard",
+        "needs_synthesis": True,
+        "max_tokens": 64,
+        "context_max_tokens": args.get("context_max_tokens"),
+        "context_blocks": [{"kind": "raw_message", "content": "expanded context"}],
+        "synthesis_prompt": {"system": "sys", "user": "usr"},
+    }
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+class FakeAuxClient:
+    def __init__(self):
+        self.calls = []
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"content": "synthetic answer"}
+
+class FakeAgent:
+    def __init__(self):
+        self.auxiliary_client = FakeAuxClient()
+
+os.environ["LCM_EXPANSION_MODEL"] = "env-expansion-model"
+os.environ["LCM_EXPANSION_CONTEXT_TOKENS"] = "4321"
+os.environ["LCM_EXPANSION_TIMEOUT_MS"] = "9000"
+
+agent = FakeAgent()
+engine = plugin.TokenSaveContextEngine(
+    config={
+        "expansion_model": "cfg-expansion-model",
+        "expansion_context_tokens": 32000,
+        "expansion_timeout_ms": 120000,
+    }
+)
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+
+result = engine.expand_query(prompt="What changed?", query="orchard")
+assert result["status"] == "ok"
+assert result["needs_synthesis"] is False
+assert result["answer"] == "synthetic answer"
+
+tool, args = tool_calls.pop()
+assert tool == "tokensave_lcm_expand_query"
+assert args["context_max_tokens"] == 4321
+
+llm_call = agent.auxiliary_client.calls.pop()
+assert llm_call["model"] == "env-expansion-model"
+assert llm_call["timeout"] == 9.0
+"#,
+        "generated plugin should source expansion knobs from env/config and apply them to expand_query synthesis",
+    );
+}
+
+#[test]
 fn summary_routes_built_from_config_and_env_models() {
     run_generated_plugin_script(
         "check_summary_route_wiring.py",
