@@ -4118,6 +4118,18 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
     );
     assert_eq!(
         payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["cleanup"]["candidate_count"], 2);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
     assert!(payload["repairs"]["planned_actions"]
@@ -4130,6 +4142,7 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
     assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
     assert!(!text.contains("scheduled report body that must not leak"));
     assert!(!text.contains("scratch one-shot body that must not leak"));
+    assert!(!text.contains("Still working"));
     assert!(!text.contains("valuable payload to preserve"));
 }
 
@@ -4208,13 +4221,18 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     assert_eq!(payload["repairs"]["backup"]["ok"], true);
     assert!(Path::new(backup_path).is_file());
     assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(
         lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
         1
     );
     assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
     assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
-    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
     assert!(!text.contains("scheduled report body that must be deleted only after backup"));
+    assert!(!text.contains("Still working"));
     assert!(!text.contains("valuable payload to preserve"));
 }
 

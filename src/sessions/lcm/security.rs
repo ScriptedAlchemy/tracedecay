@@ -67,13 +67,10 @@ pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str>
 }
 
 pub fn ignore_message_reason<S: AsRef<str>>(
-    role: &str,
+    _role: &str,
     content: &str,
     ignore_message_patterns: &[S],
 ) -> Option<&'static str> {
-    if let Some(reason) = heartbeat_noise_reason(role, content) {
-        return Some(reason);
-    }
     ignore_message_patterns
         .iter()
         .any(|pattern| message_pattern_matches(pattern.as_ref(), content))

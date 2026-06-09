@@ -79,10 +79,10 @@ fn ignore_and_stateless_patterns_use_hermes_style_globs() {
 }
 
 #[test]
-fn ignore_message_reason_classifies_heartbeat_and_configured_noise_without_body_leakage() {
+fn ignore_message_reason_classifies_only_configured_noise_without_body_leakage() {
     assert_eq!(
         ignore_message_reason("assistant", "Still working...", &Vec::<String>::new()),
-        Some("heartbeat_progress")
+        None
     );
     assert_eq!(
         ignore_message_reason(

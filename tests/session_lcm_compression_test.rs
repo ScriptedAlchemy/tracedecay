@@ -749,10 +749,61 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
 }
 
 #[tokio::test]
-async fn ignore_message_patterns_and_heartbeat_noise_are_storage_only() {
+async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-noise").await;
+
+    let preflight = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-noise".into(),
+            messages: vec![
+                json!({"id": "heartbeat-1", "role": "assistant", "content": "Still working..."}),
+                json!({"id": "cron-noise-1", "role": "user", "content": "Cronjob Response: noisy heartbeat"}),
+                json!({"id": "valuable-1", "role": "user", "content": "real user request"}),
+            ],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: vec!["Cronjob Response:*".into()],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        preflight
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "Still working...",
+            "Cronjob Response: noisy heartbeat",
+            "real user request"
+        ]
+    );
+    let preflight_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-noise".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        preflight_page
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Still working...", "real user request"]
+    );
 
     let response = db
         .lcm_compress(LcmCompressionRequest {
@@ -803,8 +854,13 @@ async fn ignore_message_patterns_and_heartbeat_noise_are_storage_only() {
         })
         .await
         .unwrap();
-    assert_eq!(page.messages.len(), 1);
-    assert_eq!(page.messages[0].content, "real user request");
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Still working...", "real user request"]
+    );
 }
 
 #[tokio::test]

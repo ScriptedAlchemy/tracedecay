@@ -205,7 +205,7 @@ async fn plan_and_apply_repairs(
             let action = json!({
                 "kind": "clean_lcm_noise",
                 "safe": true,
-                "description": "Delete LCM ignored/stateless session candidates and standalone heartbeat/noise raw messages",
+                "description": "Delete LCM ignored/stateless session candidates and standalone configured-noise raw messages",
                 "candidate_count": candidate_count,
                 "session_candidate_count": diagnostics["cleanup"]["session_candidates"].as_array().map(Vec::len).unwrap_or_default(),
                 "message_candidate_count": diagnostics["cleanup"]["message_candidates"].as_array().map(Vec::len).unwrap_or_default(),
@@ -1006,6 +1006,7 @@ async fn cleanup_candidates(
 
     let mut sessions = BTreeMap::<String, CleanupSessionCandidate>::new();
     let mut message_candidates = Vec::new();
+    let mut heartbeat_message_candidates = Vec::new();
     let mut ignored_session_count = 0_i64;
     let mut stateless_session_count = 0_i64;
     let mut noise_message_count = 0_i64;
@@ -1050,6 +1051,19 @@ async fn cleanup_candidates(
             continue;
         }
 
+        if let Some(reason) = security::heartbeat_noise_reason(&role, &content) {
+            heartbeat_message_count += 1;
+            if heartbeat_message_candidates.len() < MAX_SAMPLES {
+                heartbeat_message_candidates.push(json!({
+                    "store_id": store_id,
+                    "message_id": message_id.clone(),
+                    "session_id": row_session_id.clone(),
+                    "role": role.clone(),
+                    "reason": reason,
+                }));
+            }
+        }
+
         let Some(reason) =
             security::ignore_message_reason(&role, &content, &clean_config.ignore_message_patterns)
         else {
@@ -1060,9 +1074,6 @@ async fn cleanup_candidates(
             continue;
         }
         noise_message_count += 1;
-        if reason == "heartbeat_progress" {
-            heartbeat_message_count += 1;
-        }
         if message_candidates.len() < MAX_SAMPLES {
             message_candidates.push(json!({
                 "store_id": store_id,
@@ -1106,6 +1117,7 @@ async fn cleanup_candidates(
         "protected_noise_messages_skipped": protected_noise_count,
         "session_candidates": session_candidates,
         "message_candidates": message_candidates,
+        "heartbeat_message_candidates": heartbeat_message_candidates,
     }))
 }
 
