@@ -778,7 +778,9 @@ fn plugin_init() -> String {
     r#""""tokensave Hermes plugin registration."""
 import json
 import os
+import re
 import shutil
+import time
 from pathlib import Path
 
 from . import schemas, tools
@@ -959,15 +961,103 @@ def _storage_args(project_root=None, hermes_home=None):
         args["storage_scope"] = "hermes_profile"
     return args
 
+REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
+FALLBACK_MARKER = "[deterministic compression fallback]"
+
+def _strip_reasoning(text: str) -> str:
+    output = text or ""
+    for tag in REASONING_TAGS:
+        escaped = re.escape(tag)
+        output = re.sub(
+            rf"<{escaped}>.*?</{escaped}>",
+            "",
+            output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    return output.strip()
+
+def _llm_response_text(response) -> str:
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        content = response.get("content")
+        if isinstance(content, str):
+            return content
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+    choices = getattr(response, "choices", None)
+    if choices:
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+    return "" if response is None else str(response)
+
+def _message_content(message) -> str:
+    if not isinstance(message, dict):
+        return str(message)
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict) and isinstance(content.get("text"), str):
+        return content["text"]
+    if isinstance(content, list):
+        parts = [
+            item.get("text")
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if parts:
+            return "\n\n".join(parts)
+    return "" if content is None else str(content)
+
+def _summary_source_messages(source_messages):
+    normalized = []
+    for message in source_messages or []:
+        if not isinstance(message, dict):
+            normalized.append({"role": "user", "content": str(message)})
+            continue
+        normalized.append({
+            "role": message.get("role") or "user",
+            "content": _message_content(message),
+        })
+    return normalized
+
+def _deterministic_truncation(messages, limit: int = 2048) -> str:
+    lines = []
+    for message in messages or []:
+        if isinstance(message, dict):
+            role = message.get("role") or "user"
+            content = _message_content(message)
+        else:
+            role = "user"
+            content = str(message)
+        if content:
+            lines.append(f"{role}: {content}")
+    text = "\n".join(lines).strip()
+    if not text:
+        text = "No auxiliary summary was available."
+    max_prefix = max(0, limit - len(FALLBACK_MARKER) - 2)
+    return f"{text[:max_prefix].rstrip()}\n\n{FALLBACK_MARKER}"
+
 class TokenSaveContextEngine(ContextEngine):
     def __init__(self):
         self.active_session_id = None
         self.hermes_home = None
         self.project_root = None
+        self.agent = None
+        self._route_failures = {}
+        self._cooldown_until = {}
 
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         if session_id is not None:
             self.active_session_id = session_id
+        next_agent = kwargs.get("agent")
+        if next_agent is not None:
+            self.agent = next_agent
         next_hermes_home = hermes_home or kwargs.get("hermes_home")
         if next_hermes_home:
             self.hermes_home = next_hermes_home
@@ -990,6 +1080,79 @@ class TokenSaveContextEngine(ContextEngine):
         })
         return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
 
+    def _auxiliary_routes(self, summary_request=None, **kwargs):
+        routes = (
+            kwargs.get("routes")
+            or kwargs.get("auxiliary_routes")
+            or (summary_request or {}).get("routes")
+        )
+        if isinstance(routes, dict):
+            routes = [routes]
+        if not routes:
+            route = {}
+            for key in ("model", "temperature", "max_tokens", "timeout"):
+                if kwargs.get(key) is not None:
+                    route[key] = kwargs[key]
+            routes = [route]
+        normalized = []
+        for route in routes:
+            if not isinstance(route, dict):
+                route = {"model": str(route)}
+            normalized.append(route)
+        return normalized
+
+    def _call_auxiliary_summary(self, prompt, messages, **kwargs):
+        client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
+        summary_request = kwargs.get("summary_request")
+        route_kwargs = dict(kwargs)
+        route_kwargs.pop("summary_request", None)
+        routes = self._auxiliary_routes(summary_request, **route_kwargs)
+        last_error = None
+        if client is None or not callable(getattr(client, "call_llm", None)):
+            last_error = RuntimeError("Hermes auxiliary_client.call_llm is unavailable")
+        else:
+            now = time.time()
+            for route in routes:
+                route_name = route.get("route") or route.get("name") or route.get("model") or "default"
+                route_key = str(route_name)
+                if self._cooldown_until.get(route_key, 0) > now:
+                    continue
+                call_kwargs = {
+                    "task": "compression",
+                    "messages": [{"role": "system", "content": prompt}, *list(messages or [])],
+                    "temperature": route.get("temperature", 0.1),
+                    "max_tokens": route.get("max_tokens", 2048),
+                    "timeout": route.get("timeout", 60),
+                }
+                model = route.get("model")
+                if model is not None:
+                    call_kwargs["model"] = model
+                try:
+                    response = client.call_llm(**call_kwargs)
+                    text = _strip_reasoning(_llm_response_text(response))
+                    if not text:
+                        raise RuntimeError("Hermes auxiliary summary was empty")
+                    return {
+                        "status": "ok",
+                        "text": text,
+                        "route": route_key,
+                        "model": model,
+                    }
+                except Exception as exc:
+                    last_error = exc
+                    failures = self._route_failures.get(route_key, 0) + 1
+                    self._route_failures[route_key] = failures
+                    self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+        fallback = {
+            "status": "fallback",
+            "text": _deterministic_truncation(messages),
+            "route": "deterministic_fallback",
+            "model": None,
+        }
+        if last_error is not None:
+            fallback["error"] = str(last_error)
+        return fallback
+
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         args = _storage_args(self.project_root, self.hermes_home)
@@ -1000,7 +1163,27 @@ class TokenSaveContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
-        return call_tokensave_json("tokensave_lcm_compress", args, **kwargs)
+        first = call_tokensave_json("tokensave_lcm_compress", args, **kwargs)
+        if first.get("status") != "needs_summary":
+            return first
+
+        summary_request = first.get("summary_request") or {}
+        source_messages = _summary_source_messages(
+            summary_request.get("source_messages") or messages
+        )
+        summary = self._call_auxiliary_summary(
+            summary_request.get("prompt") or "Summarize the conversation so far.",
+            source_messages,
+            summary_request=summary_request,
+            **kwargs,
+        )
+        provided_args = dict(args)
+        provided_args["summarizer"] = {
+            "mode": "provided",
+            "summary_text": summary["text"],
+            "route": summary.get("route"),
+        }
+        return call_tokensave_json("tokensave_lcm_compress", provided_args, **kwargs)
 
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"

@@ -425,6 +425,339 @@ assert args == {
 }
 
 #[test]
+fn auxiliary_summary_strips_reasoning_tags() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_auxiliary_summary.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+assert plugin._strip_reasoning("<think>x</think>Useful") == "Useful"
+assert plugin._strip_reasoning("<THINKING>x</THINKING>\nUseful") == "Useful"
+assert plugin._strip_reasoning("<reasoning>x</reasoning>\nUseful") == "Useful"
+assert plugin._strip_reasoning("<thought>x</thought>\nUseful") == "Useful"
+assert plugin._strip_reasoning("<REASONING_SCRATCHPAD>x</REASONING_SCRATCHPAD>\nUseful") == "Useful"
+
+class Aux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        return "<think>hidden chain</think>\nUseful compact summary"
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+summary = engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "raw"}],
+)
+
+assert summary["status"] == "ok"
+assert summary["text"] == "Useful compact summary"
+assert summary["route"] == "default"
+assert summary["model"] is None
+assert agent.auxiliary_client.calls[0]["task"] == "compression"
+assert agent.auxiliary_client.calls[0]["messages"][0] == {
+    "role": "system",
+    "content": "Summarize",
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes auxiliary summary check");
+    assert!(
+        output.status.success(),
+        "generated context engine should strip reasoning from auxiliary summaries\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_auxiliary_compress_flow.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    args = json.loads(argv[argv.index("--args") + 1])
+    calls.append(args)
+    if len(calls) == 1:
+        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+        return mcp_response({
+            "status": "needs_summary",
+            "reason": "hermes_auxiliary_not_available_in_task_9",
+            "summary_nodes_created": 0,
+            "summary_nodes": [],
+            "replay_messages": [{"role": "user", "content": "fresh"}],
+            "frontier": {"current_frontier_store_id": None},
+            "summary_request": {
+                "provider": "cursor",
+                "session_id": "session-1",
+                "focus_topic": "handoff",
+                "prompt": "Summarize backlog",
+                "source_range": {"from_store_id": 1, "to_store_id": 2},
+                "source_messages": [
+                    {"store_id": 1, "role": "user", "content": "old one"},
+                    {"store_id": 2, "role": "assistant", "content": "old two"},
+                ],
+            },
+        })
+    assert args["summarizer"] == {
+        "mode": "provided",
+        "summary_text": "Useful compact summary",
+        "route": "default",
+    }
+    return mcp_response({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "system", "content": "Useful compact summary"}],
+        "frontier": {"current_frontier_store_id": 2},
+        "summary_request": None,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+class Aux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        return "<thinking>hidden chain</thinking>\nUseful compact summary"
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+result = engine.compress(
+    [{"role": "user", "content": "old one"}],
+    current_tokens=1200,
+    focus_topic="handoff",
+)
+
+assert result["status"] == "ok"
+assert result["reason"] == "compressed_backlog"
+assert len(calls) == 2
+assert agent.auxiliary_client.calls[0]["task"] == "compression"
+assert agent.auxiliary_client.calls[0]["messages"][0]["content"] == "Summarize backlog"
+assert agent.auxiliary_client.calls[0]["messages"][1:] == [
+    {"role": "user", "content": "old one"},
+    {"role": "assistant", "content": "old two"},
+]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes auxiliary compress flow check");
+    assert!(
+        output.status.success(),
+        "generated context engine should provide auxiliary summaries back to Rust\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_auxiliary_fallbacks.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class RoutingAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("model") == "primary":
+            raise RuntimeError("primary unavailable")
+        return "<reasoning>scratch</reasoning>Fallback route summary"
+
+agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+summary = engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "raw"}],
+    routes=[
+        {"model": "primary", "temperature": 0.2},
+        {"model": "backup", "temperature": 0.3},
+    ],
+)
+assert summary["status"] == "ok"
+assert summary["text"] == "Fallback route summary"
+assert summary["route"] == "backup"
+assert summary["model"] == "backup"
+assert engine._route_failures["primary"] == 1
+assert engine._cooldown_until["primary"] > 0
+assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
+
+class FailingAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("route unavailable")
+
+failing_agent = type("Agent", (), {"auxiliary_client": FailingAux()})()
+failing_engine = plugin.TokenSaveContextEngine()
+failing_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
+fallback = failing_engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "A" * 10000}],
+)
+assert fallback["status"] == "fallback"
+assert len(fallback["text"]) < 10000
+assert fallback["text"].endswith("[deterministic compression fallback]")
+assert failing_engine._route_failures["default"] == 1
+assert failing_engine._cooldown_until["default"] > 0
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes auxiliary fallback check");
+    assert!(
+        output.status.success(),
+        "generated context engine should route, cooldown, and fallback auxiliary summaries\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn call_tokensave_json_normalizes_malformed_mcp_envelopes() {
     let home = TempDir::new().unwrap();
     HermesIntegration
