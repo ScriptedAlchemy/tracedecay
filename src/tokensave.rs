@@ -939,7 +939,11 @@ impl TokenSave {
         // canonical form is forward-slash (#87).
         let file_paths = normalize_rel_paths(file_paths);
 
-        // Read and hash the files
+        // Read and hash files that still exist. Missing targeted paths are
+        // deletions, so clean their DB rows immediately instead of handing
+        // them to extraction where they would be silently skipped.
+        let mut existing_file_paths: Vec<String> = Vec::with_capacity(file_paths.len());
+        let mut removed_file_paths: Vec<String> = Vec::new();
         let mut hash_map: HashMap<String, String> = HashMap::new();
         let mut stat_map: HashMap<String, (i64, u64)> = HashMap::new();
 
@@ -947,6 +951,10 @@ impl TokenSave {
             let abs_path = project_root.join(path);
             if let Some((mtime, size)) = sync_mod::file_stat(&abs_path) {
                 stat_map.insert(path.clone(), (mtime, size));
+                existing_file_paths.push(path.clone());
+            } else {
+                removed_file_paths.push(path.clone());
+                continue;
             }
             if let Ok(source) = sync_mod::read_source_file(&abs_path) {
                 let hash = sync_mod::content_hash(&source);
@@ -954,10 +962,14 @@ impl TokenSave {
             }
         }
 
+        for path in &removed_file_paths {
+            self.db.delete_file(path).await?;
+        }
+
         // Extract graph data from the files in parallel (subprocess-isolated)
         let _ = stat_map; // worker re-stats internally; map kept for potential future use
         let (sync_extractions, _skipped_extractions) =
-            extract_files_isolated(project_root, registry, file_paths.clone());
+            extract_files_isolated(project_root, registry, existing_file_paths.clone());
 
         // Phase 1: insert all nodes (and metadata) so cross-file edges
         // can reference them. Edges are queued for phase 2 (#58).
@@ -991,18 +1003,9 @@ impl TokenSave {
             self.db.insert_edges(&owned).await?;
         }
 
-        // Resolve references for any new/changed unresolved refs
-        if !file_paths.is_empty() {
-            let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
-            let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
-            let unresolved = self.db.get_unresolved_refs().await?;
-            if !unresolved.is_empty() {
-                let resolution = resolver.resolve_all(&unresolved);
-                let edges = resolver.create_edges(&resolution.resolved);
-                if !edges.is_empty() {
-                    self.db.insert_edges(&edges).await?;
-                }
-            }
+        // Resolve references for any new/changed unresolved refs.
+        if !existing_file_paths.is_empty() {
+            self.resolve_unresolved_refs().await?;
         }
 
         self.db
@@ -1016,6 +1019,22 @@ impl TokenSave {
             .await?;
 
         clear_dirty_sentinel(&self.project_root);
+        Ok(())
+    }
+
+    async fn resolve_unresolved_refs(&self) -> Result<()> {
+        let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
+        let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
+        let unresolved = self.db.get_unresolved_refs().await?;
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+
+        let resolution = resolver.resolve_all(&unresolved);
+        let edges = resolver.create_edges(&resolution.resolved);
+        if !edges.is_empty() {
+            self.db.insert_edges(&edges).await?;
+        }
         Ok(())
     }
 
@@ -1526,6 +1545,7 @@ impl TokenSave {
             node_count: result.nodes.len() as u32,
         };
         self.db.upsert_file(&file_record).await?;
+        self.resolve_unresolved_refs().await?;
 
         Ok(())
     }
