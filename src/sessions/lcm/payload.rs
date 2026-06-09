@@ -149,6 +149,25 @@ pub(crate) fn write_external_payload(
     })
 }
 
+/// Moves externalized payload ownership from one session id to another inside
+/// the caller's transaction. Mirrors hermes-lcm `reassign_externalized_payloads`
+/// (payload files are keyed by ref, so only the DB ownership row moves).
+pub(crate) async fn reassign_session_payloads(
+    conn: &Connection,
+    provider: &str,
+    old_session_id: &str,
+    new_session_id: &str,
+) -> Result<u64, LcmError> {
+    conn.execute(
+        "UPDATE lcm_external_payloads
+         SET session_id = ?3
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, old_session_id, new_session_id],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))
+}
+
 pub(crate) async fn upsert_payload_metadata(
     conn: &Connection,
     payload: &LcmPayloadRef,

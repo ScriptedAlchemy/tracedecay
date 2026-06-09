@@ -1430,8 +1430,8 @@ async fn boundary_cooldown_expires_after_sixty_seconds() {
 }
 
 // Mirrors hermes-lcm: when old_session_id matches the bound session, the
-// compression boundary continues (Hermes carries lifecycle state over) and no
-// cooldown starts.
+// compression boundary continues (Hermes carries LCM data over to the new
+// session id) and no cooldown starts.
 #[tokio::test]
 async fn boundary_continuation_with_matching_bound_session_records_no_cooldown() {
     let tmp = TempDir::new().unwrap();
@@ -1452,8 +1452,8 @@ async fn boundary_continuation_with_matching_bound_session_records_no_cooldown()
         ))
         .await
         .unwrap();
-    assert!(!boundary.recorded);
-    assert_eq!(boundary.reason, "compression_boundary_continued");
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_carried_over");
 
     let mut request = preflight_request("cursor", "session-b", Vec::new(), Some(120));
     request.threshold_tokens = Some(100);
@@ -2347,6 +2347,21 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             .map(|node_id| LcmSourceRef::SummaryNode { node_id })
             .collect::<Vec<_>>()
     );
+    // Mirrors hermes-lcm `_assemble_context` after `_maybe_condense`: a
+    // condensation-only pass still returns the assembled active context, not
+    // an empty replay.
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec!["depth one condensed"]
+    );
+    assert_eq!(
+        response.replay_messages[0]["lcm_summary_node_id"],
+        parent.node_id.as_str()
+    );
 }
 
 #[tokio::test]
@@ -2457,8 +2472,11 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
         &["one", "two", "three", "four", "five", "six"],
     )
     .await;
-    let mut leaves = Vec::new();
-    for (idx, pair) in store_ids.chunks(2).enumerate() {
+    // Insert depth-0 leaves in reverse chronological creation order so that
+    // candidate ordering must come from source times, not insertion order.
+    let mut leaves = vec![None, None, None];
+    for idx in [2_usize, 1, 0] {
+        let pair = &store_ids[idx * 2..idx * 2 + 2];
         let leaf = db
             .lcm_insert_summary_node(summary_draft_with_times(
                 "cursor",
@@ -2474,26 +2492,12 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             ))
             .await
             .unwrap();
-        leaves.push(leaf);
+        leaves[idx] = Some(leaf);
     }
-    let mut depth_one = Vec::new();
-    for idx in [2_usize, 1, 0] {
-        let parent = db
-            .lcm_insert_summary_node(summary_draft_with_times(
-                "cursor",
-                "session-1",
-                1,
-                &format!("depth one {}", idx + 1),
-                vec![LcmSourceRef::SummaryNode {
-                    node_id: leaves[idx].node_id.clone(),
-                }],
-                1_715_000_000 + (idx as i64 * 10),
-                1_715_000_001 + (idx as i64 * 10),
-            ))
-            .await
-            .unwrap();
-        depth_one.push(parent);
-    }
+    let leaves = leaves
+        .into_iter()
+        .map(|leaf| leaf.unwrap())
+        .collect::<Vec<_>>();
     db.lcm_update_lifecycle(LcmLifecycleUpdate {
         provider: "cursor".into(),
         conversation_id: "session-1".into(),
@@ -2528,7 +2532,7 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             context_length: None,
             reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
-                summary_text: "depth two condensed".into(),
+                summary_text: "depth one condensed".into(),
             },
         })
         .await
@@ -2537,12 +2541,11 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
     assert_eq!(response.status, "ok");
     assert_eq!(response.reason, "condensed_summary_nodes");
     assert_eq!(response.summary_nodes_created, 1);
-    assert_eq!(response.summary_nodes[0].depth, 2);
+    assert_eq!(response.summary_nodes[0].depth, 1);
     assert_eq!(
         response.summary_nodes[0].source_refs,
-        depth_one
+        leaves
             .iter()
-            .rev()
             .map(|node| LcmSourceRef::SummaryNode {
                 node_id: node.node_id.clone()
             })
@@ -2708,8 +2711,11 @@ async fn forced_overflow_without_backlog_reports_irreducible_best_effort() {
     );
 }
 
+// Mirrors hermes-lcm `_assemble_context` budget enforcement: tail messages
+// that do not fit under the assembly cap are dropped (newest kept first) and
+// the summary block is budgeted, instead of returning over-cap replay.
 #[tokio::test]
-async fn forced_overflow_reports_best_effort_when_replay_still_exceeds_cap() {
+async fn forced_overflow_trims_replay_to_assembly_cap() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages_with_roles(
@@ -2740,14 +2746,11 @@ async fn forced_overflow_reports_best_effort_when_replay_still_exceeds_cap() {
     let response = db.lcm_compress(request).await.unwrap();
     let response_json = serde_json::to_value(&response).unwrap();
 
-    assert_eq!(response.status, "best_effort");
-    assert_eq!(
-        response.reason,
-        "forced_overflow_recovery_replay_over_budget"
-    );
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "forced_overflow_recovery");
     assert_eq!(response.summary_nodes_created, 1);
-    assert_eq!(response_json["replay_over_budget"], true);
-    assert!(response_json["replay_token_estimate"].as_i64().unwrap() > 6);
+    assert_eq!(response_json["replay_over_budget"], false);
+    assert!(response_json["replay_token_estimate"].as_i64().unwrap() <= 6);
     assert_eq!(
         response
             .replay_messages
@@ -2757,8 +2760,6 @@ async fn forced_overflow_reports_best_effort_when_replay_still_exceeds_cap() {
         vec![
             "system anchor words words".to_string(),
             "small summary".to_string(),
-            "fresh tail words words".to_string(),
-            "fresh assistant words words".to_string()
         ]
     );
 }
@@ -2876,11 +2877,8 @@ async fn critical_pressure_catch_up_reports_attempts_debt_and_budget_state() {
     let response = db.lcm_compress(request).await.unwrap();
     let response_json = serde_json::to_value(&response).unwrap();
 
-    assert_eq!(response.status, "best_effort");
-    assert_eq!(
-        response.reason,
-        "forced_overflow_recovery_replay_over_budget"
-    );
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "forced_overflow_recovery");
     assert_eq!(response.summary_nodes_created, 4);
     assert_eq!(response_json["compression_attempts"], 4);
     assert_eq!(response_json["fallback_used"], false);
@@ -2899,7 +2897,18 @@ async fn critical_pressure_catch_up_reports_attempts_debt_and_budget_state() {
             to_store_id: store_ids[5],
         }]
     );
-    assert_eq!(response_json["replay_over_budget"], true);
+    // Budget enforcement keeps the freshest tail and drops over-cap summary
+    // blocks and deferred backlog from active replay; they stay recoverable
+    // through the DAG and maintenance debt.
+    assert_eq!(response_json["replay_over_budget"], false);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec!["fresh-1".to_string(), "fresh-2".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -2963,4 +2972,410 @@ async fn maintenance_debt_clears_when_retry_compacts_remaining_backlog() {
         Some(store_ids[3])
     );
     assert!(second.frontier.maintenance_debt.is_empty());
+}
+
+// Mirrors hermes-lcm `_assemble_context` loading all uncondensed DAG nodes:
+// a follow-up compress with nothing new to compact must still replay the
+// summaries persisted by earlier passes instead of dropping them.
+#[tokio::test]
+async fn no_backlog_compress_replays_persisted_uncondensed_summaries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let first = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "old summary".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.summary_nodes_created, 1);
+
+    let second = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(second.status, "ok");
+    assert_eq!(second.reason, "no_backlog_to_compress");
+    assert_eq!(second.summary_nodes_created, 0);
+    assert_eq!(
+        second
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "old summary".to_string(),
+            "fresh-1".to_string(),
+            "fresh-2".to_string(),
+        ]
+    );
+    assert_eq!(
+        second.replay_messages[0]["lcm_summary_node_id"],
+        first.summary_nodes[0].node_id.as_str()
+    );
+}
+
+// Mirrors hermes-lcm `_maybe_condense` with the default
+// `incremental_max_depth = 1`: only depth-0 nodes are eligible for
+// condensation, so unparented depth-1 nodes never get condensed to depth 2
+// at default settings — they stay in active replay instead.
+#[tokio::test]
+async fn condensation_respects_default_incremental_max_depth() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["one", "two", "three", "four", "five", "six"],
+    )
+    .await;
+    for (idx, pair) in store_ids.chunks(2).enumerate() {
+        db.lcm_insert_summary_node(summary_draft_with_times(
+            "cursor",
+            "session-1",
+            1,
+            &format!("depth one {}", idx + 1),
+            pair.iter()
+                .copied()
+                .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                .collect(),
+            1_715_000_000 + (idx as i64 * 10),
+            1_715_000_001 + (idx as i64 * 10),
+        ))
+        .await
+        .unwrap();
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let mut request = compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "should not condense above max depth".into(),
+        },
+    );
+    request.summary_fan_in = Some(3);
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "no_backlog_to_compress");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "depth one 1".to_string(),
+            "depth one 2".to_string(),
+            "depth one 3".to_string(),
+        ]
+    );
+}
+
+// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: with no backlog
+// to compact, forced overflow evicts droppable assistant/tool tail turns that
+// do not fit under the cap while keeping anchors and budgetable user intent.
+#[tokio::test]
+async fn overflow_recovery_without_backlog_evicts_droppable_tail() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "policy anchor stays"),
+            (
+                "assistant",
+                "bulky derived assistant turn with many filler words here",
+            ),
+            ("user", "keep me"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "unused summary".into(),
+        },
+        None,
+        None,
+        Some(5),
+    );
+    request.current_tokens = Some(50);
+    let response = db.lcm_compress(request).await.unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "overflow_recovery_no_backlog");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(response_json["replay_over_budget"], false);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec!["policy anchor stays".to_string(), "keep me".to_string()]
+    );
+}
+
+// Mirrors hermes-lcm `_continue_compression_boundary` happy path
+// (engine.py:1902-1923): when the host old_session_id matches the bound
+// session, all LCM data is reassigned to the new session id and lifecycle
+// state is finalized + rebound instead of orphaning the old session.
+#[tokio::test]
+async fn compression_boundary_carry_over_reassigns_lcm_data() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-old",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let first = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-old",
+            LcmSummarizerMode::Fake {
+                summary_text: "old summary".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.summary_nodes_created, 1);
+    let node_id = first.summary_nodes[0].node_id.clone();
+
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-new",
+            "session-old",
+            Some("session-old"),
+        ))
+        .await
+        .unwrap();
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_carried_over");
+
+    // Raw messages moved to the new session id.
+    let new_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-new".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(new_page.messages.len(), 4);
+    let old_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-old".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert!(old_page.messages.is_empty());
+
+    // Summary node moved with its lineage intact.
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-new", &node_id)
+        .await
+        .unwrap();
+    assert_eq!(expanded.sources.len(), 2);
+
+    // Lifecycle finalized for the old session and rebound to the new one.
+    let state = db
+        .lcm_lifecycle_state("cursor", "session-new")
+        .await
+        .unwrap();
+    assert_eq!(state.current_session_id, "session-new");
+    assert_eq!(state.current_frontier_store_id, Some(store_ids[1]));
+    assert_eq!(
+        state.last_finalized_session_id.as_deref(),
+        Some("session-old")
+    );
+    assert_eq!(state.last_finalized_frontier_store_id, Some(store_ids[1]));
+    assert!(db
+        .lcm_lifecycle_state("cursor", "session-old")
+        .await
+        .is_err());
+
+    // Carried summaries keep flowing into the new session's replay.
+    let next = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-new",
+            LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next.reason, "no_backlog_to_compress");
+    assert_eq!(
+        next.replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "old summary".to_string(),
+            "fresh-1".to_string(),
+            "fresh-2".to_string(),
+        ]
+    );
+}
+
+// The carry-over moves externalized payload ownership and outstanding
+// maintenance debt to the new session id, mirroring Hermes
+// `reassign_externalized_payloads` and conversation-scoped debt continuity.
+#[tokio::test]
+async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-old",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+    let payload_body = format!("tool output\n{}", "X".repeat(300_000));
+    let mut external_message = raw_message_with_role(
+        "cursor",
+        "session-old-tool-1",
+        "session-old",
+        "tool",
+        7,
+        &payload_body,
+    );
+    external_message.kind = Some("tool_result".to_string());
+    let storage_root = tmp.path().join(".tokensave");
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&external_message)
+        .await
+        .unwrap();
+    let payload_ref = db
+        .lcm_load_raw_message("cursor", "session-old-tool-1")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("payload should externalize");
+
+    let first = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-old",
+            LcmSummarizerMode::Fake {
+                summary_text: "first chunk summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(!first.frontier.maintenance_debt.is_empty());
+
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-new",
+            "session-old",
+            Some("session-old"),
+        ))
+        .await
+        .unwrap();
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_carried_over");
+
+    let state = db
+        .lcm_lifecycle_state("cursor", "session-new")
+        .await
+        .unwrap();
+    assert_eq!(
+        state.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[2],
+            to_store_id: store_ids[4],
+        }]
+    );
+
+    let expansion = db
+        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-new".into(),
+            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload {
+                payload_ref: payload_ref.clone(),
+            },
+            content_slice: None,
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(expansion.content.starts_with("tool output"));
+    assert!(db
+        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-old".into(),
+            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
+            content_slice: None,
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .is_err());
 }

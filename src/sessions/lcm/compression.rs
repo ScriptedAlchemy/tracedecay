@@ -6,11 +6,11 @@ use serde_json::{json, Map, Value};
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    dag, raw, security, LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmLifecycleState,
-    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest, LcmPreflightResponse,
-    LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSourceRef,
-    LcmStorageKind, LcmSummarizerMode, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
-    LcmSummarySourceMessage, LcmSummarySourceRange,
+    dag, payload, raw, security, LcmCompressionRequest, LcmCompressionResponse, LcmError,
+    LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
+    LcmPreflightResponse, LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
+    LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode, LcmSummaryNodeDraft,
+    LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
 };
 
 const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
@@ -18,6 +18,12 @@ const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
 // suppresses compression for 60 seconds.
 const COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 const DEFAULT_SUMMARY_FAN_IN: usize = 4;
+// Mirrors hermes-lcm `LCMConfig.incremental_max_depth` default: condensation
+// only consumes nodes at depths strictly below this ceiling, so depth-1
+// summaries are never re-condensed to depth 2+ at default settings. The
+// configurable knob is plumbed by the config workstream; the engine enforces
+// the Hermes default here.
+const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
@@ -98,10 +104,12 @@ pub(crate) async fn lifecycle_state(
 /// Records a compression-boundary session start, mirroring hermes-lcm
 /// `_continue_compression_boundary`.
 ///
-/// Hermes carries lifecycle state over when the host's `old_session_id`
-/// matches the bound session; when it does not, the boundary skips carry-over
-/// and starts a short compression cooldown so the new session does not cascade
-/// straight back into compression while pressure is still unrelieved.
+/// Hermes carries all LCM data over when the host's `old_session_id` matches
+/// the bound session (finalize + reassign of messages, DAG nodes, and
+/// externalized payloads, engine.py:1902-1923); when it does not, the boundary
+/// skips carry-over and starts a short compression cooldown so the new session
+/// does not cascade straight back into compression while pressure is still
+/// unrelieved.
 pub(crate) async fn record_session_boundary(
     conn: &Connection,
     request: LcmSessionBoundaryRequest,
@@ -114,10 +122,7 @@ pub(crate) async fn record_session_boundary(
         return Ok(session_boundary_response(false, "not_compression_boundary"));
     }
     if request.bound_session_id.as_deref() == Some(old_session_id) {
-        return Ok(session_boundary_response(
-            false,
-            "compression_boundary_continued",
-        ));
+        return carry_over_session_boundary(conn, &request, old_session_id).await;
     }
 
     conn.execute(
@@ -140,6 +145,98 @@ pub(crate) async fn record_session_boundary(
     Ok(session_boundary_response(
         true,
         "compression_boundary_skip_recorded",
+    ))
+}
+
+/// Carries all LCM data forward across a matching-bound compression boundary,
+/// mirroring the hermes-lcm happy path: finalize the old session, then
+/// transactionally reassign raw messages, DAG nodes, and externalized payload
+/// ownership to the new session id and rebind lifecycle state to it.
+async fn carry_over_session_boundary(
+    conn: &Connection,
+    request: &LcmSessionBoundaryRequest,
+    old_session_id: &str,
+) -> Result<LcmSessionBoundaryResponse, LcmError> {
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let response = match carry_over_in_transaction(conn, request, old_session_id).await {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    };
+
+    match conn.execute("COMMIT", ()).await {
+        Ok(_) => Ok(response),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(LcmError::Db(err.to_string()))
+        }
+    }
+}
+
+async fn carry_over_in_transaction(
+    conn: &Connection,
+    request: &LcmSessionBoundaryRequest,
+    old_session_id: &str,
+) -> Result<LcmSessionBoundaryResponse, LcmError> {
+    ensure_session(conn, &request.provider, &request.session_id).await?;
+    let old_state =
+        lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
+    // Mirrors hermes-lcm: the carried frontier is the strongest durable
+    // marker recorded for the source session.
+    let carried_frontier = [
+        old_state.current_frontier_store_id,
+        old_state.last_finalized_frontier_store_id,
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+
+    raw::reassign_session_messages(conn, &request.provider, old_session_id, &request.session_id)
+        .await?;
+    dag::reassign_session_nodes(conn, &request.provider, old_session_id, &request.session_id)
+        .await?;
+    payload::reassign_session_payloads(
+        conn,
+        &request.provider,
+        old_session_id,
+        &request.session_id,
+    )
+    .await?;
+
+    let update = LcmLifecycleUpdate {
+        provider: request.provider.clone(),
+        conversation_id: request.session_id.clone(),
+        current_session_id: request.session_id.clone(),
+        current_frontier_store_id: carried_frontier,
+        last_finalized_session_id: Some(old_session_id.to_string()),
+        last_finalized_frontier_store_id: carried_frontier,
+        maintenance_debt: old_state.maintenance_debt.clone(),
+    };
+    upsert_lifecycle_state(conn, &update).await?;
+    replace_maintenance_debt(
+        conn,
+        &update.provider,
+        &update.conversation_id,
+        &update.maintenance_debt,
+    )
+    .await?;
+    // Every LCM call keys conversation_id = session_id in this port, so the
+    // old conversation row is fully superseded by the rebound one above.
+    conn.execute(
+        "DELETE FROM lcm_lifecycle_state WHERE provider = ?1 AND conversation_id = ?2",
+        params![request.provider.as_str(), old_session_id],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    Ok(session_boundary_response(
+        true,
+        "compression_boundary_carried_over",
     ))
 }
 
@@ -387,11 +484,34 @@ async fn compress_in_transaction(
 
     if window.backlog.is_empty() {
         if should_force_overflow_recovery(&request) {
-            let replay_messages =
-                replay_without_summary(&window.pinned_anchors, &window.fresh_tail);
+            // Mirrors hermes-lcm `_assemble_overflow_recovery_context`:
+            // without backlog to compact, recover by evicting droppable
+            // active-context messages under the cap instead of returning the
+            // overflowing context unchanged.
+            let replay_messages = assemble_overflow_recovery_replay(
+                conn,
+                &request.provider,
+                &request.session_id,
+                ReplayWindowParts {
+                    pinned_anchors: &window.pinned_anchors,
+                    deferred_backlog: &[],
+                    fresh_tail: &window.fresh_tail,
+                },
+                request.max_assembly_tokens,
+            )
+            .await?;
+            let over_budget = replay_exceeds_budget(
+                replay_token_estimate(&replay_messages),
+                request.max_assembly_tokens,
+            );
+            let (status, reason) = if over_budget {
+                ("best_effort", "irreducible_overflow_no_backlog")
+            } else {
+                ("ok", "overflow_recovery_no_backlog")
+            };
             return Ok(compression_response(
-                "best_effort",
-                "irreducible_overflow_no_backlog",
+                status,
+                reason,
                 Vec::new(),
                 replay_messages,
                 existing_frontier,
@@ -399,13 +519,29 @@ async fn compress_in_transaction(
                 request.max_assembly_tokens,
             ));
         }
-        if let Some(response) =
-            condense_summary_nodes_if_ready(conn, &request, &conversation_id, &existing_frontier)
-                .await?
+        if let Some(response) = condense_summary_nodes_if_ready(
+            conn,
+            &request,
+            &conversation_id,
+            &existing_frontier,
+            &window,
+        )
+        .await?
         {
             return Ok(response);
         }
-        let replay_messages = replay_without_summary(&window.pinned_anchors, &window.fresh_tail);
+        let replay_messages = assemble_replay_context(
+            conn,
+            &request.provider,
+            &request.session_id,
+            ReplayWindowParts {
+                pinned_anchors: &window.pinned_anchors,
+                deferred_backlog: &[],
+                fresh_tail: &window.fresh_tail,
+            },
+            request.max_assembly_tokens,
+        )
+        .await?;
         return Ok(compression_response(
             "ok",
             "no_backlog_to_compress",
@@ -432,12 +568,18 @@ async fn compress_in_transaction(
             source_token_count(&window.backlog),
         );
         if !has_eligible_backlog(&window.backlog, leaf_chunk_tokens) {
-            let replay_messages = replay_with_summaries(
-                &window.pinned_anchors,
-                &[],
-                &window.backlog,
-                &window.fresh_tail,
-            );
+            let replay_messages = assemble_replay_context(
+                conn,
+                &request.provider,
+                &request.session_id,
+                ReplayWindowParts {
+                    pinned_anchors: &window.pinned_anchors,
+                    deferred_backlog: &window.backlog,
+                    fresh_tail: &window.fresh_tail,
+                },
+                request.max_assembly_tokens,
+            )
+            .await?;
             return Ok(compression_response(
                 "ok",
                 "backlog_below_leaf_chunk_threshold",
@@ -506,7 +648,6 @@ async fn compress_in_transaction(
             rescuing_summary_text(summary_text.clone(), &selected_backlog, source_tokens);
         fallback_used |= pass_fallback_used;
 
-        let first_store_id = selected_backlog.first().map(|message| message.store_id);
         let summary = dag::insert_summary_node_in_transaction(
             conn,
             summary_draft(
@@ -523,10 +664,7 @@ async fn compress_in_transaction(
             .last()
             .map(|message| message.store_id)
             .or(new_frontier);
-        created_summaries.push(CreatedSummary {
-            summary,
-            first_store_id,
-        });
+        created_summaries.push(summary);
         remaining_backlog = remaining_backlog[selected_len..].to_vec();
 
         if !plan.forced_overflow_recovery {
@@ -553,12 +691,21 @@ async fn compress_in_transaction(
     )
     .await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
-    let replay_messages = replay_with_summaries(
-        &window.pinned_anchors,
-        &created_summaries,
-        &remaining_backlog,
-        &window.fresh_tail,
-    );
+    // The summaries created above are already persisted in this transaction,
+    // so the shared assembler replays them together with any earlier
+    // uncondensed summary history (hermes-lcm `_assemble_context`).
+    let replay_messages = assemble_replay_context(
+        conn,
+        &request.provider,
+        &request.session_id,
+        ReplayWindowParts {
+            pinned_anchors: &window.pinned_anchors,
+            deferred_backlog: &remaining_backlog,
+            fresh_tail: &window.fresh_tail,
+        },
+        request.max_assembly_tokens,
+    )
+    .await?;
     let mut status = "ok";
     let mut reason = if plan.forced_overflow_recovery {
         "forced_overflow_recovery"
@@ -575,10 +722,7 @@ async fn compress_in_transaction(
         reason = "forced_overflow_recovery_replay_over_budget";
     }
     let compression_attempts = created_summaries.len();
-    let summary_nodes = created_summaries
-        .into_iter()
-        .map(|created| created.summary)
-        .collect::<Vec<_>>();
+    let summary_nodes = created_summaries;
 
     let retry_status = if plan.forced_overflow_recovery {
         Some("critical_pressure_catch_up")
@@ -759,11 +903,6 @@ struct CompressionWindow {
 struct CompressionPlan {
     selected_backlog: Vec<LcmRawMessage>,
     forced_overflow_recovery: bool,
-}
-
-struct CreatedSummary {
-    summary: LcmSummaryNode,
-    first_store_id: Option<i64>,
 }
 
 fn compression_window(
@@ -1011,41 +1150,196 @@ fn replay_without_summary(
     replay_messages
 }
 
-fn replay_with_summaries(
-    pinned_anchors: &[LcmRawMessage],
-    summaries: &[CreatedSummary],
-    deferred_backlog: &[LcmRawMessage],
-    fresh_tail: &[LcmRawMessage],
+const SUMMARY_REPLAY_PRIORITY: u8 = 0;
+const RAW_REPLAY_PRIORITY: u8 = 1;
+
+struct ReplayWindowParts<'a> {
+    pinned_anchors: &'a [LcmRawMessage],
+    deferred_backlog: &'a [LcmRawMessage],
+    fresh_tail: &'a [LcmRawMessage],
+}
+
+/// Assembles the active replay context, mirroring hermes-lcm
+/// `_assemble_context`: policy anchors are always kept, every uncondensed DAG
+/// summary node is replayed (budgeted highest depth first), and the raw tail
+/// is trimmed under the effective assembly cap.
+async fn assemble_replay_context(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    parts: ReplayWindowParts<'_>,
+    max_assembly_tokens: Option<i64>,
+) -> Result<Vec<Value>, LcmError> {
+    let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let (anchors, raws) = split_leading_anchors(&parts);
+    Ok(assemble_replay_messages(
+        &anchors,
+        &summaries,
+        &raws,
+        max_assembly_tokens,
+    ))
+}
+
+/// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
+/// the cap; when nothing beyond the anchors fits, fall back to anchors plus
+/// the most recent message even if that stays over budget.
+async fn assemble_overflow_recovery_replay(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    parts: ReplayWindowParts<'_>,
+    max_assembly_tokens: Option<i64>,
+) -> Result<Vec<Value>, LcmError> {
+    let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let (anchors, raws) = split_leading_anchors(&parts);
+    let candidate = assemble_replay_messages(&anchors, &summaries, &raws, max_assembly_tokens);
+    if candidate.len() == anchors.len() {
+        if let Some(last) = raws.last() {
+            let mut replay = anchors
+                .iter()
+                .map(|message| raw_replay_message(message))
+                .collect::<Vec<_>>();
+            replay.push(raw_replay_message(last));
+            return Ok(replay);
+        }
+    }
+    Ok(candidate)
+}
+
+/// Mirrors hermes-lcm `_leading_anchor_count`: policy anchors at the very
+/// start of the remaining context behave like the leading system message and
+/// are never budget-dropped.
+fn split_leading_anchors<'a>(
+    parts: &ReplayWindowParts<'a>,
+) -> (Vec<&'a LcmRawMessage>, Vec<&'a LcmRawMessage>) {
+    let mut anchors = parts.pinned_anchors.iter().collect::<Vec<_>>();
+    let mut raws = parts
+        .deferred_backlog
+        .iter()
+        .chain(parts.fresh_tail.iter())
+        .collect::<Vec<_>>();
+    let promoted = raws
+        .iter()
+        .take_while(|message| is_policy_anchor_role(&message.role))
+        .count();
+    anchors.extend(raws.drain(..promoted));
+    (anchors, raws)
+}
+
+fn assemble_replay_messages(
+    anchors: &[&LcmRawMessage],
+    summaries: &[dag::LcmUncondensedSummaryNode],
+    raws: &[&LcmRawMessage],
+    max_assembly_tokens: Option<i64>,
 ) -> Vec<Value> {
-    let mut replay_items = Vec::with_capacity(
-        pinned_anchors.len() + summaries.len() + deferred_backlog.len() + fresh_tail.len(),
-    );
-    replay_items.extend(
-        pinned_anchors
-            .iter()
-            .map(|message| (message.store_id, 1, raw_replay_message(message))),
-    );
-    replay_items.extend(summaries.iter().map(|created| {
+    let (selected_raws, selected_summaries) = match max_assembly_tokens {
+        None => (raws.to_vec(), summaries.iter().collect::<Vec<_>>()),
+        Some(cap) => {
+            let used = anchors
+                .iter()
+                .map(|message| estimate_tokens(&message.content))
+                .sum::<i64>();
+            let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
+            let summary_budget = (cap - used - tail_tokens).max(0);
+            (
+                selected_raws,
+                select_budget_summaries(summaries, summary_budget),
+            )
+        }
+    };
+
+    let mut replay_items =
+        Vec::with_capacity(anchors.len() + selected_summaries.len() + selected_raws.len());
+    replay_items.extend(anchors.iter().map(|message| {
         (
-            created.first_store_id.unwrap_or(i64::MAX),
-            0,
-            summary_replay_message(&created.summary),
+            message.store_id,
+            RAW_REPLAY_PRIORITY,
+            raw_replay_message(message),
         )
     }));
-    replay_items.extend(
-        deferred_backlog
-            .iter()
-            .map(|message| (message.store_id, 1, raw_replay_message(message))),
-    );
-    replay_items.extend(
-        fresh_tail
-            .iter()
-            .map(|message| (message.store_id, 1, raw_replay_message(message))),
-    );
+    replay_items.extend(selected_summaries.iter().map(|summary| {
+        (
+            summary.first_source_store_id.unwrap_or(i64::MAX),
+            SUMMARY_REPLAY_PRIORITY,
+            summary_replay_message(&summary.node),
+        )
+    }));
+    replay_items.extend(selected_raws.iter().map(|message| {
+        (
+            message.store_id,
+            RAW_REPLAY_PRIORITY,
+            raw_replay_message(message),
+        )
+    }));
     replay_items.sort_by_key(|(store_id, priority, _)| (*store_id, *priority));
     replay_items
         .into_iter()
         .map(|(_, _, message)| message)
+        .collect()
+}
+
+/// Mirrors hermes-lcm `_assemble_context` tail selection: keep the newest
+/// contiguous run of messages that fits under the cap; a non-fitting
+/// assistant/tool turn is skipped (evicted), a non-fitting prompt-bearing
+/// turn stops selection, and nothing older is kept once a gap was skipped.
+fn select_budget_tail<'a>(
+    raws: &[&'a LcmRawMessage],
+    used: i64,
+    cap: i64,
+) -> (Vec<&'a LcmRawMessage>, i64) {
+    let mut kept_reversed = Vec::new();
+    let mut tail_tokens = 0i64;
+    let mut skipped_gap = false;
+    for message in raws.iter().rev() {
+        let message_tokens = estimate_tokens(&message.content);
+        if used + tail_tokens + message_tokens > cap {
+            if is_budget_droppable_tail_role(&message.role) {
+                skipped_gap = true;
+                continue;
+            }
+            break;
+        }
+        if skipped_gap {
+            break;
+        }
+        kept_reversed.push(*message);
+        tail_tokens += message_tokens;
+    }
+    kept_reversed.reverse();
+    (kept_reversed, tail_tokens)
+}
+
+/// Mirrors hermes-lcm `_is_budget_droppable_tail_message`: assistant/tool
+/// turns are derived context and may be evicted under budget pressure;
+/// user/system turns are prompt-bearing and stop tail selection.
+fn is_budget_droppable_tail_role(role: &str) -> bool {
+    matches!(role, "assistant" | "tool")
+}
+
+/// Mirrors hermes-lcm summary-block budgeting: highest-depth summaries claim
+/// the budget first; parts that do not fit are skipped without ending the
+/// scan, so smaller lower-depth summaries can still land.
+fn select_budget_summaries(
+    summaries: &[dag::LcmUncondensedSummaryNode],
+    summary_budget: i64,
+) -> Vec<&dag::LcmUncondensedSummaryNode> {
+    let mut by_depth = (0..summaries.len()).collect::<Vec<_>>();
+    by_depth.sort_by_key(|&idx| std::cmp::Reverse(summaries[idx].node.depth));
+    let mut selected = vec![false; summaries.len()];
+    let mut used = 0i64;
+    for idx in by_depth {
+        let summary_tokens = estimate_tokens(&summaries[idx].node.summary_text);
+        if used + summary_tokens > summary_budget {
+            continue;
+        }
+        used += summary_tokens;
+        selected[idx] = true;
+    }
+    summaries
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| selected[*idx])
+        .map(|(_, summary)| summary)
         .collect()
 }
 
@@ -1226,6 +1520,7 @@ async fn condense_summary_nodes_if_ready(
     request: &LcmCompressionRequest,
     conversation_id: &str,
     existing_frontier: &LcmLifecycleState,
+    window: &CompressionWindow,
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
     let fan_in = request
         .summary_fan_in
@@ -1286,11 +1581,26 @@ async fn condense_summary_nodes_if_ready(
     } else {
         "condensed_summary_nodes"
     };
+    // Mirrors hermes-lcm: `_assemble_context` always follows
+    // `_maybe_condense`, so a condensation-only pass still returns the
+    // assembled active context instead of an empty replay.
+    let replay_messages = assemble_replay_context(
+        conn,
+        &request.provider,
+        &request.session_id,
+        ReplayWindowParts {
+            pinned_anchors: &window.pinned_anchors,
+            deferred_backlog: &[],
+            fresh_tail: &window.fresh_tail,
+        },
+        request.max_assembly_tokens,
+    )
+    .await?;
     Ok(Some(compression_response(
         "ok",
         reason,
         vec![summary],
-        Vec::new(),
+        replay_messages,
         frontier,
         None,
         request.max_assembly_tokens,
@@ -1329,6 +1639,7 @@ async fn load_condensation_candidates(
              eligible_depth AS (
                SELECT depth
                FROM unparented
+               WHERE depth < ?4
                GROUP BY depth
                HAVING COUNT(*) >= ?3
                ORDER BY depth
@@ -1343,7 +1654,12 @@ async fn load_condensation_candidates(
                       first_source_id IS NULL, first_source_id,
                       created_at, node_id
              LIMIT ?3",
-            params![provider, session_id, fan_in as i64],
+            params![
+                provider,
+                session_id,
+                fan_in as i64,
+                DEFAULT_INCREMENTAL_MAX_DEPTH
+            ],
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;

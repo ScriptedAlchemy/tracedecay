@@ -243,7 +243,7 @@ pub struct LcmExpandRequest {
 
 /// Pagination metadata for a summary node's immediate source list, mirroring
 /// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
-/// `tools.py`). TokenSave slices each returned source by characters via
+/// `tools.py`). `TokenSave` slices each returned source by characters via
 /// `content_slice` instead of sharing a token budget across sources, so the
 /// resume cursor is `next_source_offset` alone.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

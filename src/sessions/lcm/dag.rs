@@ -94,6 +94,120 @@ pub(crate) async fn expand_summary_node(
     Ok(LcmSummaryExpansion { summary, sources })
 }
 
+/// One uncondensed summary node plus the earliest raw-message store id in its
+/// descendant lineage, used to position the node inside interleaved replay.
+#[derive(Debug, Clone)]
+pub(crate) struct LcmUncondensedSummaryNode {
+    pub(crate) node: LcmSummaryNode,
+    pub(crate) first_source_store_id: Option<i64>,
+}
+
+/// Loads every summary node for the session that has not been condensed into
+/// a higher-depth node. Mirrors hermes-lcm `SummaryDAG.get_uncondensed_at_depth`
+/// collapsed across all depths in one query; replay assembly consumes the
+/// result ordered by lineage position (then depth, highest first).
+pub(crate) async fn load_uncondensed_summary_nodes(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+) -> Result<Vec<LcmUncondensedSummaryNode>, LcmError> {
+    let mut rows = conn
+        .query(
+            "WITH RECURSIVE unparented AS (
+               SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth,
+                      n.summary_text, n.summary_hash, n.summary_token_count,
+                      n.source_token_count, n.source_time_start, n.source_time_end,
+                      n.expand_hint, n.metadata_json, n.created_at
+               FROM lcm_summary_nodes n
+               WHERE n.provider = ?1 AND n.session_id = ?2
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM lcm_summary_sources s
+                   WHERE s.source_kind = 'summary_node'
+                     AND s.source_id = n.node_id
+                 )
+             ),
+             lineage(root_id, source_kind, source_id) AS (
+               SELECT s.node_id, s.source_kind, s.source_id
+               FROM lcm_summary_sources s
+               JOIN unparented u ON u.node_id = s.node_id
+               UNION ALL
+               SELECT l.root_id, s.source_kind, s.source_id
+               FROM lineage l
+               JOIN lcm_summary_sources s
+                 ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
+             ),
+             first_raw AS (
+               SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
+               FROM lineage
+               WHERE source_kind = 'raw_message'
+               GROUP BY root_id
+             )
+             SELECT u.node_id, u.provider, u.conversation_id, u.session_id, u.depth,
+                    u.summary_text, u.summary_hash, u.summary_token_count,
+                    u.source_token_count, u.source_time_start, u.source_time_end,
+                    u.expand_hint, u.metadata_json, u.created_at,
+                    first_raw.first_source_store_id
+             FROM unparented u
+             LEFT JOIN first_raw ON first_raw.root_id = u.node_id
+             ORDER BY first_raw.first_source_store_id IS NULL,
+                      first_raw.first_source_store_id,
+                      u.depth DESC,
+                      u.source_time_start IS NULL, u.source_time_start,
+                      u.created_at, u.node_id",
+            params![provider, session_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut nodes = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        nodes.push(LcmUncondensedSummaryNode {
+            node: LcmSummaryNode {
+                node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+                provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+                conversation_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+                session_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
+                depth: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+                summary_text: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+                summary_hash: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
+                summary_token_count: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
+                source_token_count: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
+                source_time_start: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+                source_time_end: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
+                expand_hint: row.get(11).map_err(|err| LcmError::Db(err.to_string()))?,
+                metadata_json: row.get(12).map_err(|err| LcmError::Db(err.to_string()))?,
+                created_at: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+                source_refs: Vec::new(),
+            },
+            first_source_store_id: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
+        });
+    }
+    Ok(nodes)
+}
+
+/// Moves all summary nodes from one session id to another inside the caller's
+/// transaction, preserving node ids and node-to-node lineage. Mirrors
+/// hermes-lcm `SummaryDAG.reassign_session_nodes`.
+pub(crate) async fn reassign_session_nodes(
+    conn: &Connection,
+    provider: &str,
+    old_session_id: &str,
+    new_session_id: &str,
+) -> Result<u64, LcmError> {
+    conn.execute(
+        "UPDATE lcm_summary_nodes
+         SET session_id = ?3, conversation_id = ?3
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, old_session_id, new_session_id],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))
+}
+
 pub fn summary_node_id(
     provider: &str,
     session_id: &str,

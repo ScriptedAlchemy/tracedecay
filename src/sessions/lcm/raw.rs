@@ -134,6 +134,25 @@ fn externalized_payload_metadata(
     metadata.to_string()
 }
 
+/// Moves all persisted raw messages from one session id to another inside the
+/// caller's transaction, preserving store ids and ordinals. Mirrors hermes-lcm
+/// `MessageStore.reassign_session_messages`.
+pub(crate) async fn reassign_session_messages(
+    conn: &Connection,
+    provider: &str,
+    old_session_id: &str,
+    new_session_id: &str,
+) -> Result<u64, LcmError> {
+    conn.execute(
+        "UPDATE lcm_raw_messages
+         SET session_id = ?3
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, old_session_id, new_session_id],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))
+}
+
 pub(crate) async fn upsert_raw_message_with_payload(
     conn: &Connection,
     storage_root: &Path,

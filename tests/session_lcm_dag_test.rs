@@ -1,6 +1,8 @@
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{LcmError, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
+use tokensave::sessions::lcm::{
+    LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
 fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
@@ -472,4 +474,56 @@ async fn summary_node_ids_are_stable_for_identical_drafts() {
         .expect("second summary insert should succeed");
 
     assert_eq!(first.node_id, second.node_id);
+}
+
+// Mirrors hermes-lcm `SummaryDAG.reassign_session_nodes`: a compression
+// boundary whose old_session_id matches the bound session moves DAG nodes
+// (with stable node ids and lineage) to the new session id.
+#[tokio::test]
+async fn boundary_carry_over_moves_summary_nodes_to_new_session() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
+    let node = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "carried summary",
+            store_ids
+                .iter()
+                .copied()
+                .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                .collect(),
+        ))
+        .await
+        .expect("summary node insert should succeed");
+
+    let boundary = db
+        .lcm_session_boundary(LcmSessionBoundaryRequest {
+            provider: "cursor".to_string(),
+            session_id: "session-2".to_string(),
+            old_session_id: Some("session-1".to_string()),
+            boundary_reason: Some("compression".to_string()),
+            bound_session_id: Some("session-1".to_string()),
+            boundary_skip_at: None,
+        })
+        .await
+        .expect("boundary carry-over should succeed");
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_carried_over");
+
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-2", &node.node_id)
+        .await
+        .expect("carried node should expand under the new session");
+    assert_eq!(expanded.summary.node_id, node.node_id);
+    assert_eq!(expanded.summary.session_id, "session-2");
+    assert_eq!(expanded.sources.len(), 2);
+    assert_eq!(expanded.sources[0].content, "alpha");
+
+    let stale = db
+        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .await;
+    assert!(matches!(stale, Err(LcmError::SummaryNodeNotFound)));
 }
