@@ -1019,18 +1019,15 @@ REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATC
 FALLBACK_MARKER = "[deterministic compression fallback]"
 RETRY_WORTHY_AUXILIARY_ERRORS = (
     "context length",
-    "context window",
     "maximum context",
     "max context",
     "token limit",
     "too many tokens",
-    "rate limit",
+    "prompt is too long",
+    "input too long",
+    "request too large",
     "timed out",
     "timeout",
-    "temporarily",
-    "unavailable",
-    "overloaded",
-    "try again",
 )
 
 def _strip_reasoning(text: str) -> str:

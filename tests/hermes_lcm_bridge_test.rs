@@ -1469,6 +1469,63 @@ assert result["auxiliary_error_classification"] == "retry_worthy"
 }
 
 #[test]
+fn generated_auxiliary_retry_classifier_matches_hermes_context_markers() {
+    run_generated_plugin_script(
+        "check_auxiliary_retry_classifier.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_context_retry_classifier"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+retry_worthy_markers = (
+    "context length exceeded",
+    "maximum context",
+    "max context",
+    "too many tokens",
+    "token limit",
+    "prompt is too long",
+    "input too long",
+    "request too large",
+    "timed out",
+    "timeout",
+)
+for marker in retry_worthy_markers:
+    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "retry_worthy", marker
+
+permanent_markers = (
+    "rate limit",
+    "temporarily unavailable",
+    "service unavailable",
+    "overloaded",
+    "try again",
+    "route unavailable",
+)
+for marker in permanent_markers:
+    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "permanent", marker
+"#,
+        "generated auxiliary retry classifier should match Hermes LCM context markers",
+    );
+}
+
+#[test]
 fn permanent_auxiliary_failure_returns_error_without_advancing_frontier() {
     run_generated_plugin_script(
         "check_auxiliary_permanent_failure.py",

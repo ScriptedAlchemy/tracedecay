@@ -5043,6 +5043,65 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let compress_payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
     assert_eq!(compress_payload["status"], "ok");
     assert_eq!(compress_payload["summary_nodes_created"], 0);
+    assert_eq!(compress_payload["compression_attempts"], 0);
+    assert_eq!(compress_payload["fallback_used"], false);
+    assert!(
+        compress_payload.get("retry_status").is_some(),
+        "compress response must expose retry_status for bridge contract"
+    );
+    assert_eq!(compress_payload["retry_status"], Value::Null);
+
+    for (index, content) in [
+        "old-1 token",
+        "old-2 token",
+        "old-3 token",
+        "old-4 token",
+        "old-5 token",
+        "old-6 token",
+        "fresh-1",
+        "fresh-2",
+    ]
+    .iter()
+    .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-critical-session",
+            &format!("lcm-critical-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let critical_compress = handle_tool_call(
+        &cg,
+        "tokensave_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-critical-session",
+            "messages": [],
+            "current_tokens": 40,
+            "max_assembly_tokens": 2,
+            "leaf_chunk_tokens": 1,
+            "max_source_messages": 3,
+            "summarizer": {"mode": "fake", "summary_text": "catchup summary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let critical_payload: Value =
+        serde_json::from_str(extract_text(&critical_compress.value)).unwrap();
+    assert_eq!(critical_payload["status"], "best_effort");
+    assert_eq!(critical_payload["summary_nodes_created"], 4);
+    assert_eq!(critical_payload["compression_attempts"], 4);
+    assert_eq!(critical_payload["fallback_used"], false);
+    assert_eq!(
+        critical_payload["retry_status"],
+        "critical_pressure_catch_up"
+    );
 }
 
 #[tokio::test]
