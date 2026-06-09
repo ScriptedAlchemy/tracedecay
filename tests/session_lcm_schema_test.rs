@@ -4,6 +4,10 @@ use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 
 async fn create_legacy_sessions_db(db_path: &Path) {
+    create_legacy_sessions_db_with_text(db_path, "legacy text").await;
+}
+
+async fn create_legacy_sessions_db_with_text(db_path: &Path, legacy_text: &str) {
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
     let old_db = libsql::Builder::new_local(db_path).build().await.unwrap();
@@ -38,9 +42,14 @@ async fn create_legacy_sessions_db(db_path: &Path) {
             PRIMARY KEY(provider, message_id)
         );
         INSERT INTO sessions(provider, session_id, project_key, project_path)
-        VALUES ('cursor', 'legacy-session', '/tmp/project', '/tmp/project');
-        INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-        VALUES ('cursor', 'legacy-message', 'legacy-session', 'assistant', 1, 'legacy text');",
+        VALUES ('cursor', 'legacy-session', '/tmp/project', '/tmp/project');",
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
+         VALUES ('cursor', 'legacy-message', 'legacy-session', 'assistant', 1, ?1)",
+        libsql::params![legacy_text],
     )
     .await
     .unwrap();
@@ -68,6 +77,27 @@ async fn row_count(db_path: &Path, table: &str) -> i64 {
     let mut rows = conn.query(&sql, ()).await.unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
+}
+
+async fn fts_legacy_message_ids(db_path: &Path) -> Vec<String> {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT raw.message_id
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages raw ON raw.store_id = lcm_raw_messages_fts.rowid
+             WHERE lcm_raw_messages_fts MATCH 'legacy'
+             ORDER BY raw.message_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.push(row.get(0).unwrap());
+    }
+    ids
 }
 
 async fn schema_version(db_path: &Path) -> i64 {
@@ -116,6 +146,28 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     );
     assert!(legacy.legacy_source);
     assert!(!legacy.legacy_truncated);
+    assert_eq!(
+        fts_legacy_message_ids(&db_path).await,
+        vec!["legacy-message".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn lcm_schema_marks_legacy_truncated_messages() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let legacy_text = "legacy text\n[truncated by tokensave]";
+    create_legacy_sessions_db_with_text(&db_path, legacy_text).await;
+
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    let legacy = db
+        .lcm_load_raw_message("cursor", "legacy-message")
+        .await
+        .expect("legacy message should be carried into raw store");
+
+    assert_eq!(legacy.content, legacy_text);
+    assert!(legacy.legacy_source);
+    assert!(legacy.legacy_truncated);
 }
 
 #[tokio::test]
@@ -141,4 +193,8 @@ async fn lcm_schema_migration_is_idempotent() {
         tokensave::sessions::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 1);
+    assert_eq!(
+        fts_legacy_message_ids(&db_path).await,
+        vec!["legacy-message".to_string()]
+    );
 }
