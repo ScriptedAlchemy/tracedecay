@@ -1253,6 +1253,10 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
         current_tokens: Some(100),
         focus_topic: Some("billing".to_string()),
         expected_current_frontier_store_id: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
         summarizer: LcmSummarizerMode::Fake {
             summary_text: "deterministic summary".to_string(),
         },

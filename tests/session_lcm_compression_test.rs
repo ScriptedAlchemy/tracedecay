@@ -3,7 +3,7 @@ use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
     LcmCompressionRequest, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt,
-    LcmPreflightRequest, LcmSummarizerMode,
+    LcmPreflightRequest, LcmSourceRef, LcmSummarizerMode, LcmSummaryNodeDraft,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -140,7 +140,57 @@ fn compress_request(
         current_tokens: Some(1_000),
         focus_topic: None,
         expected_current_frontier_store_id: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
         summarizer,
+    }
+}
+
+fn limited_compress_request(
+    provider: &str,
+    session_id: &str,
+    summarizer: LcmSummarizerMode,
+    leaf_chunk_tokens: Option<i64>,
+    max_source_messages: Option<usize>,
+    max_assembly_tokens: Option<i64>,
+) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        messages: Vec::new(),
+        current_tokens: Some(1_000),
+        focus_topic: None,
+        expected_current_frontier_store_id: None,
+        max_assembly_tokens,
+        leaf_chunk_tokens,
+        max_source_messages,
+        summary_fan_in: None,
+        summarizer,
+    }
+}
+
+fn summary_draft(
+    provider: &str,
+    session_id: &str,
+    depth: i64,
+    summary_text: &str,
+    source_refs: Vec<LcmSourceRef>,
+) -> LcmSummaryNodeDraft {
+    LcmSummaryNodeDraft {
+        provider: provider.to_string(),
+        conversation_id: session_id.to_string(),
+        session_id: session_id.to_string(),
+        depth,
+        summary_text: summary_text.to_string(),
+        source_refs,
+        source_token_count: 20,
+        summary_token_count: 3,
+        source_time_start: Some(1_715_000_000),
+        source_time_end: Some(1_715_000_030),
+        expand_hint: Some("test summary lineage".to_string()),
+        metadata_json: None,
     }
 }
 
@@ -207,6 +257,10 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             current_tokens: Some(100),
             focus_topic: None,
             expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -508,6 +562,10 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         current_tokens: Some(10),
         focus_topic: None,
         expected_current_frontier_store_id: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
         summarizer: LcmSummarizerMode::Noop,
     })
     .await
@@ -554,6 +612,10 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             current_tokens: Some(1_000),
             focus_topic: None,
             expected_current_frontier_store_id: Some(0),
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "stale summary".into(),
             },
@@ -592,6 +654,10 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             current_tokens: Some(1_000),
             focus_topic: Some("billing".into()),
             expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
@@ -670,4 +736,314 @@ async fn provided_summarizer_advances_frontier_consistently() {
         state.current_frontier_store_id,
         second.frontier.current_frontier_store_id
     );
+}
+
+#[tokio::test]
+async fn dynamic_chunking_compacts_bounded_oldest_leaf_chunk_and_records_backlog_debt() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "first chunk summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "compressed_backlog");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[1])
+    );
+    assert_eq!(
+        response.frontier.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[2],
+            to_store_id: store_ids[3],
+        }]
+    );
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "first chunk summary",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ]
+    );
+
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &response.summary_nodes[0].node_id)
+        .await
+        .unwrap();
+    assert_eq!(expanded.sources.len(), 2);
+    assert_eq!(expanded.sources[0].content, "old-1 token");
+    assert_eq!(expanded.sources[1].content, "old-2 token");
+    assert!(response.summary_nodes[0]
+        .metadata_json
+        .as_deref()
+        .unwrap()
+        .contains(r#""pre_compaction_extraction":"noop_contract""#));
+}
+
+#[tokio::test]
+async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["one", "two", "three", "four", "five", "six"],
+    )
+    .await;
+    let mut leaf_ids = Vec::new();
+    for (idx, pair) in store_ids.chunks(2).enumerate() {
+        let node = db
+            .lcm_insert_summary_node(summary_draft(
+                "cursor",
+                "session-1",
+                0,
+                &format!("leaf summary {}", idx + 1),
+                pair.iter()
+                    .copied()
+                    .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                    .collect(),
+            ))
+            .await
+            .unwrap();
+        leaf_ids.push(node.node_id);
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            messages: Vec::new(),
+            current_tokens: Some(100),
+            focus_topic: None,
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: Some(3),
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "depth one condensed".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "condensed_summary_nodes");
+    assert_eq!(response.summary_nodes_created, 1);
+    let parent = &response.summary_nodes[0];
+    assert_eq!(parent.depth, 1);
+    assert_eq!(
+        parent.source_refs,
+        leaf_ids
+            .iter()
+            .cloned()
+            .map(|node_id| LcmSourceRef::SummaryNode { node_id })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn forced_overflow_recovery_compacts_additional_backlog_and_reports_reason() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "system policy anchor"),
+            ("user", "old user one"),
+            ("assistant", "old assistant one"),
+            ("user", "old user two"),
+            ("assistant", "old assistant two"),
+            ("user", "fresh user"),
+            ("assistant", "fresh assistant"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "forced overflow summary".into(),
+        },
+        Some(2),
+        Some(1),
+        Some(20),
+    );
+    request.current_tokens = Some(200);
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "forced_overflow_recovery");
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[4])
+    );
+    assert!(response.frontier.maintenance_debt.is_empty());
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "system policy anchor",
+            "forced overflow summary",
+            "fresh user",
+            "fresh assistant",
+        ]
+    );
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &response.summary_nodes[0].node_id)
+        .await
+        .unwrap();
+    assert_eq!(expanded.sources.len(), 4);
+}
+
+#[tokio::test]
+async fn non_compressing_fake_summary_falls_back_deterministically() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "alpha beta gamma delta epsilon zeta eta theta",
+            "iota kappa lambda mu nu xi omicron pi",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "oversized ".repeat(100),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "compressed_backlog_with_fallback_summary");
+    let summary = &response.summary_nodes[0];
+    assert!(summary
+        .summary_text
+        .starts_with("[deterministic LCM summary:"));
+    assert!(summary.summary_token_count < summary.source_token_count);
+}
+
+#[tokio::test]
+async fn maintenance_debt_clears_when_retry_compacts_remaining_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let first = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "first retry summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.frontier.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[2],
+            to_store_id: store_ids[3],
+        }]
+    );
+
+    let second = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "second retry summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(second.status, "ok");
+    assert_eq!(second.reason, "compressed_backlog");
+    assert_eq!(
+        second.frontier.current_frontier_store_id,
+        Some(store_ids[3])
+    );
+    assert!(second.frontier.maintenance_debt.is_empty());
 }

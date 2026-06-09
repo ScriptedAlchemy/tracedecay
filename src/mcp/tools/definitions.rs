@@ -2125,6 +2125,26 @@ fn def_lcm_compress() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Optional optimistic guard. Compression no-ops if the durable frontier has changed."
                 },
+                "max_assembly_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens exceeds it."
+                },
+                "leaf_chunk_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
+                },
+                "max_source_messages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional source-window cap for raw messages included in one compression unit."
+                },
+                "summary_fan_in": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
                 "summarizer": {
                     "type": "object",
                     "description": "Deterministic summarizer mode: noop, fake, provided, or hermes_auxiliary.",

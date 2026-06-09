@@ -1131,6 +1131,10 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
                 &args,
                 "expected_current_frontier_store_id",
             )?,
+            max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
+            leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
+            max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
+            summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
             summarizer: summarizer_arg(&args)?,
         })
         .await
