@@ -1426,3 +1426,201 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
         .expect("status should load");
     assert_eq!(status.dag.compression_ratio, "1.2:1");
 }
+
+// Hermes load_session paging only hands back a resume cursor while more rows
+// remain: a final page that exactly fills the limit terminates the cursor, and
+// resuming past the last row yields an empty page instead of an error.
+#[tokio::test]
+async fn load_session_exact_final_page_omits_next_cursor() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let contents = (1..=4)
+        .map(|idx| format!("edge-message-{idx}"))
+        .collect::<Vec<_>>();
+    let store_ids = insert_raw_messages(&db, "cursor", "session-edge", &contents).await;
+    let request = |after_store_id: Option<i64>, limit: usize| LcmLoadSessionRequest {
+        provider: "cursor".into(),
+        session_id: "session-edge".into(),
+        after_store_id,
+        limit,
+        roles: Vec::new(),
+        start_time: None,
+        end_time: None,
+        content_slice: None,
+    };
+
+    // The whole session in one exactly-sized page: no resume cursor.
+    let exact = db
+        .lcm_load_session(request(None, 4))
+        .await
+        .expect("exact-limit page should load");
+    assert_eq!(exact.messages.len(), 4);
+    assert_eq!(exact.next_cursor, None);
+
+    // A final page that exactly fills the limit also terminates the cursor.
+    let first = db
+        .lcm_load_session(request(None, 2))
+        .await
+        .expect("first page should load");
+    assert_eq!(
+        first.next_cursor.as_deref(),
+        Some(store_ids[1].to_string().as_str())
+    );
+    let last = db
+        .lcm_load_session(request(Some(store_ids[1]), 2))
+        .await
+        .expect("final page should load");
+    assert_eq!(last.messages.len(), 2);
+    assert_eq!(last.messages[1].content, "edge-message-4");
+    assert_eq!(last.next_cursor, None);
+
+    // Resuming from the last row returns an empty terminal page.
+    let drained = db
+        .lcm_load_session(request(Some(store_ids[3]), 2))
+        .await
+        .expect("drained cursor should load");
+    assert!(drained.messages.is_empty());
+    assert_eq!(drained.next_cursor, None);
+}
+
+// A session with no LCM rows is a valid empty state, matching hermes-lcm
+// engine behavior on a fresh store: reads return empty results and zeroed
+// overviews instead of errors.
+#[tokio::test]
+async fn empty_session_load_grep_and_describe_return_empty_results() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-empty").await;
+
+    let page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-empty".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .expect("empty session should load");
+    assert!(page.messages.is_empty());
+    assert_eq!(page.next_cursor, None);
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "anything".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-empty".into()),
+            include_summaries: true,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("grep on empty session should succeed");
+    assert!(hits.is_empty());
+
+    let described = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".into(),
+            session_id: "session-empty".into(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .expect("describe on empty session should succeed");
+    assert_eq!(described.raw_message_count, 0);
+    assert_eq!(described.summary_node_count, 0);
+    assert_eq!(described.external_payload_count, 0);
+    assert_eq!(described.first_store_id, None);
+    assert_eq!(described.last_store_id, None);
+    assert!(described.raw_messages.is_empty());
+    assert!(described.summary_nodes.is_empty());
+}
+
+// Content slices are character offsets, never byte offsets, matching Python
+// string slicing in hermes-lcm `lcm_expand`/`lcm_load_session` (text[a:a+n]).
+// Multibyte content must slice cleanly with char-based range metadata.
+#[tokio::test]
+async fn content_slices_use_char_offsets_for_multibyte_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    // 9 chars, 17 UTF-8 bytes: byte-based slicing would panic or split chars.
+    let content = "αβγδε🦀abc".to_string();
+    assert_eq!(content.chars().count(), 9);
+    assert_eq!(content.len(), 17);
+    let store_ids = insert_raw_messages(&db, "cursor", "session-utf8", &[content]).await;
+
+    let page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-utf8".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: Some(LcmContentSlice {
+                offset: 4,
+                limit: 3,
+            }),
+        })
+        .await
+        .expect("multibyte slice should load");
+    // Python: "αβγδε🦀abc"[4:7] == "ε🦀a"
+    assert_eq!(page.messages[0].content, "ε🦀a");
+    let range = &page.messages[0].content_range;
+    assert_eq!(range.offset, 4);
+    assert_eq!(range.returned_chars, 3);
+    assert_eq!(range.total_chars, 9);
+    assert!(range.truncated);
+
+    let expanded = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-utf8".into(),
+            target: LcmExpandTarget::RawMessage {
+                store_id: store_ids[0],
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 5,
+                limit: 2,
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .expect("multibyte expand should succeed");
+    // Python: "αβγδε🦀abc"[5:7] == "🦀a"
+    assert_eq!(expanded.content, "🦀a");
+    assert_eq!(expanded.content_range.offset, 5);
+    assert_eq!(expanded.content_range.returned_chars, 2);
+    assert_eq!(expanded.content_range.total_chars, 9);
+    assert!(expanded.content_range.truncated);
+
+    // An offset past the end clamps to an empty slice like Python s[99:101].
+    let beyond = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-utf8".into(),
+            target: LcmExpandTarget::RawMessage {
+                store_id: store_ids[0],
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 99,
+                limit: 2,
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .expect("out-of-range multibyte slice should clamp");
+    assert_eq!(beyond.content, "");
+    assert_eq!(beyond.content_range.returned_chars, 0);
+    assert_eq!(beyond.content_range.total_chars, 9);
+}
