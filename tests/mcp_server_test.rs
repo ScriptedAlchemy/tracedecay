@@ -1213,16 +1213,22 @@ async fn search_call_writes_savings_ledger_row() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    // Allow the spawned ledger-write task to complete before opening the DB.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
+    // The ledger row is written by a spawned task; poll with a deadline
+    // instead of a fixed sleep so the test survives heavy parallel load.
     let db = tokensave::global_db::GlobalDb::open()
         .await
         .expect("global db opens at isolated HOME");
-    let total = db.sum_savings(None, 0).await;
-    assert!(
-        total.calls >= 1,
-        "expected at least one ledger row, got {}",
-        total.calls
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let total = db.sum_savings(None, 0).await;
+        if total.calls >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected at least one ledger row within 10s, got {}",
+            total.calls
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
