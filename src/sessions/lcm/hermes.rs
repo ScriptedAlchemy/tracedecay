@@ -18,6 +18,8 @@ pub struct LcmCompressionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_current_frontier_store_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_assembly_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaf_chunk_tokens: Option<i64>,
@@ -25,6 +27,12 @@ pub struct LcmCompressionRequest {
     pub max_source_messages: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_fan_in: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_tail_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_leaf_chunk_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_leaf_chunk_max: Option<i64>,
     pub summarizer: LcmSummarizerMode,
 }
 

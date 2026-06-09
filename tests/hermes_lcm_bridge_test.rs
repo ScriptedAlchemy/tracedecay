@@ -892,6 +892,12 @@ args = json.loads(argv[args_index + 1])
 assert args == {
     "storage_scope": "project_local",
     "project_root": "/tmp/project",
+    "fresh_tail_count": 64,
+    "leaf_chunk_tokens": 20000,
+    "dynamic_leaf_chunk_enabled": False,
+    "dynamic_leaf_chunk_max": 40000,
+    "max_assembly_tokens": 0,
+    "summary_fan_in": 4,
     "session_id": "session-1",
     "messages": [{"role": "user", "content": "hello"}],
     "current_tokens": 987,
@@ -999,6 +1005,12 @@ args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
     "storage_scope": "project_local",
     "project_root": "/tmp/project",
+    "fresh_tail_count": 64,
+    "leaf_chunk_tokens": 20000,
+    "dynamic_leaf_chunk_enabled": False,
+    "dynamic_leaf_chunk_max": 40000,
+    "max_assembly_tokens": 0,
+    "summary_fan_in": 4,
     "session_id": "session-2",
     "messages": [{"role": "assistant", "content": "hello"}],
     "current_tokens": 1200,
@@ -1017,6 +1029,118 @@ assert args == {
     assert!(
         output.status.success(),
         "generated context engine should call tokensave_lcm_compress through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn context_engine_projects_config_defaults_into_preflight_and_compress_args() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_context_engine_config_defaults.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_config_defaults"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(argv)
+    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+config = {
+    "threshold_tokens": 777,
+    "fresh_tail_count": 5,
+    "leaf_chunk_tokens": 123,
+    "dynamic_leaf_chunk_enabled": True,
+    "dynamic_leaf_chunk_max": 456,
+    "max_assembly_tokens": 999,
+    "condensation_fanin": 3,
+}
+engine = plugin.TokenSaveContextEngine(config=config)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+engine.should_compress_preflight(
+    [{"role": "user", "content": "hello"}],
+    current_tokens=800,
+)
+engine.compress(
+    [{"role": "assistant", "content": "compress me"}],
+    current_tokens=800,
+)
+
+assert len(calls) == 2
+preflight_args = json.loads(calls[0][calls[0].index("--args") + 1])
+compress_args = json.loads(calls[1][calls[1].index("--args") + 1])
+
+for args in (preflight_args, compress_args):
+    assert args["threshold_tokens"] == 777
+    assert args["fresh_tail_count"] == 5
+    assert args["leaf_chunk_tokens"] == 123
+    assert args["dynamic_leaf_chunk_enabled"] is True
+    assert args["dynamic_leaf_chunk_max"] == 456
+    assert args["max_assembly_tokens"] == 999
+    assert args["summary_fan_in"] == 3
+
+assert preflight_args["session_id"] == "session-1"
+assert preflight_args["current_tokens"] == 800
+assert preflight_args["messages"] == [{"role": "user", "content": "hello"}]
+assert compress_args["summarizer"] == {"mode": "hermes_auxiliary"}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes config defaults check");
+    assert!(
+        output.status.success(),
+        "generated context engine should project configured Hermes defaults into preflight/compress args\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2135,10 +2259,14 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
+        threshold_tokens: None,
         max_assembly_tokens: None,
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         summarizer: LcmSummarizerMode::Fake {
             summary_text: "deterministic summary".to_string(),
         },
@@ -2150,6 +2278,9 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
     assert_eq!(encoded["messages"][0]["content"], "fresh");
     assert_eq!(encoded["current_tokens"], 100);
     assert_eq!(encoded["focus_topic"], "billing");
+    assert!(encoded.get("threshold_tokens").is_none());
+    assert!(encoded.get("fresh_tail_count").is_none());
+    assert!(encoded.get("dynamic_leaf_chunk_enabled").is_none());
     assert_eq!(encoded["summarizer"]["mode"], "fake");
     assert_eq!(
         encoded["summarizer"]["summary_text"],

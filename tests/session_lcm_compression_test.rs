@@ -137,6 +137,31 @@ async fn insert_raw_messages_with_roles(
     store_ids
 }
 
+fn preflight_request(
+    provider: &str,
+    session_id: &str,
+    messages: Vec<Value>,
+    current_tokens: Option<i64>,
+) -> LcmPreflightRequest {
+    LcmPreflightRequest {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        messages,
+        current_tokens,
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+    }
+}
+
 fn compress_request(
     provider: &str,
     session_id: &str,
@@ -152,10 +177,14 @@ fn compress_request(
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
+        threshold_tokens: None,
         max_assembly_tokens: None,
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         summarizer,
     }
 }
@@ -178,10 +207,14 @@ fn limited_compress_request(
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
+        threshold_tokens: None,
         max_assembly_tokens,
         leaf_chunk_tokens,
         max_source_messages,
         summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         summarizer,
     }
 }
@@ -290,10 +323,14 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -354,6 +391,14 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             session_id: "session-structured".into(),
             messages: messages.clone(),
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -375,10 +420,14 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -431,6 +480,14 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             session_id: "session-collision".into(),
             messages: vec![active_message.clone()],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -454,10 +511,14 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "unused".into(),
             },
@@ -502,6 +563,14 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
         session_id: "session-tools".into(),
         messages,
         current_tokens: Some(100),
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
@@ -520,10 +589,14 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "unused".into(),
             },
@@ -565,6 +638,14 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
                 ],
             })],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -632,6 +713,14 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
                 "content": content.clone(),
             })],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -682,10 +771,14 @@ async fn ignored_session_pattern_skips_active_ingest_and_compression() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "should not be used".into(),
             },
@@ -725,6 +818,14 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
                 "content": "throwaway one-shot prompt"
             })],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: vec!["scratch-shell-*".into()],
             ignore_message_patterns: Vec::new(),
@@ -764,6 +865,14 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
                 json!({"id": "valuable-1", "role": "user", "content": "real user request"}),
             ],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: vec!["Cronjob Response:*".into()],
@@ -820,10 +929,14 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: vec!["Cronjob Response:*".into()],
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -879,6 +992,14 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
                 "content": format!("data:image/png;base64,{}", "A".repeat(100_000))
             })],
             current_tokens: Some(100),
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -893,6 +1014,104 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
         .as_str()
         .unwrap()
         .contains("[externalized payload"));
+}
+
+#[tokio::test]
+async fn preflight_requests_compression_for_over_threshold_eligible_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
+    request.threshold_tokens = Some(100);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "threshold_backlog_ready");
+}
+
+#[tokio::test]
+async fn preflight_requests_compression_for_forced_overflow_without_replay_change() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[("system", "system anchor"), ("user", "fresh user")],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
+    request.max_assembly_tokens = Some(50);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "forced_overflow_pressure");
+}
+
+#[tokio::test]
+async fn preflight_requests_compression_for_maintenance_debt() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+    let first = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "first chunk summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.frontier.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[2],
+            to_store_id: store_ids[3],
+        }]
+    );
+
+    let response = db
+        .lcm_preflight(preflight_request(
+            "cursor",
+            "session-1",
+            Vec::new(),
+            Some(10),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "maintenance_debt_ready");
 }
 
 #[tokio::test]
@@ -1172,6 +1391,14 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         session_id: "session-1".into(),
         messages: messages.clone(),
         current_tokens: Some(10),
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
@@ -1199,10 +1426,14 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
+        threshold_tokens: None,
         max_assembly_tokens: None,
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
         summarizer: LcmSummarizerMode::Noop,
     })
     .await
@@ -1252,10 +1483,14 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: Some(0),
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "stale summary".into(),
             },
@@ -1297,10 +1532,14 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
@@ -1508,10 +1747,14 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "depth one condensed".into(),
             },
@@ -1604,10 +1847,14 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "should not mix depths".into(),
             },
@@ -1696,10 +1943,14 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
+            threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            fresh_tail_count: None,
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "depth two condensed".into(),
             },

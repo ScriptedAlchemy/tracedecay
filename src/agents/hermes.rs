@@ -1205,6 +1205,78 @@ def _resolve_hermes_home(config=None, hermes_home=None):
     fallback = os.path.expanduser("~/.hermes")
     return fallback or None
 
+def _configured_value(config, *names, default=None):
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        for name in names:
+            if name in config and config[name] is not None:
+                return config[name]
+        return default
+    for name in names:
+        value = getattr(config, name, None)
+        if value is not None:
+            return value
+    return default
+
+def _configured_int(config, *names, default=None):
+    value = _configured_value(config, *names, default=default)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+def _configured_bool(config, *names, default=None):
+    value = _configured_value(config, *names, default=default)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+def _configured_threshold_tokens(config):
+    explicit = _configured_int(config, "threshold_tokens")
+    if explicit is not None:
+        return explicit
+    context_length = _configured_int(
+        config,
+        "context_length",
+        "max_context_tokens",
+        "model_context_tokens",
+    )
+    threshold = _configured_value(config, "context_threshold")
+    if context_length is None or threshold is None:
+        return None
+    try:
+        return int(context_length * float(threshold))
+    except Exception:
+        return None
+
+def _lcm_config_args(config) -> dict:
+    args = {
+        "fresh_tail_count": _configured_int(config, "fresh_tail_count", default=64),
+        "leaf_chunk_tokens": _configured_int(config, "leaf_chunk_tokens", default=20000),
+        "dynamic_leaf_chunk_enabled": _configured_bool(
+            config,
+            "dynamic_leaf_chunk_enabled",
+            default=False,
+        ),
+        "dynamic_leaf_chunk_max": _configured_int(config, "dynamic_leaf_chunk_max", default=40000),
+        "max_assembly_tokens": _configured_int(config, "max_assembly_tokens", default=0),
+        "summary_fan_in": _configured_int(config, "summary_fan_in", "condensation_fanin", default=4),
+    }
+    threshold_tokens = _configured_threshold_tokens(config)
+    if threshold_tokens is not None:
+        args["threshold_tokens"] = threshold_tokens
+    return {key: value for key, value in args.items() if value is not None}
+
+def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
+    for key in keys:
+        if key in kwargs and kwargs[key] is not None:
+            args[key] = kwargs.pop(key)
+
 REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
 FALLBACK_MARKER = "[deterministic compression fallback]"
 RETRY_WORTHY_AUXILIARY_ERRORS = (
@@ -1614,11 +1686,25 @@ class TokenSaveContextEngine(ContextEngine):
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)
+        args.update(_lcm_config_args(self.config))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
             "current_tokens": current_tokens,
         })
+        _apply_lcm_option_overrides(args, kwargs, (
+            "threshold_tokens",
+            "max_assembly_tokens",
+            "leaf_chunk_tokens",
+            "max_source_messages",
+            "summary_fan_in",
+            "fresh_tail_count",
+            "dynamic_leaf_chunk_enabled",
+            "dynamic_leaf_chunk_max",
+            "ignore_session_patterns",
+            "stateless_session_patterns",
+            "ignore_message_patterns",
+        ))
         return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
 
     def status(self, session_id=None, **kwargs):
@@ -1648,18 +1734,25 @@ class TokenSaveContextEngine(ContextEngine):
         if not messages or not self.active_session_id:
             return
         args = _storage_args(self.project_root, self.hermes_home)
+        args.update(_lcm_config_args(self.config))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
         })
-        for key in (
+        _apply_lcm_option_overrides(args, kwargs, (
             "current_tokens",
+            "threshold_tokens",
+            "max_assembly_tokens",
+            "leaf_chunk_tokens",
+            "max_source_messages",
+            "summary_fan_in",
+            "fresh_tail_count",
+            "dynamic_leaf_chunk_enabled",
+            "dynamic_leaf_chunk_max",
             "ignore_session_patterns",
             "stateless_session_patterns",
             "ignore_message_patterns",
-        ):
-            if kwargs.get(key) is not None:
-                args[key] = kwargs[key]
+        ))
         try:
             tools.call_tokensave_tool("tokensave_lcm_preflight", args, **_copy_without_none({
                 "project_root": kwargs.get("project_root"),
@@ -1807,15 +1900,20 @@ class TokenSaveContextEngine(ContextEngine):
         max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
         lcm_option_keys = (
             "expected_current_frontier_store_id",
+            "threshold_tokens",
             "max_assembly_tokens",
             "leaf_chunk_tokens",
             "max_source_messages",
             "summary_fan_in",
+            "fresh_tail_count",
+            "dynamic_leaf_chunk_enabled",
+            "dynamic_leaf_chunk_max",
             "ignore_session_patterns",
             "stateless_session_patterns",
             "ignore_message_patterns",
         )
         args = _storage_args(self.project_root, self.hermes_home)
+        args.update(_lcm_config_args(self.config))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
@@ -1823,9 +1921,7 @@ class TokenSaveContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
-        for key in lcm_option_keys:
-            if key in kwargs:
-                args[key] = kwargs.pop(key)
+        _apply_lcm_option_overrides(args, kwargs, lcm_option_keys)
 
         attempts = 0
         retry_status = None

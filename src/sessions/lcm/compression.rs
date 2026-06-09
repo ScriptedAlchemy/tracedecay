@@ -119,14 +119,31 @@ pub(crate) async fn preflight(
         &request.ignore_message_patterns,
     )
     .await?;
+    let conversation_id = request.session_id.clone();
+    let existing_frontier = lifecycle_state_or_default(
+        conn,
+        &request.provider,
+        &conversation_id,
+        &request.session_id,
+    )
+    .await?;
+    let raw_messages =
+        load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+    let window = compression_window(
+        &raw_messages,
+        existing_frontier.current_frontier_store_id,
+        request.fresh_tail_count,
+    );
+    let (should_compress, reason) = preflight_decision(&request, &existing_frontier, &window);
+    let should_compress = ingested.changed_replay || should_compress;
     let reason = if ingested.changed_replay {
         "ingest_protection_changed_replay"
     } else {
-        "no_compression_needed"
+        reason
     };
     Ok(LcmPreflightResponse {
         status: "ok".to_string(),
-        should_compress: ingested.changed_replay,
+        should_compress,
         reason: reason.to_string(),
         replay_messages: ingested.replay_messages,
     })
@@ -227,8 +244,11 @@ async fn compress_in_transaction(
         if existing_frontier.current_frontier_store_id.unwrap_or(0) != expected_frontier {
             let raw_messages =
                 load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
-            let window =
-                compression_window(&raw_messages, existing_frontier.current_frontier_store_id);
+            let window = compression_window(
+                &raw_messages,
+                existing_frontier.current_frontier_store_id,
+                request.fresh_tail_count,
+            );
             let replay_messages =
                 replay_without_summary(&window.pinned_anchors, &window.fresh_tail);
             return Ok(compression_response(
@@ -245,7 +265,11 @@ async fn compress_in_transaction(
 
     let raw_messages =
         load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
-    let window = compression_window(&raw_messages, existing_frontier.current_frontier_store_id);
+    let window = compression_window(
+        &raw_messages,
+        existing_frontier.current_frontier_store_id,
+        request.fresh_tail_count,
+    );
 
     if window.backlog.is_empty() {
         if should_force_overflow_recovery(&request) {
@@ -318,9 +342,15 @@ async fn compress_in_transaction(
     let mut new_frontier = existing_frontier.current_frontier_store_id;
 
     while !remaining_backlog.is_empty() && created_summaries.len() < pass_limit {
+        let leaf_chunk_tokens = effective_leaf_chunk_tokens(
+            request.leaf_chunk_tokens,
+            request.dynamic_leaf_chunk_enabled,
+            request.dynamic_leaf_chunk_max,
+            source_token_count(&remaining_backlog),
+        );
         let selected_len = bounded_leaf_chunk_len(
             &remaining_backlog,
-            request.leaf_chunk_tokens,
+            leaf_chunk_tokens,
             request.max_source_messages,
         );
         let selected_backlog = remaining_backlog[..selected_len].to_vec();
@@ -592,6 +622,7 @@ struct CreatedSummary {
 fn compression_window(
     raw_messages: &[LcmRawMessage],
     current_frontier_store_id: Option<i64>,
+    fresh_tail_count: Option<usize>,
 ) -> CompressionWindow {
     let frontier_store_id = current_frontier_store_id.unwrap_or(0);
     let unsummarized = raw_messages
@@ -599,7 +630,9 @@ fn compression_window(
         .filter(|message| message.store_id > frontier_store_id)
         .cloned()
         .collect::<Vec<_>>();
-    let backlog_len = unsummarized.len().saturating_sub(DEFAULT_FRESH_TAIL_COUNT);
+    let backlog_len = unsummarized
+        .len()
+        .saturating_sub(fresh_tail_count.unwrap_or(DEFAULT_FRESH_TAIL_COUNT));
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
@@ -630,9 +663,15 @@ fn compression_plan(
     window: &CompressionWindow,
 ) -> CompressionPlan {
     let forced_overflow_recovery = should_force_overflow_recovery(request);
+    let leaf_chunk_tokens = effective_leaf_chunk_tokens(
+        request.leaf_chunk_tokens,
+        request.dynamic_leaf_chunk_enabled,
+        request.dynamic_leaf_chunk_max,
+        source_token_count(&window.backlog),
+    );
     let selected_len = bounded_leaf_chunk_len(
         &window.backlog,
-        request.leaf_chunk_tokens,
+        leaf_chunk_tokens,
         request.max_source_messages,
     );
     CompressionPlan {
@@ -642,10 +681,95 @@ fn compression_plan(
 }
 
 fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
-    match (request.current_tokens, request.max_assembly_tokens) {
-        (Some(current_tokens), Some(max_assembly_tokens)) => current_tokens >= max_assembly_tokens,
+    forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens)
+}
+
+fn preflight_decision(
+    request: &LcmPreflightRequest,
+    frontier: &LcmLifecycleState,
+    window: &CompressionWindow,
+) -> (bool, &'static str) {
+    if forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens) {
+        return (true, "forced_overflow_pressure");
+    }
+
+    if frontier_has_maintenance_debt(frontier) {
+        return (true, "maintenance_debt_ready");
+    }
+
+    if threshold_pressure(request.current_tokens, request.threshold_tokens) {
+        if window.backlog.is_empty() {
+            return (false, "threshold_no_eligible_backlog");
+        }
+        let leaf_chunk_tokens = effective_leaf_chunk_tokens(
+            request.leaf_chunk_tokens,
+            request.dynamic_leaf_chunk_enabled,
+            request.dynamic_leaf_chunk_max,
+            source_token_count(&window.backlog),
+        );
+        if has_eligible_backlog(
+            &window.backlog,
+            leaf_chunk_tokens,
+            request.max_source_messages,
+        ) {
+            return (true, "threshold_backlog_ready");
+        }
+        return (false, "threshold_no_eligible_backlog");
+    }
+
+    (false, "no_compression_needed")
+}
+
+fn threshold_pressure(current_tokens: Option<i64>, threshold_tokens: Option<i64>) -> bool {
+    match (current_tokens, threshold_tokens) {
+        (Some(current_tokens), Some(threshold_tokens)) if threshold_tokens > 0 => {
+            current_tokens >= threshold_tokens
+        }
         _ => false,
     }
+}
+
+fn forced_overflow_pressure(current_tokens: Option<i64>, max_assembly_tokens: Option<i64>) -> bool {
+    match (current_tokens, max_assembly_tokens) {
+        (Some(current_tokens), Some(max_assembly_tokens)) if max_assembly_tokens > 0 => {
+            current_tokens >= max_assembly_tokens
+        }
+        _ => false,
+    }
+}
+
+fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
+    frontier
+        .maintenance_debt
+        .iter()
+        .any(|debt| matches!(debt, LcmMaintenanceDebt::RawBacklog { .. }))
+}
+
+fn has_eligible_backlog(
+    backlog: &[LcmRawMessage],
+    leaf_chunk_tokens: Option<i64>,
+    max_source_messages: Option<usize>,
+) -> bool {
+    !backlog.is_empty()
+        && bounded_leaf_chunk_len(backlog, leaf_chunk_tokens, max_source_messages) > 0
+}
+
+fn effective_leaf_chunk_tokens(
+    leaf_chunk_tokens: Option<i64>,
+    dynamic_leaf_chunk_enabled: Option<bool>,
+    dynamic_leaf_chunk_max: Option<i64>,
+    raw_tokens_outside_tail: i64,
+) -> Option<i64> {
+    if !dynamic_leaf_chunk_enabled.unwrap_or(false) {
+        return leaf_chunk_tokens;
+    }
+    let base = leaf_chunk_tokens.unwrap_or(1).max(1);
+    let ceiling = dynamic_leaf_chunk_max.unwrap_or(base).max(base);
+    let mut working = base;
+    while working < ceiling && raw_tokens_outside_tail > working.saturating_mul(2) {
+        working = ceiling.min(working.saturating_mul(2));
+    }
+    Some(working)
 }
 
 fn filtered_session_reason(

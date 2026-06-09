@@ -526,6 +526,16 @@ fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
     Ok(Some(integer))
 }
 
+fn bool_arg(args: &Value, name: &str) -> Result<Option<bool>> {
+    let Some(value) = args.get(name) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| argument_error(format!("{name} must be a boolean")))
+}
+
 fn non_negative_i64_arg_alias(args: &Value, primary: &str, alias: &str) -> Result<Option<i64>> {
     match non_negative_i64_arg(args, primary)? {
         Some(value) => Ok(Some(value)),
@@ -1362,6 +1372,14 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
             session_id: session_id.to_string(),
             messages: messages_arg(&args)?,
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
+            threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
+            max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
+            leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
+            max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
+            summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
+            fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
+            dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
+            dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
             ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
             stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
             ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
@@ -1400,10 +1418,14 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
                 &args,
                 "expected_current_frontier_store_id",
             )?,
+            threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
             max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
             leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
             max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
             summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
+            fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
+            dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
+            dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
             summarizer: summarizer_arg(&args)?,
         })
         .await

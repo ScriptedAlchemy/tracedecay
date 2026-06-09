@@ -2154,6 +2154,45 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Optional current context token estimate."
                 },
+                "threshold_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token threshold that allows preflight to request compression when current_tokens meets or exceeds it and eligible backlog exists."
+                },
+                "max_assembly_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
+                },
+                "leaf_chunk_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
+                },
+                "max_source_messages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional source-window cap for raw messages included in one compression unit."
+                },
+                "summary_fan_in": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
+                "fresh_tail_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
+                },
+                "dynamic_leaf_chunk_enabled": {
+                    "type": "boolean",
+                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
+                },
+                "dynamic_leaf_chunk_max": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional upper bound for dynamic leaf chunk token budget."
+                },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
                 "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
@@ -2203,6 +2242,11 @@ fn def_lcm_compress() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Optional optimistic guard. Compression no-ops if the durable frontier has changed."
                 },
+                "threshold_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token threshold mirrored from Hermes config for parity with preflight calls."
+                },
                 "max_assembly_tokens": {
                     "type": "integer",
                     "minimum": 0,
@@ -2222,6 +2266,20 @@ fn def_lcm_compress() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 2,
                     "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
+                "fresh_tail_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
+                },
+                "dynamic_leaf_chunk_enabled": {
+                    "type": "boolean",
+                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
+                },
+                "dynamic_leaf_chunk_max": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional upper bound for dynamic leaf chunk token budget."
                 },
                 "summarizer": {
                     "type": "object",
