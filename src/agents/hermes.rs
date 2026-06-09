@@ -1241,6 +1241,153 @@ def _configured_bool(config, *names, default=None):
         return value.strip().lower() in ("1", "true", "yes", "on")
     return bool(value)
 
+def _parse_pattern_list(raw):
+    return [part.strip() for part in str(raw).split(",") if part.strip()]
+
+# Env-aware settings mirroring hermes-lcm LCMConfig.from_env: documented LCM_*
+# env vars take precedence over host ctx.config attributes, which take
+# precedence over the hermes-lcm hardcoded defaults.
+
+def _lcm_str_setting(config, env_key, *names, default=None):
+    env_value = os.environ.get(env_key)
+    if env_value is not None:
+        return env_value
+    value = _configured_value(config, *names)
+    return value if value is not None else default
+
+def _lcm_int_setting(config, env_key, *names, default=None):
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return _configured_int(config, *names, default=default)
+
+def _lcm_float_setting(config, env_key, *names, default=None):
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    value = _configured_value(config, *names)
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+def _lcm_bool_setting(config, env_key, *names, default=None):
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        normalized = raw.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    return _configured_bool(config, *names, default=default)
+
+def _lcm_list_setting(config, env_key, *names, default=None):
+    raw = os.environ.get(env_key)
+    if raw is not None:
+        return _parse_pattern_list(raw)
+    value = _configured_value(config, *names)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return _parse_pattern_list(value)
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return default
+
+def _config_bool_disabled(value):
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("0", "false", "no", "off"):
+            return True
+        try:
+            return float(normalized) == 0
+        except ValueError:
+            return False
+    return False
+
+def _hermes_yaml_compression_threshold(default):
+    # Port of hermes-lcm config._hermes_compression_threshold: read the main
+    # Hermes compression.threshold from {HERMES_HOME}/config.yaml when no LCM
+    # override exists. Disabled Hermes compression must not leak its threshold.
+    home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
+    cfg_path = Path(home) / "config.yaml"
+    try:
+        text = cfg_path.read_text()
+    except Exception:
+        return default
+    try:
+        import yaml
+    except Exception:
+        yaml = None
+    try:
+        if yaml is not None:
+            cfg = yaml.safe_load(text) or {}
+            compression = cfg.get("compression") or {}
+            if _config_bool_disabled(compression.get("enabled")):
+                return default
+            value = compression.get("threshold")
+            if value is None:
+                return default
+            return float(value)
+
+        in_compression = False
+        direct_indent = None
+        compression_disabled = False
+        threshold_value = None
+        for raw_line in text.splitlines():
+            line = raw_line.split('#', 1)[0].rstrip()
+            if not line.strip():
+                continue
+            if not line.startswith((" ", "\t")):
+                in_compression = line.strip() == "compression:"
+                direct_indent = None
+                continue
+            if not in_compression:
+                continue
+            indent = len(line) - len(line.lstrip(" \t"))
+            if direct_indent is None:
+                direct_indent = indent
+            if indent != direct_indent or ":" not in line:
+                continue
+            key, raw_value = line.strip().split(":", 1)
+            value = raw_value.strip().strip("'\"")
+            if key == "enabled" and _config_bool_disabled(value):
+                compression_disabled = True
+            elif key == "threshold":
+                threshold_value = value
+        if compression_disabled or threshold_value is None:
+            return default
+        return float(threshold_value)
+    except Exception:
+        return default
+
+def _lcm_context_threshold(config):
+    raw = os.environ.get("LCM_CONTEXT_THRESHOLD")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    configured = _configured_value(config, "context_threshold")
+    if configured is not None:
+        try:
+            return float(configured)
+        except (TypeError, ValueError):
+            pass
+    return _hermes_yaml_compression_threshold(0.75)
+
 def _configured_threshold_tokens(config):
     explicit = _configured_int(config, "threshold_tokens")
     if explicit is not None:
@@ -1251,40 +1398,72 @@ def _configured_threshold_tokens(config):
         "max_context_tokens",
         "model_context_tokens",
     )
-    threshold = _configured_value(config, "context_threshold")
-    if context_length is None or threshold is None:
+    if context_length is None:
         return None
     try:
-        return int(context_length * float(threshold))
+        return int(context_length * float(_lcm_context_threshold(config)))
     except Exception:
         return None
 
 def _lcm_config_args(config) -> dict:
     args = {
-        "fresh_tail_count": _configured_int(config, "fresh_tail_count", default=64),
-        "leaf_chunk_tokens": _configured_int(config, "leaf_chunk_tokens", default=20000),
-        "dynamic_leaf_chunk_enabled": _configured_bool(
+        "fresh_tail_count": _lcm_int_setting(config, "LCM_FRESH_TAIL_COUNT", "fresh_tail_count", default=64),
+        "leaf_chunk_tokens": _lcm_int_setting(config, "LCM_LEAF_CHUNK_TOKENS", "leaf_chunk_tokens", default=20000),
+        "dynamic_leaf_chunk_enabled": _lcm_bool_setting(
             config,
+            "LCM_DYNAMIC_LEAF_CHUNK_ENABLED",
             "dynamic_leaf_chunk_enabled",
             default=False,
         ),
-        "dynamic_leaf_chunk_max": _configured_int(config, "dynamic_leaf_chunk_max", default=40000),
-        "max_assembly_tokens": _configured_int(config, "max_assembly_tokens", default=0),
+        "dynamic_leaf_chunk_max": _lcm_int_setting(
+            config,
+            "LCM_DYNAMIC_LEAF_CHUNK_MAX",
+            "dynamic_leaf_chunk_max",
+            default=40000,
+        ),
+        "max_assembly_tokens": _lcm_int_setting(config, "LCM_MAX_ASSEMBLY_TOKENS", "max_assembly_tokens", default=0),
         # Hermes derives an assembly cap of context_length - reserve_tokens_floor
         # when both are positive; pass both through so tokensave can apply the
         # same derivation (reserve_tokens_floor defaults to 0 = disabled).
-        "reserve_tokens_floor": _configured_int(config, "reserve_tokens_floor", default=0),
+        "reserve_tokens_floor": _lcm_int_setting(
+            config,
+            "LCM_RESERVE_TOKENS_FLOOR",
+            "reserve_tokens_floor",
+            default=0,
+        ),
         "context_length": _configured_int(
             config,
             "context_length",
             "max_context_tokens",
             "model_context_tokens",
         ),
-        "summary_fan_in": _configured_int(config, "summary_fan_in", "condensation_fanin", default=4),
+        "summary_fan_in": _lcm_int_setting(
+            config,
+            "LCM_CONDENSATION_FANIN",
+            "summary_fan_in",
+            "condensation_fanin",
+            default=4,
+        ),
+        # hermes-lcm caps condensation at depth 1 by default; pass the knob
+        # through so the Rust engine can enforce the same ceiling.
+        "incremental_max_depth": _lcm_int_setting(
+            config,
+            "LCM_INCREMENTAL_MAX_DEPTH",
+            "incremental_max_depth",
+            default=1,
+        ),
     }
     threshold_tokens = _configured_threshold_tokens(config)
     if threshold_tokens is not None:
         args["threshold_tokens"] = threshold_tokens
+    for env_key, name in (
+        ("LCM_IGNORE_SESSION_PATTERNS", "ignore_session_patterns"),
+        ("LCM_STATELESS_SESSION_PATTERNS", "stateless_session_patterns"),
+        ("LCM_IGNORE_MESSAGE_PATTERNS", "ignore_message_patterns"),
+    ):
+        patterns = _lcm_list_setting(config, env_key, name)
+        if patterns:
+            args[name] = patterns
     return {key: value for key, value in args.items() if value is not None}
 
 def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
@@ -2087,17 +2266,49 @@ class TokenSaveContextEngine(ContextEngine):
         )
         if isinstance(routes, dict):
             routes = [routes]
+        defaults = {}
+        for key in ("model", "temperature", "max_tokens", "timeout"):
+            if kwargs.get(key) is not None:
+                defaults[key] = kwargs[key]
+        if "timeout" not in defaults:
+            timeout_ms = _lcm_int_setting(
+                self.config,
+                "LCM_SUMMARY_TIMEOUT_MS",
+                "summary_timeout_ms",
+                default=60000,
+            )
+            if timeout_ms:
+                defaults["timeout"] = timeout_ms / 1000
         if not routes:
-            route = {}
-            for key in ("model", "temperature", "max_tokens", "timeout"):
-                if kwargs.get(key) is not None:
-                    route[key] = kwargs[key]
-            routes = [route]
+            if defaults.get("model") is not None:
+                routes = [{}]
+            else:
+                # Mirror hermes-lcm escalation._summary_model_chain: the
+                # configured summary_model plus summary_fallback_models form
+                # the default route chain, falling back to one task-default
+                # route when nothing is configured.
+                primary = str(
+                    _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="") or ""
+                )
+                fallbacks = _lcm_list_setting(
+                    self.config,
+                    "LCM_SUMMARY_FALLBACK_MODELS",
+                    "summary_fallback_models",
+                    default=[],
+                )
+                chain = []
+                for model in [primary, *(fallbacks or [])]:
+                    normalized_model = str(model or "").strip()
+                    if normalized_model not in chain:
+                        chain.append(normalized_model)
+                if not chain:
+                    chain.append("")
+                routes = [{"model": model} if model else {} for model in chain]
         normalized = []
         for route in routes:
             if not isinstance(route, dict):
                 route = {"model": str(route)}
-            normalized.append(route)
+            normalized.append({**defaults, **route})
         return normalized
 
     def _call_auxiliary_summary(self, prompt, messages, **kwargs):
@@ -2206,12 +2417,20 @@ class TokenSaveContextEngine(ContextEngine):
         source_tokens = _count_messages_tokens(source_messages)
         # Mirrors the leaf budget in hermes-lcm engine._summarize_leaf_chunk_with_rescue.
         token_budget = min(12000, max(2000, int(source_tokens * 0.20)))
-        custom_instructions = str(_configured_value(self.config, "custom_instructions", default="") or "")
-        try:
-            l2_budget_ratio = float(_configured_value(self.config, "l2_budget_ratio", default=0.50))
-        except Exception:
+        custom_instructions = str(
+            _lcm_str_setting(self.config, "LCM_CUSTOM_INSTRUCTIONS", "custom_instructions", default="") or ""
+        )
+        l2_budget_ratio = _lcm_float_setting(
+            self.config,
+            "LCM_L2_BUDGET_RATIO",
+            "l2_budget_ratio",
+            default=0.50,
+        )
+        if l2_budget_ratio is None:
             l2_budget_ratio = 0.50
-        l3_truncate_tokens = _configured_int(self.config, "l3_truncate_tokens", default=512) or 512
+        l3_truncate_tokens = (
+            _lcm_int_setting(self.config, "LCM_L3_TRUNCATE_TOKENS", "l3_truncate_tokens", default=512) or 512
+        )
 
         def accepts_result(text):
             return source_tokens <= 0 or _count_tokens(text) < source_tokens

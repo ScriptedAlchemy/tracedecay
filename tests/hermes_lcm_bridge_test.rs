@@ -823,8 +823,12 @@ fn context_engine_preflight_uses_tokensave_tool_json_args() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
 
 plugin_dir = pathlib.Path(sys.argv[1])
 
@@ -899,6 +903,7 @@ assert args == {
     "max_assembly_tokens": 0,
     "reserve_tokens_floor": 0,
     "summary_fan_in": 4,
+    "incremental_max_depth": 1,
     "session_id": "session-1",
     "messages": [{"role": "user", "content": "hello"}],
     "current_tokens": 987,
@@ -1050,8 +1055,12 @@ fn context_engine_compress_uses_tokensave_tool_json_args() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
 
 plugin_dir = pathlib.Path(sys.argv[1])
 
@@ -1122,6 +1131,7 @@ assert args == {
     "max_assembly_tokens": 0,
     "reserve_tokens_floor": 0,
     "summary_fan_in": 4,
+    "incremental_max_depth": 1,
     "session_id": "session-2",
     "messages": [{"role": "assistant", "content": "hello"}],
     "current_tokens": 1200,
@@ -1166,8 +1176,12 @@ fn context_engine_projects_config_defaults_into_preflight_and_compress_args() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
 
 plugin_dir = pathlib.Path(sys.argv[1])
 
@@ -1212,6 +1226,7 @@ config = {
     "condensation_fanin": 3,
     "context_length": 200000,
     "reserve_tokens_floor": 4096,
+    "incremental_max_depth": 2,
 }
 engine = plugin.TokenSaveContextEngine(config=config)
 engine.initialize(session_id="session-1", project_root="/tmp/project")
@@ -1239,6 +1254,7 @@ for args in (preflight_args, compress_args):
     assert args["summary_fan_in"] == 3
     assert args["context_length"] == 200000
     assert args["reserve_tokens_floor"] == 4096
+    assert args["incremental_max_depth"] == 2
 
 assert preflight_args["session_id"] == "session-1"
 assert preflight_args["current_tokens"] == 800
@@ -2610,6 +2626,284 @@ assert len(calls) == 2
 assert len(agent.auxiliary_client.calls) == 1
 "#,
         "summary acceptance should compare token estimates, not character lengths",
+    );
+}
+
+#[test]
+fn generated_plugin_reads_lcm_env_config_overrides() {
+    run_generated_plugin_script(
+        "check_lcm_env_config.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_env_config"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(json.loads(argv[argv.index("--args") + 1]))
+    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+# Documented hermes-lcm env vars (LCMConfig.from_env) override both the
+# hardcoded defaults and host ctx.config attributes.
+os.environ.update({
+    "LCM_FRESH_TAIL_COUNT": "7",
+    "LCM_LEAF_CHUNK_TOKENS": "111",
+    "LCM_CONTEXT_THRESHOLD": "0.5",
+    "LCM_CONDENSATION_FANIN": "9",
+    "LCM_DYNAMIC_LEAF_CHUNK_ENABLED": "true",
+    "LCM_DYNAMIC_LEAF_CHUNK_MAX": "222",
+    "LCM_MAX_ASSEMBLY_TOKENS": "333",
+    "LCM_RESERVE_TOKENS_FLOOR": "444",
+    "LCM_INCREMENTAL_MAX_DEPTH": "3",
+    "LCM_IGNORE_SESSION_PATTERNS": "tmp-*, scratch-*",
+    "LCM_STATELESS_SESSION_PATTERNS": "ro-*",
+    "LCM_IGNORE_MESSAGE_PATTERNS": "^/lcm ",
+})
+
+config = {"fresh_tail_count": 64, "context_length": 100000, "context_threshold": 0.9}
+engine = plugin.TokenSaveContextEngine(config=config)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
+
+args = calls.pop()
+assert args["fresh_tail_count"] == 7
+assert args["leaf_chunk_tokens"] == 111
+assert args["summary_fan_in"] == 9
+assert args["dynamic_leaf_chunk_enabled"] is True
+assert args["dynamic_leaf_chunk_max"] == 222
+assert args["max_assembly_tokens"] == 333
+assert args["reserve_tokens_floor"] == 444
+assert args["incremental_max_depth"] == 3
+assert args["context_length"] == 100000
+# LCM_CONTEXT_THRESHOLD beats the ctx.config context_threshold attribute.
+assert args["threshold_tokens"] == 50000
+assert args["ignore_session_patterns"] == ["tmp-*", "scratch-*"]
+assert args["stateless_session_patterns"] == ["ro-*"]
+assert args["ignore_message_patterns"] == ["^/lcm"]
+
+# Unparseable env values fall back to ctx.config / defaults instead of failing.
+os.environ["LCM_MAX_ASSEMBLY_TOKENS"] = "not-a-number"
+os.environ["LCM_CONTEXT_THRESHOLD"] = "also-bad"
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
+args = calls.pop()
+assert args["max_assembly_tokens"] == 0
+assert args["threshold_tokens"] == 90000
+"#,
+        "generated plugin should honor documented LCM_* env config overrides",
+    );
+}
+
+#[test]
+fn generated_plugin_falls_back_to_hermes_yaml_threshold() {
+    run_generated_plugin_script(
+        "check_lcm_yaml_threshold.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_yaml_threshold"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(json.loads(argv[argv.index("--args") + 1]))
+    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+def preflight_threshold(config):
+    engine = plugin.TokenSaveContextEngine(config=config)
+    engine.initialize(session_id="session-1", project_root="/tmp/project")
+    engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
+    return calls.pop().get("threshold_tokens")
+
+with tempfile.TemporaryDirectory() as tmp:
+    os.environ["HERMES_HOME"] = tmp
+    cfg = pathlib.Path(tmp) / "config.yaml"
+
+    # Hermes compression.threshold backfills LCM when no override exists.
+    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.6\n")
+    assert preflight_threshold({"context_length": 100000}) == 60000
+
+    # Disabled Hermes compression must not leak its threshold into LCM.
+    cfg.write_text("compression:\n  enabled: false\n  threshold: 0.9\n")
+    assert preflight_threshold({"context_length": 100000}) == 75000
+
+    # Explicit env and ctx.config thresholds still win over the YAML fallback.
+    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.6\n")
+    os.environ["LCM_CONTEXT_THRESHOLD"] = "0.5"
+    assert preflight_threshold({"context_length": 100000}) == 50000
+    del os.environ["LCM_CONTEXT_THRESHOLD"]
+    assert preflight_threshold({"context_length": 100000, "context_threshold": 0.8}) == 80000
+
+with tempfile.TemporaryDirectory() as tmp:
+    # No config.yaml at all: the documented 0.75 default applies whenever the
+    # context window is known instead of silently disabling threshold pressure.
+    os.environ["HERMES_HOME"] = tmp
+    assert preflight_threshold({"context_length": 100000}) == 75000
+    assert preflight_threshold(None) is None
+"#,
+        "generated plugin should fall back to the Hermes YAML compression threshold",
+    );
+}
+
+#[test]
+fn summary_routes_built_from_config_and_env_models() {
+    run_generated_plugin_script(
+        "check_summary_route_wiring.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_summary_routes"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# summary_model / summary_fallback_models from ctx.config wire the default
+# auxiliary route chain (deduplicated, in order, with the summary timeout).
+config = {
+    "summary_model": "primary",
+    "summary_fallback_models": ["backup", "primary"],
+    "summary_timeout_ms": 30000,
+}
+engine = plugin.TokenSaveContextEngine(config=config)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+routes = engine._auxiliary_routes()
+assert [route.get("model") for route in routes] == ["primary", "backup"]
+assert [route.get("timeout") for route in routes] == [30.0, 30.0]
+
+# Hosts that pass no config keep the single task-default route.
+bare_engine = plugin.TokenSaveContextEngine()
+bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
+bare_routes = bare_engine._auxiliary_routes()
+assert len(bare_routes) == 1
+assert "model" not in bare_routes[0]
+
+# Documented env vars override ctx.config for the route chain.
+os.environ["LCM_SUMMARY_MODEL"] = "env-primary"
+os.environ["LCM_SUMMARY_FALLBACK_MODELS"] = "env-backup1, env-backup2"
+os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
+env_routes = engine._auxiliary_routes()
+assert [route.get("model") for route in env_routes] == [
+    "env-primary",
+    "env-backup1",
+    "env-backup2",
+]
+assert env_routes[0]["timeout"] == 45.0
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+# Per-call model overrides still take precedence over the configured chain.
+kwarg_routes = engine._auxiliary_routes(model="kwarg-model")
+assert [route.get("model") for route in kwarg_routes] == ["kwarg-model"]
+
+# End to end: the configured chain falls over from primary to backup.
+class RoutingAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("model") == "primary":
+            raise RuntimeError("primary unavailable")
+        return "Configured backup summary"
+
+agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
+engine.agent = agent
+summary = engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "raw"}],
+)
+assert summary["status"] == "ok"
+assert summary["text"] == "Configured backup summary"
+assert summary["route"] == "backup"
+assert summary["model"] == "backup"
+assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
+assert agent.auxiliary_client.calls[0]["timeout"] == 30.0
+"#,
+        "summary model chain should wire config and env models into auxiliary routes",
     );
 }
 
