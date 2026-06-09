@@ -373,6 +373,48 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
     assert_eq!(payload["success"], false);
 }
 
+#[tokio::test]
+async fn test_tools_call_plain_text_failure_sets_is_error() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(34),
+            "tools/call",
+            json!({
+                "name": "tokensave_changelog",
+                "arguments": {
+                    "from_ref": "HEAD~1",
+                    "to_ref": "HEAD"
+                }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = parse_response(
+        responses
+            .iter()
+            .find(|r| parse_response(r)["id"] == 34)
+            .expect("response with id 34"),
+    );
+    assert!(
+        resp["error"].is_null(),
+        "plain-text semantic failures should not become JSON-RPC errors"
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "plain-text semantic failure should set MCP isError=true, got {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool result text");
+    assert!(
+        text.contains("git diff failed"),
+        "expected changelog git failure text, got: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6b. test_tools_call_timings_flag
 // ---------------------------------------------------------------------------

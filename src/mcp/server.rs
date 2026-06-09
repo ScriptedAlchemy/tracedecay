@@ -43,8 +43,7 @@ const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
 fn global_db_enabled() -> bool {
     std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 /// Hand-maintained schema documentation for the `tokensave://schema` resource.
@@ -239,11 +238,14 @@ fn tool_result_has_semantic_error(value: &Value) -> bool {
     value
         .get("content")
         .and_then(Value::as_array)
-        .map(|content| {
+        .is_some_and(|content| {
             content.iter().any(|item| {
                 let Some(text) = item.get("text").and_then(Value::as_str) else {
                     return false;
                 };
+                if plain_text_tool_failure(text) {
+                    return true;
+                }
                 let Ok(payload) = serde_json::from_str::<Value>(text) else {
                     return false;
                 };
@@ -258,7 +260,11 @@ fn tool_result_has_semantic_error(value: &Value) -> bool {
                         .is_some_and(|code| !code.is_null() && code.as_i64() != Some(0))
             })
         })
-        .unwrap_or(false)
+}
+
+fn plain_text_tool_failure(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("git error:") || trimmed.starts_with("git diff failed:")
 }
 
 fn mark_semantic_tool_error(value: &mut Value) {
@@ -921,9 +927,7 @@ impl McpServer {
             "handle_request called with empty method"
         );
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        let Some(id) = request.id.clone() else {
-            return None;
-        };
+        let id = request.id.clone()?;
 
         let result = match request.method.as_str() {
             "initialize" => Some(Self::handle_initialize(id)),
