@@ -837,25 +837,60 @@ def _pre_llm_call(*args, **kwargs):
 def _tokensave_status(raw_args: str = ""):
     return tools.call_tokensave_tool("tokensave_status", {})
 
+def _bridge_preview(value, limit: int = 2048) -> str:
+    if isinstance(value, str):
+        preview = value
+    else:
+        try:
+            preview = json.dumps(value, sort_keys=True)
+        except Exception:
+            preview = repr(value)
+    if len(preview) > limit:
+        return preview[:limit] + "...[truncated]"
+    return preview
+
+
 def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
     raw = tools.call_tokensave_tool(name, args, **kwargs)
     try:
         outer = json.loads(raw)
     except json.JSONDecodeError:
-        return {"error": "tokensave tool returned invalid JSON", "raw": raw}
+        return {
+            "error": "tokensave tool returned invalid JSON",
+            "raw_preview": _bridge_preview(raw),
+        }
+    if isinstance(outer, dict) and "error" in outer:
+        return outer
+    if not isinstance(outer, dict):
+        return {
+            "error": "tokensave tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
     content = outer.get("content")
     if not isinstance(content, list) or not content:
-        return outer
+        return {
+            "error": "tokensave tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
     first = content[0]
     if not isinstance(first, dict):
-        return outer
+        return {
+            "error": "tokensave tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
     text = first.get("text")
     if not isinstance(text, str):
-        return outer
+        return {
+            "error": "tokensave tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"error": "tokensave tool returned invalid nested JSON", "text": text}
+        return {
+            "error": "tokensave tool returned invalid nested JSON",
+            "text_preview": _bridge_preview(text),
+        }
 
 def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:

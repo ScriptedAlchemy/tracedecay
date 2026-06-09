@@ -425,6 +425,91 @@ assert args == {
 }
 
 #[test]
+fn call_tokensave_json_normalizes_malformed_mcp_envelopes() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_bridge_error_normalization.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+responses = []
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    return responses.pop(0)
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+def call_with_outer(outer):
+    responses.append(json.dumps(outer))
+    return plugin.call_tokensave_json("tokensave_lcm_preflight", {})
+
+missing_content = call_with_outer({})
+assert missing_content["error"] == "tokensave tool response missing text content"
+
+empty_content = call_with_outer({"content": []})
+assert empty_content["error"] == "tokensave tool response missing text content"
+
+non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
+assert non_text_content["error"] == "tokensave tool response missing text content"
+
+responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
+invalid_nested_json = plugin.call_tokensave_json("tokensave_lcm_preflight", {})
+assert invalid_nested_json["error"] == "tokensave tool returned invalid nested JSON"
+
+outer_error = {"error": "tool failed", "code": "boom", "content": []}
+assert call_with_outer(outer_error) == outer_error
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes bridge error normalization check");
+    assert!(
+        output.status.success(),
+        "generated JSON bridge should normalize malformed MCP envelopes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn lcm_compression_request_contract_serializes_fake_summarizer() {
     let request = LcmCompressionRequest {
         provider: "cursor".to_string(),
