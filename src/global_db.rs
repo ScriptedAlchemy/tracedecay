@@ -660,6 +660,49 @@ impl GlobalDb {
         crate::sessions::lcm::schema::load_raw_message(&self.conn, provider, message_id).await
     }
 
+    /// Loads ordered raw LCM messages for one session with stable store-id pagination.
+    pub async fn lcm_load_session(
+        &self,
+        request: crate::sessions::lcm::LcmLoadSessionRequest,
+    ) -> Result<crate::sessions::lcm::LcmLoadSessionPage, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::load_session(&self.conn, request).await
+    }
+
+    /// Searches bounded LCM raw snippets and, optionally, summary node text.
+    pub async fn lcm_grep(
+        &self,
+        request: crate::sessions::lcm::LcmGrepRequest,
+    ) -> Result<Vec<crate::sessions::lcm::LcmGrepHit>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::grep(&self.conn, request).await
+    }
+
+    /// Expands a raw message, summary node, or external payload with content range metadata.
+    pub async fn lcm_expand(
+        &self,
+        request: crate::sessions::lcm::LcmExpandRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.
+    pub async fn lcm_describe(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmDescribeResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::describe(&self.conn, provider, session_id).await
+    }
+
+    /// Reports LCM schema, storage, payload, and currently implemented maintenance counts.
+    pub async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::status(&self.conn, &self.storage_root, provider, session_id)
+            .await
+    }
+
     /// Returns an LCM store bound to an explicit storage root for payload files.
     pub fn lcm_store(
         &self,
