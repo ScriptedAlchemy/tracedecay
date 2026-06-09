@@ -3144,6 +3144,147 @@ assert call_with_outer(outer_error) == outer_error
     );
 }
 
+// The generated tool bridge wraps every subprocess failure mode in a JSON
+// error payload instead of raising: missing binary, nonzero exit with partial
+// output, malformed stdout JSON, and empty stdout all stay machine-readable
+// for the host.
+#[test]
+fn call_tokensave_tool_reports_subprocess_failures_as_json_errors() {
+    run_generated_plugin_script(
+        "check_subprocess_failure_modes.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import stat
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_subprocess_failures"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+tools = plugin.tools
+
+def write_fake_binary(name, body):
+    path = plugin_dir / name
+    path.write_text('#!/bin/sh\n' + body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(path)
+
+# Missing binary: the OSError is wrapped, never raised.
+tools.TOKENSAVE_BIN = str(plugin_dir / "definitely-missing-tokensave")
+missing = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
+assert missing["error"].startswith("tokensave tool failed:"), missing
+# The JSON bridge surfaces the same error dict without raising.
+assert "error" in plugin.call_tokensave_json("tokensave_lcm_status", {})
+
+# Subprocess dies mid-handshake: nonzero exit with partial stdout and stderr
+# is reported with the exit status and bounded captures.
+tools.TOKENSAVE_BIN = write_fake_binary(
+    "fake-tokensave-crash",
+    'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
+)
+crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
+assert crashed["error"] == "tokensave tool exited with status 3", crashed
+assert crashed["stdout"] == '{"content'
+assert crashed["stderr"] == "handshake aborted"
+
+# Exit 0 with malformed JSON on stdout.
+tools.TOKENSAVE_BIN = write_fake_binary(
+    "fake-tokensave-badjson",
+    "printf 'not-json-at-all'\nexit 0\n",
+)
+malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
+assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
+assert malformed["stdout"] == "not-json-at-all"
+
+# Exit 0 with empty stdout normalizes to an empty JSON object.
+tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n")
+assert tools.call_tokensave_tool("tokensave_lcm_status", {}) == "{}"
+"#,
+        "generated tool bridge should normalize subprocess failures into JSON errors",
+    );
+}
+
+// With the tokensave binary unavailable, the context engine must degrade
+// gracefully: preflight/status/compress return error dicts and session-start
+// boundary reporting never raises into the host.
+#[test]
+fn context_engine_degrades_when_tokensave_binary_missing() {
+    run_generated_plugin_script(
+        "check_engine_missing_binary_degradation.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_missing_binary"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+plugin.tools.TOKENSAVE_BIN = str(plugin_dir / "definitely-missing-tokensave")
+
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-degraded", project_root=str(plugin_dir))
+
+# Boundary reporting on session start swallows the failure.
+engine.on_session_start(
+    session_id="session-degraded-next",
+    old_session_id="session-degraded",
+    boundary_reason="compression",
+)
+
+messages = [{"role": "user", "content": "hello"}]
+preflight = engine.should_compress_preflight(messages, current_tokens=128)
+assert isinstance(preflight, dict), preflight
+assert preflight["error"].startswith("tokensave tool failed:"), preflight
+
+status = engine.status()
+assert isinstance(status, dict)
+assert status["error"].startswith("tokensave tool failed:"), status
+
+compressed = engine.compress(messages, current_tokens=128)
+assert isinstance(compressed, dict), compressed
+assert compressed["error"].startswith("tokensave tool failed:"), compressed
+
+# Tool dispatch through the engine surface stays JSON-stringly typed.
+raw = engine.handle_tool_call("lcm_status", {})
+assert isinstance(raw, str)
+assert "error" in raw
+"#,
+        "context engine should degrade to error dicts when the tokensave binary is missing",
+    );
+}
+
 #[test]
 fn lcm_compression_request_contract_serializes_fake_summarizer() {
     let request = LcmCompressionRequest {
