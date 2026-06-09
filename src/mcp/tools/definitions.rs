@@ -1729,11 +1729,40 @@ fn def_message_search() -> ToolDefinition {
     )
 }
 
+fn lcm_storage_scope_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["project_local", "hermes_profile"],
+        "description": "Storage scope for LCM session state. Defaults to project_local. Use hermes_profile only with an explicit absolute hermes_home."
+    })
+}
+
+fn lcm_hermes_home_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "absolute Hermes profile home directory required when storage_scope is hermes_profile."
+    })
+}
+
+fn lcm_storage_scope_requires_hermes_home() -> Value {
+    json!([{
+        "if": {
+            "properties": {
+                "storage_scope": { "const": "hermes_profile" }
+            },
+            "required": ["storage_scope"]
+        },
+        "then": {
+            "required": ["hermes_home"]
+        }
+    }])
+}
+
 fn def_lcm_status() -> ToolDefinition {
     def(
         "tokensave_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts from the project-local sessions.db.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts from project-local or Hermes profile sessions.db storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1745,12 +1774,10 @@ fn def_lcm_status() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional provider-local session id filter."
                 },
-                "storage_scope": {
-                    "type": "string",
-                    "enum": ["project_local", "hermes_profile"],
-                    "description": "Optional caller storage scope to echo in diagnostics."
-                }
-            }
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
         }),
     )
 }
@@ -1759,7 +1786,7 @@ fn def_lcm_load_session() -> ToolDefinition {
     def(
         "tokensave_lcm_load_session",
         "LCM Load Session",
-        "Load ordered lossless raw session messages with stable pagination and bounded content slices.",
+        "Load ordered lossless raw session messages with stable pagination and bounded content slices from project-local or Hermes profile LCM storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1806,8 +1833,11 @@ fn def_lcm_load_session() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 8192,
                     "description": "Maximum characters returned per message."
-                }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
             },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["session_id"]
         }),
     )
@@ -1817,7 +1847,7 @@ fn def_lcm_grep() -> ToolDefinition {
     def(
         "tokensave_lcm_grep",
         "LCM Grep",
-        "Search bounded LCM raw-message snippets and optional summary text in the project-local sessions.db.",
+        "Search bounded LCM raw-message snippets and optional summary text in project-local or Hermes profile sessions.db storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1847,8 +1877,11 @@ fn def_lcm_grep() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 100,
                     "description": "Maximum hits."
-                }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
             },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["query"]
         }),
     )
@@ -1858,7 +1891,7 @@ fn def_lcm_describe() -> ToolDefinition {
     def(
         "tokensave_lcm_describe",
         "LCM Describe",
-        "Describe one session's LCM raw-message and summary-DAG shape without exposing full payload bodies.",
+        "Describe one session's LCM raw-message and summary-DAG shape from project-local or Hermes profile storage without exposing full payload bodies.",
         json!({
             "type": "object",
             "properties": {
@@ -1869,8 +1902,11 @@ fn def_lcm_describe() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Provider-local session id."
-                }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
             },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["session_id"]
         }),
     )
@@ -1880,7 +1916,7 @@ fn def_lcm_expand() -> ToolDefinition {
     def(
         "tokensave_lcm_expand",
         "LCM Expand",
-        "Expand one raw message, summary node, or external payload through the bounded LCM query API.",
+        "Expand one raw message, summary node, or external payload through the bounded LCM query API from project-local or Hermes profile storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1926,8 +1962,11 @@ fn def_lcm_expand() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 8192,
                     "description": "Maximum characters returned."
-                }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
             },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["session_id", "target"]
         }),
     )
@@ -1982,7 +2021,7 @@ fn def_lcm_preflight() -> ToolDefinition {
     def_rw(
         "tokensave_lcm_preflight",
         "LCM Preflight",
-        "Run compression preflight checks. Registered now; lifecycle mutation is implemented in a later task.",
+        "Run compression preflight checks against project-local or Hermes profile LCM storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1993,8 +2032,11 @@ fn def_lcm_preflight() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Provider-local session id."
-                }
-            }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
         }),
     )
 }
@@ -2003,7 +2045,7 @@ fn def_lcm_compress() -> ToolDefinition {
     def_rw(
         "tokensave_lcm_compress",
         "LCM Compress",
-        "Advance the LCM compression lifecycle without invoking an auxiliary LLM.",
+        "Advance the LCM compression lifecycle in project-local or Hermes profile storage without invoking an auxiliary LLM.",
         json!({
             "type": "object",
             "properties": {
@@ -2046,8 +2088,11 @@ fn def_lcm_compress() -> ToolDefinition {
                         "route": {"type": "string"}
                     },
                     "required": ["mode"]
-                }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
             },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["session_id"]
         }),
     )

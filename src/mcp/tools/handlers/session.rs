@@ -232,17 +232,18 @@ async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution 
                 Ok(hermes_home) => hermes_home,
                 Err(result) => return LcmStorageResolution::Unavailable(result),
             };
-            let db_path = crate::sessions::cursor::hermes_profile_session_db_path(&hermes_home);
-            if !db_path.starts_with(&hermes_home) {
+            let db_path =
+                match crate::sessions::cursor::resolve_hermes_profile_session_db_path(&hermes_home)
+                {
+                    Ok(db_path) => db_path,
+                    Err(message) => {
+                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                            message,
+                        ))
+                    }
+                };
+            let Some(db) = GlobalDb::open_at(&db_path).await else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                    "hermes_profile LCM storage path must stay inside hermes_home",
-                ));
-            }
-            let Some(db) =
-                crate::sessions::cursor::open_hermes_profile_session_db(&hermes_home).await
-            else {
-                return LcmStorageResolution::Unavailable(lcm_scoped_unavailable(
-                    "hermes_profile",
                     "could not open hermes_profile tokensave session database",
                 ));
             };

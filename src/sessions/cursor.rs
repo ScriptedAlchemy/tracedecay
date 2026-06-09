@@ -31,8 +31,59 @@ pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
         .join(PROJECT_SESSION_DB_FILENAME)
 }
 
+pub fn resolve_hermes_profile_session_db_path(
+    hermes_home: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let tokensave_dir = hermes_home.join(".tokensave");
+    match std::fs::symlink_metadata(&tokensave_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "hermes_profile LCM storage rejects symlinked .tokensave directory: {}",
+                    tokensave_dir.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "hermes_profile LCM storage requires .tokensave to be a directory: {}",
+                    tokensave_dir.display()
+                ));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&tokensave_dir).map_err(|err| {
+                format!(
+                    "could not create hermes_profile .tokensave directory {}: {err}",
+                    tokensave_dir.display()
+                )
+            })?;
+        }
+        Err(err) => {
+            return Err(format!(
+                "could not inspect hermes_profile .tokensave directory {}: {err}",
+                tokensave_dir.display()
+            ));
+        }
+    }
+
+    let canonical_parent = tokensave_dir.canonicalize().map_err(|err| {
+        format!(
+            "could not resolve hermes_profile .tokensave directory {}: {err}",
+            tokensave_dir.display()
+        )
+    })?;
+    if !canonical_parent.starts_with(hermes_home) {
+        return Err(format!(
+            "hermes_profile LCM storage path must stay inside hermes_home: {}",
+            canonical_parent.display()
+        ));
+    }
+    Ok(canonical_parent.join(PROJECT_SESSION_DB_FILENAME))
+}
+
 pub async fn open_hermes_profile_session_db(hermes_home: &Path) -> Option<GlobalDb> {
-    GlobalDb::open_at(&hermes_profile_session_db_path(hermes_home)).await
+    let db_path = resolve_hermes_profile_session_db_path(hermes_home).ok()?;
+    GlobalDb::open_at(&db_path).await
 }
 
 /// A Cursor hook event scoped to one transcript file. Cursor is hook-driven —

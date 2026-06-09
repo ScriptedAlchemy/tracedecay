@@ -4,6 +4,8 @@
 //! ensuring that the MCP dispatch layer formats results correctly.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -133,6 +135,47 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .unwrap_or_else(|| panic!("{mutating} definition"));
         assert_eq!(tool.input_schema["type"], "object");
         assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
+    }
+
+    for scoped in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == scoped)
+            .unwrap_or_else(|| panic!("{scoped} definition"));
+        let storage_scope = &tool.input_schema["properties"]["storage_scope"];
+        assert_eq!(
+            storage_scope["enum"],
+            json!(["project_local", "hermes_profile"]),
+            "{scoped} must advertise supported storage scopes"
+        );
+        assert!(
+            storage_scope["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("hermes_home"),
+            "{scoped} storage_scope should document hermes_profile requirements"
+        );
+        let hermes_home = &tool.input_schema["properties"]["hermes_home"];
+        assert_eq!(
+            hermes_home["type"],
+            json!("string"),
+            "{scoped} must expose hermes_home"
+        );
+        assert!(
+            hermes_home["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("absolute"),
+            "{scoped} hermes_home should document absolute path requirements"
+        );
     }
 
     let load = tools
@@ -4317,6 +4360,75 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
         .unwrap()
         .contains("absolute hermes_home"));
     assert!(loaded_payload.get("messages").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_symlinked_tokensave_dir_escape() {
+    let (cg, _dir) = setup_project().await;
+    let hermes_home = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    unix_fs::symlink(outside.path(), hermes_home.path().join(".tokensave")).unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"].as_str().unwrap().contains(".tokensave"),
+        "rejection should identify the unsafe profile storage component: {payload}"
+    );
+    assert!(
+        !outside.path().join("sessions.db").exists(),
+        "profile DB must not be created through a symlink escape"
+    );
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_non_directory_home() {
+    let (cg, _dir) = setup_project().await;
+    let dir = TempDir::new().unwrap();
+    let hermes_home = dir.path().join("hermes-home-file");
+    fs::write(&hermes_home, "not a directory").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a directory"),
+        "non-directory hermes_home should be rejected clearly: {payload}"
+    );
+    assert!(payload.get("lcm").is_none());
 }
 
 #[tokio::test]
