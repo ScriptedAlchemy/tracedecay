@@ -82,36 +82,43 @@ pub async fn resolve_serve_from_global_db() -> Option<std::path::PathBuf> {
 /// project, return its path.  The raw line is stored in `out` so the caller
 /// can replay it into the MCP transport (the server still needs to see it).
 pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<std::path::PathBuf> {
-    use tokio::io::AsyncBufReadExt;
-    let stdin = tokio::io::stdin();
-    let mut reader = tokio::io::BufReader::new(stdin);
-    let mut line = String::new();
-    // Read the first non-empty line (should be the `initialize` request).
+    use tokio::io::AsyncReadExt;
+    let mut stdin = tokio::io::stdin();
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0_u8; 1];
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
+        match stdin.read(&mut byte).await {
             Ok(0) => return None, // EOF
-            Ok(_) => {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    break;
-                }
-            }
+            Ok(_) => match byte[0] {
+                b'\n' if line.iter().any(|b| !b.is_ascii_whitespace()) => break,
+                b'\n' => line.clear(),
+                b'\r' => {}
+                b => line.push(b),
+            },
             Err(_) => return None,
         }
     }
+    let line = String::from_utf8(line).ok()?;
     *out = Some(line.trim().to_string());
 
-    let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
-
-    let gdb = tokensave::global_db::GlobalDb::open().await?;
-    let mut registered: Vec<String> = gdb.list_project_paths().await;
+    let mut registered: Vec<String> = match tokensave::global_db::GlobalDb::open().await {
+        Some(gdb) => gdb.list_project_paths().await,
+        None => Vec::new(),
+    };
     registered.retain(|p| {
         std::path::Path::new(p)
             .join(".tokensave/tokensave.db")
             .exists()
     });
+    resolve_project_from_mcp_initialize_line(&line, &registered)
+}
+
+fn resolve_project_from_mcp_initialize_line(
+    line: &str,
+    registered: &[String],
+) -> Option<std::path::PathBuf> {
+    let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+    let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
 
     // Try each root URI — first match wins.
     for root in roots {
@@ -131,4 +138,38 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn initialized_project() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
+        std::fs::write(dir.path().join(".tokensave/tokensave.db"), b"").unwrap();
+        dir
+    }
+
+    #[test]
+    fn mcp_initialize_roots_resolve_initialized_project_without_global_db() {
+        let active = initialized_project();
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "roots": [{
+                    "uri": format!("file://{}", active.path().display()),
+                    "name": "active"
+                }]
+            }
+        })
+        .to_string();
+
+        let resolved = resolve_project_from_mcp_initialize_line(&line, &[]).unwrap();
+        assert_eq!(resolved, active.path());
+    }
 }

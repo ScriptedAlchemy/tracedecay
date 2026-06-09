@@ -697,7 +697,7 @@ impl McpServer {
         };
         if let Some(resp) = response {
             let json_str = serde_json::to_string(&resp).unwrap_or_default();
-            let _ = transport.write_line(&json_str).await;
+            let _ = transport.write_line(&format!("{json_str}\n")).await;
             let _ = transport.flush().await;
         }
     }
@@ -706,11 +706,6 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(&self, transport: &mut impl super::transport::McpTransport) -> Result<()> {
-        debug_assert!(
-            self.stats.total_requests.load(Ordering::Relaxed) == 0,
-            "server run() called on an already-used server"
-        );
-
         loop {
             let line: String = {
                 #[cfg(unix)]

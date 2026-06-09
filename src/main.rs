@@ -981,29 +981,35 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 return Ok(());
             }
             let original_cwd = std::env::current_dir().ok();
-            let project_path = tokensave::config::resolve_path_with_discovery(path);
             // Track the first stdin line if we need to peek at `initialize` roots.
             let mut peeked_line: Option<String> = None;
-            let cg = match serve::ensure_initialized(&project_path).await {
-                Ok(cg) => cg,
-                Err(_) => {
-                    // CWD-based discovery failed (e.g. VS Code launched us from ~).
-                    // Fall back to the global DB's registered projects.
-                    match serve::resolve_serve_from_global_db().await {
-                        Some(p) => serve::ensure_initialized(&p).await?,
-                        None => {
-                            // Last resort: peek at the first stdin line for MCP
-                            // `initialize` roots (e.g. VS Code multi-folder workspace).
-                            match serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                                Some(p) => serve::ensure_initialized(&p).await?,
-                                None => {
-                                    return Err(tokensave::errors::TokenSaveError::Config {
-                                        message: format!(
-                                            "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
-                                            project_path.display()
-                                        ),
-                                    });
-                                }
+            let explicit_path = path.is_some();
+            let project_path = tokensave::config::resolve_path_with_discovery(path);
+            let roots_project_path = if explicit_path {
+                None
+            } else {
+                serve::resolve_serve_from_mcp_roots(&mut peeked_line).await
+            };
+            let cg = if let Some(p) = roots_project_path {
+                serve::ensure_initialized(&p).await?
+            } else {
+                match serve::ensure_initialized(&project_path).await {
+                    Ok(cg) => cg,
+                    Err(e) => {
+                        if explicit_path {
+                            return Err(e);
+                        }
+                        // CWD-based discovery failed (e.g. VS Code launched us from ~).
+                        // Fall back to the global DB's registered projects.
+                        match serve::resolve_serve_from_global_db().await {
+                            Some(p) => serve::ensure_initialized(&p).await?,
+                            None => {
+                                return Err(tokensave::errors::TokenSaveError::Config {
+                                    message: format!(
+                                        "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
+                                        project_path.display()
+                                    ),
+                                });
                             }
                         }
                     }
