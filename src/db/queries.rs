@@ -28,8 +28,35 @@ fn build_qmark_placeholders(n: usize) -> String {
 }
 
 impl Database {
-    async fn rollback_batch_transaction(&self) {
-        let _ = self.conn().execute("ROLLBACK", ()).await;
+    async fn with_batch_transaction<T>(
+        &self,
+        operation: &str,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.conn()
+            .execute("BEGIN", ())
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("failed to begin: {e}"),
+                operation: operation.to_string(),
+            })?;
+
+        match work.await {
+            Ok(value) => {
+                if let Err(e) = self.conn().execute("COMMIT", ()).await {
+                    let _ = self.conn().execute("ROLLBACK", ()).await;
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to commit: {e}"),
+                        operation: operation.to_string(),
+                    });
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn().execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -407,15 +434,7 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
-
-        let result = async {
+        self.with_batch_transaction("insert_nodes", async {
             let stmt = self.conn()
                 .prepare(
                     "INSERT OR REPLACE INTO nodes \
@@ -469,21 +488,9 @@ impl Database {
                 stmt.reset();
             }
 
-            self.conn()
-                .execute("COMMIT", ())
-                .await
-                .map_err(|e| TokenSaveError::Database {
-                    message: format!("failed to commit: {e}"),
-                    operation: "insert_nodes".to_string(),
-                })?;
             Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            self.rollback_batch_transaction().await;
-        }
-        result
+        })
+        .await
     }
 
     /// Retrieves a node by its unique ID, returning `None` if not found.
@@ -784,15 +791,7 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-
-        let result = async {
+        self.with_batch_transaction("insert_edges", async {
             // Conditional INSERT: only insert when both endpoints exist in
             // `nodes`. This avoids FK violations during incremental sync
             // when an edge references a node from a not-yet-indexed file.
@@ -852,21 +851,9 @@ impl Database {
                 stmt.reset();
             }
 
-            self.conn()
-                .execute("COMMIT", ())
-                .await
-                .map_err(|e| TokenSaveError::Database {
-                    message: format!("failed to commit: {e}"),
-                    operation: "insert_edges".to_string(),
-                })?;
             Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            self.rollback_batch_transaction().await;
-        }
-        result
+        })
+        .await
     }
 
     /// Returns outgoing edges from a source node, optionally filtered by edge kinds.
@@ -1964,15 +1951,7 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
-
-        let result = async {
+        self.with_batch_transaction("upsert_files", async {
             let stmt = self.conn()
                 .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
                 .await
@@ -2002,21 +1981,9 @@ impl Database {
                 stmt.reset();
             }
 
-            self.conn()
-                .execute("COMMIT", ())
-                .await
-                .map_err(|e| TokenSaveError::Database {
-                    message: format!("failed to commit: {e}"),
-                    operation: "upsert_files".to_string(),
-                })?;
             Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            self.rollback_batch_transaction().await;
-        }
-        result
+        })
+        .await
     }
 
     pub async fn upsert_file(&self, file: &FileRecord) -> Result<()> {
@@ -2138,15 +2105,7 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-
-        let result = async {
+        self.with_batch_transaction("insert_unresolved_refs", async {
             let stmt = self.conn()
                 .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
                 .await
@@ -2176,21 +2135,9 @@ impl Database {
                 stmt.reset();
             }
 
-            self.conn()
-                .execute("COMMIT", ())
-                .await
-                .map_err(|e| TokenSaveError::Database {
-                    message: format!("failed to commit: {e}"),
-                    operation: "insert_unresolved_refs".to_string(),
-                })?;
             Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            self.rollback_batch_transaction().await;
-        }
-        result
+        })
+        .await
     }
 
     /// Returns all unresolved references.

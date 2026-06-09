@@ -62,17 +62,6 @@ fn sample_file(path: &str) -> FileRecord {
     }
 }
 
-fn sample_unresolved_ref(from_node_id: &str) -> UnresolvedRef {
-    UnresolvedRef {
-        from_node_id: from_node_id.to_string(),
-        reference_name: "MissingType".to_string(),
-        reference_kind: EdgeKind::Uses,
-        line: 7,
-        column: 12,
-        file_path: "src/lib.rs".to_string(),
-    }
-}
-
 async fn assert_can_start_new_transaction(db: &Database) {
     db.conn()
         .execute("BEGIN", ())
@@ -181,7 +170,14 @@ async fn test_insert_unresolved_refs_rolls_back_after_execute_failure() {
         .expect("failed to install unresolved ref failure trigger");
 
     let err = db
-        .insert_unresolved_refs(&[sample_unresolved_ref("rb-ref")])
+        .insert_unresolved_refs(&[UnresolvedRef {
+            from_node_id: "rb-ref".to_string(),
+            reference_name: "MissingType".to_string(),
+            reference_kind: EdgeKind::Uses,
+            line: 7,
+            column: 12,
+            file_path: "src/lib.rs".to_string(),
+        }])
         .await
         .expect_err("forced trigger should make insert_unresolved_refs fail");
     assert!(
