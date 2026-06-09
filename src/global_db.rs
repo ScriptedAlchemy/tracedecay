@@ -684,6 +684,14 @@ impl GlobalDb {
         crate::sessions::lcm::query::expand(&self.conn, &self.storage_root, request).await
     }
 
+    /// Assembles bounded LCM retrieval context for host-side query synthesis.
+    pub async fn lcm_expand_query(
+        &self,
+        request: crate::sessions::lcm::LcmExpandQueryRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandQueryResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand_query(&self.conn, &self.storage_root, request).await
+    }
+
     /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.
     pub async fn lcm_describe(
         &self,

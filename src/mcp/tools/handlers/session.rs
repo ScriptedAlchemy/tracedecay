@@ -6,13 +6,16 @@ use crate::errors::{Result, TokenSaveError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
-    LcmCompressionRequest, LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest,
-    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSummarizerMode,
+    LcmCompressionRequest, LcmContentSlice, LcmExpandQueryRequest, LcmExpandRequest,
+    LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope,
+    LcmSummarizerMode,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
+const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
+const MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_LCM_CONTENT_LIMIT: usize = 8192;
 const MAX_LCM_RESULT_LIMIT: usize = 100;
 
@@ -115,6 +118,35 @@ fn messages_arg(args: &Value) -> Result<Vec<Value>> {
         return Err(argument_error("messages must be an array"));
     };
     Ok(messages.clone())
+}
+
+fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
+    let Some(value) = args.get(name) else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(argument_error(format!("{name} must be an array")));
+    };
+    values
+        .iter()
+        .map(|value| {
+            if let Some(text) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                return Ok(text.to_string());
+            }
+            if let Some(integer) = value.as_i64() {
+                if integer >= 0 {
+                    return Ok(integer.to_string());
+                }
+            }
+            Err(argument_error(format!(
+                "{name} must contain only non-empty strings or non-negative integers"
+            )))
+        })
+        .collect()
 }
 
 fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
@@ -526,11 +558,52 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
     })))
 }
 
-pub(super) async fn handle_lcm_expand_query(_cg: &TokenSave, _args: Value) -> Result<ToolResult> {
-    Ok(tool_json(&json!({
-        "status": "not_implemented",
-        "message": "tokensave_lcm_expand_query is registered, but synthesized expansion answers require the later Hermes/LLM bridge task.",
-    })))
+pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let provider = provider_arg(&args);
+    let session_id = required_string_arg(&args, "session_id")?;
+    let prompt = required_string_arg(&args, "prompt")?;
+    let max_results =
+        bounded_usize_arg(&args, "max_results", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(5);
+    let max_tokens =
+        bounded_usize_arg(&args, "max_tokens", 1, MAX_LCM_CONTENT_LIMIT)?.unwrap_or(2000);
+    let default_context_limit = max_tokens
+        .max(DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT)
+        .min(MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT);
+    let context_max_tokens = bounded_usize_arg(
+        &args,
+        "context_max_tokens",
+        1,
+        MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
+    )?
+    .unwrap_or(default_context_limit);
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
+    };
+    let response = storage
+        .db
+        .lcm_expand_query(LcmExpandQueryRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            prompt: prompt.to_string(),
+            query: string_arg(&args, "query").map(str::to_string),
+            node_ids: string_array_arg(&args, "node_ids")?,
+            max_results,
+            max_tokens,
+            context_max_tokens,
+        })
+        .await
+        .map_err(lcm_error)?;
+    let mut payload = serde_json::to_value(response).map_err(|err| TokenSaveError::Config {
+        message: format!("failed to serialize expand-query response: {err}"),
+    })?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("status".to_string(), json!("ok"));
+        object.insert("provider".to_string(), json!(provider));
+        object.insert("session_id".to_string(), json!(session_id));
+        object.insert("storage_scope".to_string(), json!(storage.scope));
+    }
+    Ok(tool_json(&payload))
 }
 
 pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {

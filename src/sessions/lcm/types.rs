@@ -217,6 +217,75 @@ pub struct LcmExpandResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub prompt: String,
+    pub query: Option<String>,
+    pub node_ids: Vec<String>,
+    pub max_results: usize,
+    pub max_tokens: usize,
+    pub context_max_tokens: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryResponse {
+    pub prompt: String,
+    pub query: Option<String>,
+    pub answer: Option<String>,
+    pub needs_synthesis: bool,
+    pub synthesis_prompt: Option<LcmExpandQuerySynthesisPrompt>,
+    pub max_tokens: usize,
+    pub context_max_tokens: usize,
+    pub context_budget: LcmExpandQueryBudget,
+    pub context_truncated: bool,
+    pub context_pagination: Vec<LcmExpandQueryPagination>,
+    pub node_ids: Vec<String>,
+    pub matches: Vec<LcmExpandQueryMatch>,
+    pub context_blocks: Vec<LcmExpandQueryContextBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQuerySynthesisPrompt {
+    pub system: String,
+    pub user: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryBudget {
+    pub requested_max_chars: usize,
+    pub used_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryPagination {
+    pub kind: String,
+    pub node_id: Option<String>,
+    pub source_ref: Option<LcmSourceRef>,
+    pub next_content_offset: Option<u64>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryMatch {
+    pub kind: String,
+    pub node_id: Option<String>,
+    pub store_id: Option<i64>,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandQueryContextBlock {
+    pub kind: String,
+    pub node_id: Option<String>,
+    pub source_ref: Option<LcmSourceRef>,
+    pub content: String,
+    pub content_range: LcmContentRange,
+    pub raw_message: Option<LcmRawMessage>,
+    pub summary_node: Option<LcmSummaryNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmSummaryNodeOverview {
     pub node_id: String,
     pub conversation_id: String,

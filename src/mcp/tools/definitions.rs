@@ -1976,7 +1976,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tokensave_lcm_expand_query",
         "LCM Expand Query",
-        "Answer a prompt from bounded LCM expansions. Registered for compatibility; synthesis awaits the Hermes/LLM bridge.",
+        "Assemble bounded LCM retrieval context for a prompt from project-local or Hermes profile storage; host integrations synthesize the final answer when needs_synthesis is true.",
         json!({
             "type": "object",
             "properties": {
@@ -1986,7 +1986,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Optional provider-local session id."
+                    "description": "Provider-local session id."
                 },
                 "query": {
                     "type": "string",
@@ -1998,7 +1998,12 @@ fn def_lcm_expand_query() -> ToolDefinition {
                 },
                 "node_ids": {
                     "type": "array",
-                    "items": { "type": "string" },
+                    "items": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "integer", "minimum": 0 }
+                        ]
+                    },
                     "description": "Optional summary node ids to expand."
                 },
                 "max_results": {
@@ -2011,8 +2016,18 @@ fn def_lcm_expand_query() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Desired synthesized answer token budget."
-                }
-            }
+                },
+                "context_max_tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65536,
+                    "description": "Maximum retrieval context budget assembled before host-side synthesis."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id", "prompt"]
         }),
     )
 }

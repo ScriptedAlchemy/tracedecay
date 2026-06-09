@@ -7,9 +7,12 @@ use libsql::{params, Connection, Value};
 use super::types::{LcmLifecycleStatus, LcmPayloadStatus, LcmRedactionStatus};
 use super::{
     compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse,
-    LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource,
-    LcmGrepHit, LcmGrepRequest, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
-    LcmRawMessage, LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind, LcmSummaryNode,
+    LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
+    LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
+    LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget,
+    LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmLoadSessionMessage,
+    LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview, LcmScope,
+    LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryExpansion, LcmSummaryNode,
     LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
 };
 
@@ -187,6 +190,143 @@ pub(crate) async fn expand(
     }
 }
 
+pub(crate) async fn expand_query(
+    conn: &Connection,
+    _storage_root: &Path,
+    request: LcmExpandQueryRequest,
+) -> Result<LcmExpandQueryResponse, LcmError> {
+    let max_results = clamp_limit(request.max_results);
+    let context_max_chars = request.context_max_tokens.max(1);
+    let mut matches = Vec::new();
+    let mut selected_summaries = Vec::new();
+    let mut selected_raw_store_ids = Vec::new();
+
+    if request.node_ids.is_empty() {
+        if let Some(query) = request
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+        {
+            let fts = fts_query(query);
+            if !fts.is_empty() {
+                let summary_hits = summary_grep_hits(
+                    conn,
+                    &request.provider,
+                    Some(&request.session_id),
+                    &fts,
+                    max_results,
+                )
+                .await?;
+                for hit in summary_hits {
+                    if let Some(node_id) = hit.node_id.as_deref() {
+                        let expansion = dag::expand_summary_node(
+                            conn,
+                            &request.provider,
+                            &request.session_id,
+                            node_id,
+                        )
+                        .await?;
+                        matches.push(expand_query_match_from_hit(&hit));
+                        selected_summaries.push(expansion);
+                    }
+                }
+
+                if selected_summaries.len() < max_results {
+                    let remaining = max_results - selected_summaries.len();
+                    let raw_hits = raw_grep_hits(
+                        conn,
+                        &request.provider,
+                        Some(&request.session_id),
+                        &fts,
+                        remaining,
+                    )
+                    .await?;
+                    for hit in raw_hits {
+                        if let Some(store_id) = hit.store_id {
+                            matches.push(expand_query_match_from_hit(&hit));
+                            selected_raw_store_ids.push(store_id);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for node_id in request.node_ids.iter().take(max_results) {
+            let expansion =
+                dag::expand_summary_node(conn, &request.provider, &request.session_id, node_id)
+                    .await?;
+            matches.push(LcmExpandQueryMatch {
+                kind: "summary_node".to_string(),
+                node_id: Some(expansion.summary.node_id.clone()),
+                store_id: None,
+                snippet: raw::derived_text_for_snippet(&expansion.summary.summary_text),
+            });
+            selected_summaries.push(expansion);
+        }
+    }
+
+    if selected_summaries.is_empty() && selected_raw_store_ids.is_empty() {
+        return Ok(LcmExpandQueryResponse {
+            prompt: request.prompt,
+            query: request.query,
+            answer: Some("No matching LCM context found in the current session.".to_string()),
+            needs_synthesis: false,
+            synthesis_prompt: None,
+            max_tokens: request.max_tokens,
+            context_max_tokens: request.context_max_tokens,
+            context_budget: LcmExpandQueryBudget {
+                requested_max_chars: context_max_chars,
+                used_chars: 0,
+            },
+            context_truncated: false,
+            context_pagination: Vec::new(),
+            node_ids: Vec::new(),
+            matches,
+            context_blocks: Vec::new(),
+        });
+    }
+
+    let mut assembler = ExpandQueryAssembler::new(context_max_chars);
+    let mut node_ids = Vec::new();
+    for expansion in selected_summaries {
+        node_ids.push(expansion.summary.node_id.clone());
+        assembler.add_summary_expansion(expansion);
+    }
+    for store_id in selected_raw_store_ids {
+        let raw = load_raw_message_by_store_id(conn, store_id).await?;
+        if raw.provider == request.provider && raw.session_id == request.session_id {
+            assembler.add_raw_message(raw, None);
+        }
+    }
+
+    let context_blocks = assembler.context_blocks;
+    let context_pagination = assembler.context_pagination;
+    let context_truncated = !context_pagination.is_empty();
+    let context_budget = LcmExpandQueryBudget {
+        requested_max_chars: context_max_chars,
+        used_chars: assembler.used_chars,
+    };
+    let synthesis_prompt =
+        expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
+
+    Ok(LcmExpandQueryResponse {
+        prompt: request.prompt,
+        query: request.query,
+        answer: None,
+        needs_synthesis: true,
+        synthesis_prompt: Some(synthesis_prompt),
+        max_tokens: request.max_tokens,
+        context_max_tokens: request.context_max_tokens,
+        context_budget,
+        context_truncated,
+        context_pagination,
+        node_ids,
+        matches,
+        context_blocks,
+    })
+}
+
 pub(crate) async fn describe(
     conn: &Connection,
     provider: &str,
@@ -343,6 +483,174 @@ fn slice_summary_sources(
             source
         })
         .collect()
+}
+
+struct ExpandQueryAssembler {
+    context_blocks: Vec<LcmExpandQueryContextBlock>,
+    context_pagination: Vec<LcmExpandQueryPagination>,
+    max_chars: usize,
+    used_chars: usize,
+}
+
+impl ExpandQueryAssembler {
+    fn new(max_chars: usize) -> Self {
+        Self {
+            context_blocks: Vec::new(),
+            context_pagination: Vec::new(),
+            max_chars,
+            used_chars: 0,
+        }
+    }
+
+    fn remaining_chars(&self) -> usize {
+        self.max_chars.saturating_sub(self.used_chars)
+    }
+
+    fn add_summary_expansion(&mut self, expansion: LcmSummaryExpansion) {
+        let node_id = expansion.summary.node_id.clone();
+        let summary_text = expansion.summary.summary_text.clone();
+        if let Some((content, range)) =
+            self.take_content("summary", Some(node_id.clone()), None, &summary_text)
+        {
+            let mut summary = expansion.summary.clone();
+            summary.summary_text = content.clone();
+            self.context_blocks.push(LcmExpandQueryContextBlock {
+                kind: "summary".to_string(),
+                node_id: Some(node_id.clone()),
+                source_ref: None,
+                content,
+                content_range: range,
+                raw_message: None,
+                summary_node: Some(summary),
+            });
+        }
+
+        for source in expansion.sources {
+            let source_ref = source.source_ref.clone();
+            let kind = match source_ref {
+                LcmSourceRef::RawMessage { .. } => "raw_message",
+                LcmSourceRef::SummaryNode { .. } => "summary_source",
+            };
+            let Some((content, range)) = self.take_content(
+                kind,
+                Some(node_id.clone()),
+                Some(source_ref.clone()),
+                &source.content,
+            ) else {
+                continue;
+            };
+            let raw_message = source.raw_message.map(|mut raw| {
+                raw.content = content.clone();
+                raw
+            });
+            let summary_node = source.summary_node.map(|summary| {
+                let mut summary = *summary;
+                summary.summary_text = content.clone();
+                summary
+            });
+            self.context_blocks.push(LcmExpandQueryContextBlock {
+                kind: kind.to_string(),
+                node_id: Some(node_id.clone()),
+                source_ref: Some(source_ref),
+                content,
+                content_range: range,
+                raw_message,
+                summary_node,
+            });
+        }
+    }
+
+    fn add_raw_message(&mut self, raw: LcmRawMessage, node_id: Option<String>) {
+        let source_ref = Some(LcmSourceRef::RawMessage {
+            store_id: raw.store_id,
+        });
+        let Some((content, range)) = self.take_content(
+            "raw_message",
+            node_id.clone(),
+            source_ref.clone(),
+            &raw.content,
+        ) else {
+            return;
+        };
+        let mut raw_message = raw;
+        raw_message.content = content.clone();
+        self.context_blocks.push(LcmExpandQueryContextBlock {
+            kind: "raw_message".to_string(),
+            node_id,
+            source_ref,
+            content,
+            content_range: range,
+            raw_message: Some(raw_message),
+            summary_node: None,
+        });
+    }
+
+    fn take_content(
+        &mut self,
+        kind: &str,
+        node_id: Option<String>,
+        source_ref: Option<LcmSourceRef>,
+        content: &str,
+    ) -> Option<(String, LcmContentRange)> {
+        let remaining = self.remaining_chars();
+        if remaining == 0 {
+            self.context_pagination.push(LcmExpandQueryPagination {
+                kind: kind.to_string(),
+                node_id,
+                source_ref,
+                next_content_offset: Some(0),
+                has_more: true,
+            });
+            return None;
+        }
+
+        let (sliced, range) = slice_content(
+            content,
+            Some(LcmContentSlice {
+                offset: 0,
+                limit: remaining,
+            }),
+        );
+        self.used_chars = self
+            .used_chars
+            .saturating_add(sliced.chars().count())
+            .min(self.max_chars);
+        if range.truncated {
+            self.context_pagination.push(LcmExpandQueryPagination {
+                kind: kind.to_string(),
+                node_id,
+                source_ref,
+                next_content_offset: Some(range.returned_chars),
+                has_more: true,
+            });
+        }
+        Some((sliced, range))
+    }
+}
+
+fn expand_query_match_from_hit(hit: &LcmGrepHit) -> LcmExpandQueryMatch {
+    LcmExpandQueryMatch {
+        kind: hit.kind.clone(),
+        node_id: hit.node_id.clone(),
+        store_id: hit.store_id,
+        snippet: hit.snippet.clone(),
+    }
+}
+
+fn expand_query_synthesis_prompt(
+    prompt: &str,
+    context_blocks: &[LcmExpandQueryContextBlock],
+    context_truncated: bool,
+) -> LcmExpandQuerySynthesisPrompt {
+    let system = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.".to_string();
+    let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
+    let truncation_note = if context_truncated {
+        "\n\nNOTE: Some LCM context was truncated; pagination metadata is included in the tool response."
+    } else {
+        ""
+    };
+    let user = format!("QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{context_json}{truncation_note}");
+    LcmExpandQuerySynthesisPrompt { system, user }
 }
 
 async fn raw_grep_hits(

@@ -1049,6 +1049,118 @@ def _deterministic_truncation(messages, limit: int = 2048) -> str:
     max_prefix = max(0, limit - len(FALLBACK_MARKER) - 2)
     return f"{text[:max_prefix].rstrip()}\n\n{FALLBACK_MARKER}"
 
+def _bounded_expand_query_answer(text: str, max_tokens: int):
+    try:
+        token_budget = int(max_tokens or 2000)
+    except Exception:
+        token_budget = 2000
+    char_limit = max(1, token_budget) * 4
+    answer = (text or "").strip()
+    if len(answer) <= char_limit:
+        return answer, False
+    return answer[:char_limit].rstrip(), True
+
+def _expand_query_degraded_payload(retrieval, reason: str, *, timeout_seconds=None):
+    payload = {}
+    if isinstance(retrieval, dict):
+        for key in (
+            "status",
+            "prompt",
+            "query",
+            "model",
+            "max_tokens",
+            "context_max_tokens",
+            "context_truncated",
+            "context_pagination",
+            "node_ids",
+            "matches",
+            "provider",
+            "session_id",
+            "storage_scope",
+        ):
+            if key in retrieval:
+                payload[key] = retrieval[key]
+    payload["status"] = payload.get("status") or "ok"
+    payload["needs_synthesis"] = False
+    payload["degraded"] = True
+    payload["error"] = reason
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    return payload
+
+def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
+    if not isinstance(retrieval, dict) or not retrieval.get("needs_synthesis"):
+        return retrieval
+    client = getattr(agent, "auxiliary_client", None)
+    if client is None or not callable(getattr(client, "call_llm", None)):
+        return _expand_query_degraded_payload(
+            retrieval,
+            "Hermes auxiliary_client.call_llm is unavailable",
+        )
+
+    synthesis_prompt = retrieval.get("synthesis_prompt") or {}
+    context_blocks = retrieval.get("context_blocks") or []
+    system_prompt = synthesis_prompt.get("system") or (
+        "You answer questions using expanded LCM retrieval context. "
+        "Be concise, factual, and grounded in the provided context. "
+        "If the context is insufficient, say so plainly."
+    )
+    user_prompt = synthesis_prompt.get("user") or (
+        f"QUESTION:\n{retrieval.get('prompt', '')}\n\n"
+        "EXPANDED CONTEXT:\n"
+        f"{json.dumps(context_blocks, ensure_ascii=False, indent=2)}"
+    )
+    max_tokens = retrieval.get("max_tokens") or kwargs.get("max_tokens") or 2000
+    timeout = kwargs.get("timeout") or kwargs.get("expansion_timeout") or 60
+    call_kwargs = {
+        "task": "compression",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+    }
+    model = kwargs.get("model") or retrieval.get("model")
+    if model:
+        call_kwargs["model"] = model
+    try:
+        response = client.call_llm(**call_kwargs)
+    except TimeoutError:
+        return _expand_query_degraded_payload(
+            retrieval,
+            f"lcm_expand_query synthesis timed out after {float(timeout):.3g}s",
+            timeout_seconds=timeout,
+        )
+    except Exception as exc:
+        return _expand_query_degraded_payload(
+            retrieval,
+            f"lcm_expand_query synthesis failed: {exc}",
+        )
+
+    answer = _strip_reasoning(_llm_response_text(response)).strip()
+    if not answer:
+        return _expand_query_degraded_payload(
+            retrieval,
+            "lcm_expand_query synthesis returned an empty answer",
+        )
+    bounded_answer, truncated = _bounded_expand_query_answer(answer, max_tokens)
+    payload = dict(retrieval)
+    payload.pop("context_blocks", None)
+    payload.pop("synthesis_prompt", None)
+    payload["status"] = payload.get("status") or "ok"
+    payload["needs_synthesis"] = False
+    payload["answer"] = bounded_answer
+    if truncated:
+        payload["answer_truncated"] = True
+    return payload
+
+def _handle_lcm_expand_query(args, **kwargs) -> str:
+    retrieval = call_tokensave_json("tokensave_lcm_expand_query", args or {}, **kwargs)
+    agent = kwargs.get("agent")
+    payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
+    return json.dumps(payload)
+
 class TokenSaveContextEngine(ContextEngine):
     def __init__(self):
         self.active_session_id = None
@@ -1090,6 +1202,20 @@ class TokenSaveContextEngine(ContextEngine):
         args = _storage_args(self.project_root, self.hermes_home)
         args["session_id"] = session_id or self.active_session_id
         return call_tokensave_json("tokensave_lcm_status", args, **kwargs)
+
+    def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
+        args = _storage_args(self.project_root, self.hermes_home)
+        args["session_id"] = kwargs.pop("session_id", None) or self.active_session_id
+        args["prompt"] = prompt
+        if query is not None:
+            args["query"] = query
+        if node_ids is not None:
+            args["node_ids"] = node_ids
+        for key in ("max_results", "max_tokens", "context_max_tokens"):
+            if key in kwargs and kwargs[key] is not None:
+                args[key] = kwargs[key]
+        retrieval = call_tokensave_json("tokensave_lcm_expand_query", args, **kwargs)
+        return _synthesize_expand_query_payload(retrieval, agent=self.agent, **kwargs)
 
     def _auxiliary_routes(self, summary_request=None, **kwargs):
         routes = (
@@ -1246,11 +1372,12 @@ class TokensaveMemoryProvider(MemoryProvider):
 def register(ctx):
     for schema in schemas.TOOL_SCHEMAS:
         name = schema["name"]
+        handler = _handle_lcm_expand_query if name == "tokensave_lcm_expand_query" else tools.make_handler(name)
         ctx.register_tool(
             name=name,
             toolset="tokensave",
             schema=schema,
-            handler=tools.make_handler(name),
+            handler=handler,
         )
 
     ctx.register_hook("pre_llm_call", _pre_llm_call)

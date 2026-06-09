@@ -143,6 +143,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tokensave_lcm_grep",
         "tokensave_lcm_describe",
         "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
     ] {
@@ -3959,14 +3960,33 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let result = handle_tool_call(
         &cg,
         "tokensave_lcm_expand_query",
-        json!({"provider": "cursor", "session_id": "lcm-session", "prompt": "summarize"}),
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "prompt": "Summarize orchard dispatch",
+            "query": "orchard dispatch",
+            "context_max_tokens": 128,
+            "max_tokens": 64
+        }),
         None,
         None,
     )
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "not_implemented");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["prompt"], "Summarize orchard dispatch");
+    assert!(payload["context_blocks"]
+        .as_array()
+        .expect("context blocks")
+        .iter()
+        .any(|block| block["kind"] == "raw_message"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("EXPANDED CONTEXT"));
+    assert!(extract_text(&result.value).len() <= 15_000);
 
     let preflight = handle_tool_call(
         &cg,
@@ -4299,6 +4319,33 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
     assert_eq!(grep_payload["count"], 1);
     assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
     assert!(grep_payload["hits"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "prompt": "Explain profile pear evidence",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "context_max_tokens": 1024,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["storage_scope"], "hermes_profile");
+    assert_eq!(expanded_payload["needs_synthesis"], true);
+    assert!(expanded_payload["context_blocks"][0]["content"]
         .as_str()
         .unwrap()
         .contains("profile-local pear evidence"));

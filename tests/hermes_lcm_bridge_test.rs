@@ -514,6 +514,145 @@ assert agent.auxiliary_client.calls[0]["messages"][0] == {
 }
 
 #[test]
+fn context_engine_expand_query_synthesizes_and_degrades() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_expand_query_synthesis.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+responses = []
+
+def mcp_response(inner):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]})
+
+def needs_synthesis():
+    return {
+        "status": "ok",
+        "prompt": "What changed?",
+        "query": "orchard",
+        "needs_synthesis": True,
+        "max_tokens": 32,
+        "context_max_tokens": 256,
+        "context_truncated": False,
+        "context_pagination": [],
+        "node_ids": ["sum_1"],
+        "matches": [{"kind": "summary_node", "node_id": "sum_1", "snippet": "orchard summary"}],
+        "context_blocks": [{"kind": "summary", "node_id": "sum_1", "content": "orchard summary"}],
+        "synthesis_prompt": {
+            "system": "Use expanded LCM context.",
+            "user": "QUESTION:\nWhat changed?\n\nEXPANDED CONTEXT:\n[]",
+        },
+    }
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    assert name == "tokensave_lcm_expand_query"
+    assert args["session_id"] == "session-1"
+    assert args["storage_scope"] == "project_local"
+    assert args["project_root"] == "/tmp/project"
+    assert args["prompt"] == "What changed?"
+    assert args["query"] == "orchard"
+    return mcp_response(responses.pop(0))
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+class Aux:
+    def __init__(self):
+        self.mode = "ok"
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.mode == "timeout":
+            raise TimeoutError("slow route")
+        if self.mode == "empty":
+            return "<reasoning>hidden</reasoning>   "
+        return "<reasoning>hidden</reasoning>Final answer from context"
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+
+responses.append(needs_synthesis())
+answer = engine.expand_query(prompt="What changed?", query="orchard")
+assert answer["status"] == "ok"
+assert answer["needs_synthesis"] is False
+assert answer["answer"] == "Final answer from context"
+assert "hidden" not in answer["answer"]
+assert answer["node_ids"] == ["sum_1"]
+assert agent.auxiliary_client.calls[0]["task"] == "compression"
+assert agent.auxiliary_client.calls[0]["messages"][0] == {
+    "role": "system",
+    "content": "Use expanded LCM context.",
+}
+assert "EXPANDED CONTEXT" in agent.auxiliary_client.calls[0]["messages"][1]["content"]
+
+agent.auxiliary_client.mode = "timeout"
+responses.append(needs_synthesis())
+timeout_payload = engine.expand_query(prompt="What changed?", query="orchard")
+assert timeout_payload["degraded"] is True
+assert "timed out" in timeout_payload["error"]
+assert timeout_payload["timeout_seconds"] > 0
+assert timeout_payload["needs_synthesis"] is False
+
+agent.auxiliary_client.mode = "empty"
+responses.append(needs_synthesis())
+empty_payload = engine.expand_query(prompt="What changed?", query="orchard")
+assert empty_payload["degraded"] is True
+assert "empty answer" in empty_payload["error"]
+assert empty_payload["needs_synthesis"] is False
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes expand-query synthesis check");
+    assert!(
+        output.status.success(),
+        "generated context engine should synthesize and degrade expand-query answers\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
     let home = TempDir::new().unwrap();
     HermesIntegration
