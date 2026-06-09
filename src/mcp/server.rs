@@ -696,8 +696,9 @@ impl McpServer {
             )),
         };
         if let Some(resp) = response {
-            let json_str = serde_json::to_string(&resp).unwrap_or_default();
-            let _ = transport.write_line(&format!("{json_str}\n")).await;
+            let mut json_str = serde_json::to_string(&resp).unwrap_or_default();
+            json_str.push('\n');
+            let _ = transport.write_line(&json_str).await;
             let _ = transport.flush().await;
         }
     }

@@ -31,6 +31,11 @@ pub async fn ensure_initialized(project_path: &Path) -> tokensave::errors::Resul
     })
 }
 
+fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
+    paths.retain(|path| TokenSave::is_initialized(Path::new(path)));
+    paths
+}
+
 /// Fallback for `serve`: when CWD-based discovery fails, check the global DB
 /// for registered projects. When multiple projects exist, pick the best match
 /// against cwd: prefer a project that is an ancestor of cwd (cwd is inside the
@@ -40,14 +45,8 @@ pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
     let Some(gdb) = tokensave::global_db::GlobalDb::open().await else {
         return ServeGlobalDbResolution::None;
     };
-    let mut paths: Vec<String> = gdb.list_project_paths().await;
+    let mut paths = initialized_project_paths(gdb.list_project_paths().await);
     paths.sort();
-    // Keep only projects whose .tokensave dir still exists on disk.
-    paths.retain(|p| {
-        std::path::Path::new(p)
-            .join(".tokensave/tokensave.db")
-            .exists()
-    });
     if paths.len() == 1 {
         return ServeGlobalDbResolution::Found(std::path::PathBuf::from(paths.remove(0)));
     }
@@ -117,12 +116,7 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
     let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
 
     let gdb = tokensave::global_db::GlobalDb::open().await?;
-    let mut registered: Vec<String> = gdb.list_project_paths().await;
-    registered.retain(|p| {
-        std::path::Path::new(p)
-            .join(".tokensave/tokensave.db")
-            .exists()
-    });
+    let registered = initialized_project_paths(gdb.list_project_paths().await);
 
     // Try each root URI — first match wins.
     for root in roots {
@@ -151,6 +145,8 @@ async fn read_first_non_empty_stdin_line() -> Option<String> {
     let mut stdin = tokio::io::stdin();
     let mut line = Vec::new();
     let mut byte = [0_u8; 1];
+    // Avoid buffering past the first line; the normal stdio transport must still
+    // receive any later JSON-RPC messages from stdin.
     loop {
         match stdin.read(&mut byte).await {
             Ok(0) if line.is_empty() => return None,
