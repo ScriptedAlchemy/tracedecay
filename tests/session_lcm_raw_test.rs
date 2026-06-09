@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
+use tokensave::sessions::lcm::LcmPreflightRequest;
 use tokensave::sessions::source::{
     ingest_source, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
@@ -107,6 +109,62 @@ impl TranscriptSource for FakeTranscriptSource {
             },
         })
     }
+}
+
+#[tokio::test]
+async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session(
+            "cursor",
+            "session-active-metadata",
+            "project-a"
+        ))
+        .await
+    );
+
+    let active_message = json!({
+        "id": "active-collision-metadata",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "namespaced active replay"},
+            {"type": "input_json", "value": {"ok": true}},
+        ],
+        "payload_ref": "original-payload-ref",
+        "byte_count": 9876,
+        "char_count": 543,
+        "sha256": "original-sha256",
+        "external_payload": {"source": "original-message"},
+        "ingest_protection": {"source": "original-message"},
+    });
+
+    let preflight = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-active-metadata".into(),
+            messages: vec![active_message.clone()],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preflight.replay_messages[0], active_message);
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "active-collision-metadata")
+        .await
+        .expect("raw active message should exist");
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["lcm_active_replay"], true);
+    assert_eq!(metadata["active_replay"], preflight.replay_messages[0]);
+    assert!(metadata.get("payload_ref").is_none());
+    assert!(metadata.get("byte_count").is_none());
+    assert!(metadata.get("char_count").is_none());
+    assert!(metadata.get("sha256").is_none());
+    assert!(metadata.get("external_payload").is_none());
 }
 
 #[tokio::test]

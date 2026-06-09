@@ -78,6 +78,14 @@ async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
     );
 }
 
+fn externalized_ref_from_placeholder(text: &str) -> String {
+    let marker = "ref=";
+    let start = text.find(marker).expect("placeholder ref") + marker.len();
+    let tail = &text[start..];
+    let end = tail.find([']', ',', ';']).unwrap_or_else(|| tail.len());
+    tail[..end].trim().to_string()
+}
+
 async fn insert_raw_messages(
     db: &GlobalDb,
     provider: &str,
@@ -390,7 +398,76 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
         .await
         .expect("structured raw message should exist");
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["content"], preflight.replay_messages[0]["content"]);
+    assert_eq!(
+        metadata["active_replay"]["content"],
+        preflight.replay_messages[0]["content"]
+    );
+}
+
+#[tokio::test]
+async fn active_replay_preserves_top_level_fields_that_collide_with_storage_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-collision").await;
+
+    let active_message = json!({
+        "id": "structured-collision",
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "collision structured block"},
+            {"type": "input_json", "value": {"nested": true}},
+        ],
+        "payload_ref": "user-payload-ref",
+        "byte_count": 12345,
+        "char_count": 678,
+        "sha256": "user-sha256",
+        "external_payload": {"kind": "user-field"},
+        "ingest_protection": {"kind": "user-metadata"},
+    });
+
+    let preflight = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "session-collision".into(),
+            messages: vec![active_message.clone()],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preflight.replay_messages[0], active_message);
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "structured-collision")
+        .await
+        .expect("structured raw message should exist");
+    let replay_from_raw = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-collision".into(),
+            messages: Vec::new(),
+            current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let mut expected = active_message;
+    expected["store_id"] = Value::from(raw.store_id);
+    assert_eq!(replay_from_raw.replay_messages, vec![expected]);
 }
 
 #[tokio::test]
@@ -515,6 +592,20 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(raw.content.contains("[Externalized LCM ingest payload:"));
     assert!(!raw.content.contains("data:image/png;base64"));
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = db
+        .lcm_store(tmp.path().join(".tokensave"))
+        .lcm_expand_payload(
+            "cursor",
+            "session-media",
+            &payload_ref,
+            0,
+            media_payload.chars().count(),
+        )
+        .await
+        .expect("nested media payload should expand");
+    assert_eq!(expanded.content, media_payload);
 }
 
 #[tokio::test]

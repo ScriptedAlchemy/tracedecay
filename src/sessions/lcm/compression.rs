@@ -17,6 +17,7 @@ const DEFAULT_SUMMARY_FAN_IN: usize = 4;
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
+const ACTIVE_REPLAY_MESSAGE_KEY: &str = "active_replay";
 
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
@@ -1148,9 +1149,15 @@ fn default_message_kind(role: &str) -> String {
 }
 
 fn active_message_metadata(message: &Value, role: &str) -> String {
-    let mut metadata = message.as_object().cloned().unwrap_or_else(Map::new);
-    metadata.insert("role".to_string(), Value::String(role.to_string()));
+    let mut replay = message.as_object().cloned().unwrap_or_else(Map::new);
+    replay.insert("role".to_string(), Value::String(role.to_string()));
+
+    let mut metadata = Map::new();
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
+    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), Value::Object(replay));
+    if let Some(lcm_ingest) = message.get("lcm_ingest") {
+        metadata.insert("lcm_ingest".to_string(), lcm_ingest.clone());
+    }
     Value::Object(metadata).to_string()
 }
 
@@ -1173,12 +1180,8 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_else(Map::new);
-    if let Some(replay) = replay.as_object() {
-        for (key, value) in replay {
-            metadata.insert(key.clone(), value.clone());
-        }
-    }
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
+    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), replay.clone());
     Value::Object(metadata).to_string()
 }
 
@@ -1380,14 +1383,11 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
     {
         return None;
     }
-    let mut replay = metadata.as_object()?.clone();
-    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
-    replay.remove("ingest_protection");
-    replay.remove("external_payload");
-    replay.remove("payload_ref");
-    replay.remove("byte_count");
-    replay.remove("char_count");
-    replay.remove("sha256");
+    let mut replay = metadata
+        .get(ACTIVE_REPLAY_MESSAGE_KEY)
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| legacy_active_replay_message_from_metadata(&metadata))?;
     if !replay.contains_key("content") {
         replay.insert(
             "content".to_string(),
@@ -1395,6 +1395,19 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
         );
     }
     Some(Value::Object(replay))
+}
+
+fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {
+    let mut replay = metadata.as_object()?.clone();
+    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
+    replay.remove(ACTIVE_REPLAY_MESSAGE_KEY);
+    replay.remove("ingest_protection");
+    replay.remove("external_payload");
+    replay.remove("payload_ref");
+    replay.remove("byte_count");
+    replay.remove("char_count");
+    replay.remove("sha256");
+    Some(replay)
 }
 
 fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
