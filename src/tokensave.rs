@@ -695,6 +695,7 @@ impl TokenSave {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
+        self.ensure_branch_writable("full index")?;
         let _lock = try_acquire_sync_lock(&self.project_root)?;
         write_dirty_sentinel(&self.project_root);
         let start = Instant::now();
@@ -855,6 +856,8 @@ impl TokenSave {
             return Ok(false);
         }
 
+        self.ensure_branch_writable("sync files")?;
+
         let Ok(lock) = try_acquire_sync_lock(&self.project_root) else {
             return Ok(true);
         };
@@ -889,6 +892,8 @@ impl TokenSave {
         if still_stale_before.is_empty() {
             return Ok(());
         }
+
+        self.ensure_branch_writable("sync files")?;
 
         let lock = if let Ok(lock) = try_acquire_sync_lock(&self.project_root) {
             lock
@@ -927,6 +932,8 @@ impl TokenSave {
     /// This is a focused, single-shot operation used by `sync_if_stale`.
     async fn sync_single_files(&self, file_paths: &[String]) -> Result<()> {
         use crate::sync as sync_mod;
+
+        self.ensure_branch_writable("sync files")?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1063,6 +1070,7 @@ impl TokenSave {
             self.project_root.is_dir(),
             "sync: project root is not a directory"
         );
+        self.ensure_branch_writable("sync")?;
         let _lock = try_acquire_sync_lock(&self.project_root)?;
         write_dirty_sentinel(&self.project_root);
         let start = Instant::now();
@@ -2620,6 +2628,27 @@ impl TokenSave {
     /// Returns the project root path.
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
+        if !self.is_fallback() {
+            return Ok(());
+        }
+
+        let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
+        let serving = self.serving_branch.as_deref().unwrap_or("default branch");
+        let hint = self
+            .active_branch
+            .as_deref()
+            .map(|branch| format!(" Run `tokensave branch add {branch}` before writing."))
+            .unwrap_or_else(|| " Check out a tracked branch before writing.".to_string());
+
+        Err(TokenSaveError::Config {
+            message: format!(
+                "cannot {operation}: active branch '{active}' is served from fallback branch \
+                 '{serving}'.{hint}"
+            ),
+        })
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is
