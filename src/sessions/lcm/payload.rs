@@ -74,19 +74,45 @@ pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
 pub(crate) fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut offset = 0usize;
-    while let Some(relative) = text[offset..].find("ref=") {
-        let start = offset + relative + "ref=".len();
+    while let Some(relative) = text[offset..].find('[') {
+        let start = offset + relative;
         let tail = &text[start..];
-        let end = tail
-            .find(|ch: char| ch == ']' || ch == ';' || ch == ',' || ch.is_whitespace())
-            .unwrap_or(tail.len());
-        let candidate = tail[..end].trim();
+        let Some(end_relative) = tail.find(']') else {
+            break;
+        };
+        let placeholder = &tail[..=end_relative];
+        if !is_external_payload_placeholder(placeholder) {
+            offset = start + '['.len_utf8();
+            continue;
+        }
+        offset = start + end_relative + 1;
+        let Some(ref_relative) = placeholder.find("ref=") else {
+            continue;
+        };
+        let ref_start = ref_relative + "ref=".len();
+        let ref_tail = &placeholder[ref_start..placeholder.len().saturating_sub(1)];
+        let end = ref_tail
+            .find(|ch: char| ch == ';' || ch == ',' || ch.is_whitespace())
+            .unwrap_or(ref_tail.len());
+        let candidate = ref_tail[..end].trim();
         if validate_payload_ref(candidate).is_ok() && !refs.iter().any(|value| value == candidate) {
             refs.push(candidate.to_string());
         }
-        offset = start.saturating_add(end).min(text.len());
     }
     refs
+}
+
+fn is_external_payload_placeholder(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "[externalized payload:",
+        "[gc'd externalized payload:",
+        "[externalized lcm ingest payload:",
+        "[externalized tool output:",
+        "[gc'd externalized tool output:",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 pub(crate) fn write_external_payload(

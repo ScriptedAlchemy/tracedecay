@@ -429,29 +429,69 @@ async fn count_unreferenced_payload_metadata(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
+    let referenced_refs = referenced_payload_refs(conn, provider, session_id).await?;
     let mut rows = conn
         .query(
-            "SELECT COUNT(*)
-             FROM lcm_external_payloads p
-             LEFT JOIN lcm_raw_messages r
-               ON r.provider = p.provider
-              AND r.session_id = p.session_id
-              AND r.message_id = p.message_id
-              AND r.payload_ref = p.payload_ref
-              AND r.storage_kind = 'external'
-             WHERE p.provider = ?1
-               AND (?2 IS NULL OR p.session_id = ?2)
-               AND r.message_id IS NULL",
+            "SELECT payload_ref
+             FROM lcm_external_payloads
+             WHERE provider = ?1
+               AND (?2 IS NULL OR session_id = ?2)",
             params![provider, opt_text(session_id)],
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
+    let mut unreferenced = 0_i64;
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("payload metadata count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+    {
+        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        if !referenced_refs.contains(&payload_ref) {
+            unreferenced += 1;
+        }
+    }
+    Ok(unreferenced)
+}
+
+async fn referenced_payload_refs(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<BTreeSet<String>, LcmError> {
+    let mut refs = BTreeSet::new();
+    let mut rows = conn
+        .query(
+            "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let storage_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let payload_ref: Option<String> = row.get(1).unwrap_or(None);
+        if storage_kind == "external" {
+            if let Some(payload_ref) = payload_ref {
+                refs.insert(payload_ref);
+            }
+        }
+        for index in 2..6 {
+            let value: Option<String> = row.get(index).unwrap_or(None);
+            refs.extend(
+                value
+                    .as_deref()
+                    .map(payload::extract_payload_refs_from_text)
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Ok(refs)
 }
 
 async fn fts_diagnostics(

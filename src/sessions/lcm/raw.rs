@@ -463,6 +463,17 @@ fn redact_sensitive_text(text: &str, config: &IngestConfig) -> RedactionOutcome 
             patterns.push("password_assignment".to_string());
         }
     }
+    if config
+        .sensitive_patterns
+        .iter()
+        .any(|pattern| pattern == "private_key" || pattern == "all" || pattern == "default")
+    {
+        let next = redact_private_keys(&protected);
+        if next != protected {
+            protected = next;
+            patterns.push("private_key".to_string());
+        }
+    }
     patterns.sort();
     patterns.dedup();
     RedactionOutcome {
@@ -544,6 +555,59 @@ fn redact_bearer_tokens(text: &str) -> String {
     }
     out.push_str(&text[cursor..]);
     out
+}
+
+fn redact_private_keys(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let mut search = 0usize;
+    while let Some((block_start, block_end)) = find_next_private_key_block(text, &lower, search) {
+        out.push_str(&text[cursor..block_start]);
+        out.push_str(&sensitive_placeholder(
+            "private_key",
+            &text[block_start..block_end],
+        ));
+        cursor = block_end;
+        search = block_end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn find_next_private_key_block(
+    text: &str,
+    lower: &str,
+    mut search: usize,
+) -> Option<(usize, usize)> {
+    while let Some(relative) = lower[search..].find("-----begin ") {
+        let block_start = search + relative;
+        let header_name_start = block_start + "-----begin ".len();
+        let Some(header_end_relative) = lower[header_name_start..].find("-----") else {
+            return None;
+        };
+        let header_end = header_name_start + header_end_relative + "-----".len();
+        if !lower[block_start..header_end].contains("private key") {
+            search = header_name_start.min(text.len());
+            continue;
+        }
+
+        let mut end_search = header_end;
+        while let Some(end_relative) = lower[end_search..].find("-----end ") {
+            let footer_start = end_search + end_relative;
+            let footer_name_start = footer_start + "-----end ".len();
+            let Some(footer_end_relative) = lower[footer_name_start..].find("-----") else {
+                return None;
+            };
+            let block_end = footer_name_start + footer_end_relative + "-----".len();
+            if lower[footer_start..block_end].contains("private key") {
+                return Some((block_start, block_end));
+            }
+            end_search = footer_name_start.min(text.len());
+        }
+        return None;
+    }
+    None
 }
 
 fn find_next_key(lower: &str, cursor: usize, keys: &[&str]) -> Option<(usize, usize)> {

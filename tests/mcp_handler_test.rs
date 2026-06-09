@@ -4102,6 +4102,111 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
 }
 
 #[tokio::test]
+async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
+    let (cg, _dir) = setup_project().await;
+    let media_payload = format!(
+        "data:image/png;base64,{}",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
+    );
+    let content = json!({
+        "content": [
+            {"type": "text", "text": "doctor nested payload canary"},
+            {"type": "image_url", "image_url": {"url": media_payload}},
+        ]
+    })
+    .to_string();
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-nested-payload",
+        "lcm-doctor-nested-payload-message",
+        content,
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-nested-payload",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["unreferenced_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-plain-ref",
+        "lcm-doctor-plain-ref-message",
+        "plain documentation mentions ref=payload_plain_text_false_positive.payload outside a placeholder",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-plain-ref",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_tool_result_message(

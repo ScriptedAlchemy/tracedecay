@@ -262,6 +262,105 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
 }
 
 #[tokio::test]
+async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let private_key =
+        "-----BEGIN PRIVATE KEY-----\nPRIVATEKEYSECRET1234567890\n-----END PRIVATE KEY-----";
+    let mut message = raw_message(
+        "cursor",
+        "redacted-private-key",
+        "session-1",
+        "user",
+        &format!("before\n{private_key}\nafter searchable private key canary"),
+    );
+    message.kind = Some("message".to_string());
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["default"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("private key redacted message should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "redacted-private-key")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains("BEGIN PRIVATE KEY"));
+    assert!(!raw.content.contains("PRIVATEKEYSECRET1234567890"));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=private_key"));
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(
+        metadata["ingest_protection"]["redaction_patterns"],
+        json!(["private_key"])
+    );
+    assert_eq!(
+        lcm_fts_count(&db_path, "PRIVATEKEYSECRET1234567890").await,
+        0
+    );
+    assert_eq!(lcm_fts_count(&db_path, "searchable").await, 1);
+}
+
+#[tokio::test]
+async fn private_key_redaction_disabled_preserves_lossless_content() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let private_key =
+        "-----BEGIN PRIVATE KEY-----\nLOSSLESSPRIVATEKEY1234567890\n-----END PRIVATE KEY-----";
+    let mut message = raw_message(
+        "cursor",
+        "lossless-private-key",
+        "session-1",
+        "user",
+        &format!("{private_key}\nlossless private key canary"),
+    );
+    message.kind = Some("message".to_string());
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("lossless private key message should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lossless-private-key")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.contains("BEGIN PRIVATE KEY"));
+    assert!(raw.content.contains("LOSSLESSPRIVATEKEY1234567890"));
+    assert!(raw.metadata_json.is_none());
+    assert_eq!(
+        lcm_fts_count(&db_path, "LOSSLESSPRIVATEKEY1234567890").await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
