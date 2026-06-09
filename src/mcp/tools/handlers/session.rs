@@ -798,8 +798,27 @@ fn lcm_doctor_mode(args: &Value) -> Result<&str> {
     }
 }
 
-fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
+fn parse_bool_flag_from_env(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn lcm_doctor_clean_apply_enabled(args: &Value) -> Result<bool> {
+    match args.get("doctor_clean_apply_enabled") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| argument_error("doctor_clean_apply_enabled must be a boolean")),
+        None => Ok(parse_bool_flag_from_env("LCM_DOCTOR_CLEAN_APPLY_ENABLED")),
+    }
+}
+
+fn lcm_clean_config(args: &Value, doctor_clean_apply_enabled: bool) -> Result<LcmCleanConfig> {
     Ok(LcmCleanConfig {
+        doctor_clean_apply_enabled,
         ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
         stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
         ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
@@ -1164,7 +1183,32 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
     let session_id = string_arg(&args, "session_id");
     let mode = lcm_doctor_mode(&args)?;
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
-    let clean_config = lcm_clean_config(&args)?;
+    let clean_apply_enabled = lcm_doctor_clean_apply_enabled(&args)?;
+    if mode == "clean" && apply && !clean_apply_enabled {
+        return Ok(tool_json(&json!({
+            "status": "denied",
+            "provider": provider,
+            "session_id": session_id,
+            "mode": mode,
+            "dry_run": false,
+            "apply": true,
+            "error": "destructive cleanup is disabled by default",
+            "note": "set LCM_DOCTOR_CLEAN_APPLY_ENABLED=true only in trusted operator environments",
+            "repairs": {
+                "planned_actions": [],
+                "applied_actions": [],
+                "backup": Value::Null,
+                "unsafe_actions_skipped": [
+                    {
+                        "kind": "clean_lcm_noise",
+                        "safe": false,
+                        "reason": "doctor_clean_apply_disabled"
+                    }
+                ]
+            }
+        })));
+    }
+    let clean_config = lcm_clean_config(&args, clean_apply_enabled)?;
     let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
     let storage = match open_lcm_storage_with_mode(cg, &args, read_only_existing).await {
         LcmStorageResolution::Available(storage) => storage,

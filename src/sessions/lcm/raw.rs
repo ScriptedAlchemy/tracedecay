@@ -95,14 +95,29 @@ pub(crate) fn derived_text_for_snippet(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
 }
 
-fn externalized_payload_placeholder(payload_ref: &super::LcmPayloadRef) -> String {
-    let hash_prefix = payload_ref
-        .content_hash
-        .get(..12)
-        .unwrap_or(payload_ref.content_hash.as_str());
+fn externalized_payload_placeholder(
+    payload_ref: &super::LcmPayloadRef,
+    field_path: &str,
+    quarantine_reason: Option<&str>,
+) -> String {
+    if let Some(reason) = quarantine_reason {
+        return format!(
+            "[Externalized LCM ingest payload: assistant output quarantined; kind={}; reason={}; field={}; chars={}; bytes={}; ref={}]",
+            safe_placeholder_metadata(&payload_ref.kind),
+            safe_placeholder_metadata(reason),
+            safe_placeholder_metadata(field_path),
+            payload_ref.char_count,
+            payload_ref.byte_count,
+            payload_ref.payload_ref
+        );
+    }
     format!(
-        "[externalized payload: {}, ref={}, bytes={}, sha256={}]",
-        payload_ref.kind, payload_ref.payload_ref, payload_ref.byte_count, hash_prefix
+        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
+        safe_placeholder_metadata(&payload_ref.kind),
+        safe_placeholder_metadata(field_path),
+        payload_ref.char_count,
+        payload_ref.byte_count,
+        payload_ref.payload_ref
     )
 }
 
@@ -248,7 +263,11 @@ pub(crate) async fn upsert_raw_message_with_payload(
     )?;
     payload::upsert_payload_metadata(conn, &payload_ref).await?;
 
-    let placeholder = externalized_payload_placeholder(&payload_ref);
+    let placeholder = externalized_payload_placeholder(
+        &payload_ref,
+        "content",
+        prepared.protection.quarantine_reason.as_deref(),
+    );
     let metadata_json = externalized_payload_metadata(&payload_ref, &prepared.protection);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
@@ -442,10 +461,37 @@ fn protect_json_media_payloads(
 ) -> Result<(), LcmError> {
     match value {
         JsonValue::Object(map) => {
-            for (key, child) in map.iter_mut() {
-                let child_path = format!("{field_path}.{key}");
-                protect_json_media_payloads(child, storage_root, message, &child_path, payloads)?;
+            let original = std::mem::take(map);
+            let mut rebuilt = Map::with_capacity(original.len());
+            for (key, mut child) in original {
+                let mut protected_key = key.clone();
+                if security::contains_media_payload(&key) {
+                    let key_field_path = format!("{field_path}.<key>");
+                    if let Some(replaced_key) = replace_media_substrings(
+                        &key,
+                        storage_root,
+                        message,
+                        &key_field_path,
+                        payloads,
+                    )? {
+                        protected_key = replaced_key;
+                    }
+                }
+                let child_path = if protected_key == key {
+                    format!("{field_path}.{protected_key}")
+                } else {
+                    format!("{field_path}.<key>")
+                };
+                protect_json_media_payloads(
+                    &mut child,
+                    storage_root,
+                    message,
+                    &child_path,
+                    payloads,
+                )?;
+                rebuilt.insert(protected_key, child);
             }
+            *map = rebuilt;
         }
         JsonValue::Array(items) => {
             for (index, child) in items.iter_mut().enumerate() {
@@ -558,11 +604,7 @@ fn externalize_spans(
             span,
             metadata_json,
         )?;
-        protected.push_str(&ingest_payload_placeholder(
-            &payload_ref,
-            &message.role,
-            field_path,
-        ));
+        protected.push_str(&ingest_payload_placeholder(&payload_ref, field_path));
         payloads.push(payload_ref);
         cursor = end;
     }
@@ -570,11 +612,10 @@ fn externalize_spans(
     Ok(protected)
 }
 
-fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, role: &str, field_path: &str) -> String {
+fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
     format!(
-        "[Externalized LCM ingest payload: kind={}; role={}; field={}; chars={}; bytes={}; ref={}]",
+        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
         safe_placeholder_metadata(&payload_ref.kind),
-        safe_placeholder_metadata(role),
         safe_placeholder_metadata(field_path),
         payload_ref.char_count,
         payload_ref.byte_count,
@@ -741,8 +782,10 @@ fn redact_api_keys(text: &str) -> String {
     redact_assignments(
         text,
         &[
+            "apikey",
             "api_key",
             "api-key",
+            "apitoken",
             "api token",
             "api_token",
             "access_token",
@@ -834,23 +877,46 @@ fn redact_assignments(
             continue;
         }
         pos += 1;
-        pos = skip_chars(text, pos, |ch| {
-            ch.is_whitespace() || matches!(ch, '"' | '\'')
-        });
-        let secret_start = pos;
-        pos = skip_chars(text, pos, |ch| {
-            !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
-        });
-        let secret = &text[secret_start..pos];
+        pos = skip_chars(text, pos, char::is_whitespace);
+        let mut secret_start = pos;
+        let (secret_end, consumed_to) = if let Some(quote) = text[pos..]
+            .chars()
+            .next()
+            .filter(|ch| matches!(*ch, '"' | '\''))
+        {
+            pos += quote.len_utf8();
+            secret_start = pos;
+            while pos < text.len() {
+                let Some(ch) = text[pos..].chars().next() else {
+                    break;
+                };
+                if ch == quote || matches!(ch, '\r' | '\n' | ']' | '}') {
+                    break;
+                }
+                pos += ch.len_utf8();
+            }
+            let secret_end = pos;
+            if text[pos..].chars().next().is_some_and(|ch| ch == quote) {
+                pos += quote.len_utf8();
+            }
+            (secret_end, pos)
+        } else {
+            pos = skip_chars(text, pos, |ch| {
+                !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
+            });
+            (pos, pos)
+        };
+        let secret = &text[secret_start..secret_end];
         if secret.chars().count() < min_secret_len || secret.starts_with(SENSITIVE_REDACTION_PREFIX)
         {
-            out.push_str(&text[cursor..pos]);
-            cursor = pos;
+            out.push_str(&text[cursor..consumed_to]);
+            cursor = consumed_to;
             continue;
         }
         out.push_str(&text[cursor..secret_start]);
         out.push_str(&sensitive_placeholder(pattern_name, secret));
-        cursor = pos;
+        out.push_str(&text[secret_end..consumed_to]);
+        cursor = consumed_to;
     }
     out
 }

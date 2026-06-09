@@ -329,7 +329,9 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .expect("projection should exist");
     assert!(fetched.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!fetched.text.contains(body_secret));
-    assert!(fetched.text.contains("[externalized payload: tool_result"));
+    assert!(fetched
+        .text
+        .contains("[Externalized LCM ingest payload: kind=tool_result;"));
     let projection_metadata = fetched.metadata_json.as_deref().unwrap_or("");
     assert!(!projection_metadata.contains(metadata_secret));
     assert!(projection_metadata.contains("\"external_payload\":true"));

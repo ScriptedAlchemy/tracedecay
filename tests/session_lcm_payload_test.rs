@@ -552,6 +552,101 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
 }
 
 #[tokio::test]
+async fn quoted_password_assignment_redacts_full_quoted_value() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let secret = "correct horse battery staple";
+    let mut message = raw_message(
+        "cursor",
+        "quoted-password-redaction",
+        "session-1",
+        "user",
+        &format!("password=\"{secret}\" keep quotedpasswordcanary"),
+    );
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["password_assignment"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("quoted password message should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "quoted-password-redaction")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains(secret));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=password_assignment"));
+    assert!(raw.content.contains("keep quotedpasswordcanary"));
+    assert_eq!(lcm_fts_count(&db_path, "battery").await, 0);
+}
+
+#[tokio::test]
+async fn api_alias_assignments_redact_apikey_and_apitoken() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let api_key_secret = "aliaskey1234567890";
+    let api_token_secret = "aliastoken1234567890";
+    let mut message = raw_message(
+        "cursor",
+        "api-alias-redaction",
+        "session-1",
+        "user",
+        &format!("apikey={api_key_secret} apitoken={api_token_secret} keep aliasredactioncanary"),
+    );
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["api_key"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("api alias message should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "api-alias-redaction")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains(api_key_secret));
+    assert!(!raw.content.contains(api_token_secret));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=api_key"));
+    assert!(raw.content.contains("keep aliasredactioncanary"));
+    assert_eq!(lcm_fts_count(&db_path, "aliaskey1234567890").await, 0);
+    assert_eq!(lcm_fts_count(&db_path, "aliastoken1234567890").await, 0);
+}
+
+#[tokio::test]
 async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
@@ -687,7 +782,11 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     assert!(!raw.content.contains("LOOP_SEGMENT"));
     let (snippet_text, index_text) =
         raw_snippet_and_index(&db_path, "cursor", "assistant-loop").await;
-    assert!(snippet_text.contains("quarantined_assistant_output"));
+    assert!(
+        snippet_text.contains("[Externalized LCM ingest payload: assistant output quarantined;")
+    );
+    assert!(snippet_text.contains("kind=quarantined_assistant_output;"));
+    assert!(snippet_text.contains("reason=high_repetition;"));
     assert_eq!(snippet_text, index_text);
     assert!(!index_text.contains("LOOP_SEGMENT"));
     assert_eq!(lcm_fts_count(&db_path, "LOOP_SEGMENT").await, 0);
@@ -781,10 +880,11 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     assert_eq!(expanded.content, payload);
 
     let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "tool-secret").await;
-    assert!(snippet_text.contains("[externalized payload: tool_result"));
+    assert!(snippet_text.contains("[Externalized LCM ingest payload: kind=tool_result;"));
+    assert!(snippet_text.contains("field=content;"));
     assert!(snippet_text.contains(payload_ref));
+    assert!(snippet_text.contains("chars="));
     assert!(snippet_text.contains("bytes="));
-    assert!(snippet_text.contains("sha256="));
     assert_eq!(snippet_text, index_text);
     assert!(!snippet_text.contains(unique_secret));
     assert!(!index_text.contains(unique_secret));
@@ -1272,4 +1372,50 @@ async fn existing_ingest_placeholder_is_not_double_externalized() {
         .await
         .expect("new span payload should expand");
     assert_eq!(appended.content, second_span);
+}
+
+#[tokio::test]
+async fn json_key_media_payload_externalizes_key_span_without_whole_message_externalization() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let media_key = format!("data:image/png;base64,{}", "QUJDRA==".repeat(64));
+    let mut object = serde_json::Map::new();
+    object.insert(media_key.clone(), json!("keep json-key-media canary"));
+    let content = Value::Object(object).to_string();
+    let mut message = raw_message("cursor", "json-key-media", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("json key media payload should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "json-key-media")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains(";base64,"));
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(raw.content.contains("keep json-key-media canary"));
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &payload_ref,
+            0,
+            media_key.chars().count(),
+        )
+        .await
+        .expect("media key payload should expand");
+    assert_eq!(expanded.content, media_key);
 }

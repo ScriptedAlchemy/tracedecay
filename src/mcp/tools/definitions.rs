@@ -1817,6 +1817,10 @@ fn def_lcm_doctor() -> ToolDefinition {
                     "type": "boolean",
                     "description": "When mode=repair or mode=clean, apply safe repairs/cleanup. Defaults to false for dry-run."
                 },
+                "doctor_clean_apply_enabled": {
+                    "type": "boolean",
+                    "description": "Safety gate for mode=clean + apply. Defaults to false unless LCM_DOCTOR_CLEAN_APPLY_ENABLED is set."
+                },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
                 "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise."),

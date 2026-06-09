@@ -518,6 +518,8 @@ pub struct LcmConfigStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCleanConfig {
+    #[serde(default)]
+    pub doctor_clean_apply_enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

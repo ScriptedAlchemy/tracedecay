@@ -250,6 +250,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         doctor.input_schema["properties"]["apply"]["type"],
         json!("boolean")
     );
+    assert_eq!(
+        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
+        json!("boolean")
+    );
 }
 
 /// Searches for `name` via the search handler and returns the first matching
@@ -4159,6 +4163,45 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
 }
 
 #[tokio::test]
+async fn lcm_doctor_clean_apply_is_denied_by_default() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must remain without explicit opt-in",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(
+        payload["error"],
+        "destructive cleanup is disabled by default"
+    );
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["apply"], true);
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+}
+
+#[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(
@@ -4215,6 +4258,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
             "provider": "cursor",
             "mode": "clean",
             "apply": true,
+            "doctor_clean_apply_enabled": true,
             "ignore_session_patterns": ["cron-*"]
         }),
         None,
@@ -4277,6 +4321,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
             "provider": "cursor",
             "mode": "clean",
             "apply": true,
+            "doctor_clean_apply_enabled": true,
             "ignore_message_patterns": ["^Cronjob Response:"]
         }),
         None,
