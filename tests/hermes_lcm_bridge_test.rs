@@ -50,6 +50,7 @@ import importlib.machinery
 import importlib.util
 import pathlib
 import sys
+import types
 
 plugin_dir = pathlib.Path(sys.argv[1])
 
@@ -58,6 +59,17 @@ parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
 parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
+
+class ContextEngine:
+    pass
+
+agent_module = types.ModuleType("agent")
+agent_module.__path__ = []
+context_engine_module = types.ModuleType("agent.context_engine")
+context_engine_module.ContextEngine = ContextEngine
+agent_module.context_engine = context_engine_module
+sys.modules["agent"] = agent_module
+sys.modules["agent.context_engine"] = context_engine_module
 
 module_name = f"{parent_name}.tokensave"
 spec = importlib.util.spec_from_file_location(
@@ -89,6 +101,7 @@ plugin.register(ctx)
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
 assert isinstance(engine, plugin.TokenSaveContextEngine)
+assert isinstance(engine, ContextEngine)
 
 engine.initialize(
     session_id="session-123",
@@ -113,6 +126,34 @@ assert profile_args == {
 
 fallback_args = plugin._storage_args()
 assert fallback_args == {"storage_scope": "hermes_profile"}
+
+calls = []
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return "{}"
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
+engine.should_compress_preflight(messages=[], current_tokens=123)
+name, args, kwargs = calls.pop()
+assert name == "tokensave_lcm_preflight"
+assert args["session_id"] == "session-1"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == "/tmp/hermes"
+
+engine.on_session_start(
+    session_id="session-2",
+    hermes_home="/tmp/hermes",
+    project_root="/tmp/project",
+)
+engine.should_compress_preflight(messages=[], current_tokens=456)
+name, args, kwargs = calls.pop()
+assert name == "tokensave_lcm_preflight"
+assert args["session_id"] == "session-2"
+assert args["storage_scope"] == "project_local"
+assert args["project_root"] == "/tmp/project"
 
 class LegacyCtx:
     def register_tool(self, *args, **kwargs):

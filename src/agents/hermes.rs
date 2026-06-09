@@ -789,6 +789,12 @@ except Exception:
     class MemoryProvider:
         pass
 
+try:
+    from agent.context_engine import ContextEngine
+except Exception:
+    class ContextEngine:
+        pass
+
 MEMORY_FACT_ACTIONS = {
     "fact_add": "add",
     "fact_search": "search",
@@ -898,16 +904,22 @@ def _storage_args(project_root=None, hermes_home=None):
         args["storage_scope"] = "hermes_profile"
     return args
 
-class TokenSaveContextEngine:
+class TokenSaveContextEngine(ContextEngine):
     def __init__(self):
         self.active_session_id = None
         self.hermes_home = None
         self.project_root = None
 
-    def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
+    def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         self.active_session_id = session_id
-        self.hermes_home = hermes_home
-        self.project_root = project_root or kwargs.get("cwd")
+        self.hermes_home = hermes_home if hermes_home is not None else kwargs.get("hermes_home")
+        self.project_root = project_root or kwargs.get("project_root") or kwargs.get("cwd")
+
+    def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
+        self._bind_session(session_id, hermes_home, project_root, **kwargs)
+
+    def on_session_start(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
+        self._bind_session(session_id, hermes_home, project_root, **kwargs)
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)
