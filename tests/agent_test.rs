@@ -507,7 +507,7 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("def register(ctx):"));
     assert!(init_py.contains("class TokensaveMemoryProvider"));
     assert!(init_py.contains("ctx.register_memory_provider("));
-    assert!(init_py.contains("ctx.register_tool("));
+    assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
@@ -736,6 +736,8 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
 class FullCtx:
+    context_engine_tool_handlers_receive_messages = True
+
     def __init__(self):
         self.tools = []
         self.hooks = []
@@ -835,6 +837,8 @@ assert calls[3][0] == "tokensave_memory_status"
 assert calls[3][1] == {}
 
 class LegacyCtx:
+    context_engine_tool_handlers_receive_messages = True
+
     def __init__(self):
         self.tools = []
         self.hooks = []

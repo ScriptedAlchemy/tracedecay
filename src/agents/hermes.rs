@@ -783,6 +783,7 @@ def make_handler(name: str):
 fn plugin_init() -> String {
     r#""""tokensave Hermes plugin registration."""
 import json
+import logging
 import os
 import re
 import shutil
@@ -790,6 +791,8 @@ import time
 from pathlib import Path
 
 from . import schemas, tools
+
+logger = logging.getLogger(__name__)
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -835,6 +838,32 @@ for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
     }
 MEMORY_TOOL_MAP["fact_feedback"] = {"tokensave_name": "tokensave_fact_feedback"}
 MEMORY_TOOL_MAP["memory_status"] = {"tokensave_name": "tokensave_memory_status"}
+
+LCM_TOOL_ALIASES = {
+    "lcm_grep": "tokensave_lcm_grep",
+    "lcm_load_session": "tokensave_lcm_load_session",
+    "lcm_describe": "tokensave_lcm_describe",
+    "lcm_expand": "tokensave_lcm_expand",
+    "lcm_expand_query": "tokensave_lcm_expand_query",
+    "lcm_status": "tokensave_lcm_status",
+    "lcm_doctor": "tokensave_lcm_doctor",
+}
+LCM_NATIVE_TOOL_NAMES = tuple(LCM_TOOL_ALIASES.keys())
+LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
+
+def _make_wrapped_lcm_handler(tool_name: str, engine):
+    def _wrapped(args: dict, **kwargs) -> str:
+        return engine.handle_tool_call(tool_name, args, **kwargs)
+    return _wrapped
+
+def _host_forwards_registered_tool_messages(ctx) -> bool:
+    capability = getattr(ctx, "context_engine_tool_handlers_receive_messages", False)
+    if callable(capability):
+        try:
+            capability = capability()
+        except Exception:
+            return False
+    return bool(capability)
 
 def _pre_llm_call(*args, **kwargs):
     return (
@@ -927,6 +956,25 @@ def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) ->
         "description": f"Tokensave memory tool {hermes_name}.",
         "parameters": {"type": "object", "properties": {}},
     }
+
+def _clone_schema(tokensave_name: str, public_name: str = None) -> dict:
+    for schema in schemas.TOOL_SCHEMAS:
+        if schema.get("name") == tokensave_name:
+            cloned = json.loads(json.dumps(schema))
+            if public_name is not None:
+                cloned["name"] = public_name
+            return cloned
+    return {
+        "name": public_name or tokensave_name,
+        "description": f"Tokensave tool {public_name or tokensave_name}.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+
+def _lcm_tool_schemas() -> list:
+    return [
+        _clone_schema(tokensave_name, public_name=public_name)
+        for public_name, tokensave_name in LCM_TOOL_ALIASES.items()
+    ]
 
 def _decode_tool_args(arguments):
     if arguments is None:
@@ -1171,6 +1219,10 @@ class TokenSaveContextEngine(ContextEngine):
         self._route_failures = {}
         self._cooldown_until = {}
 
+    @property
+    def name(self) -> str:
+        return "tokensave-lcm"
+
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         if session_id is not None:
             self.active_session_id = session_id
@@ -1203,6 +1255,43 @@ class TokenSaveContextEngine(ContextEngine):
         args = _storage_args(self.project_root, self.hermes_home)
         args["session_id"] = session_id or self.active_session_id
         return call_tokensave_json("tokensave_lcm_status", args, **kwargs)
+
+    def get_tool_schemas(self):
+        return _lcm_tool_schemas()
+
+    def get_status(self):
+        storage = _storage_args(self.project_root, self.hermes_home)
+        return {
+            "engine": self.name,
+            "session_id": self.active_session_id,
+            "storage_scope": storage.get("storage_scope"),
+            "hermes_home": self.hermes_home,
+            "project_root": self.project_root,
+            "context_engine_tool_names": sorted(
+                schema["name"] for schema in self.get_tool_schemas()
+            ),
+            "route_failures": dict(self._route_failures),
+            "cooldown_routes": sorted(self._cooldown_until.keys()),
+        }
+
+    def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
+        tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
+        tokensave_name = LCM_TOOL_ALIASES.get(tool_name)
+        if tokensave_name is None and tool_name in LCM_DIRECT_TOOL_NAMES:
+            tokensave_name = tool_name
+        if tokensave_name is None:
+            return tools.error_payload(f"unknown LCM tool: {tool_name}")
+
+        tool_args = dict(tool_args)
+        storage_args = _storage_args(self.project_root, self.hermes_home)
+        for key, value in storage_args.items():
+            tool_args.setdefault(key, value)
+        if self.active_session_id:
+            tool_args.setdefault("session_id", self.active_session_id)
+
+        if tokensave_name == "tokensave_lcm_expand_query":
+            return _handle_lcm_expand_query(tool_args, agent=self.agent, **kwargs)
+        return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)
@@ -1371,16 +1460,6 @@ class TokensaveMemoryProvider(MemoryProvider):
         return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
 
 def register(ctx):
-    for schema in schemas.TOOL_SCHEMAS:
-        name = schema["name"]
-        handler = _handle_lcm_expand_query if name == "tokensave_lcm_expand_query" else tools.make_handler(name)
-        ctx.register_tool(
-            name=name,
-            toolset="tokensave",
-            schema=schema,
-            handler=handler,
-        )
-
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
@@ -1393,8 +1472,52 @@ def register(ctx):
     if callable(getattr(ctx, "register_memory_provider", None)):
         ctx.register_memory_provider(TokensaveMemoryProvider())
 
+    context_engine = TokenSaveContextEngine()
     if callable(getattr(ctx, "register_context_engine", None)):
-        ctx.register_context_engine(TokenSaveContextEngine())
+        ctx.register_context_engine(context_engine)
+
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool) and _host_forwards_registered_tool_messages(ctx):
+        for schema in schemas.TOOL_SCHEMAS:
+            name = schema["name"]
+            handler = _handle_lcm_expand_query if name == "tokensave_lcm_expand_query" else tools.make_handler(name)
+            try:
+                register_tool(
+                    name=name,
+                    toolset="tokensave",
+                    schema=schema,
+                    handler=handler,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "tokensave tool registration failed for %s; continuing: %s",
+                    name,
+                    exc,
+                )
+        for schema in context_engine.get_tool_schemas():
+            name = schema["name"]
+            try:
+                register_tool(
+                    name=name,
+                    toolset="context_engine",
+                    schema=schema,
+                    handler=_make_wrapped_lcm_handler(name, context_engine),
+                    description=schema.get("description", ""),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "tokensave LCM tool registration failed for %s; continuing with context-engine schemas: %s",
+                    name,
+                    exc,
+                )
+    elif callable(register_tool):
+        logger.info(
+            "tokensave direct tool registration skipped because this Hermes host does not advertise message forwarding"
+        )
+    else:
+        logger.info(
+            "tokensave direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
+        )
 
     skills_dir = Path(__file__).parent / "skills"
     skill_path = skills_dir / "tokensave" / "SKILL.md"

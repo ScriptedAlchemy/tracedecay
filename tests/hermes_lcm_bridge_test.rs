@@ -29,6 +29,295 @@ fn assert_python_compiles(paths: &[&Path]) {
     );
 }
 
+fn run_generated_plugin_script(script_name: &str, script: &str, failure_message: &str) {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script_path = plugin_dir.join(script_name);
+    std::fs::write(&script_path, script).unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script_path)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes plugin check");
+    assert!(
+        output.status.success(),
+        "{failure_message}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_registration_degrades_without_register_tool() {
+    run_generated_plugin_script(
+        "check_registration_without_register_tool.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_no_register_tool"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class NoToolCtx:
+    def __init__(self):
+        self.hooks = []
+        self.memory_providers = []
+        self.context_engines = []
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_memory_provider(self, provider):
+        self.memory_providers.append(provider)
+
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = NoToolCtx()
+plugin.register(ctx)
+
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call"]
+assert len(ctx.memory_providers) == 1
+assert len(ctx.context_engines) == 1
+assert isinstance(ctx.context_engines[0], plugin.TokenSaveContextEngine)
+"#,
+        "generated plugin registration should continue when host lacks register_tool",
+    );
+}
+
+#[test]
+fn generated_registration_continues_when_register_tool_raises() {
+    run_generated_plugin_script(
+        "check_registration_register_tool_raises.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_register_tool_raises"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class RaisingToolCtx:
+    context_engine_tool_handlers_receive_messages = True
+
+    def __init__(self):
+        self.tool_calls = []
+        self.hooks = []
+        self.memory_providers = []
+        self.context_engines = []
+
+    def register_tool(self, **kwargs):
+        self.tool_calls.append(kwargs["name"])
+        raise RuntimeError("host register_tool failed")
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_memory_provider(self, provider):
+        self.memory_providers.append(provider)
+
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = RaisingToolCtx()
+plugin.register(ctx)
+
+assert ctx.tool_calls
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call"]
+assert len(ctx.memory_providers) == 1
+assert len(ctx.context_engines) == 1
+"#,
+        "generated plugin registration should continue when register_tool raises",
+    );
+}
+
+#[test]
+fn generated_registration_skips_tools_without_message_forwarding_capability() {
+    run_generated_plugin_script(
+        "check_registration_capability_gate.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_registration_gate"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class UnsafeRegisteredToolCtx:
+    context_engine_tool_handlers_receive_messages = False
+
+    def __init__(self):
+        self.tools = []
+        self.context_engines = []
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+        raise AssertionError("register_tool should be skipped on unsafe hosts")
+
+    def register_hook(self, name, handler):
+        pass
+
+    def register_memory_provider(self, provider):
+        pass
+
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = UnsafeRegisteredToolCtx()
+plugin.register(ctx)
+
+assert ctx.tools == []
+assert len(ctx.context_engines) == 1
+engine = ctx.context_engines[0]
+assert engine.name == "tokensave-lcm"
+assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
+"#,
+        "generated plugin should skip direct tools when host does not forward messages",
+    );
+}
+
+#[test]
+fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
+    run_generated_plugin_script(
+        "check_context_engine_native_surface.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_context_surface"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+assert engine.name == "tokensave-lcm"
+
+schemas = engine.get_tool_schemas()
+schema_names = {schema["name"] for schema in schemas}
+expected_native = {
+    "lcm_grep",
+    "lcm_load_session",
+    "lcm_describe",
+    "lcm_expand",
+    "lcm_expand_query",
+    "lcm_status",
+    "lcm_doctor",
+}
+assert expected_native.issubset(schema_names)
+assert "tokensave_lcm_preflight" not in schema_names
+assert "tokensave_lcm_compress" not in schema_names
+assert all(name.startswith("lcm_") for name in schema_names)
+
+status = engine.get_status()
+assert status["engine"] == "tokensave-lcm"
+assert status["session_id"] == "session-1"
+assert status["storage_scope"] == "project_local"
+assert status["context_engine_tool_names"] == sorted(schema_names)
+
+calls = []
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return json.dumps({"ok": True, "tool": name})
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+native_result = engine.handle_tool_call(
+    "lcm_grep",
+    {"query": "orchard"},
+    messages=[{"role": "user", "content": "current turn"}],
+)
+direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct"})
+
+assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
+assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
+assert calls[0][0] == "tokensave_lcm_grep"
+assert calls[0][1]["query"] == "orchard"
+assert calls[0][1]["storage_scope"] == "project_local"
+assert calls[0][1]["project_root"] == "/tmp/project"
+assert calls[0][1]["session_id"] == "session-1"
+assert calls[0][2]["messages"] == [{"role": "user", "content": "current turn"}]
+assert calls[1][0] == "tokensave_lcm_grep"
+assert calls[1][1]["query"] == "direct"
+"#,
+        "generated context engine should expose Hermes-style native LCM surface",
+    );
+}
+
 #[test]
 fn generated_context_engine_registers_when_supported() {
     let home = TempDir::new().unwrap();
