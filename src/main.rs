@@ -985,22 +985,18 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let mut peeked_line: Option<String> = None;
             let explicit_path = path.is_some();
             let project_path = tokensave::config::resolve_path_with_discovery(path);
-            let roots_project_path = if explicit_path {
-                None
-            } else {
-                serve::resolve_serve_from_mcp_roots(&mut peeked_line).await
-            };
-            let cg = if let Some(p) = roots_project_path {
-                serve::ensure_initialized(&p).await?
-            } else {
-                match serve::ensure_initialized(&project_path).await {
-                    Ok(cg) => cg,
-                    Err(e) => {
-                        if explicit_path {
-                            return Err(e);
-                        }
-                        // CWD-based discovery failed (e.g. VS Code launched us from ~).
-                        // Fall back to the global DB's registered projects.
+            let cg = match serve::ensure_initialized(&project_path).await {
+                Ok(cg) => cg,
+                Err(e) => {
+                    if explicit_path {
+                        return Err(e);
+                    }
+                    // CWD-based discovery failed (e.g. VS Code launched us from ~).
+                    // Next try MCP initialize roots from editor workspace context.
+                    if let Some(p) = serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
+                        serve::ensure_initialized(&p).await?
+                    } else {
+                        // Last resort: fall back to the global DB's registered projects.
                         match serve::resolve_serve_from_global_db().await {
                             Some(p) => serve::ensure_initialized(&p).await?,
                             None => {

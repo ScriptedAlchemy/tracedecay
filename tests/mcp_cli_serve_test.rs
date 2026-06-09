@@ -148,6 +148,73 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
 }
 
 #[tokio::test]
+async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
+    let home = TempDir::new().unwrap();
+    let cwd_project = init_project_with_file("pub fn cwd_project_marker() {}\n").await;
+    let nested_cwd = cwd_project.path().join("src");
+    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+
+    let mut child = tokensave_command_with_home(home.path())
+        .arg("serve")
+        .current_dir(&nested_cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tokensave serve should start");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "roots": [{
+                        "uri": format!("file://{}", active.path().display()),
+                        "name": "active"
+                    }]
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tokensave_runtime",
+                    "arguments": {}
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tokensave serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "tokensave serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        runtime_project_root(&output.stdout, 2),
+        cwd_project.path().to_str().unwrap(),
+        "discovered cwd project should be preferred over MCP initialize roots"
+    );
+}
+
+#[tokio::test]
 async fn explicit_initialized_path_ignores_initialize_roots() {
     let home = TempDir::new().unwrap();
     let explicit = init_project_with_file("pub fn explicit_project_marker() {}\n").await;
