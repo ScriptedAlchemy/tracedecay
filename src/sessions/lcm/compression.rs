@@ -397,12 +397,21 @@ async fn compress_in_transaction(
         status = "best_effort";
         reason = "forced_overflow_recovery_replay_over_budget";
     }
+    let compression_attempts = created_summaries.len();
     let summary_nodes = created_summaries
         .into_iter()
         .map(|created| created.summary)
         .collect::<Vec<_>>();
 
-    Ok(compression_response(
+    let retry_status = if plan.forced_overflow_recovery {
+        Some("critical_pressure_catch_up")
+    } else if fallback_used {
+        Some("fallback_summary")
+    } else {
+        None
+    };
+
+    Ok(compression_response_with_attempt_state(
         status,
         reason,
         summary_nodes,
@@ -410,6 +419,9 @@ async fn compress_in_transaction(
         frontier,
         None,
         request.max_assembly_tokens,
+        compression_attempts,
+        fallback_used,
+        retry_status,
     ))
 }
 
@@ -741,6 +753,32 @@ fn compression_response(
     summary_request: Option<LcmSummaryRequest>,
     max_assembly_tokens: Option<i64>,
 ) -> LcmCompressionResponse {
+    compression_response_with_attempt_state(
+        status,
+        reason,
+        summary_nodes,
+        replay_messages,
+        frontier,
+        summary_request,
+        max_assembly_tokens,
+        0,
+        false,
+        None,
+    )
+}
+
+fn compression_response_with_attempt_state(
+    status: &str,
+    reason: &str,
+    summary_nodes: Vec<LcmSummaryNode>,
+    replay_messages: Vec<Value>,
+    frontier: LcmLifecycleState,
+    summary_request: Option<LcmSummaryRequest>,
+    max_assembly_tokens: Option<i64>,
+    compression_attempts: usize,
+    fallback_used: bool,
+    retry_status: Option<&str>,
+) -> LcmCompressionResponse {
     let replay_token_estimate = replay_token_estimate(&replay_messages);
     LcmCompressionResponse {
         status: status.to_string(),
@@ -750,6 +788,9 @@ fn compression_response(
         replay_messages,
         replay_token_estimate,
         replay_over_budget: replay_exceeds_budget(replay_token_estimate, max_assembly_tokens),
+        compression_attempts,
+        fallback_used,
+        retry_status: retry_status.map(str::to_string),
         frontier,
         summary_request,
     }

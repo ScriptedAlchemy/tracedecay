@@ -459,6 +459,10 @@ pub struct LcmCompressionResponse {
     pub replay_messages: Vec<serde_json::Value>,
     pub replay_token_estimate: i64,
     pub replay_over_budget: bool,
+    pub compression_attempts: usize,
+    pub fallback_used: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_status: Option<String>,
     pub frontier: LcmLifecycleState,
     pub summary_request: Option<LcmSummaryRequest>,
 }

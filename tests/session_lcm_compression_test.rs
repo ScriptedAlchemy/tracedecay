@@ -1913,6 +1913,108 @@ async fn non_compressing_fake_summary_falls_back_deterministically() {
 }
 
 #[tokio::test]
+async fn non_compressing_summary_reports_fallback_attempt_state() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "alpha beta gamma delta epsilon zeta eta theta",
+            "iota kappa lambda mu nu xi omicron pi",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "oversized ".repeat(100),
+            },
+        ))
+        .await
+        .unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "compressed_backlog_with_fallback_summary");
+    assert_eq!(response_json["compression_attempts"], 1);
+    assert_eq!(response_json["fallback_used"], true);
+    assert_eq!(
+        response_json["retry_status"].as_str(),
+        Some("fallback_summary")
+    );
+    assert!(response.frontier.maintenance_debt.is_empty());
+    assert_eq!(response_json["replay_over_budget"], false);
+}
+
+#[tokio::test]
+async fn critical_pressure_catch_up_reports_attempts_debt_and_budget_state() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "old-5 token",
+            "old-6 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "catchup summary".into(),
+        },
+        Some(2),
+        Some(1),
+        Some(3),
+    );
+    request.current_tokens = Some(40);
+    let response = db.lcm_compress(request).await.unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(
+        response.reason,
+        "forced_overflow_recovery_replay_over_budget"
+    );
+    assert_eq!(response.summary_nodes_created, 4);
+    assert_eq!(response_json["compression_attempts"], 4);
+    assert_eq!(response_json["fallback_used"], false);
+    assert_eq!(
+        response_json["retry_status"].as_str(),
+        Some("critical_pressure_catch_up")
+    );
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[3])
+    );
+    assert_eq!(
+        response.frontier.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[4],
+            to_store_id: store_ids[5],
+        }]
+    );
+    assert_eq!(response_json["replay_over_budget"], true);
+}
+
+#[tokio::test]
 async fn maintenance_debt_clears_when_retry_compacts_remaining_backlog() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

@@ -1342,6 +1342,230 @@ assert len(agent.auxiliary_client.calls) == 1
 }
 
 #[test]
+fn retry_worthy_auxiliary_failure_retries_smaller_summary_request() {
+    run_generated_plugin_script(
+        "check_auxiliary_retry_shrinks_chunk.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+source_messages = [
+    {"store_id": 1, "role": "user", "content": "old one " * 20},
+    {"store_id": 2, "role": "assistant", "content": "old two " * 20},
+]
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def needs_summary(messages):
+    return {
+        "status": "needs_summary",
+        "reason": "summary_required",
+        "summary_nodes_created": 0,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "user", "content": "fresh"}],
+        "frontier": {"current_frontier_store_id": None, "maintenance_debt": []},
+        "summary_request": {
+            "provider": "cursor",
+            "session_id": "session-1",
+            "focus_topic": "handoff",
+            "prompt": "Summarize backlog",
+            "source_range": {
+                "from_store_id": messages[0]["store_id"],
+                "to_store_id": messages[-1]["store_id"],
+            },
+            "source_messages": messages,
+        },
+    }
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    args = json.loads(argv[argv.index("--args") + 1])
+    calls.append(args)
+    if len(calls) == 1:
+        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+        assert "max_source_messages" not in args
+        return mcp_response(needs_summary(source_messages))
+    if len(calls) == 2:
+        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+        assert args["max_source_messages"] == 1
+        return mcp_response(needs_summary(source_messages[:1]))
+    assert args["summarizer"] == {
+        "mode": "provided",
+        "summary_text": "Smaller chunk summary",
+        "route": "default",
+    }
+    return mcp_response({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "system", "content": "Smaller chunk summary"}],
+        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": [
+            {"kind": "raw_backlog", "from_store_id": 2, "to_store_id": 2}
+        ]},
+        "summary_request": None,
+        "replay_token_estimate": 3,
+        "replay_over_budget": False,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+class ContextLimitedAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(kwargs["messages"]) > 2:
+            raise RuntimeError("context length exceeded")
+        return "Smaller chunk summary"
+
+agent = type("Agent", (), {"auxiliary_client": ContextLimitedAux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+result = engine.compress(
+    [{"role": "user", "content": "active"}],
+    current_tokens=1200,
+    focus_topic="handoff",
+)
+
+assert result["status"] == "ok"
+assert len(calls) == 3
+assert len(agent.auxiliary_client.calls) == 2
+assert [len(call["messages"]) - 1 for call in agent.auxiliary_client.calls] == [2, 1]
+assert result["auxiliary_attempts"] == 2
+assert result["auxiliary_retry_status"] == "retried"
+assert result["auxiliary_error_classification"] == "retry_worthy"
+"#,
+        "retry-worthy auxiliary failures should retry with a smaller summary request",
+    );
+}
+
+#[test]
+fn permanent_auxiliary_failure_returns_error_without_advancing_frontier() {
+    run_generated_plugin_script(
+        "check_auxiliary_permanent_failure.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    args = json.loads(argv[argv.index("--args") + 1])
+    calls.append(args)
+    assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+    return mcp_response({
+        "status": "needs_summary",
+        "reason": "summary_required",
+        "summary_nodes_created": 0,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "user", "content": "fresh"}],
+        "frontier": {"current_frontier_store_id": None, "maintenance_debt": [
+            {"kind": "raw_backlog", "from_store_id": 1, "to_store_id": 2}
+        ]},
+        "summary_request": {
+            "provider": "cursor",
+            "session_id": "session-1",
+            "focus_topic": "handoff",
+            "prompt": "Summarize backlog",
+            "source_range": {"from_store_id": 1, "to_store_id": 2},
+            "source_messages": [
+                {"store_id": 1, "role": "user", "content": "old one"},
+                {"store_id": 2, "role": "assistant", "content": "old two"},
+            ],
+        },
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+class BadTemplateAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("template exploded")
+
+agent = type("Agent", (), {"auxiliary_client": BadTemplateAux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+result = engine.compress(
+    [{"role": "user", "content": "active"}],
+    current_tokens=1200,
+    focus_topic="handoff",
+)
+
+assert result["status"] == "error"
+assert result["reason"] == "auxiliary_summary_permanent_failure"
+assert result["auxiliary_attempts"] == 1
+assert result["auxiliary_retry_status"] == "not_retryable"
+assert result["auxiliary_error_classification"] == "permanent"
+assert result["frontier"]["current_frontier_store_id"] is None
+assert len(calls) == 1
+assert len(agent.auxiliary_client.calls) == 1
+"#,
+        "permanent auxiliary failures should not write a provided summary",
+    );
+}
+
+#[test]
 fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
     let home = TempDir::new().unwrap();
     HermesIntegration

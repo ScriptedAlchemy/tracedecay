@@ -1017,6 +1017,21 @@ def _storage_args(project_root=None, hermes_home=None):
 
 REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
 FALLBACK_MARKER = "[deterministic compression fallback]"
+RETRY_WORTHY_AUXILIARY_ERRORS = (
+    "context length",
+    "context window",
+    "maximum context",
+    "max context",
+    "token limit",
+    "too many tokens",
+    "rate limit",
+    "timed out",
+    "timeout",
+    "temporarily",
+    "unavailable",
+    "overloaded",
+    "try again",
+)
 
 def _strip_reasoning(text: str) -> str:
     output = text or ""
@@ -1102,6 +1117,85 @@ def _deterministic_truncation(messages, limit: int = 2048) -> str:
         text = "No auxiliary summary was available."
     max_prefix = max(0, limit - len(FALLBACK_MARKER) - 2)
     return f"{text[:max_prefix].rstrip()}\n\n{FALLBACK_MARKER}"
+
+def _auxiliary_error_classification(error) -> str:
+    message = str(error or "").lower()
+    if any(pattern in message for pattern in RETRY_WORTHY_AUXILIARY_ERRORS):
+        return "retry_worthy"
+    return "permanent"
+
+def _auxiliary_retry_limit(kwargs) -> int:
+    try:
+        limit = int(kwargs.pop("max_auxiliary_attempts", 2) or 2)
+    except Exception:
+        limit = 2
+    return min(max(limit, 1), 8)
+
+def _next_smaller_source_limit(source_messages, current_limit=None):
+    source_count = len(source_messages or [])
+    if source_count <= 1:
+        return None
+    next_limit = max(1, source_count // 2)
+    if current_limit is not None:
+        try:
+            next_limit = min(next_limit, int(current_limit))
+        except Exception:
+            pass
+    if next_limit >= source_count:
+        next_limit = source_count - 1
+    return max(1, next_limit)
+
+def _with_auxiliary_metadata(
+    result,
+    *,
+    attempts,
+    retry_status=None,
+    error_classification=None,
+    fallback_used=False,
+):
+    if not isinstance(result, dict):
+        result = {}
+    if attempts or retry_status is not None or error_classification is not None or fallback_used:
+        result.setdefault("auxiliary_attempts", attempts)
+    if retry_status is not None:
+        result.setdefault("auxiliary_retry_status", retry_status)
+    if error_classification is not None:
+        result.setdefault("auxiliary_error_classification", error_classification)
+    if fallback_used:
+        result["fallback_used"] = True
+    return result
+
+def _auxiliary_error_result(first, *, attempts, retry_status, error_classification, error):
+    result = {}
+    if isinstance(first, dict):
+        for key in (
+            "summary_nodes_created",
+            "summary_nodes",
+            "replay_messages",
+            "replay_token_estimate",
+            "replay_over_budget",
+            "frontier",
+            "summary_request",
+        ):
+            if key in first:
+                result[key] = first[key]
+    result.setdefault("summary_nodes_created", 0)
+    result.setdefault("summary_nodes", [])
+    result.setdefault("replay_messages", [])
+    result.setdefault("frontier", {"current_frontier_store_id": None, "maintenance_debt": []})
+    result["status"] = "error"
+    result["reason"] = (
+        "auxiliary_summary_permanent_failure"
+        if error_classification == "permanent"
+        else "auxiliary_summary_retry_exhausted"
+    )
+    result["error"] = str(error)
+    return _with_auxiliary_metadata(
+        result,
+        attempts=attempts,
+        retry_status=retry_status,
+        error_classification=error_classification,
+    )
 
 def _bounded_expand_query_answer(text: str, max_tokens: int):
     try:
@@ -1331,10 +1425,12 @@ class TokenSaveContextEngine(ContextEngine):
     def _call_auxiliary_summary(self, prompt, messages, **kwargs):
         client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
         summary_request = kwargs.get("summary_request")
+        allow_retry_signal = bool(kwargs.pop("allow_retry_signal", False))
         route_kwargs = dict(kwargs)
         route_kwargs.pop("summary_request", None)
         routes = self._auxiliary_routes(summary_request, **route_kwargs)
         last_error = None
+        last_classification = None
         if client is None or not callable(getattr(client, "call_llm", None)):
             last_error = RuntimeError("Hermes auxiliary_client.call_llm is unavailable")
         else:
@@ -1342,7 +1438,7 @@ class TokenSaveContextEngine(ContextEngine):
             for route in routes:
                 route_name = route.get("route") or route.get("name") or route.get("model") or "default"
                 route_key = str(route_name)
-                if self._cooldown_until.get(route_key, 0) > now:
+                if not allow_retry_signal and self._cooldown_until.get(route_key, 0) > now:
                     continue
                 call_kwargs = {
                     "task": "compression",
@@ -1367,9 +1463,24 @@ class TokenSaveContextEngine(ContextEngine):
                     }
                 except Exception as exc:
                     last_error = exc
+                    last_classification = _auxiliary_error_classification(exc)
                     failures = self._route_failures.get(route_key, 0) + 1
                     self._route_failures[route_key] = failures
                     self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+        if last_error is not None:
+            last_classification = last_classification or _auxiliary_error_classification(last_error)
+            if allow_retry_signal and last_classification == "retry_worthy":
+                return {
+                    "status": "retry",
+                    "error": str(last_error),
+                    "error_classification": last_classification,
+                }
+            if allow_retry_signal and last_classification == "permanent":
+                return {
+                    "status": "error",
+                    "error": str(last_error),
+                    "error_classification": last_classification,
+                }
         fallback = {
             "status": "fallback",
             "text": _deterministic_truncation(messages),
@@ -1378,10 +1489,22 @@ class TokenSaveContextEngine(ContextEngine):
         }
         if last_error is not None:
             fallback["error"] = str(last_error)
+            fallback["error_classification"] = last_classification
         return fallback
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
+        max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
+        lcm_option_keys = (
+            "expected_current_frontier_store_id",
+            "max_assembly_tokens",
+            "leaf_chunk_tokens",
+            "max_source_messages",
+            "summary_fan_in",
+            "ignore_session_patterns",
+            "stateless_session_patterns",
+            "ignore_message_patterns",
+        )
         args = _storage_args(self.project_root, self.hermes_home)
         args.update({
             "session_id": self.active_session_id,
@@ -1390,36 +1513,119 @@ class TokenSaveContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
-        first = call_tokensave_json("tokensave_lcm_compress", args, **kwargs)
-        if first.get("status") != "needs_summary":
-            return first
+        for key in lcm_option_keys:
+            if key in kwargs:
+                args[key] = kwargs.pop(key)
 
-        summary_request = first.get("summary_request") or {}
-        source_messages = _summary_source_messages(
-            summary_request.get("source_messages") or messages
-        )
-        summary = self._call_auxiliary_summary(
-            summary_request.get("prompt") or "Summarize the conversation so far.",
-            source_messages,
-            summary_request=summary_request,
-            **kwargs,
-        )
-        source_size = _summary_source_size(source_messages)
-        if summary.get("status") == "ok" and source_size > 0 and len(summary.get("text", "")) >= source_size:
-            summary = {
-                "status": "fallback",
-                "text": _deterministic_truncation(source_messages),
-                "route": "deterministic_fallback",
-                "model": None,
-                "error": "Hermes auxiliary summary was not smaller than source",
+        attempts = 0
+        retry_status = None
+        error_classification = None
+        fallback_used = False
+        attempt_args = dict(args)
+
+        while attempts < max_auxiliary_attempts:
+            first = call_tokensave_json("tokensave_lcm_compress", attempt_args, **kwargs)
+            if first.get("status") != "needs_summary":
+                return _with_auxiliary_metadata(
+                    first,
+                    attempts=attempts,
+                    retry_status=retry_status,
+                    error_classification=error_classification,
+                    fallback_used=fallback_used,
+                )
+
+            summary_request = first.get("summary_request") or {}
+            source_messages = _summary_source_messages(
+                summary_request.get("source_messages") or messages
+            )
+            attempts += 1
+            summary = self._call_auxiliary_summary(
+                summary_request.get("prompt") or "Summarize the conversation so far.",
+                source_messages,
+                summary_request=summary_request,
+                allow_retry_signal=True,
+                **kwargs,
+            )
+            summary_status = summary.get("status")
+            if summary_status in ("retry", "error"):
+                error_classification = summary.get("error_classification") or (
+                    "retry_worthy" if summary_status == "retry" else "permanent"
+                )
+                smaller_limit = _next_smaller_source_limit(
+                    source_messages,
+                    attempt_args.get("max_source_messages"),
+                )
+                if (
+                    summary_status == "retry"
+                    and smaller_limit is not None
+                    and attempts < max_auxiliary_attempts
+                ):
+                    retry_status = "retried"
+                    attempt_args = dict(args)
+                    attempt_args["max_source_messages"] = smaller_limit
+                    continue
+                retry_status = "retry_exhausted" if summary_status == "retry" else "not_retryable"
+                return _auxiliary_error_result(
+                    first,
+                    attempts=attempts,
+                    retry_status=retry_status,
+                    error_classification=error_classification,
+                    error=summary.get("error"),
+                )
+
+            source_size = _summary_source_size(source_messages)
+            if (
+                summary_status == "ok"
+                and source_size > 0
+                and len(summary.get("text", "")) >= source_size
+            ):
+                error_classification = "non_compressing_summary"
+                smaller_limit = _next_smaller_source_limit(
+                    source_messages,
+                    attempt_args.get("max_source_messages"),
+                )
+                if smaller_limit is not None and attempts < max_auxiliary_attempts:
+                    retry_status = "retried"
+                    attempt_args = dict(args)
+                    attempt_args["max_source_messages"] = smaller_limit
+                    continue
+                fallback_used = True
+                retry_status = "fallback_summary"
+                summary = {
+                    "status": "fallback",
+                    "text": _deterministic_truncation(source_messages),
+                    "route": "deterministic_fallback",
+                    "model": None,
+                    "error": "Hermes auxiliary summary was not smaller than source",
+                    "error_classification": error_classification,
+                }
+            elif summary_status == "fallback":
+                fallback_used = True
+                retry_status = retry_status or "fallback_summary"
+                error_classification = summary.get("error_classification") or error_classification
+
+            provided_args = dict(attempt_args)
+            provided_args["summarizer"] = {
+                "mode": "provided",
+                "summary_text": summary["text"],
+                "route": summary.get("route"),
             }
-        provided_args = dict(args)
-        provided_args["summarizer"] = {
-            "mode": "provided",
-            "summary_text": summary["text"],
-            "route": summary.get("route"),
-        }
-        return call_tokensave_json("tokensave_lcm_compress", provided_args, **kwargs)
+            result = call_tokensave_json("tokensave_lcm_compress", provided_args, **kwargs)
+            return _with_auxiliary_metadata(
+                result,
+                attempts=attempts,
+                retry_status=retry_status,
+                error_classification=error_classification,
+                fallback_used=fallback_used,
+            )
+
+        return _auxiliary_error_result(
+            {"frontier": {"current_frontier_store_id": None, "maintenance_debt": []}},
+            attempts=attempts,
+            retry_status="retry_exhausted",
+            error_classification=error_classification or "retry_worthy",
+            error="auxiliary retry budget exhausted",
+        )
 
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"
