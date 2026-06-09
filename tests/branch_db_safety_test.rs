@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -35,91 +36,114 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
-#[tokio::test]
-async fn sync_refuses_to_write_when_opened_on_fallback_branch() {
+async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TokenSave) {
     let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    let project = dir.path().to_path_buf();
 
-    git(project, &["init", "-b", "main"]);
+    git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
-    commit_all(project, "initial commit");
+    commit_all(&project, "initial commit");
 
-    let main = TokenSave::init(project).await.unwrap();
+    let main = TokenSave::init(&project).await.unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
-    git(project, &["checkout", "-b", "feature/untracked"]);
+    git(&project, &["checkout", "-b", "feature/untracked"]);
     fs::write(
         project.join("src/untracked_only.rs"),
         "pub fn untracked_only() {}\n",
     )
     .unwrap();
 
-    let fallback = TokenSave::open(project).await.unwrap();
+    let fallback = TokenSave::open(&project).await.unwrap();
     assert_eq!(fallback.active_branch(), Some("feature/untracked"));
     assert_eq!(fallback.serving_branch(), Some("main"));
     assert!(fallback.is_fallback());
 
-    let err = fallback.sync().await.unwrap_err();
+    (dir, project, fallback)
+}
+
+async fn assert_main_db_missing_untracked_only(project: &Path, message: &str) {
+    git(project, &["checkout", "main"]);
+    let main = TokenSave::open(project).await.unwrap();
+    let results = main.search("untracked_only", 10).await.unwrap();
+    assert!(results.is_empty(), "{message}");
+}
+
+fn assert_fallback_write_refused(err: impl std::fmt::Display) {
     let message = err.to_string();
     assert!(
         message.contains("fallback") && message.contains("tokensave branch add"),
         "unexpected error: {message}"
     );
+}
+
+#[tokio::test]
+async fn sync_refuses_to_write_when_opened_on_fallback_branch() {
+    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+
+    let err = fallback.sync().await.unwrap_err();
+    assert_fallback_write_refused(err);
 
     drop(fallback);
-    git(project, &["checkout", "main"]);
-    let main = TokenSave::open(project).await.unwrap();
-    let results = main.search("untracked_only", 10).await.unwrap();
-    assert!(
-        results.is_empty(),
-        "fallback sync must not index untracked branch files into main DB"
-    );
+    assert_main_db_missing_untracked_only(
+        &project,
+        "fallback sync must not index untracked branch files into main DB",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn full_index_refuses_to_write_when_opened_on_fallback_branch() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
-    commit_all(project, "initial commit");
-
-    let main = TokenSave::init(project).await.unwrap();
-    main.index_all().await.unwrap();
-    drop(main);
-
-    git(project, &["checkout", "-b", "feature/untracked"]);
-    fs::write(
-        project.join("src/untracked_only.rs"),
-        "pub fn untracked_only() {}\n",
-    )
-    .unwrap();
-
-    let fallback = TokenSave::open(project).await.unwrap();
-    assert_eq!(fallback.active_branch(), Some("feature/untracked"));
-    assert_eq!(fallback.serving_branch(), Some("main"));
-    assert!(fallback.is_fallback());
+    let (_dir, project, fallback) = open_untracked_fallback_project().await;
 
     let err = match fallback.index_all().await {
         Ok(_) => panic!("full index should refuse fallback writes"),
         Err(err) => err,
     };
-    let message = err.to_string();
-    assert!(
-        message.contains("fallback") && message.contains("tokensave branch add"),
-        "unexpected error: {message}"
-    );
+    assert_fallback_write_refused(err);
 
     drop(fallback);
-    git(project, &["checkout", "main"]);
-    let main = TokenSave::open(project).await.unwrap();
-    let results = main.search("untracked_only", 10).await.unwrap();
-    assert!(
-        results.is_empty(),
-        "fallback full index must not index untracked branch files into main DB"
-    );
+    assert_main_db_missing_untracked_only(
+        &project,
+        "fallback full index must not index untracked branch files into main DB",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
+    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+
+    let err = fallback
+        .sync_if_stale(&["src/untracked_only.rs".to_string()])
+        .await
+        .unwrap_err();
+    assert_fallback_write_refused(err);
+
+    drop(fallback);
+    assert_main_db_missing_untracked_only(
+        &project,
+        "fallback stale sync must not index untracked branch files into main DB",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn silent_stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
+    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+
+    let err = fallback
+        .sync_if_stale_silent(&["src/untracked_only.rs".to_string()])
+        .await
+        .unwrap_err();
+    assert_fallback_write_refused(err);
+
+    drop(fallback);
+    assert_main_db_missing_untracked_only(
+        &project,
+        "fallback silent stale sync must not index untracked branch files into main DB",
+    )
+    .await;
 }

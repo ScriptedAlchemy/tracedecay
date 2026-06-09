@@ -856,6 +856,8 @@ impl TokenSave {
             return Ok(false);
         }
 
+        self.ensure_branch_writable("sync files")?;
+
         let Ok(lock) = try_acquire_sync_lock(&self.project_root) else {
             return Ok(true);
         };
@@ -890,6 +892,8 @@ impl TokenSave {
         if still_stale_before.is_empty() {
             return Ok(());
         }
+
+        self.ensure_branch_writable("sync files")?;
 
         let lock = if let Ok(lock) = try_acquire_sync_lock(&self.project_root) {
             lock
