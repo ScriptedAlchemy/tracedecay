@@ -965,6 +965,10 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Externalized payload ref filename to expand.",
                 },
                 "store_id": {"type": "integer", "description": "Raw message store_id to fetch."},
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session id override (for example, expand a cross-session grep hit in its owning session).",
+                },
                 "max_tokens": {"type": "integer", "description": "Token budget for returned content.", "default": 4000},
                 "source_offset": {
                     "type": "integer",
@@ -2061,8 +2065,6 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
         content_limit = _tokens_from_native_max(translated.pop("max_tokens", None))
         if content_limit is not None and "content_limit" not in translated:
             translated["content_limit"] = content_limit
-        translated.pop("source_offset", None)
-        translated.pop("source_limit", None)
         return translated
     return translated
 

@@ -310,6 +310,9 @@ expand_params = schemas_by_name["lcm_expand"]["parameters"]
 assert "node_id" in expand_params["properties"]
 assert "store_id" in expand_params["properties"]
 assert "externalized_ref" in expand_params["properties"]
+assert "session_id" in expand_params["properties"]
+assert "source_offset" in expand_params["properties"]
+assert "source_limit" in expand_params["properties"]
 assert "target" not in expand_params["properties"]
 assert expand_params.get("required") == []
 
@@ -352,7 +355,10 @@ load_result = engine.handle_tool_call(
 )
 describe_node_result = engine.handle_tool_call("lcm_describe", {"node_id": 7})
 describe_payload_result = engine.handle_tool_call("lcm_describe", {"externalized_ref": "payload_123.payload"})
-expand_result = engine.handle_tool_call("lcm_expand", {"store_id": 42, "max_tokens": 77})
+expand_result = engine.handle_tool_call(
+    "lcm_expand",
+    {"store_id": 42, "session_id": "session-foreign", "max_tokens": 77, "source_offset": 3, "source_limit": 2},
+)
 direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct", "session_scope": "all"})
 implicit_current_result = engine.handle_tool_call("lcm_grep", {"query": "implicit"})
 
@@ -402,7 +408,10 @@ assert calls[5][1]["target"] == {"kind": "external_payload", "payload_ref": "pay
 assert "externalized_ref" not in calls[5][1]
 assert calls[6][0] == "tokensave_lcm_expand"
 assert calls[6][1]["target"] == {"kind": "raw_message", "store_id": 42}
+assert calls[6][1]["session_id"] == "session-foreign"
 assert calls[6][1]["content_limit"] == 308
+assert calls[6][1]["source_offset"] == 3
+assert calls[6][1]["source_limit"] == 2
 assert "store_id" not in calls[6][1]
 assert "max_tokens" not in calls[6][1]
 assert calls[7][0] == "tokensave_lcm_grep"
