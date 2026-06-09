@@ -165,15 +165,16 @@ async fn plan_and_apply_repairs(
         let action = json!({
             "kind": "rebuild_raw_fts",
             "safe": true,
-            "description": "Rebuild lcm_raw_messages_fts from lcm_raw_messages"
+            "description": "Recreate the content-only lcm_raw_messages_fts structure and rebuild it from lcm_raw_messages"
         });
         planned.push(action.clone());
         if apply {
-            conn.execute(
-                "INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts) VALUES('rebuild')",
-                (),
-            )
-            .await?;
+            // Recreates the table/triggers in the current (v3, content-only)
+            // structure before rebuilding, so this also repairs databases
+            // whose FTS objects predate the role/metadata_json removal.
+            schema::rebuild_raw_fts(conn)
+                .await
+                .ok_or_else(|| LcmError::Db("raw FTS rebuild failed".to_string()))?;
             applied.push(action);
         }
     }
@@ -558,8 +559,14 @@ async fn fts_diagnostics(
         "trigger",
     )
     .await?;
+    // Pre-v3 FTS objects still index role/metadata_json and over-match
+    // unqualified grep queries; treat that stale structure as rebuild-needed.
+    let raw_structure_current = schema::raw_fts_structure_is_current(conn)
+        .await
+        .unwrap_or(false);
     let raw_rebuild_needed = !raw_table_present
         || raw_trigger_count < 3
+        || !raw_structure_current
         || fts_probe_needs_rebuild(
             conn,
             "lcm_raw_messages",
@@ -586,6 +593,7 @@ async fn fts_diagnostics(
         "raw": {
             "table_present": raw_table_present,
             "trigger_count": raw_trigger_count,
+            "structure_current": raw_structure_current,
             "rebuild_needed": raw_rebuild_needed,
         },
         "summaries": {

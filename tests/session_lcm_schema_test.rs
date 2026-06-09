@@ -154,6 +154,92 @@ async fn set_migration_version(db_path: &Path, version: i64) {
     .unwrap();
 }
 
+/// Rewrites the raw-message FTS objects into the pre-v3 shape (role +
+/// metadata_json indexed alongside index_text) and stamps the requested
+/// schema version, simulating a database written by an older tokensave.
+async fn downgrade_raw_fts_to_v2(db_path: &Path) {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
+         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
+         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_update;
+         DROP TABLE IF EXISTS lcm_raw_messages_fts;
+         CREATE VIRTUAL TABLE lcm_raw_messages_fts USING fts5(
+             index_text, role, metadata_json,
+             content='lcm_raw_messages',
+             content_rowid='store_id'
+         );
+         CREATE TRIGGER lcm_raw_messages_fts_insert
+             AFTER INSERT ON lcm_raw_messages BEGIN
+                 INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
+                 VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
+             END;
+         CREATE TRIGGER lcm_raw_messages_fts_delete
+             AFTER DELETE ON lcm_raw_messages BEGIN
+                 INSERT INTO lcm_raw_messages_fts(
+                     lcm_raw_messages_fts, rowid, index_text, role, metadata_json
+                 )
+                 VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
+             END;
+         CREATE TRIGGER lcm_raw_messages_fts_update
+             AFTER UPDATE ON lcm_raw_messages BEGIN
+                 INSERT INTO lcm_raw_messages_fts(
+                     lcm_raw_messages_fts, rowid, index_text, role, metadata_json
+                 )
+                 VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
+                 INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
+                 VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
+             END;
+         INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts) VALUES('rebuild');
+         UPDATE session_schema_migrations SET version = 2 WHERE name = 'lcm';",
+    )
+    .await
+    .unwrap();
+}
+
+async fn fts_message_ids_matching(db_path: &Path, query: &str) -> Vec<String> {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT raw.message_id
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages raw ON raw.store_id = lcm_raw_messages_fts.rowid
+             WHERE lcm_raw_messages_fts MATCH ?1
+             ORDER BY raw.message_id",
+            libsql::params![query],
+        )
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.push(row.get(0).unwrap());
+    }
+    ids
+}
+
+async fn raw_fts_object_sql(db_path: &Path) -> Vec<String> {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master
+             WHERE name IN ('lcm_raw_messages_fts',
+                            'lcm_raw_messages_fts_insert',
+                            'lcm_raw_messages_fts_delete',
+                            'lcm_raw_messages_fts_update')",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut sqls = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        sqls.push(row.get(0).unwrap());
+    }
+    sqls
+}
+
 #[tokio::test]
 async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let tmp = TempDir::new().unwrap();
@@ -237,6 +323,77 @@ async fn lcm_schema_migration_is_idempotent() {
         fts_legacy_message_ids(&db_path).await,
         vec!["legacy-message".to_string()]
     );
+}
+
+// Schema v3 narrows the raw-message FTS index to index_text only, matching
+// hermes-lcm `build_message_fts_spec` (store.py:173-204) which indexes the
+// content column alone. Migrating a v2 database must restructure the FTS
+// objects, carry the searchable rows forward, and stop role/metadata text
+// from satisfying unqualified MATCH queries.
+#[tokio::test]
+async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    create_legacy_sessions_db(&db_path).await;
+
+    // Establish the schema, then rewrite the FTS objects into the pre-v3
+    // shape with the version marker set back to 2.
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    drop(db);
+    downgrade_raw_fts_to_v2(&db_path).await;
+    assert_eq!(schema_version(&db_path).await, 2);
+    assert_eq!(
+        fts_message_ids_matching(&db_path, "assistant").await,
+        vec!["legacy-message".to_string()],
+        "v2 fixture must over-match via the indexed role column"
+    );
+
+    let migrated = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    assert_eq!(
+        migrated.lcm_schema_version().await.unwrap(),
+        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+    );
+    drop(migrated);
+
+    // The restructured objects no longer index role/metadata_json.
+    let sqls = raw_fts_object_sql(&db_path).await;
+    assert_eq!(sqls.len(), 4, "FTS table and three triggers must exist");
+    for sql in &sqls {
+        assert!(
+            !sql.contains("metadata_json"),
+            "migrated FTS object still references metadata_json: {sql}"
+        );
+    }
+
+    // Search results carried forward; role text no longer matches.
+    assert_eq!(
+        fts_message_ids_matching(&db_path, "legacy").await,
+        vec!["legacy-message".to_string()],
+        "content search results must survive the migration"
+    );
+    assert!(
+        fts_message_ids_matching(&db_path, "assistant")
+            .await
+            .is_empty(),
+        "role text must not match after the v3 restructure"
+    );
+
+    // Idempotent re-open: structure and results are stable.
+    let reopened = GlobalDb::open_at(&db_path)
+        .await
+        .expect("idempotent reopen");
+    assert_eq!(
+        reopened.lcm_schema_version().await.unwrap(),
+        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+    );
+    drop(reopened);
+    assert_eq!(
+        fts_message_ids_matching(&db_path, "legacy").await,
+        vec!["legacy-message".to_string()]
+    );
+    assert!(fts_message_ids_matching(&db_path, "assistant")
+        .await
+        .is_empty());
 }
 
 // Mirrors hermes-lcm `run_versioned_migrations` (db_bootstrap.py:580-601):

@@ -4,10 +4,85 @@ use super::{raw, LcmRawMessage, LcmStorageKind};
 
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 2;
+pub const LCM_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
+
+/// Raw-message FTS structure (schema v3): index only `index_text`, matching
+/// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
+/// nothing but the message content column. Earlier schemas also indexed
+/// `role` and `metadata_json`, so an unqualified MATCH over-matched rows via
+/// role names or metadata text. Role and source filtering happen as plain
+/// SQL predicates on `lcm_raw_messages`, never through the FTS index.
+const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
+        index_text,
+        content='lcm_raw_messages',
+        content_rowid='store_id'
+    );
+    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_insert
+        AFTER INSERT ON lcm_raw_messages BEGIN
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
+            VALUES (NEW.store_id, NEW.index_text);
+        END;
+    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_delete
+        AFTER DELETE ON lcm_raw_messages BEGIN
+            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
+            VALUES ('delete', OLD.store_id, OLD.index_text);
+        END;
+    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_update
+        AFTER UPDATE ON lcm_raw_messages BEGIN
+            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
+            VALUES ('delete', OLD.store_id, OLD.index_text);
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
+            VALUES (NEW.store_id, NEW.index_text);
+        END;";
+
+/// Returns whether the raw-message FTS table and triggers already use the
+/// v3 content-only structure. Pre-v3 objects mention `metadata_json` in
+/// their DDL; a missing table counts as current here because presence is
+/// checked separately (doctor) or guaranteed (migration runs the DDL).
+pub(crate) async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name IN ('lcm_raw_messages_fts',
+                            'lcm_raw_messages_fts_insert',
+                            'lcm_raw_messages_fts_delete',
+                            'lcm_raw_messages_fts_update')
+               AND sql LIKE '%metadata_json%'",
+            (),
+        )
+        .await
+        .ok()?;
+    let row = rows.next().await.ok()??;
+    let stale: i64 = row.get(0).ok()?;
+    Some(stale == 0)
+}
+
+/// Drops any existing raw-message FTS table/triggers (old or new shape),
+/// recreates the v3 content-only structure, and repopulates the index from
+/// `lcm_raw_messages` via the FTS5 `'rebuild'` command. Used by the schema
+/// migration and the doctor repair path; idempotent and data-preserving
+/// because the index is derived entirely from the content table.
+pub(crate) async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
+         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
+         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_update;
+         DROP TABLE IF EXISTS lcm_raw_messages_fts;",
+    )
+    .await
+    .ok()?;
+    conn.execute_batch(RAW_FTS_DDL).await.ok()?;
+    conn.execute(
+        "INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts) VALUES('rebuild')",
+        (),
+    )
+    .await
+    .ok()?;
+    Some(())
+}
 
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
@@ -127,32 +202,6 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_maintenance_debt_kind
             ON lcm_maintenance_debt(provider, debt_kind, created_at);
-        CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
-            index_text, role, metadata_json,
-            content='lcm_raw_messages',
-            content_rowid='store_id'
-        );
-        CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_insert
-            AFTER INSERT ON lcm_raw_messages BEGIN
-                INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
-                VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_delete
-            AFTER DELETE ON lcm_raw_messages BEGIN
-                INSERT INTO lcm_raw_messages_fts(
-                    lcm_raw_messages_fts, rowid, index_text, role, metadata_json
-                )
-                VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_update
-            AFTER UPDATE ON lcm_raw_messages BEGIN
-                INSERT INTO lcm_raw_messages_fts(
-                    lcm_raw_messages_fts, rowid, index_text, role, metadata_json
-                )
-                VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
-                INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
-                VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
-            END;
         CREATE VIRTUAL TABLE IF NOT EXISTS lcm_summary_nodes_fts USING fts5(
             summary_text, expand_hint, metadata_json,
             content='lcm_summary_nodes',
@@ -182,6 +231,14 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
     )
     .await
     .ok()?;
+
+    // Schema v3: the raw-message FTS index dropped the role and
+    // metadata_json columns (see RAW_FTS_DDL). Rebuilding unconditionally
+    // here keeps the step idempotent — this code only runs while the stored
+    // version is behind LCM_SCHEMA_VERSION, the index is fully derived from
+    // lcm_raw_messages, and a retry after a partially applied earlier run
+    // converges on the current structure.
+    rebuild_raw_fts(conn).await?;
 
     // Schema v2: lifecycle rows gained the compression-boundary cooldown
     // marker. Databases created before the column existed need the ALTER;

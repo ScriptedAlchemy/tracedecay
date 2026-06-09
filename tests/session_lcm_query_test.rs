@@ -1761,6 +1761,74 @@ async fn content_slices_use_char_offsets_for_multibyte_content() {
     assert_eq!(beyond.content_range.total_chars, 9);
 }
 
+fn grep_request(query: &str) -> LcmGrepRequest {
+    LcmGrepRequest {
+        provider: "cursor".into(),
+        query: query.into(),
+        scope: LcmScope::All,
+        session_id: None,
+        include_summaries: false,
+        limit: 10,
+        sort: LcmGrepSort::Recency,
+        source: None,
+        role: None,
+        start_time: None,
+        end_time: None,
+    }
+}
+
+// Hermes scopes message FTS matches to the content column only
+// (store.py:173-204 `build_message_fts_spec` indexes nothing but `content`).
+// Role and metadata text must therefore never satisfy an unqualified grep.
+#[tokio::test]
+async fn grep_does_not_match_role_or_metadata_text() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-fts-scope").await;
+    let message = raw_message_with_role_source_timestamp(
+        "cursor",
+        "fts-scope-message",
+        "session-fts-scope",
+        1,
+        "assistant",
+        "zephyrsource",
+        1_715_000_001,
+        "deploy pipeline ready",
+    );
+    assert!(db.upsert_session_message(&message).await);
+
+    // Positive control: content terms still match through the FTS index.
+    let content_hits = db
+        .lcm_grep(grep_request("pipeline"))
+        .await
+        .expect("content grep should succeed");
+    assert_eq!(content_hits.len(), 1);
+    assert_eq!(
+        content_hits[0].message_id.as_deref(),
+        Some("fts-scope-message")
+    );
+
+    // Role text ("assistant") must not over-match the row.
+    let role_hits = db
+        .lcm_grep(grep_request("assistant"))
+        .await
+        .expect("role grep should succeed");
+    assert!(
+        role_hits.is_empty(),
+        "role column text must not satisfy an unqualified grep: {role_hits:?}"
+    );
+
+    // Metadata text (the source marker) must not over-match the row either.
+    let metadata_hits = db
+        .lcm_grep(grep_request("zephyrsource"))
+        .await
+        .expect("metadata grep should succeed");
+    assert!(
+        metadata_hits.is_empty(),
+        "metadata_json text must not satisfy an unqualified grep: {metadata_hits:?}"
+    );
+}
+
 // Pins the SQL pushdown of `count_lossy_ingest_records` to the previous
 // serde_json semantics: only a JSON boolean `true` under
 // `$.ingest_protection.lossy` counts; numeric 1, false, missing keys,
@@ -1775,13 +1843,25 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
     let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
     let conn = raw_db.connect().unwrap();
     let variants: &[(&str, Option<&str>)] = &[
-        ("lossy-true", Some(r#"{"ingest_protection":{"lossy":true}}"#)),
-        ("lossy-false", Some(r#"{"ingest_protection":{"lossy":false}}"#)),
-        ("lossy-integer", Some(r#"{"ingest_protection":{"lossy":1}}"#)),
+        (
+            "lossy-true",
+            Some(r#"{"ingest_protection":{"lossy":true}}"#),
+        ),
+        (
+            "lossy-false",
+            Some(r#"{"ingest_protection":{"lossy":false}}"#),
+        ),
+        (
+            "lossy-integer",
+            Some(r#"{"ingest_protection":{"lossy":1}}"#),
+        ),
         ("missing-key", Some(r#"{"ingest_protection":{}}"#)),
         ("missing-section", Some(r#"{"other":true}"#)),
         ("invalid-json", Some("{not json")),
-        ("non-object", Some(r#"[{"ingest_protection":{"lossy":true}}]"#)),
+        (
+            "non-object",
+            Some(r#"[{"ingest_protection":{"lossy":true}}]"#),
+        ),
         ("null-metadata", None),
     ];
     for (idx, (message_id, metadata)) in variants.iter().enumerate() {
