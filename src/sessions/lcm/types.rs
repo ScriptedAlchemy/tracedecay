@@ -308,6 +308,29 @@ pub struct LcmPreflightResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummarySourceRange {
+    pub from_store_id: i64,
+    pub to_store_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummarySourceMessage {
+    pub store_id: i64,
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub focus_topic: Option<String>,
+    pub prompt: String,
+    pub source_range: LcmSummarySourceRange,
+    pub source_messages: Vec<LcmSummarySourceMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCompressionResponse {
     pub status: String,
     pub reason: String,
@@ -315,6 +338,7 @@ pub struct LcmCompressionResponse {
     pub summary_nodes: Vec<LcmSummaryNode>,
     pub replay_messages: Vec<serde_json::Value>,
     pub frontier: LcmLifecycleState,
+    pub summary_request: Option<LcmSummaryRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

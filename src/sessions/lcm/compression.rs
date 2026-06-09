@@ -9,7 +9,7 @@ use super::{
     dag, raw, LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmLifecycleState,
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest, LcmPreflightResponse,
     LcmRawMessage, LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode,
-    LcmSummaryNodeDraft,
+    LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
 };
 
 const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
@@ -143,9 +143,35 @@ pub(crate) async fn compress(
             summary_nodes: Vec::new(),
             replay_messages: ingested.replay_messages,
             frontier,
+            summary_request: None,
         });
     }
 
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let response = match compress_in_transaction(conn, request).await {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    };
+
+    match conn.execute("COMMIT", ()).await {
+        Ok(_) => Ok(response),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(LcmError::Db(err.to_string()))
+        }
+    }
+}
+
+async fn compress_in_transaction(
+    conn: &Connection,
+    request: LcmCompressionRequest,
+) -> Result<LcmCompressionResponse, LcmError> {
     let conversation_id = request.session_id.clone();
     let existing_frontier = lifecycle_state_or_default(
         conn,
@@ -154,25 +180,37 @@ pub(crate) async fn compress(
         &request.session_id,
     )
     .await?;
+    if let Some(expected_frontier) = request.expected_current_frontier_store_id {
+        if existing_frontier.current_frontier_store_id.unwrap_or(0) != expected_frontier {
+            let raw_messages =
+                load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+            let window =
+                compression_window(&raw_messages, existing_frontier.current_frontier_store_id);
+            return Ok(LcmCompressionResponse {
+                status: "ok".to_string(),
+                reason: "frontier_changed".to_string(),
+                summary_nodes_created: 0,
+                summary_nodes: Vec::new(),
+                replay_messages: replay_without_summary(&window.pinned_anchors, &window.fresh_tail),
+                frontier: existing_frontier,
+                summary_request: None,
+            });
+        }
+    }
+
     let raw_messages =
         load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
-    let frontier_store_id = existing_frontier.current_frontier_store_id.unwrap_or(0);
-    let unsummarized = raw_messages
-        .iter()
-        .filter(|message| message.store_id > frontier_store_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    let backlog_len = unsummarized.len().saturating_sub(DEFAULT_FRESH_TAIL_COUNT);
-    let (backlog, fresh_tail) = unsummarized.split_at(backlog_len);
+    let window = compression_window(&raw_messages, existing_frontier.current_frontier_store_id);
 
-    if backlog.is_empty() {
+    if window.backlog.is_empty() {
         return Ok(LcmCompressionResponse {
             status: "ok".to_string(),
             reason: "no_backlog_to_compress".to_string(),
             summary_nodes_created: 0,
             summary_nodes: Vec::new(),
-            replay_messages: fresh_tail.iter().map(raw_replay_message).collect(),
+            replay_messages: replay_without_summary(&window.pinned_anchors, &window.fresh_tail),
             frontier: existing_frontier,
+            summary_request: None,
         });
     }
 
@@ -182,8 +220,14 @@ pub(crate) async fn compress(
             reason: "hermes_auxiliary_not_available_in_task_9".to_string(),
             summary_nodes_created: 0,
             summary_nodes: Vec::new(),
-            replay_messages: fresh_tail.iter().map(raw_replay_message).collect(),
+            replay_messages: replay_without_summary(&window.pinned_anchors, &window.fresh_tail),
             frontier: existing_frontier,
+            summary_request: Some(summary_request_for_backlog(
+                &request.provider,
+                &request.session_id,
+                request.focus_topic,
+                &window.backlog,
+            )),
         });
     }
 
@@ -196,58 +240,42 @@ pub(crate) async fn compress(
         LcmSummarizerMode::Noop | LcmSummarizerMode::HermesAuxiliary => unreachable!(),
     };
 
-    let source_refs = backlog
-        .iter()
-        .map(|message| LcmSourceRef::RawMessage {
-            store_id: message.store_id,
-        })
-        .collect::<Vec<_>>();
-    let source_token_count = backlog
-        .iter()
-        .map(|message| estimate_tokens(&message.content))
-        .sum::<i64>();
-    let source_time_start = backlog.iter().filter_map(|message| message.timestamp).min();
-    let source_time_end = backlog.iter().filter_map(|message| message.timestamp).max();
-    let metadata_json = route.map(|route| json!({ "summary_route": route }).to_string());
-    let summary = dag::insert_summary_node(
+    let summary = dag::insert_summary_node_in_transaction(
         conn,
-        LcmSummaryNodeDraft {
-            provider: request.provider.clone(),
-            conversation_id: conversation_id.clone(),
-            session_id: request.session_id.clone(),
-            depth: 0,
-            summary_text: summary_text.clone(),
-            source_refs,
-            source_token_count,
-            summary_token_count: estimate_tokens(&summary_text),
-            source_time_start,
-            source_time_end,
-            expand_hint: Some(format!("{} raw messages", backlog.len())),
-            metadata_json,
-        },
+        summary_draft(
+            &request.provider,
+            &conversation_id,
+            &request.session_id,
+            &summary_text,
+            route,
+            &window.backlog,
+        ),
     )
     .await?;
-    let new_frontier = backlog
+    let new_frontier = window
+        .backlog
         .last()
         .map(|message| message.store_id)
         .or(existing_frontier.current_frontier_store_id);
-    let frontier = update_lifecycle(
+    let update = LcmLifecycleUpdate {
+        provider: request.provider.clone(),
+        conversation_id,
+        current_session_id: request.session_id.clone(),
+        current_frontier_store_id: new_frontier,
+        last_finalized_session_id: existing_frontier.last_finalized_session_id.clone(),
+        last_finalized_frontier_store_id: existing_frontier.last_finalized_frontier_store_id,
+        maintenance_debt: Vec::new(),
+    };
+    upsert_lifecycle_state(conn, &update).await?;
+    replace_maintenance_debt(
         conn,
-        LcmLifecycleUpdate {
-            provider: request.provider.clone(),
-            conversation_id,
-            current_session_id: request.session_id.clone(),
-            current_frontier_store_id: new_frontier,
-            last_finalized_session_id: existing_frontier.last_finalized_session_id.clone(),
-            last_finalized_frontier_store_id: existing_frontier.last_finalized_frontier_store_id,
-            maintenance_debt: Vec::new(),
-        },
+        &update.provider,
+        &update.conversation_id,
+        &update.maintenance_debt,
     )
     .await?;
-
-    let mut replay_messages = Vec::with_capacity(1 + fresh_tail.len());
-    replay_messages.push(summary_replay_message(&summary));
-    replay_messages.extend(fresh_tail.iter().map(raw_replay_message));
+    let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
+    let replay_messages = replay_with_summary(&window.pinned_anchors, &summary, &window.fresh_tail);
 
     Ok(LcmCompressionResponse {
         status: "ok".to_string(),
@@ -256,6 +284,7 @@ pub(crate) async fn compress(
         summary_nodes: vec![summary],
         replay_messages,
         frontier,
+        summary_request: None,
     })
 }
 
@@ -403,6 +432,137 @@ async fn lifecycle_state_or_default(
     }
 }
 
+struct CompressionWindow {
+    pinned_anchors: Vec<LcmRawMessage>,
+    backlog: Vec<LcmRawMessage>,
+    fresh_tail: Vec<LcmRawMessage>,
+}
+
+fn compression_window(
+    raw_messages: &[LcmRawMessage],
+    current_frontier_store_id: Option<i64>,
+) -> CompressionWindow {
+    let pinned_anchors = raw_messages
+        .iter()
+        .take_while(|message| is_policy_anchor_role(&message.role))
+        .cloned()
+        .collect::<Vec<_>>();
+    let frontier_store_id = current_frontier_store_id.unwrap_or(0);
+    let unsummarized = raw_messages
+        .iter()
+        .skip(pinned_anchors.len())
+        .filter(|message| message.store_id > frontier_store_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let backlog_len = unsummarized.len().saturating_sub(DEFAULT_FRESH_TAIL_COUNT);
+    let (backlog, fresh_tail) = unsummarized.split_at(backlog_len);
+
+    CompressionWindow {
+        pinned_anchors,
+        backlog: backlog.to_vec(),
+        fresh_tail: fresh_tail.to_vec(),
+    }
+}
+
+fn is_policy_anchor_role(role: &str) -> bool {
+    matches!(role, "system" | "developer" | "tool")
+}
+
+fn replay_without_summary(
+    pinned_anchors: &[LcmRawMessage],
+    fresh_tail: &[LcmRawMessage],
+) -> Vec<Value> {
+    let mut replay_messages = Vec::with_capacity(pinned_anchors.len() + fresh_tail.len());
+    replay_messages.extend(pinned_anchors.iter().map(raw_replay_message));
+    replay_messages.extend(fresh_tail.iter().map(raw_replay_message));
+    replay_messages
+}
+
+fn replay_with_summary(
+    pinned_anchors: &[LcmRawMessage],
+    summary: &LcmSummaryNode,
+    fresh_tail: &[LcmRawMessage],
+) -> Vec<Value> {
+    let mut replay_messages = Vec::with_capacity(pinned_anchors.len() + 1 + fresh_tail.len());
+    replay_messages.extend(pinned_anchors.iter().map(raw_replay_message));
+    replay_messages.push(summary_replay_message(summary));
+    replay_messages.extend(fresh_tail.iter().map(raw_replay_message));
+    replay_messages
+}
+
+fn summary_draft(
+    provider: &str,
+    conversation_id: &str,
+    session_id: &str,
+    summary_text: &str,
+    route: Option<String>,
+    backlog: &[LcmRawMessage],
+) -> LcmSummaryNodeDraft {
+    let source_refs = backlog
+        .iter()
+        .map(|message| LcmSourceRef::RawMessage {
+            store_id: message.store_id,
+        })
+        .collect::<Vec<_>>();
+    let source_token_count = backlog
+        .iter()
+        .map(|message| estimate_tokens(&message.content))
+        .sum::<i64>();
+    let source_time_start = backlog.iter().filter_map(|message| message.timestamp).min();
+    let source_time_end = backlog.iter().filter_map(|message| message.timestamp).max();
+    let metadata_json = route.map(|route| json!({ "summary_route": route }).to_string());
+
+    LcmSummaryNodeDraft {
+        provider: provider.to_string(),
+        conversation_id: conversation_id.to_string(),
+        session_id: session_id.to_string(),
+        depth: 0,
+        summary_text: summary_text.to_string(),
+        source_refs,
+        source_token_count,
+        summary_token_count: estimate_tokens(summary_text),
+        source_time_start,
+        source_time_end,
+        expand_hint: Some(format!("{} raw messages", backlog.len())),
+        metadata_json,
+    }
+}
+
+fn summary_request_for_backlog(
+    provider: &str,
+    session_id: &str,
+    focus_topic: Option<String>,
+    backlog: &[LcmRawMessage],
+) -> LcmSummaryRequest {
+    let first_store_id = backlog.first().map(|message| message.store_id).unwrap_or(0);
+    let last_store_id = backlog.last().map(|message| message.store_id).unwrap_or(0);
+    let focus = focus_topic.as_deref().unwrap_or("the conversation so far");
+    let prompt = format!(
+        "Summarize LCM raw messages for provider '{provider}', session '{session_id}', \
+         store_id range {first_store_id}..={last_store_id}. Focus on {focus}. \
+         Preserve durable instructions, decisions, open tasks, and facts needed to continue."
+    );
+
+    LcmSummaryRequest {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        focus_topic,
+        prompt,
+        source_range: LcmSummarySourceRange {
+            from_store_id: first_store_id,
+            to_store_id: last_store_id,
+        },
+        source_messages: backlog
+            .iter()
+            .map(|message| LcmSummarySourceMessage {
+                store_id: message.store_id,
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect(),
+    }
+}
+
 async fn ingest_active_messages(
     conn: &Connection,
     storage_root: &Path,
@@ -412,10 +572,9 @@ async fn ingest_active_messages(
 ) -> Result<IngestedActiveMessages, LcmError> {
     let mut replay_messages = Vec::with_capacity(messages.len());
     let mut changed_replay = false;
-    let mut ordinal = next_ordinal(conn, provider, session_id).await?;
+    let mut next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
 
     for (idx, message) in messages.iter().enumerate() {
-        ordinal += 1;
         let role = message
             .get("role")
             .and_then(Value::as_str)
@@ -431,6 +590,13 @@ async fn ingest_active_messages(
             .unwrap_or_else(|| {
                 deterministic_message_id(provider, session_id, idx, &role, &content)
             });
+        let ordinal = match existing_message_ordinal(conn, provider, &message_id).await? {
+            Some(existing_ordinal) => existing_ordinal,
+            None => {
+                next_available_ordinal += 1;
+                next_available_ordinal
+            }
+        };
         let kind = message
             .get("kind")
             .and_then(Value::as_str)
@@ -497,6 +663,27 @@ async fn ensure_session(
     .await
     .map_err(|err| LcmError::Db(err.to_string()))?;
     Ok(())
+}
+
+async fn existing_message_ordinal(
+    conn: &Connection,
+    provider: &str,
+    message_id: &str,
+) -> Result<Option<i64>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT ordinal
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2",
+            params![provider, message_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    rows.next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .map(|row| row.get(0).map_err(|err| LcmError::Db(err.to_string())))
+        .transpose()
 }
 
 async fn next_ordinal(

@@ -9,6 +9,31 @@ pub(crate) async fn insert_summary_node(
     conn: &Connection,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let summary = match insert_summary_node_in_transaction(conn, draft).await {
+        Ok(summary) => summary,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+    };
+
+    match conn.execute("COMMIT", ()).await {
+        Ok(_) => Ok(summary),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(LcmError::Db(err.to_string()))
+        }
+    }
+}
+
+pub(crate) async fn insert_summary_node_in_transaction(
+    conn: &Connection,
+    draft: LcmSummaryNodeDraft,
+) -> Result<LcmSummaryNode, LcmError> {
     let summary_hash = raw::sha256_hex(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
@@ -18,30 +43,10 @@ pub(crate) async fn insert_summary_node(
         &summary_hash,
     );
 
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-
-    if let Err(err) = validate_summary_sources(conn, &draft, &node_id).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-    if let Err(err) = upsert_summary_node(conn, &node_id, &summary_hash, &draft).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-    if let Err(err) = replace_summary_sources(conn, &node_id, &draft.source_refs).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => load_summary_node(conn, &draft.provider, &draft.session_id, &node_id).await,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
+    validate_summary_sources(conn, &draft, &node_id).await?;
+    upsert_summary_node(conn, &node_id, &summary_hash, &draft).await?;
+    replace_summary_sources(conn, &node_id, &draft.source_refs).await?;
+    load_summary_node(conn, &draft.provider, &draft.session_id, &node_id).await
 }
 
 pub(crate) async fn expand_summary_node(

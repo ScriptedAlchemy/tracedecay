@@ -1998,7 +1998,7 @@ fn def_lcm_compress() -> ToolDefinition {
     def_rw(
         "tokensave_lcm_compress",
         "LCM Compress",
-        "Advance the LCM compression lifecycle. Registered now; compression is implemented in a later task.",
+        "Advance the LCM compression lifecycle without invoking an auxiliary LLM.",
         json!({
             "type": "object",
             "properties": {
@@ -2010,11 +2010,40 @@ fn def_lcm_compress() -> ToolDefinition {
                     "type": "string",
                     "description": "Provider-local session id."
                 },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "Preview lifecycle work without mutating state once compression is implemented."
+                "messages": {
+                    "type": "array",
+                    "description": "Current active context messages to ingest before compression.",
+                    "items": {"type": "object"}
+                },
+                "current_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional current context token estimate."
+                },
+                "focus_topic": {
+                    "type": "string",
+                    "description": "Optional focus for the summary request prompt."
+                },
+                "expected_current_frontier_store_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional optimistic guard. Compression no-ops if the durable frontier has changed."
+                },
+                "summarizer": {
+                    "type": "object",
+                    "description": "Deterministic summarizer mode: noop, fake, provided, or hermes_auxiliary.",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["noop", "fake", "provided", "hermes_auxiliary"]
+                        },
+                        "summary_text": {"type": "string"},
+                        "route": {"type": "string"}
+                    },
+                    "required": ["mode"]
                 }
-            }
+            },
+            "required": ["session_id"]
         }),
     )
 }

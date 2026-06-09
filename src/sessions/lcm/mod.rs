@@ -18,6 +18,7 @@ pub use types::{
     LcmLoadSessionPage, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPayloadExpansion,
     LcmPayloadRef, LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRawMessageOverview,
     LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryExpansion, LcmSummaryNode,
-    LcmSummaryNodeDraft, LcmSummaryNodeOverview, DERIVED_TRUNCATION_MARKER,
-    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+    LcmSummaryNodeDraft, LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage,
+    LcmSummarySourceRange, DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS,
+    MAX_DERIVED_TEXT_CHARS,
 };

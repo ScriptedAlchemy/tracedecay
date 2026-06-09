@@ -9,6 +9,8 @@ pub struct LcmCompressionRequest {
     pub messages: Vec<Value>,
     pub current_tokens: Option<i64>,
     pub focus_topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_current_frontier_store_id: Option<i64>,
     pub summarizer: LcmSummarizerMode,
 }
 

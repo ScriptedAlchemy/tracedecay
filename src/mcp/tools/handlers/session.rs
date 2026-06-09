@@ -448,6 +448,10 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
             messages: messages_arg(&args)?,
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
             focus_topic: string_arg(&args, "focus_topic").map(str::to_string),
+            expected_current_frontier_store_id: non_negative_i64_arg(
+                &args,
+                "expected_current_frontier_store_id",
+            )?,
             summarizer: summarizer_arg(&args)?,
         })
         .await
@@ -461,5 +465,6 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
         "summary_nodes": response.summary_nodes,
         "replay_messages": response.replay_messages,
         "frontier": response.frontier,
+        "summary_request": response.summary_request,
     })))
 }

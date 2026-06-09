@@ -517,6 +517,7 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
         messages: vec![serde_json::json!({"role": "user", "content": "fresh"})],
         current_tokens: Some(100),
         focus_topic: Some("billing".to_string()),
+        expected_current_frontier_store_id: None,
         summarizer: LcmSummarizerMode::Fake {
             summary_text: "deterministic summary".to_string(),
         },
