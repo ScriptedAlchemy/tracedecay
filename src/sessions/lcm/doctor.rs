@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{params, Connection, Value as SqlValue};
@@ -185,9 +186,16 @@ async fn plan_and_apply_repairs(
             });
             planned.push(action.clone());
             if apply {
-                backup = backup_database(conn, db_path, storage_root).await?;
-                let deleted =
-                    delete_clean_candidates(conn, provider, session_id, clean_config).await?;
+                let (backup_result, deleted) = backup_and_delete_clean_candidates(
+                    conn,
+                    db_path,
+                    storage_root,
+                    provider,
+                    session_id,
+                    clean_config,
+                )
+                .await?;
+                backup = backup_result;
                 let mut applied_action = action;
                 if let Some(object) = applied_action.as_object_mut() {
                     object.insert("deleted".to_string(), deleted);
@@ -1097,12 +1105,7 @@ async fn raw_message_has_summary_source(
     Ok(count > 0)
 }
 
-async fn backup_database(
-    conn: &Connection,
-    db_path: &Path,
-    storage_root: &Path,
-) -> Result<Value, LcmError> {
-    checkpoint_wal_for_backup(conn).await?;
+fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
     let backup_dir = storage_root.join("lcm-clean-backups");
     fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
     let stamp = SystemTime::now()
@@ -1110,13 +1113,31 @@ async fn backup_database(
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     let backup_path = backup_dir.join(format!("sessions-clean-{stamp}-{}.db", std::process::id()));
-    let byte_count =
-        fs::copy(db_path, &backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
+    let byte_count = copy_sqlite_file_set(db_path, &backup_path)?;
     Ok(json!({
         "ok": true,
         "path": backup_path,
         "byte_count": byte_count,
     }))
+}
+
+fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
+    let mut byte_count =
+        fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
+    for suffix in ["-wal", "-shm"] {
+        let source = sqlite_sidecar_path(db_path, suffix);
+        if source.is_file() {
+            let target = sqlite_sidecar_path(backup_path, suffix);
+            byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
+        }
+    }
+    Ok(byte_count)
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
 }
 
 async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
@@ -1140,24 +1161,57 @@ async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
     Ok(())
 }
 
-async fn delete_clean_candidates(
+async fn backup_and_delete_clean_candidates(
+    conn: &Connection,
+    db_path: &Path,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
+) -> Result<(Value, Value), LcmError> {
+    backup_and_delete_clean_candidates_with_backup(
+        conn,
+        provider,
+        session_id,
+        clean_config,
+        || async { backup_database(db_path, storage_root) },
+    )
+    .await
+}
+
+async fn backup_and_delete_clean_candidates_with_backup<F, Fut>(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
-) -> Result<Value, LcmError> {
-    let (session_ids, message_store_ids) =
-        collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
-
+    backup: F,
+) -> Result<(Value, Value), LcmError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value, LcmError>>,
+{
+    checkpoint_wal_for_backup(conn).await?;
     conn.execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
-    let result =
-        delete_clean_candidates_in_transaction(conn, provider, &session_ids, &message_store_ids)
-            .await;
+    let result = async {
+        let (session_ids, message_store_ids) =
+            collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
+        let backup_result = backup().await?;
+        let deleted = delete_clean_candidates_in_transaction(
+            conn,
+            provider,
+            &session_ids,
+            &message_store_ids,
+        )
+        .await?;
+        Ok((backup_result, deleted))
+    }
+    .await;
+
     match result {
-        Ok(deleted) => match conn.execute("COMMIT", ()).await {
-            Ok(_) => Ok(deleted),
+        Ok(values) => match conn.execute("COMMIT", ()).await {
+            Ok(_) => Ok(values),
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 Err(LcmError::Db(err.to_string()))
@@ -1324,4 +1378,120 @@ fn sha256_hex(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::*;
+
+    async fn insert_test_clean_candidate(
+        conn: &Connection,
+        project_root: &Path,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let project_key = project_root.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO sessions (
+                provider, session_id, project_key, project_path, title, started_at
+             ) VALUES ('cursor', ?1, ?2, ?2, ?3, 1)
+             ON CONFLICT(provider, session_id) DO NOTHING",
+            params![session_id, project_key.as_str(), session_id],
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref, snippet_text,
+                index_text, legacy_source, legacy_truncated, metadata_json
+             )
+             VALUES (
+                'cursor', ?1, ?2, 'assistant', 1, 2,
+                'test cron body', ?3, 'inline', NULL, 'test cron body',
+                'test cron body', 0, 0, NULL
+             )",
+            params![message_id, session_id, format!("{message_id}-hash")],
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    async fn raw_count(conn: &Connection, session_id: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+                params![session_id],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn clean_apply_backup_callback_runs_under_immediate_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().to_path_buf();
+        let db_path = project_root.join("sessions.db");
+        let _global = crate::global_db::GlobalDb::open_at(&db_path)
+            .await
+            .expect("test session database should open");
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        insert_test_clean_candidate(
+            &conn,
+            &project_root,
+            "cron-before-lock",
+            "cron-before-lock-message",
+        )
+        .await
+        .unwrap();
+
+        let writer_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let writer_conn = writer_db.connect().unwrap();
+        writer_conn.busy_timeout(Duration::from_millis(25)).unwrap();
+        let writer_project_root = project_root.clone();
+        let backup_path = project_root.join("backup.db");
+        let backup_path_for_callback = backup_path.clone();
+        let clean_config = LcmCleanConfig {
+            ignore_session_patterns: vec!["cron-*".to_string()],
+            ..Default::default()
+        };
+
+        let (backup, deleted) = backup_and_delete_clean_candidates_with_backup(
+            &conn,
+            "cursor",
+            None,
+            &clean_config,
+            move || async move {
+                let write_result = insert_test_clean_candidate(
+                    &writer_conn,
+                    &writer_project_root,
+                    "cron-raced-lock",
+                    "cron-raced-lock-message",
+                )
+                .await;
+                assert!(
+                    write_result.is_err(),
+                    "backup callback must run while BEGIN IMMEDIATE blocks concurrent clean candidates"
+                );
+                Ok(json!({
+                    "ok": true,
+                    "path": backup_path_for_callback,
+                }))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(backup["ok"], true);
+        assert_eq!(deleted["sessions"], 1);
+        assert_eq!(raw_count(&conn, "cron-before-lock").await, 0);
+        assert_eq!(raw_count(&conn, "cron-raced-lock").await, 0);
+    }
 }
