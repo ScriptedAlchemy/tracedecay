@@ -989,14 +989,25 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 Err(_) => {
                     // CWD-based discovery failed (e.g. VS Code launched us from ~).
                     // Fall back to the global DB's registered projects.
-                    match serve::resolve_serve_from_global_db().await {
-                        Some(p) => serve::ensure_initialized(&p).await?,
-                        None => {
+                    let global_fallback = serve::resolve_serve_from_global_db().await;
+                    match global_fallback {
+                        serve::ServeGlobalDbResolution::Found(p) => {
+                            serve::ensure_initialized(&p).await?
+                        }
+                        serve::ServeGlobalDbResolution::None
+                        | serve::ServeGlobalDbResolution::Ambiguous(_) => {
                             // Last resort: peek at the first stdin line for MCP
                             // `initialize` roots (e.g. VS Code multi-folder workspace).
                             match serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
                                 Some(p) => serve::ensure_initialized(&p).await?,
                                 None => {
+                                    if let serve::ServeGlobalDbResolution::Ambiguous(paths) =
+                                        global_fallback
+                                    {
+                                        return Err(tokensave::errors::TokenSaveError::Config {
+                                            message: serve::global_db_ambiguity_message(&paths),
+                                        });
+                                    }
                                     return Err(tokensave::errors::TokenSaveError::Config {
                                         message: format!(
                                             "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
