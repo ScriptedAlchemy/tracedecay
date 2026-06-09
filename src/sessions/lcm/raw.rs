@@ -18,6 +18,17 @@ pub(crate) fn derived_text_for_snippet(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
 }
 
+fn externalized_payload_placeholder(payload_ref: &super::LcmPayloadRef) -> String {
+    let hash_prefix = payload_ref
+        .content_hash
+        .get(..12)
+        .unwrap_or(payload_ref.content_hash.as_str());
+    format!(
+        "[externalized payload: {}, ref={}, bytes={}, sha256={}]",
+        payload_ref.kind, payload_ref.payload_ref, payload_ref.byte_count, hash_prefix
+    )
+}
+
 fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
     if raw.chars().count() <= max_chars {
         return raw.to_string();
@@ -101,8 +112,7 @@ pub(crate) async fn upsert_raw_message_with_payload(
     )?;
     payload::upsert_payload_metadata(conn, &payload_ref).await?;
 
-    let snippet = derived_text_for_snippet(&message.text);
-    let index = derived_text_for_index(&message.text);
+    let placeholder = externalized_payload_placeholder(&payload_ref);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -134,8 +144,8 @@ pub(crate) async fn upsert_raw_message_with_payload(
             payload_ref.content_hash.as_str(),
             LcmStorageKind::External.as_str(),
             payload_ref.payload_ref.as_str(),
-            snippet.as_str(),
-            index.as_str(),
+            placeholder.as_str(),
+            placeholder.as_str(),
             opt_text(message.metadata_json.as_deref()),
         ],
     )

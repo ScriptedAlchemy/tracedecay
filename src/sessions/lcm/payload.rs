@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use crate::sessions::SessionMessageRecord;
 
 use super::{raw, LcmError, LcmPayloadExpansion, LcmPayloadRef};
+
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
 
 pub struct LcmStore<'db> {
     conn: &'db Connection,
@@ -157,13 +160,7 @@ async fn expand_payload(
     let dir = payload_dir(storage_root);
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let content = fs::read_to_string(&path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            LcmError::PayloadMissing
-        } else {
-            LcmError::Io(err.to_string())
-        }
-    })?;
+    let content = read_payload_file(&path)?;
     if sha256_hex(content.as_bytes()) != payload.content_hash {
         return Err(LcmError::PayloadIntegrityMismatch);
     }
@@ -243,16 +240,52 @@ fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
 }
 
 fn write_private_file(path: &Path, content: &[u8]) -> Result<(), LcmError> {
-    let mut file = private_file_options()
-        .create(true)
-        .truncate(true)
+    let mut file = match private_file_options()
+        .create_new(true)
         .write(true)
         .open(path)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return ensure_existing_payload_matches(path, content);
+        }
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    };
     file.write_all(content)
         .map_err(|err| LcmError::Io(err.to_string()))?;
-    set_private_file_permissions(path)?;
     Ok(())
+}
+
+fn ensure_existing_payload_matches(path: &Path, content: &[u8]) -> Result<(), LcmError> {
+    let mut file = private_file_options()
+        .read(true)
+        .open(path)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    let mut existing = Vec::new();
+    file.read_to_end(&mut existing)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    if existing == content {
+        Ok(())
+    } else {
+        Err(LcmError::PayloadIntegrityMismatch)
+    }
+}
+
+fn read_payload_file(path: &Path) -> Result<String, LcmError> {
+    let mut file = private_file_options()
+        .read(true)
+        .open(path)
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                LcmError::PayloadMissing
+            } else {
+                LcmError::Io(err.to_string())
+            }
+        })?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(content)
 }
 
 #[cfg(unix)]
@@ -261,6 +294,8 @@ fn private_file_options() -> fs::OpenOptions {
 
     let mut options = fs::OpenOptions::new();
     options.mode(0o600);
+    #[cfg(target_os = "linux")]
+    options.custom_flags(O_NOFOLLOW);
     options
 }
 
@@ -279,19 +314,6 @@ fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
 
 #[cfg(not(unix))]
 fn set_private_dir_permissions(_path: &Path) -> Result<(), LcmError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), LcmError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|err| LcmError::Io(err.to_string()))
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), LcmError> {
     Ok(())
 }
 
