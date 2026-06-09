@@ -158,6 +158,9 @@ pub(crate) async fn reassign_session_payloads(
     old_session_id: &str,
     new_session_id: &str,
 ) -> Result<u64, LcmError> {
+    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
+        return Ok(0);
+    }
     conn.execute(
         "UPDATE lcm_external_payloads
          SET session_id = ?3

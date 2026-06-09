@@ -270,10 +270,9 @@ pub struct LcmExpandResponse {
     /// Mirrors hermes-lcm `from_current_session`; raw-message targets only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_current_session: Option<bool>,
-    /// Set on cross-session raw-message expansions whose row references an
-    /// externalized payload: payload bodies are session-scoped, so the ref
-    /// is surfaced for traceability only. Mirrors hermes-lcm
-    /// `externalized_note`.
+    /// Legacy compatibility note mirrored from hermes-lcm payloads. Modern
+    /// cross-session expansion flows should rely on `payload_ref` +
+    /// `raw_message.session_id` and remain note-free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub externalized_note: Option<String>,
     /// Source-list pagination metadata (summary-node targets only).
@@ -605,6 +604,8 @@ pub struct LcmPreflightRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_fan_in: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental_max_depth: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_tail_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_leaf_chunk_enabled: Option<bool>,
@@ -703,6 +704,8 @@ pub struct LcmExpandedSummarySource {
     pub source_ref: LcmSourceRef,
     pub content: String,
     pub content_range: Option<LcmContentRange>,
+    #[serde(default)]
+    pub content_truncated: bool,
     pub raw_message: Option<LcmRawMessage>,
     pub summary_node: Option<Box<LcmSummaryNode>>,
 }

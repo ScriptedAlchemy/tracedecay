@@ -69,6 +69,7 @@ pub(crate) async fn expand_summary_node(
                     source_ref: source_ref.clone(),
                     content: raw.content.clone(),
                     content_range: None,
+                    content_truncated: false,
                     raw_message: Some(raw),
                     summary_node: None,
                 });
@@ -84,6 +85,7 @@ pub(crate) async fn expand_summary_node(
                     source_ref: source_ref.clone(),
                     content: child.summary_text.clone(),
                     content_range: None,
+                    content_truncated: false,
                     raw_message: None,
                     summary_node: Some(Box::new(child)),
                 });
@@ -198,6 +200,9 @@ pub(crate) async fn reassign_session_nodes(
     old_session_id: &str,
     new_session_id: &str,
 ) -> Result<u64, LcmError> {
+    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
+        return Ok(0);
+    }
     conn.execute(
         "UPDATE lcm_summary_nodes
          SET session_id = ?3, conversation_id = ?3

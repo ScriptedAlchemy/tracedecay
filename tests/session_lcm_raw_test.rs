@@ -150,6 +150,7 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,

@@ -154,17 +154,10 @@ pub(crate) async fn expand(
             let externalized_ref = raw.payload_ref.clone();
             let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
             let content = raw.content.clone();
-            let (payload_ref, externalized_note) = if from_current_session {
-                (None, None)
+            let payload_ref = if from_current_session {
+                None
             } else {
-                (
-                    externalized_ref.clone(),
-                    externalized_ref.map(|_| {
-                        "Externalized payload metadata is session-scoped; cross-session ref is \
-                         surfaced for traceability only and cannot be expanded in this version."
-                            .to_string()
-                    }),
-                )
+                externalized_ref.clone()
             };
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
@@ -175,7 +168,7 @@ pub(crate) async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref,
                 from_current_session: Some(from_current_session),
-                externalized_note,
+                externalized_note: None,
                 source_pagination: None,
             })
         }
@@ -584,6 +577,7 @@ fn slice_summary_sources(
         .map(|mut source| {
             let (content, range) = slice_content(&source.content, slice);
             source.content.clone_from(&content);
+            source.content_truncated = range.truncated;
             source.content_range = Some(range);
             if let Some(raw_message) = source.raw_message.as_mut() {
                 raw_message.content.clone_from(&content);
@@ -715,12 +709,9 @@ async fn dag_status(
         );
     }
     // Hermes renders `round(source/summary, 1)` as "N.N:1" and "0:1" for an
-    // empty DAG (`hermes-lcm/tools.py` lcm_status).
-    let compression_ratio = if total_tokens > 0 {
-        format!("{:.1}:1", total_source_tokens as f64 / total_tokens as f64)
-    } else {
-        "0:1".to_string()
-    };
+    // empty DAG (`hermes-lcm/tools.py` lcm_status). Python `round` uses
+    // bankers rounding (ties-to-even), so mirror it with integer math.
+    let compression_ratio = python_round_ratio_to_tenths(total_source_tokens, total_tokens);
     Ok(LcmDagStatus {
         total_nodes,
         total_tokens,
@@ -728,6 +719,30 @@ async fn dag_status(
         compression_ratio,
         depths,
     })
+}
+
+fn python_round_ratio_to_tenths(total_source_tokens: i64, total_tokens: i64) -> String {
+    if total_tokens <= 0 {
+        return "0:1".to_string();
+    }
+    let numerator = i128::from(total_source_tokens.max(0)) * 10;
+    let denominator = i128::from(total_tokens);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let rounded = match (remainder * 2).cmp(&denominator) {
+        std::cmp::Ordering::Less => quotient,
+        std::cmp::Ordering::Greater => quotient + 1,
+        std::cmp::Ordering::Equal => {
+            if quotient % 2 == 0 {
+                quotient
+            } else {
+                quotient + 1
+            }
+        }
+    };
+    let whole = rounded / 10;
+    let fractional = (rounded % 10).abs();
+    format!("{whole}.{fractional}:1")
 }
 
 struct ExpandQueryAssembler {

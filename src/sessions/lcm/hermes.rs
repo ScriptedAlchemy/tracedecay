@@ -28,6 +28,8 @@ pub struct LcmCompressionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_fan_in: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental_max_depth: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_tail_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_leaf_chunk_enabled: Option<bool>,

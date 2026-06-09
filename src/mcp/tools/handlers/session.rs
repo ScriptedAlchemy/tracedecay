@@ -527,6 +527,16 @@ fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
     Ok(Some(integer))
 }
 
+fn signed_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
+    let Some(value) = args.get(name) else {
+        return Ok(None);
+    };
+    value
+        .as_i64()
+        .map(Some)
+        .ok_or_else(|| argument_error(format!("{name} must be an integer")))
+}
+
 fn bool_arg(args: &Value, name: &str) -> Result<Option<bool>> {
     let Some(value) = args.get(name) else {
         return Ok(None);
@@ -1409,6 +1419,7 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
             leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
             max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
             summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
+            incremental_max_depth: signed_i64_arg(&args, "incremental_max_depth")?,
             fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
             dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
             dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
@@ -1457,6 +1468,7 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
             leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
             max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
             summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
+            incremental_max_depth: signed_i64_arg(&args, "incremental_max_depth")?,
             fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
             dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
             dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,

@@ -153,6 +153,7 @@ fn preflight_request(
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -184,6 +185,7 @@ fn compress_request(
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -216,6 +218,7 @@ fn limited_compress_request(
         leaf_chunk_tokens,
         max_source_messages,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -356,6 +359,7 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -426,6 +430,7 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -457,6 +462,7 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -519,6 +525,7 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -552,6 +559,7 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -606,6 +614,7 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -634,6 +643,7 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -766,6 +776,7 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -843,6 +854,7 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -903,6 +915,7 @@ async fn ignored_session_pattern_skips_active_ingest_and_compression() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -952,6 +965,7 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -1001,6 +1015,7 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -1067,6 +1082,7 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -1132,6 +1148,7 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -1520,7 +1537,7 @@ async fn boundary_continuation_with_matching_bound_session_records_no_cooldown()
     insert_raw_messages(
         &db,
         "cursor",
-        "session-b",
+        "session-a",
         &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
     )
     .await;
@@ -2039,6 +2056,7 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -2076,6 +2094,7 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
@@ -2135,6 +2154,7 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -2186,6 +2206,7 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: None,
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -2403,6 +2424,7 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -2520,6 +2542,7 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -2607,6 +2630,7 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             leaf_chunk_tokens: None,
             max_source_messages: None,
             summary_fan_in: Some(3),
+            incremental_max_depth: None,
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
@@ -3184,6 +3208,62 @@ async fn condensation_respects_default_incremental_max_depth() {
     );
 }
 
+#[tokio::test]
+async fn condensation_honors_non_default_incremental_max_depth() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["one", "two", "three", "four", "five", "six"],
+    )
+    .await;
+    for (idx, pair) in store_ids.chunks(2).enumerate() {
+        db.lcm_insert_summary_node(summary_draft_with_times(
+            "cursor",
+            "session-1",
+            1,
+            &format!("depth one {}", idx + 1),
+            pair.iter()
+                .copied()
+                .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                .collect(),
+            1_715_100_000 + (idx as i64 * 10),
+            1_715_100_001 + (idx as i64 * 10),
+        ))
+        .await
+        .unwrap();
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let mut request = compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "condensed depth one summaries".into(),
+        },
+    );
+    request.summary_fan_in = Some(3);
+    request.incremental_max_depth = Some(2);
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "condensed_summary_nodes");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(response.summary_nodes[0].depth, 2);
+}
+
 // Mirrors hermes-lcm `_assemble_overflow_recovery_context`: with no backlog
 // to compact, forced overflow evicts droppable assistant/tool tail turns that
 // do not fit under the cap while keeping anchors and budgetable user intent.
@@ -3350,6 +3430,26 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
             "fresh-1".to_string(),
             "fresh-2".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn compression_boundary_carry_over_requires_empty_target_session() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(&db, "cursor", "session-old", &["old-1", "old-2"]).await;
+    insert_raw_messages(&db, "cursor", "session-new", &["already-there"]).await;
+
+    let err = db
+        .lcm_session_boundary(boundary_request(
+            "session-new",
+            "session-old",
+            Some("session-old"),
+        ))
+        .await
+        .expect_err("carry-over must fail when target session already has raw rows");
+    assert!(
+        matches!(err, tokensave::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
     );
 }
 

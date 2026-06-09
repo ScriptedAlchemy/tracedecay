@@ -8138,6 +8138,155 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 }
 
 #[tokio::test]
+async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
+    let (cg, _dir) = setup_project().await;
+    let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-external-message",
+        body,
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "active context",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
+
+    let raw_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let raw_payload: Value = serde_json::from_str(extract_text(&raw_result.value)).unwrap();
+    assert_eq!(raw_payload["status"], "ok");
+    assert_eq!(raw_payload["expansion"]["from_current_session"], false);
+    assert!(raw_payload["expansion"]["externalized_note"].is_null());
+    let payload_ref = raw_payload["expansion"]["payload_ref"]
+        .as_str()
+        .expect("cross-session external row should surface payload_ref")
+        .to_string();
+    let owner_session = raw_payload["expansion"]["raw_message"]["session_id"]
+        .as_str()
+        .expect("owner session id should be surfaced")
+        .to_string();
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "content_limit": 80
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "external_payload");
+    assert!(payload["expansion"]["content"]
+        .as_str()
+        .expect("external payload content")
+        .starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
+async fn lcm_compress_handler_honors_incremental_max_depth_override() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=6 {
+        let message_id = format!("depth-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-depth-session",
+            &message_id,
+            format!("depth source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    for (index, pair) in store_ids.chunks(2).enumerate() {
+        db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-depth-session".to_string(),
+            session_id: "lcm-depth-session".to_string(),
+            depth: 1,
+            summary_text: format!("depth one summary {}", index + 1),
+            source_refs: pair
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 12,
+            summary_token_count: 4,
+            source_time_start: Some(10 + index as i64),
+            source_time_end: Some(20 + index as i64),
+            expand_hint: Some("depth override test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("depth-1 summary should insert");
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-depth-session".to_string(),
+        current_session_id: "lcm-depth-session".to_string(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-depth-session",
+            "messages": [],
+            "summary_fan_in": 3,
+            "incremental_max_depth": 2,
+            "summarizer": {"mode": "fake", "summary_text": "depth-two condensation"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["reason"], "condensed_summary_nodes");
+    assert_eq!(payload["summary_nodes_created"], 1);
+    assert_eq!(payload["summary_nodes"][0]["depth"], 2);
+}
+
+#[tokio::test]
 async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(

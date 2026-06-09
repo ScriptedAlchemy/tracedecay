@@ -143,6 +143,9 @@ pub(crate) async fn reassign_session_messages(
     old_session_id: &str,
     new_session_id: &str,
 ) -> Result<u64, LcmError> {
+    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
+        return Ok(0);
+    }
     conn.execute(
         "UPDATE lcm_raw_messages
          SET session_id = ?3

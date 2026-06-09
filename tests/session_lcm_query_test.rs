@@ -911,6 +911,7 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
     );
     assert_eq!(source_range.total_chars, huge_source_chars);
     assert!(source_range.truncated);
+    assert!(source.content_truncated);
     let raw_source = source.raw_message.as_ref().expect("raw source metadata");
     assert_eq!(raw_source.store_id, store_ids[0]);
     assert_eq!(raw_source.content, "source-prefix");
@@ -1251,7 +1252,7 @@ async fn expand_allows_cross_session_raw_store_id_with_provenance() {
 }
 
 #[tokio::test]
-async fn expand_cross_session_external_row_surfaces_ref_without_payload_body() {
+async fn expand_cross_session_external_row_can_hydrate_payload_via_two_step_expand() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tokensave");
     let db = open_lcm_db(&tmp).await;
@@ -1286,15 +1287,39 @@ async fn expand_cross_session_external_row_surfaces_ref_without_payload_body() {
         .expect("cross-session external row should expand");
     assert_eq!(cross.from_current_session, Some(false));
     assert_eq!(cross.payload_ref.as_deref(), Some(payload_ref.as_str()));
-    let note = cross
-        .externalized_note
-        .as_deref()
-        .expect("cross-session externalized note");
-    assert!(note.contains("session-scoped"));
+    assert_eq!(cross.externalized_note, None);
     let rendered = serde_json::to_string(&cross).unwrap();
     assert!(
         !rendered.contains("ZZZZZZZZZZ"),
-        "cross-session expand must not leak externalized payload bodies"
+        "cross-session raw-message expand should stay compact until payload expansion"
+    );
+    let payload_owner_session_id = cross
+        .raw_message
+        .as_ref()
+        .expect("raw metadata should include owner session")
+        .session_id
+        .clone();
+    let expanded_payload = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: payload_owner_session_id,
+            target: LcmExpandTarget::ExternalPayload {
+                payload_ref: payload_ref.clone(),
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 0,
+                limit: 128,
+            }),
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .expect("cross-session payload should hydrate through explicit payload target");
+    assert_eq!(expanded_payload.kind, "external_payload");
+    assert!(expanded_payload.content.starts_with("cross-payload-"));
+    assert_eq!(
+        expanded_payload.payload_ref.as_deref(),
+        Some(payload_ref.as_str())
     );
 }
 
@@ -1371,4 +1396,33 @@ async fn status_reports_dag_depth_distribution_store_estimate_and_config_default
     assert!(empty.dag.depths.is_empty());
     assert_eq!(empty.store.messages, 0);
     assert_eq!(empty.store.estimated_tokens, 0);
+}
+
+#[tokio::test]
+async fn status_uses_python_half_even_rounding_for_ratio_ties() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-tie",
+        &["alpha".to_string(), "beta".to_string()],
+    )
+    .await;
+    let mut node = summary_draft(
+        "cursor",
+        "session-tie",
+        "ratio tie",
+        vec![LcmSourceRef::RawMessage {
+            store_id: store_ids[0],
+        }],
+    );
+    node.summary_token_count = 4;
+    node.source_token_count = 5; // 1.25 -> Python round(..., 1) => 1.2
+    db.lcm_insert_summary_node(node).await.unwrap();
+    let status = db
+        .lcm_status("cursor", Some("session-tie"))
+        .await
+        .expect("status should load");
+    assert_eq!(status.dag.compression_ratio, "1.2:1");
 }

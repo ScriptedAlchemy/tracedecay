@@ -28,6 +28,14 @@ const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
 const ACTIVE_REPLAY_MESSAGE_KEY: &str = "active_replay";
 
+fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
+    match configured {
+        Some(value) if value < 0 => i64::MAX,
+        Some(value) => value,
+        None => DEFAULT_INCREMENTAL_MAX_DEPTH,
+    }
+}
+
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
     changed_replay: bool,
@@ -183,6 +191,29 @@ async fn carry_over_in_transaction(
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     ensure_session(conn, &request.provider, &request.session_id).await?;
+    let mut target_rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND session_id = ?2",
+            params![request.provider.as_str(), request.session_id.as_str()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let target_row = target_rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("carry-over guard query returned no rows".to_string()))?;
+    let target_message_count: i64 = target_row
+        .get(0)
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    if target_message_count > 0 {
+        return Err(LcmError::Db(format!(
+            "compression boundary carry-over requires an empty target session; session {} already has {} raw message(s)",
+            request.session_id, target_message_count
+        )));
+    }
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
     // Mirrors hermes-lcm: the carried frontier is the strongest durable
@@ -1525,8 +1556,14 @@ async fn condense_summary_nodes_if_ready(
         .summary_fan_in
         .filter(|fan_in| *fan_in > 1)
         .unwrap_or(LCM_DEFAULT_SUMMARY_FAN_IN);
-    let children =
-        load_condensation_candidates(conn, &request.provider, &request.session_id, fan_in).await?;
+    let children = load_condensation_candidates(
+        conn,
+        &request.provider,
+        &request.session_id,
+        fan_in,
+        incremental_max_depth_limit(request.incremental_max_depth),
+    )
+    .await?;
     if children.len() < fan_in || matches!(request.summarizer, LcmSummarizerMode::HermesAuxiliary) {
         return Ok(None);
     }
@@ -1611,6 +1648,7 @@ async fn load_condensation_candidates(
     provider: &str,
     session_id: &str,
     fan_in: usize,
+    incremental_max_depth: i64,
 ) -> Result<Vec<LcmSummaryNode>, LcmError> {
     let mut rows = conn
         .query(
@@ -1657,7 +1695,7 @@ async fn load_condensation_candidates(
                 provider,
                 session_id,
                 fan_in as i64,
-                DEFAULT_INCREMENTAL_MAX_DEPTH
+                incremental_max_depth
             ],
         )
         .await

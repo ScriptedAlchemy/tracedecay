@@ -144,9 +144,11 @@ static DATA_URI_BASE64_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 
 pub fn contains_data_uri(content: &str) -> bool {
-    DATA_URI_BASE64_RE
-        .as_ref()
-        .is_some_and(|regex| regex.is_match(content))
+    DATA_URI_BASE64_RE.as_ref().is_some_and(|regex| {
+        regex
+            .find_iter(content)
+            .any(|found| has_data_uri_boundary(content, found.end()))
+    })
 }
 
 /// Byte spans of data-URI base64 payloads eligible for substring
@@ -155,9 +157,22 @@ pub(crate) fn data_uri_spans(content: &str) -> Vec<(usize, usize)> {
     DATA_URI_BASE64_RE.as_ref().map_or_else(Vec::new, |regex| {
         regex
             .find_iter(content)
-            .map(|found| (found.start(), found.end()))
+            .filter_map(|found| {
+                has_data_uri_boundary(content, found.end()).then_some((found.start(), found.end()))
+            })
             .collect()
     })
+}
+
+fn has_data_uri_boundary(content: &str, end: usize) -> bool {
+    match content.get(end..).and_then(|suffix| suffix.chars().next()) {
+        None => true,
+        Some(ch) => !is_data_uri_base64_char(ch),
+    }
+}
+
+fn is_data_uri_base64_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=')
 }
 
 fn assistant_output_is_high_repetition(content: &str) -> bool {

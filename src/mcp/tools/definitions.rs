@@ -2068,7 +2068,7 @@ fn def_lcm_expand() -> ToolDefinition {
                 "source_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset."
+                    "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
@@ -2190,6 +2190,10 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "minimum": 2,
                     "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
                 },
+                "incremental_max_depth": {
+                    "type": "integer",
+                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
+                },
                 "fresh_tail_count": {
                     "type": "integer",
                     "minimum": 0,
@@ -2287,6 +2291,10 @@ fn def_lcm_compress() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 2,
                     "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
+                "incremental_max_depth": {
+                    "type": "integer",
+                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
                 },
                 "fresh_tail_count": {
                     "type": "integer",
