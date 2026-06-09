@@ -93,6 +93,7 @@ pub fn global_session(provider: &str, session_id: &str, project_key: &str) -> Se
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn message_record(
     provider: &str,
     message_id: &str,
