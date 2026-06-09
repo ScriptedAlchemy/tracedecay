@@ -22,6 +22,10 @@ pub(crate) async fn insert_summary_node(
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
 
+    if let Err(err) = validate_summary_sources(conn, &draft, &node_id).await {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(err);
+    }
     if let Err(err) = upsert_summary_node(conn, &node_id, &summary_hash, &draft).await {
         let _ = conn.execute("ROLLBACK", ()).await;
         return Err(err);
@@ -147,6 +151,37 @@ async fn upsert_summary_node(
     Ok(())
 }
 
+async fn validate_summary_sources(
+    conn: &Connection,
+    draft: &LcmSummaryNodeDraft,
+    node_id: &str,
+) -> Result<(), LcmError> {
+    for source_ref in &draft.source_refs {
+        match source_ref {
+            LcmSourceRef::RawMessage { store_id } => {
+                let (provider, session_id) = load_raw_message_owner_by_store_id(conn, *store_id)
+                    .await?
+                    .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+                if provider != draft.provider || session_id != draft.session_id {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                }
+            }
+            LcmSourceRef::SummaryNode {
+                node_id: child_node_id,
+            } => {
+                if child_node_id == node_id {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                }
+                let child = load_summary_node_by_id(conn, child_node_id).await?;
+                if child.provider != draft.provider || child.session_id != draft.session_id {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn replace_summary_sources(
     conn: &Connection,
     node_id: &str,
@@ -261,7 +296,7 @@ async fn load_raw_message_by_store_id(
         .query(
             "SELECT provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
-                    legacy_source, legacy_truncated, metadata_json
+                    snippet_text, legacy_source, legacy_truncated, metadata_json
              FROM lcm_raw_messages
              WHERE store_id = ?1",
             params![store_id],
@@ -275,6 +310,13 @@ async fn load_raw_message_by_store_id(
         .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
     let storage_kind_text: String = row.get(9).map_err(|err| LcmError::Db(err.to_string()))?;
     let content: Option<String> = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
+    let snippet_text: String = row.get(11).map_err(|err| LcmError::Db(err.to_string()))?;
+    let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
+        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
+    let content = match storage_kind {
+        LcmStorageKind::Inline => content.unwrap_or_default(),
+        LcmStorageKind::External => content.unwrap_or(snippet_text),
+    };
     Ok(LcmRawMessage {
         provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
         message_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
@@ -283,15 +325,39 @@ async fn load_raw_message_by_store_id(
         role: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
         ordinal: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
         timestamp: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        content: content.unwrap_or_default(),
+        content,
         content_hash: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        storage_kind: LcmStorageKind::from_db(&storage_kind_text)
-            .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?,
+        storage_kind,
         payload_ref: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-        legacy_source: row.get::<i64>(11).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(12).unwrap_or(0) != 0,
-        metadata_json: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
+        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
+        metadata_json: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
     })
+}
+
+async fn load_raw_message_owner_by_store_id(
+    conn: &Connection,
+    store_id: i64,
+) -> Result<Option<(String, String)>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT provider, session_id
+             FROM lcm_raw_messages
+             WHERE store_id = ?1",
+            params![store_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    rows.next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .map(|row| {
+            Ok((
+                row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+                row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+            ))
+        })
+        .transpose()
 }
 
 fn source_ref_to_db(source_ref: &LcmSourceRef) -> (&'static str, String) {
