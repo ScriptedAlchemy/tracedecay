@@ -13,8 +13,8 @@ pub use hermes::{LcmCompressionRequest, LcmSummarizerMode};
 pub use raw::derived_text_for_index;
 pub use schema::LCM_SCHEMA_VERSION;
 pub use types::{
-    LcmCompressionResponse, LcmContentRange, LcmContentSlice, LcmDescribeResponse, LcmError,
-    LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
+    LcmCleanConfig, LcmCompressionResponse, LcmContentRange, LcmContentSlice, LcmDescribeResponse,
+    LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
     LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget,
     LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmLifecycleState, LcmLifecycleUpdate,

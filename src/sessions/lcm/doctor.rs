@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +7,7 @@ use libsql::{params, Connection, Value as SqlValue};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::{payload, schema, LcmError, LCM_SCHEMA_VERSION};
+use super::{payload, schema, security, LcmCleanConfig, LcmError, LCM_SCHEMA_VERSION};
 
 const MAX_SAMPLES: usize = 20;
 const RETENTION_OLD_DAYS: f64 = 30.0;
@@ -27,13 +27,25 @@ fn unixepoch() -> i64 {
 pub(crate) async fn doctor(
     conn: &Connection,
     storage_root: &Path,
+    db_path: &Path,
     provider: &str,
     session_id: Option<&str>,
     mode: &str,
     apply: bool,
+    clean_config: LcmCleanConfig,
 ) -> Result<Value, LcmError> {
-    let diagnostics = gather_diagnostics(conn, storage_root, provider, session_id).await?;
-    let repairs = plan_and_apply_repairs(conn, &diagnostics, mode, apply).await?;
+    let diagnostics =
+        gather_diagnostics(conn, storage_root, provider, session_id, &clean_config).await?;
+    let repairs = plan_and_apply_repairs(
+        conn,
+        db_path,
+        storage_root,
+        provider,
+        &diagnostics,
+        mode,
+        apply,
+    )
+    .await?;
     let issue_count = issue_count(&diagnostics);
     let applied_count = repairs["applied_actions"]
         .as_array()
@@ -52,7 +64,7 @@ pub(crate) async fn doctor(
         "provider": provider,
         "session_id": session_id,
         "mode": mode,
-        "dry_run": mode == "repair" && !apply,
+        "dry_run": matches!(mode, "repair" | "clean") && !apply,
         "apply": apply,
         "diagnostics": diagnostics,
         "repairs": repairs,
@@ -64,6 +76,7 @@ async fn gather_diagnostics(
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
 ) -> Result<Value, LcmError> {
     let schema_version = schema::schema_version(conn).await;
     let raw_message_count =
@@ -77,6 +90,7 @@ async fn gather_diagnostics(
     let summaries = summary_integrity(conn, provider, session_id).await?;
     let lifecycle = lifecycle_integrity(conn, provider, session_id).await?;
     let retention = retention_candidates(conn, provider, session_id).await?;
+    let cleanup = cleanup_candidates(conn, provider, session_id, clean_config).await?;
 
     Ok(json!({
         "schema": {
@@ -93,17 +107,22 @@ async fn gather_diagnostics(
         "summaries": summaries,
         "lifecycle": lifecycle,
         "retention": retention,
+        "cleanup": cleanup,
     }))
 }
 
 async fn plan_and_apply_repairs(
     conn: &Connection,
+    db_path: &Path,
+    storage_root: &Path,
+    provider: &str,
     diagnostics: &Value,
     mode: &str,
     apply: bool,
 ) -> Result<Value, LcmError> {
     let mut planned = Vec::new();
     let mut applied = Vec::new();
+    let mut backup = Value::Null;
     let raw_rebuild_needed = diagnostics["fts"]["raw"]["rebuild_needed"]
         .as_bool()
         .unwrap_or(false);
@@ -147,9 +166,36 @@ async fn plan_and_apply_repairs(
         }
     }
 
+    if mode == "clean" {
+        let candidate_count = diagnostics["cleanup"]["candidate_count"]
+            .as_i64()
+            .unwrap_or_default();
+        if candidate_count > 0 {
+            let action = json!({
+                "kind": "clean_lcm_noise",
+                "safe": true,
+                "description": "Delete LCM ignored/stateless session candidates and standalone heartbeat/noise raw messages",
+                "candidate_count": candidate_count,
+                "session_candidate_count": diagnostics["cleanup"]["session_candidates"].as_array().map(Vec::len).unwrap_or_default(),
+                "message_candidate_count": diagnostics["cleanup"]["message_candidates"].as_array().map(Vec::len).unwrap_or_default(),
+            });
+            planned.push(action.clone());
+            if apply {
+                backup = backup_database(db_path, storage_root)?;
+                let deleted = delete_clean_candidates(conn, provider, diagnostics).await?;
+                let mut applied_action = action;
+                if let Some(object) = applied_action.as_object_mut() {
+                    object.insert("deleted".to_string(), deleted);
+                }
+                applied.push(applied_action);
+            }
+        }
+    }
+
     Ok(json!({
         "planned_actions": planned,
         "applied_actions": applied,
+        "backup": backup,
         "unsafe_actions_skipped": [],
     }))
 }
@@ -194,6 +240,9 @@ fn issue_count(diagnostics: &Value) -> i64 {
             .as_i64()
             .unwrap_or(0)
         + diagnostics["lifecycle"]["orphan_debt"]
+            .as_i64()
+            .unwrap_or(0)
+        + diagnostics["cleanup"]["candidate_count"]
             .as_i64()
             .unwrap_or(0)
 }
@@ -888,6 +937,294 @@ async fn retention_candidates(
         "sessions_analyzed": analyzed,
         "candidate_count": candidates.len(),
         "candidates": candidates,
+    }))
+}
+
+#[derive(Default)]
+struct CleanupSessionCandidate {
+    classes: BTreeSet<&'static str>,
+    message_count: i64,
+    summary_node_count: i64,
+}
+
+async fn cleanup_candidates(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
+) -> Result<Value, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT store_id, message_id, session_id, role, COALESCE(content, index_text, '')
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+             ORDER BY session_id, store_id
+             LIMIT 5000",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let mut sessions = BTreeMap::<String, CleanupSessionCandidate>::new();
+    let mut message_candidates = Vec::new();
+    let mut ignored_session_count = 0_i64;
+    let mut stateless_session_count = 0_i64;
+    let mut noise_message_count = 0_i64;
+    let mut heartbeat_message_count = 0_i64;
+    let mut protected_noise_count = 0_i64;
+
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let message_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        let row_session_id: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+        let role: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+        let content: String = row.get(4).unwrap_or_default();
+
+        let ignored =
+            security::matches_any_pattern(&clean_config.ignore_session_patterns, &row_session_id);
+        let stateless = security::matches_any_pattern(
+            &clean_config.stateless_session_patterns,
+            &row_session_id,
+        );
+        if ignored || stateless {
+            let is_new = !sessions.contains_key(&row_session_id);
+            let summary_node_count = if is_new {
+                summary_count_for_session(conn, provider, &row_session_id).await?
+            } else {
+                0
+            };
+            let candidate = sessions.entry(row_session_id.clone()).or_default();
+            candidate.message_count += 1;
+            if is_new {
+                candidate.summary_node_count = summary_node_count;
+            }
+            if ignored {
+                candidate.classes.insert("ignored_session");
+            }
+            if stateless {
+                candidate.classes.insert("stateless_session");
+            }
+            continue;
+        }
+
+        let Some(reason) =
+            security::ignore_message_reason(&role, &content, &clean_config.ignore_message_patterns)
+        else {
+            continue;
+        };
+        if raw_message_has_summary_source(conn, store_id).await? {
+            protected_noise_count += 1;
+            continue;
+        }
+        noise_message_count += 1;
+        if reason == "heartbeat_progress" {
+            heartbeat_message_count += 1;
+        }
+        if message_candidates.len() < MAX_SAMPLES {
+            message_candidates.push(json!({
+                "store_id": store_id,
+                "message_id": message_id,
+                "session_id": row_session_id,
+                "role": role,
+                "reason": reason,
+            }));
+        }
+    }
+
+    let session_candidates = sessions
+        .iter()
+        .take(MAX_SAMPLES)
+        .map(|(session_id, candidate)| {
+            let classes = candidate.classes.iter().copied().collect::<Vec<_>>();
+            json!({
+                "session_id": session_id,
+                "classes": classes,
+                "message_count": candidate.message_count,
+                "summary_node_count": candidate.summary_node_count,
+            })
+        })
+        .collect::<Vec<_>>();
+    for candidate in sessions.values() {
+        if candidate.classes.contains("ignored_session") {
+            ignored_session_count += 1;
+        }
+        if candidate.classes.contains("stateless_session") {
+            stateless_session_count += 1;
+        }
+    }
+
+    Ok(json!({
+        "read_only": true,
+        "candidate_count": sessions.len() as i64 + noise_message_count,
+        "ignored_session_candidates": ignored_session_count,
+        "stateless_session_candidates": stateless_session_count,
+        "noise_message_candidates": noise_message_count,
+        "heartbeat_noise_message_candidates": heartbeat_message_count,
+        "protected_noise_messages_skipped": protected_noise_count,
+        "session_candidates": session_candidates,
+        "message_candidates": message_candidates,
+    }))
+}
+
+async fn raw_message_has_summary_source(
+    conn: &Connection,
+    store_id: i64,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_summary_sources
+             WHERE source_kind = 'raw_message' AND source_id = ?1",
+            params![store_id.to_string()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("summary source count returned no rows".to_string()))?;
+    let count: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(count > 0)
+}
+
+fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
+    let backup_dir = storage_root.join("lcm-clean-backups");
+    fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let backup_path = backup_dir.join(format!("sessions-clean-{stamp}-{}.db", std::process::id()));
+    let byte_count =
+        fs::copy(db_path, &backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
+    Ok(json!({
+        "ok": true,
+        "path": backup_path,
+        "byte_count": byte_count,
+    }))
+}
+
+async fn delete_clean_candidates(
+    conn: &Connection,
+    provider: &str,
+    diagnostics: &Value,
+) -> Result<Value, LcmError> {
+    let session_ids = diagnostics["cleanup"]["session_candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| candidate["session_id"].as_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let message_store_ids = diagnostics["cleanup"]["message_candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| candidate["store_id"].as_i64())
+        .collect::<Vec<_>>();
+
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let result =
+        delete_clean_candidates_in_transaction(conn, provider, &session_ids, &message_store_ids)
+            .await;
+    match result {
+        Ok(deleted) => match conn.execute("COMMIT", ()).await {
+            Ok(_) => Ok(deleted),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(LcmError::Db(err.to_string()))
+            }
+        },
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(err)
+        }
+    }
+}
+
+async fn delete_clean_candidates_in_transaction(
+    conn: &Connection,
+    provider: &str,
+    session_ids: &[String],
+    message_store_ids: &[i64],
+) -> Result<Value, LcmError> {
+    let mut deleted_sessions = 0_i64;
+    let mut deleted_messages = 0_i64;
+    for session_id in session_ids {
+        conn.execute(
+            "DELETE FROM lcm_summary_nodes WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id.as_str()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+        conn.execute(
+            "DELETE FROM lcm_external_payloads WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id.as_str()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+        let changed = conn
+            .execute(
+                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id.as_str()],
+            )
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?;
+        deleted_messages += changed as i64;
+        conn.execute(
+            "DELETE FROM lcm_lifecycle_state
+             WHERE provider = ?1
+               AND (conversation_id = ?2 OR current_session_id = ?2 OR last_finalized_session_id = ?2)",
+            params![provider, session_id.as_str()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+        deleted_sessions += 1;
+    }
+
+    for store_id in message_store_ids {
+        let mut rows = conn
+            .query(
+                "SELECT provider, message_id FROM lcm_raw_messages WHERE store_id = ?1",
+                params![*store_id],
+            )
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?
+        else {
+            continue;
+        };
+        let provider: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let message_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        conn.execute(
+            "DELETE FROM lcm_external_payloads WHERE provider = ?1 AND message_id = ?2",
+            params![provider.as_str(), message_id.as_str()],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+        let changed = conn
+            .execute(
+                "DELETE FROM lcm_raw_messages WHERE store_id = ?1",
+                params![*store_id],
+            )
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?;
+        deleted_messages += changed as i64;
+    }
+
+    Ok(json!({
+        "sessions": deleted_sessions,
+        "raw_messages": deleted_messages,
     }))
 }
 

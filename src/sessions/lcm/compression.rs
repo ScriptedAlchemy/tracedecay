@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    dag, raw, LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmLifecycleState,
+    dag, raw, security, LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmLifecycleState,
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest, LcmPreflightResponse,
     LcmRawMessage, LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode,
     LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
@@ -94,6 +94,19 @@ pub(crate) async fn preflight(
     storage_root: &Path,
     request: LcmPreflightRequest,
 ) -> Result<LcmPreflightResponse, LcmError> {
+    if let Some(reason) = filtered_session_reason(
+        &request.session_id,
+        &request.ignore_session_patterns,
+        &request.stateless_session_patterns,
+    ) {
+        return Ok(LcmPreflightResponse {
+            status: "ok".to_string(),
+            should_compress: false,
+            reason: reason.to_string(),
+            replay_messages: request.messages,
+        });
+    }
+
     ensure_session(conn, &request.provider, &request.session_id).await?;
     let ingested = ingest_active_messages(
         conn,
@@ -101,6 +114,7 @@ pub(crate) async fn preflight(
         &request.provider,
         &request.session_id,
         &request.messages,
+        &request.ignore_message_patterns,
     )
     .await?;
     let reason = if ingested.changed_replay {
@@ -121,6 +135,29 @@ pub(crate) async fn compress(
     storage_root: &Path,
     request: LcmCompressionRequest,
 ) -> Result<LcmCompressionResponse, LcmError> {
+    if let Some(reason) = filtered_session_reason(
+        &request.session_id,
+        &request.ignore_session_patterns,
+        &request.stateless_session_patterns,
+    ) {
+        let frontier = lifecycle_state_or_default(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &request.session_id,
+        )
+        .await?;
+        return Ok(compression_response(
+            "ok",
+            reason,
+            Vec::new(),
+            request.messages,
+            frontier,
+            None,
+            request.max_assembly_tokens,
+        ));
+    }
+
     ensure_session(conn, &request.provider, &request.session_id).await?;
     let ingested = ingest_active_messages(
         conn,
@@ -128,6 +165,7 @@ pub(crate) async fn compress(
         &request.provider,
         &request.session_id,
         &request.messages,
+        &request.ignore_message_patterns,
     )
     .await?;
 
@@ -592,6 +630,20 @@ fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
     }
 }
 
+fn filtered_session_reason(
+    session_id: &str,
+    ignore_session_patterns: &[String],
+    stateless_session_patterns: &[String],
+) -> Option<&'static str> {
+    if security::matches_any_pattern(ignore_session_patterns, session_id) {
+        Some("ignored_session")
+    } else if security::matches_any_pattern(stateless_session_patterns, session_id) {
+        Some("stateless_session")
+    } else {
+        None
+    }
+}
+
 fn bounded_leaf_chunk_len(
     backlog: &[LcmRawMessage],
     leaf_chunk_tokens: Option<i64>,
@@ -988,6 +1040,7 @@ async fn ingest_active_messages(
     provider: &str,
     session_id: &str,
     messages: &[Value],
+    ignore_message_patterns: &[String],
 ) -> Result<IngestedActiveMessages, LcmError> {
     let mut replay_messages = Vec::with_capacity(messages.len());
     let mut changed_replay = false;
@@ -1000,6 +1053,13 @@ async fn ingest_active_messages(
             .unwrap_or("user")
             .to_string();
         let content = message_content(message);
+        if security::ignore_message_reason(&role, &content, ignore_message_patterns).is_some() {
+            let mut replay = message.clone();
+            replay["role"] = Value::String(role);
+            replay["content"] = Value::String(content);
+            replay_messages.push(replay);
+            continue;
+        }
         let message_id = message
             .get("id")
             .or_else(|| message.get("message_id"))

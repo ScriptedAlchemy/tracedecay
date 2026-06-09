@@ -139,6 +139,9 @@ fn compress_request(
         messages: Vec::new(),
         current_tokens: Some(1_000),
         focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
         max_assembly_tokens: None,
         leaf_chunk_tokens: None,
@@ -162,6 +165,9 @@ fn limited_compress_request(
         messages: Vec::new(),
         current_tokens: Some(1_000),
         focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
         max_assembly_tokens,
         leaf_chunk_tokens,
@@ -271,6 +277,9 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             })],
             current_tokens: Some(100),
             focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -309,6 +318,152 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 }
 
 #[tokio::test]
+async fn ignored_session_pattern_skips_active_ingest_and_compression() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "cron-20260414").await;
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "cron-20260414".into(),
+            messages: vec![json!({
+                "id": "cron-message-1",
+                "role": "assistant",
+                "content": "scheduled report body that must not be indexed"
+            })],
+            current_tokens: Some(1_000),
+            focus_topic: None,
+            ignore_session_patterns: vec!["cron-*".into()],
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "should not be used".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "ignored_session");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(
+        response.replay_messages[0]["content"],
+        "scheduled report body that must not be indexed"
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some("cron-20260414"))
+            .await
+            .unwrap()
+            .raw_message_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "scratch-shell-a").await;
+
+    let response = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: "cursor".into(),
+            session_id: "scratch-shell-a".into(),
+            messages: vec![json!({
+                "id": "scratch-message-1",
+                "role": "user",
+                "content": "throwaway one-shot prompt"
+            })],
+            current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: vec!["scratch-shell-*".into()],
+            ignore_message_patterns: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "stateless_session");
+    assert_eq!(
+        response.replay_messages[0]["content"],
+        "throwaway one-shot prompt"
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some("scratch-shell-a"))
+            .await
+            .unwrap()
+            .raw_message_count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn ignore_message_patterns_and_heartbeat_noise_are_storage_only() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-noise").await;
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-noise".into(),
+            messages: vec![
+                json!({"id": "heartbeat-1", "role": "assistant", "content": "Still working..."}),
+                json!({"id": "cron-noise-1", "role": "user", "content": "Cronjob Response: noisy heartbeat"}),
+                json!({"id": "valuable-1", "role": "user", "content": "real user request"}),
+            ],
+            current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: vec!["Cronjob Response:*".into()],
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            summarizer: LcmSummarizerMode::Noop,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "Still working...",
+            "Cronjob Response: noisy heartbeat",
+            "real user request"
+        ]
+    );
+    let page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-noise".into(),
+            after_store_id: None,
+            limit: 10,
+            role: None,
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].content, "real user request");
+}
+
+#[tokio::test]
 async fn preflight_can_request_compression_when_ingest_protection_changes_replay() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
@@ -324,6 +479,9 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
                 "content": format!("data:image/png;base64,{}", "A".repeat(100_000))
             })],
             current_tokens: Some(100),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
         })
         .await
         .unwrap();
@@ -614,6 +772,9 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         session_id: "session-1".into(),
         messages: messages.clone(),
         current_tokens: Some(10),
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
     })
     .await
     .unwrap();
@@ -634,6 +795,9 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         messages,
         current_tokens: Some(10),
         focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
         max_assembly_tokens: None,
         leaf_chunk_tokens: None,
@@ -684,6 +848,9 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             messages: Vec::new(),
             current_tokens: Some(1_000),
             focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: Some(0),
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -726,6 +893,9 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             messages: Vec::new(),
             current_tokens: Some(1_000),
             focus_topic: Some("billing".into()),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -934,6 +1104,9 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             messages: Vec::new(),
             current_tokens: Some(100),
             focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -1027,6 +1200,9 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
             messages: Vec::new(),
             current_tokens: Some(100),
             focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -1116,6 +1292,9 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             messages: Vec::new(),
             current_tokens: Some(100),
             focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,

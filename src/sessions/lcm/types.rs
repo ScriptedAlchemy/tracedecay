@@ -334,6 +334,16 @@ pub struct LcmStatus {
     pub redaction: LcmRedactionStatus,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmCleanConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stateless_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_message_patterns: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadStatus {
     pub externalized_count: i64,
@@ -401,6 +411,12 @@ pub struct LcmPreflightRequest {
     pub session_id: String,
     pub messages: Vec<serde_json::Value>,
     pub current_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stateless_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_message_patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

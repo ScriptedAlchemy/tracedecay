@@ -1745,6 +1745,14 @@ fn lcm_hermes_home_schema() -> Value {
     })
 }
 
+fn lcm_pattern_array_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": description
+    })
+}
+
 fn lcm_storage_scope_requires_hermes_home() -> Value {
     json!([{
         "if": {
@@ -1801,13 +1809,16 @@ fn def_lcm_doctor() -> ToolDefinition {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["diagnose", "repair", "retention"],
-                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates."
+                    "enum": ["diagnose", "repair", "retention", "clean"],
+                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup."
                 },
                 "apply": {
                     "type": "boolean",
-                    "description": "When mode=repair, apply safe repairs such as FTS rebuild. Defaults to false for dry-run."
+                    "description": "When mode=repair or mode=clean, apply safe repairs/cleanup. Defaults to false for dry-run."
                 },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise."),
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
             },
@@ -2082,6 +2093,19 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "type": "string",
                     "description": "Provider-local session id."
                 },
+                "messages": {
+                    "type": "array",
+                    "description": "Current active context messages to inspect before compression.",
+                    "items": {"type": "object"}
+                },
+                "current_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional current context token estimate."
+                },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
             },
@@ -2120,6 +2144,9 @@ fn def_lcm_compress() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional focus for the summary request prompt."
                 },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
                 "expected_current_frontier_store_id": {
                     "type": "integer",
                     "minimum": 0,

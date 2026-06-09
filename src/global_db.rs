@@ -32,6 +32,7 @@ pub struct SavingsDay {
 pub struct GlobalDb {
     conn: Connection,
     storage_root: PathBuf,
+    db_path: PathBuf,
     _db: LibsqlDatabase,
 }
 
@@ -293,6 +294,7 @@ impl GlobalDb {
         Some(Self {
             conn,
             storage_root,
+            db_path: db_path.to_path_buf(),
             _db: db,
         })
     }
@@ -325,6 +327,7 @@ impl GlobalDb {
         Some(Self {
             conn,
             storage_root,
+            db_path: db_path.to_path_buf(),
             _db: db,
         })
     }
@@ -750,14 +753,17 @@ impl GlobalDb {
         session_id: Option<&str>,
         mode: &str,
         apply: bool,
+        clean_config: crate::sessions::lcm::LcmCleanConfig,
     ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
         crate::sessions::lcm::doctor::doctor(
             &self.conn,
             &self.storage_root,
+            &self.db_path,
             provider,
             session_id,
             mode,
             apply,
+            clean_config,
         )
         .await
     }

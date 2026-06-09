@@ -6,9 +6,9 @@ use crate::errors::{Result, TokenSaveError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
-    LcmCompressionRequest, LcmContentSlice, LcmExpandQueryRequest, LcmExpandRequest,
-    LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope,
-    LcmSummarizerMode,
+    LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmExpandQueryRequest,
+    LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest, LcmPreflightRequest,
+    LcmScope, LcmSummarizerMode,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
@@ -588,11 +588,19 @@ fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
 fn lcm_doctor_mode(args: &Value) -> Result<&str> {
     let mode = string_arg(args, "mode").unwrap_or("diagnose");
     match mode {
-        "diagnose" | "repair" | "retention" => Ok(mode),
+        "diagnose" | "repair" | "retention" | "clean" => Ok(mode),
         _ => Err(argument_error(
-            "mode must be one of diagnose, repair, retention",
+            "mode must be one of diagnose, repair, retention, clean",
         )),
     }
+}
+
+fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
+    Ok(LcmCleanConfig {
+        ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
+        stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
+        ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
+    })
 }
 
 fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
@@ -914,14 +922,15 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
     let session_id = string_arg(&args, "session_id");
     let mode = lcm_doctor_mode(&args)?;
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
-    let read_only_existing = mode != "repair" || !apply;
+    let clean_config = lcm_clean_config(&args)?;
+    let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
     let storage = match open_lcm_storage_with_mode(cg, &args, read_only_existing).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
     let mut payload = storage
         .db
-        .lcm_doctor(provider, session_id, mode, apply)
+        .lcm_doctor(provider, session_id, mode, apply, clean_config)
         .await
         .map_err(lcm_error)?;
     if let Some(object) = payload.as_object_mut() {
@@ -1100,6 +1109,9 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
             session_id: session_id.to_string(),
             messages: messages_arg(&args)?,
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
+            ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
+            stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
+            ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
         })
         .await
         .map_err(lcm_error)?;
@@ -1128,6 +1140,9 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
             messages: messages_arg(&args)?,
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
             focus_topic: string_arg(&args, "focus_topic").map(str::to_string),
+            ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
+            stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
+            ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
             expected_current_frontier_store_id: non_negative_i64_arg(
                 &args,
                 "expected_current_frontier_store_id",

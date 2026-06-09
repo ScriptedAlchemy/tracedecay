@@ -1,5 +1,6 @@
 use tokensave::sessions::lcm::security::should_externalize;
 use tokensave::sessions::lcm::security::{heartbeat_noise_reason, quarantine_reason};
+use tokensave::sessions::lcm::security::{ignore_message_reason, pattern_matches};
 
 #[test]
 fn classifies_data_uri_and_long_base64_for_externalization() {
@@ -65,6 +66,33 @@ fn heartbeat_noise_is_diagnostic_only() {
         "Still working..."
     ));
     assert_eq!(heartbeat_noise_reason("user", "Still working..."), None);
+}
+
+#[test]
+fn ignore_and_stateless_patterns_use_hermes_style_globs() {
+    assert!(pattern_matches("cron-*", "cron-20260414"));
+    assert!(pattern_matches("tmp-session-?", "tmp-session-a"));
+    assert!(!pattern_matches("cron-*", "interactive-20260414"));
+}
+
+#[test]
+fn ignore_message_reason_classifies_heartbeat_and_configured_noise_without_body_leakage() {
+    assert_eq!(
+        ignore_message_reason("assistant", "Still working...", &Vec::<String>::new()),
+        Some("heartbeat_progress")
+    );
+    assert_eq!(
+        ignore_message_reason(
+            "user",
+            "Cronjob Response: noisy heartbeat",
+            &["Cronjob Response:*"]
+        ),
+        Some("ignore_message_pattern")
+    );
+    assert_eq!(
+        ignore_message_reason("user", "real user request", &["Cronjob Response:*"]),
+        None
+    );
 }
 
 #[test]

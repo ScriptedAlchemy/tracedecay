@@ -233,7 +233,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tokensave_lcm_doctor definition");
     assert_eq!(
         doctor.input_schema["properties"]["mode"]["enum"],
-        json!(["diagnose", "repair", "retention"])
+        json!(["diagnose", "repair", "retention", "clean"])
     );
     assert_eq!(
         doctor.input_schema["properties"]["apply"]["type"],
@@ -3942,6 +3942,18 @@ async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn lcm_summary_node_count(cg: &TokenSave, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_summary_nodes WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 async fn lcm_schema_migration_count(cg: &TokenSave) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
@@ -3972,6 +3984,170 @@ async fn wipe_lcm_raw_fts_for_message(cg: &TokenSave, message_id: &str) {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must not leak",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "scratch-shell-a",
+        "scratch-shell-message",
+        "scratch one-shot body that must not leak",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        3,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        4,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": false,
+            "ignore_session_patterns": ["cron-*"],
+            "stateless_session_patterns": ["scratch-shell-*"],
+            "ignore_message_patterns": ["Cronjob Response:*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["cleanup"]["read_only"], true);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["ignored_session_candidates"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["stateless_session_candidates"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        1
+    );
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "clean_lcm_noise"));
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "scratch-shell-a").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert!(!text.contains("scheduled report body that must not leak"));
+    assert!(!text.contains("scratch one-shot body that must not leak"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must be deleted only after backup",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let cron_store_id = lcm_raw_store_id(&cg, "cron-20260414-message").await;
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "cron-20260414".to_string(),
+        session_id: "cron-20260414".to_string(),
+        depth: 0,
+        summary_text: "scheduled report summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: cron_store_id,
+        }],
+        source_token_count: 12,
+        summary_token_count: 3,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("test clean candidate".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .unwrap();
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        3,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("clean apply should report backup path");
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert!(!text.contains("scheduled report body that must be deleted only after backup"));
+    assert!(!text.contains("valuable payload to preserve"));
 }
 
 #[tokio::test]

@@ -9,6 +9,12 @@ pub struct LcmCompressionRequest {
     pub messages: Vec<Value>,
     pub current_tokens: Option<i64>,
     pub focus_topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stateless_session_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_message_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_current_frontier_store_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
