@@ -1023,13 +1023,13 @@ impl TokenSave {
     }
 
     async fn resolve_unresolved_refs(&self) -> Result<()> {
-        let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
-        let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
         let unresolved = self.db.get_unresolved_refs().await?;
         if unresolved.is_empty() {
             return Ok(());
         }
 
+        let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
+        let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
         let resolution = resolver.resolve_all(&unresolved);
         let edges = resolver.create_edges(&resolution.resolved);
         if !edges.is_empty() {
