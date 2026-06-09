@@ -1,9 +1,9 @@
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
-    LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest,
-    LcmScope, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft, LCM_SCHEMA_VERSION,
-    MAX_DERIVED_SNIPPET_CHARS,
+    LcmContentSlice, LcmError, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest,
+    LcmLoadSessionRequest, LcmScope, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+    LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -237,6 +237,70 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
 }
 
 #[tokio::test]
+async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "The regression lives in src/foo.rs and needs a tokenizer-style query.".to_string(),
+            "Another message mentions src and foo but not the extension token.".to_string(),
+        ],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "src/foo.rs".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+        })
+        .await
+        .expect("path-like grep should not miss because punctuation was collapsed");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].store_id, Some(store_ids[0]));
+    assert!(hits[0].snippet.contains("src/foo.rs"));
+}
+
+#[tokio::test]
+async fn grep_quotes_reserved_operator_looking_query_text() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "A literal OR token appears in this transcript.".to_string(),
+            "This message deliberately omits the operator word.".to_string(),
+        ],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "OR".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+        })
+        .await
+        .expect("reserved FTS operator text should be treated as literal text");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].store_id, Some(store_ids[0]));
+    assert!(hits[0].snippet.contains("OR"));
+}
+
+#[tokio::test]
 async fn status_reports_schema_frontier_payload_and_debt_counts() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tokensave");
@@ -433,4 +497,89 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
         .unwrap();
     assert_eq!(raw_external.storage_kind, LcmStorageKind::External);
     assert!(!payload_expansion.content.contains("ZZZZZZZZZZ"));
+}
+
+#[tokio::test]
+async fn expand_slices_summary_source_content_and_nested_source_bodies() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let huge_source = format!("source-prefix-{}", "X".repeat(128_000));
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[huge_source]).await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "summary source slicing regression",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("summary should insert");
+
+    let expansion = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: summary.node_id.clone(),
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 0,
+                limit: "source-prefix".chars().count(),
+            }),
+        })
+        .await
+        .expect("summary should expand");
+
+    assert_eq!(expansion.summary_sources.len(), 1);
+    let source = &expansion.summary_sources[0];
+    assert_eq!(source.content, "source-prefix");
+    assert!(source.content.chars().count() <= "source-prefix".chars().count());
+    let raw_source = source.raw_message.as_ref().expect("raw source metadata");
+    assert_eq!(raw_source.store_id, store_ids[0]);
+    assert_eq!(raw_source.content, "source-prefix");
+    assert_eq!(
+        raw_source.content.chars().count(),
+        "source-prefix".chars().count()
+    );
+    assert!(!raw_source.content_hash.is_empty());
+
+    let rendered = serde_json::to_string(&expansion).unwrap();
+    assert!(!rendered.contains("XXXXXXXXXX"));
+    assert!(rendered.contains("\"content_hash\""));
+}
+
+#[tokio::test]
+async fn expand_wrapper_denies_cross_session_summary_nodes() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids =
+        insert_raw_messages(&db, "cursor", "session-1", &["owned by session one".into()]).await;
+    insert_session(&db, "cursor", "session-2").await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "summary belongs to session one",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("summary should insert");
+
+    let err = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-2".into(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: summary.node_id,
+            },
+            content_slice: None,
+        })
+        .await
+        .expect_err("wrapper expansion should reject nodes from another session");
+
+    assert_eq!(err, LcmError::SummaryNodeNotFound);
 }

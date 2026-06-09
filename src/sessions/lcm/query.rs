@@ -4,10 +4,10 @@ use libsql::{params, Connection, Value};
 
 use super::{
     dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse, LcmError,
-    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmGrepHit, LcmGrepRequest,
-    LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
-    LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind, LcmSummaryNodeOverview,
-    LCM_SCHEMA_VERSION,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit,
+    LcmGrepRequest, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
+    LcmRawMessage, LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind,
+    LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -127,13 +127,14 @@ pub(crate) async fn expand(
                     .await?;
             let (content, range) =
                 slice_content(&expansion.summary.summary_text, request.content_slice);
+            let summary_sources = slice_summary_sources(expansion.sources, request.content_slice);
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
                 content_range: range,
                 raw_message: None,
                 summary_node: Some(expansion.summary),
-                summary_sources: expansion.sources,
+                summary_sources,
                 payload_ref: None,
             })
         }
@@ -259,6 +260,26 @@ fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmC
             truncated,
         },
     )
+}
+
+fn slice_summary_sources(
+    sources: Vec<LcmExpandedSummarySource>,
+    slice: Option<LcmContentSlice>,
+) -> Vec<LcmExpandedSummarySource> {
+    sources
+        .into_iter()
+        .map(|mut source| {
+            let (content, _) = slice_content(&source.content, slice);
+            source.content = content.clone();
+            if let Some(raw_message) = source.raw_message.as_mut() {
+                raw_message.content = content.clone();
+            }
+            if let Some(summary_node) = source.summary_node.as_mut() {
+                summary_node.summary_text = content;
+            }
+            source
+        })
+        .collect()
 }
 
 async fn raw_grep_hits(
@@ -592,16 +613,28 @@ fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&s
 }
 
 fn fts_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|part| {
-            part.chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                .collect::<String>()
-        })
-        .filter(|part| !part.is_empty())
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    for ch in query.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            terms.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+
+    terms
+        .into_iter()
+        .map(|term| quote_fts_term(&term))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn quote_fts_term(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }
 
 fn clamp_limit(limit: usize) -> usize {
