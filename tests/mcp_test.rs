@@ -13,7 +13,7 @@ fn test_parse_jsonrpc_request() {
 
     let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
     assert_eq!(request.method, "tools/list");
-    assert_eq!(request.id, serde_json::Value::Number(1.into()));
+    assert_eq!(request.id, Some(serde_json::Value::Number(1.into())));
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn test_notification_without_id() {
 
     let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
     assert_eq!(request.method, "initialized");
-    assert!(request.id.is_null());
+    assert!(request.id.is_none());
     assert!(request.params.is_none());
 }
 
@@ -187,6 +187,9 @@ fn test_request_with_string_id() {
     });
 
     let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
-    assert_eq!(request.id, serde_json::Value::String("req-42".to_string()));
+    assert_eq!(
+        request.id,
+        Some(serde_json::Value::String("req-42".to_string()))
+    );
     assert_eq!(request.method, "ping");
 }
