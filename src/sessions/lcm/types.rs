@@ -339,6 +339,10 @@ pub struct LcmPayloadStatus {
     pub externalized_count: i64,
     pub missing_count: i64,
     pub unreferenced_count: i64,
+    pub placeholder_ref_count: i64,
+    pub missing_placeholder_metadata_count: i64,
+    pub missing_placeholder_file_count: i64,
+    pub gc_candidate_count: i64,
     pub root_contained: bool,
 }
 

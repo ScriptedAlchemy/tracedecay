@@ -1,4 +1,5 @@
 use tokensave::sessions::lcm::security::should_externalize;
+use tokensave::sessions::lcm::security::{heartbeat_noise_reason, quarantine_reason};
 
 #[test]
 fn classifies_data_uri_and_long_base64_for_externalization() {
@@ -31,6 +32,39 @@ fn classifies_data_uri_and_long_base64_for_externalization() {
         Some("message"),
         "short useful text"
     ));
+}
+
+#[test]
+fn classifies_repetitive_assistant_output_for_quarantine() {
+    let repeated =
+        "same repeated assistant diagnostic segment with very low novelty.\n".repeat(1_200);
+    assert_eq!(
+        quarantine_reason("assistant", Some("message"), &repeated),
+        Some("high_repetition")
+    );
+    assert!(should_externalize("assistant", Some("message"), &repeated));
+
+    let varied_report = (0..1_200)
+        .map(|idx| format!("line {idx}: varied diagnostic identifier {idx:x}\n"))
+        .collect::<String>();
+    assert_eq!(
+        quarantine_reason("assistant", Some("message"), &varied_report),
+        None
+    );
+}
+
+#[test]
+fn heartbeat_noise_is_diagnostic_only() {
+    assert_eq!(
+        heartbeat_noise_reason("assistant", "Still working..."),
+        Some("heartbeat_progress")
+    );
+    assert!(!should_externalize(
+        "assistant",
+        Some("message"),
+        "Still working..."
+    ));
+    assert_eq!(heartbeat_noise_reason("user", "Still working..."), None);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
@@ -87,6 +88,14 @@ fn expected_payload_ref(
     format!("payload_{owner_hash}.payload")
 }
 
+fn externalized_ref_from_placeholder(text: &str) -> String {
+    let marker = "ref=";
+    let start = text.find(marker).expect("placeholder ref") + marker.len();
+    let tail = &text[start..];
+    let end = tail.find([']', ',', ';']).unwrap_or_else(|| tail.len());
+    tail[..end].trim().to_string()
+}
+
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
     SessionRecord {
         provider: provider.to_string(),
@@ -127,6 +136,178 @@ fn raw_message(
         source_offset: None,
         metadata_json: None,
     }
+}
+
+#[tokio::test]
+async fn externalizes_nested_json_media_payload_without_externalizing_scaffold() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let media_payload = format!(
+        "data:image/png;base64,{}",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
+    );
+    let content = json!({
+        "content": [
+            {"type": "text", "text": "keep searchable nested canary"},
+            {"type": "image_url", "image_url": {"url": media_payload}},
+        ],
+        "tool_result": {"mime": "image/png"}
+    })
+    .to_string();
+    let mut message = raw_message("cursor", "nested-media", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("nested media payload should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "nested-media")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.contains("keep searchable nested canary"));
+    assert!(!raw.content.contains("QWxhZGRpbjpvcGVuIHNlc2FtZQ"));
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["nested_external_payloads"], 1);
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &payload_ref,
+            0,
+            media_payload.chars().count(),
+        )
+        .await
+        .expect("nested payload should expand with hash and ownership checks");
+    assert_eq!(expanded.content, media_payload);
+    assert_eq!(lcm_fts_count(&db_path, "nested").await, 1);
+    assert_eq!(lcm_fts_count(&db_path, "QWxhZGRpbjpvcGVu").await, 0);
+}
+
+#[tokio::test]
+async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let secret = "sk-redaction1234567890abcdef";
+    let mut message = raw_message(
+        "cursor",
+        "redacted-secret",
+        "session-1",
+        "user",
+        &format!("api_key={secret} keep searchable redaction canary"),
+    );
+    message.kind = Some("message".to_string());
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["api_key"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("redacted message should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "redacted-secret")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains(secret));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=api_key"));
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(
+        metadata["ingest_protection"]["redaction_patterns"],
+        json!(["api_key"])
+    );
+
+    let status = db
+        .lcm_status("cursor", Some("session-1"))
+        .await
+        .expect("status should load");
+    assert_eq!(status.redaction.enabled, true);
+    assert_eq!(status.redaction.lossy_records, 1);
+    assert_eq!(
+        lcm_fts_count(&db_path, "redaction1234567890abcdef").await,
+        0
+    );
+    assert_eq!(lcm_fts_count(&db_path, "redaction").await, 1);
+}
+
+#[tokio::test]
+async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let repeated_segment = "LOOP_SEGMENT repeated assistant diagnostic line.\n";
+    let body = repeated_segment.repeat(2_000);
+    assert!(body.chars().count() > 65_536);
+    let mut message = raw_message("cursor", "assistant-loop", "session-1", "assistant", &body);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("repetitive assistant output should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "assistant-loop")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::External);
+    let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["ingest_protection"]["kind"],
+        "quarantined_assistant_output"
+    );
+    assert_eq!(metadata["ingest_protection"]["reason"], "high_repetition");
+    assert!(!raw.content.contains("LOOP_SEGMENT"));
+    let (snippet_text, index_text) =
+        raw_snippet_and_index(&db_path, "cursor", "assistant-loop").await;
+    assert!(snippet_text.contains("quarantined_assistant_output"));
+    assert_eq!(snippet_text, index_text);
+    assert!(!index_text.contains("LOOP_SEGMENT"));
+    assert_eq!(lcm_fts_count(&db_path, "LOOP_SEGMENT").await, 0);
+
+    let expanded = store
+        .lcm_expand_payload("cursor", "session-1", payload_ref, 0, body.chars().count())
+        .await
+        .expect("quarantined payload should expand");
+    assert_eq!(expanded.content, body);
 }
 
 #[tokio::test]

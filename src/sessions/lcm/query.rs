@@ -25,6 +25,12 @@ struct LcmLifecycleMetadata {
     last_finalized_frontier_store_id: Option<i64>,
 }
 
+struct PlaceholderPayloadStatus {
+    placeholder_ref_count: i64,
+    missing_metadata_count: i64,
+    missing_file_count: i64,
+}
+
 pub(crate) async fn load_session(
     conn: &Connection,
     request: LcmLoadSessionRequest,
@@ -362,12 +368,16 @@ pub(crate) async fn status(
     let missing_payload_count =
         count_missing_payloads(conn, storage_root, provider, session_id).await?;
     let unreferenced_payload_count = count_unreferenced_payloads(conn, storage_root).await?;
+    let placeholder_status =
+        placeholder_payload_status(conn, storage_root, provider, session_id).await?;
     let maintenance_debt_count =
         compression::maintenance_debt_count(conn, provider, session_id).await?;
     let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
     let frontier_count = count_frontier_rows(conn, provider, session_id).await?;
     let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
     let legacy_truncated_count = count_legacy_truncated(conn, provider, session_id).await?;
+    let lossy_ingest_records = count_lossy_ingest_records(conn, provider, session_id).await?;
+    let lossy_records = legacy_truncated_count + lossy_ingest_records;
 
     Ok(LcmStatus {
         schema_version: schema::schema_version(conn)
@@ -384,6 +394,10 @@ pub(crate) async fn status(
             externalized_count: external_payload_count,
             missing_count: missing_payload_count,
             unreferenced_count: unreferenced_payload_count,
+            placeholder_ref_count: placeholder_status.placeholder_ref_count,
+            missing_placeholder_metadata_count: placeholder_status.missing_metadata_count,
+            missing_placeholder_file_count: placeholder_status.missing_file_count,
+            gc_candidate_count: unreferenced_payload_count,
             root_contained: payload_root_contained(storage_root),
         },
         lifecycle: LcmLifecycleStatus {
@@ -396,8 +410,8 @@ pub(crate) async fn status(
             last_finalized_frontier_store_id: lifecycle_metadata.last_finalized_frontier_store_id,
         },
         redaction: LcmRedactionStatus {
-            enabled: false,
-            lossy_records: legacy_truncated_count,
+            enabled: lossy_records > 0,
+            lossy_records,
             legacy_truncated_count,
         },
     })
@@ -967,6 +981,87 @@ async fn count_unreferenced_payloads(
     Ok(unreferenced)
 }
 
+async fn placeholder_payload_status(
+    conn: &Connection,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<PlaceholderPayloadStatus, LcmError> {
+    let metadata_refs = metadata_refs_for_scope(conn, provider, session_id).await?;
+    let placeholder_refs = placeholder_refs_for_scope(conn, provider, session_id).await?;
+    let dir = payload::payload_dir(storage_root);
+    let mut missing_metadata_count = 0_i64;
+    let mut missing_file_count = 0_i64;
+    for payload_ref in &placeholder_refs {
+        if !metadata_refs.contains(payload_ref) {
+            missing_metadata_count += 1;
+        }
+        if payload::validate_payload_ref(payload_ref).is_err() || !dir.join(payload_ref).is_file() {
+            missing_file_count += 1;
+        }
+    }
+    Ok(PlaceholderPayloadStatus {
+        placeholder_ref_count: placeholder_refs.len() as i64,
+        missing_metadata_count,
+        missing_file_count,
+    })
+}
+
+async fn metadata_refs_for_scope(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<BTreeSet<String>, LcmError> {
+    let mut refs = BTreeSet::new();
+    let mut rows = conn
+        .query(
+            "SELECT payload_ref
+             FROM lcm_external_payloads
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        refs.insert(row.get(0).map_err(|err| LcmError::Db(err.to_string()))?);
+    }
+    Ok(refs)
+}
+
+async fn placeholder_refs_for_scope(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<BTreeSet<String>, LcmError> {
+    let mut refs = BTreeSet::new();
+    let mut rows = conn
+        .query(
+            "SELECT content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        for index in 0..4 {
+            let value: Option<String> = row.get(index).unwrap_or(None);
+            if let Some(value) = value {
+                refs.extend(payload::extract_payload_refs_from_text(&value));
+            }
+        }
+    }
+    Ok(refs)
+}
+
 fn payload_root_contained(storage_root: &Path) -> bool {
     let dir = payload::payload_dir(storage_root);
     if !dir.exists() {
@@ -1092,6 +1187,41 @@ async fn count_legacy_truncated(
         .map_err(|err| LcmError::Db(err.to_string()))?
         .ok_or_else(|| LcmError::Db("legacy truncated count query returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+}
+
+async fn count_lossy_ingest_records(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1
+               AND (?2 IS NULL OR session_id = ?2)
+               AND metadata_json IS NOT NULL",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut count = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let metadata: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        if serde_json::from_str::<serde_json::Value>(&metadata)
+            .ok()
+            .and_then(|value| value.get("ingest_protection").cloned())
+            .and_then(|value| value.get("lossy").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 async fn load_raw_message_by_store_id(

@@ -71,6 +71,24 @@ pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
     }
 }
 
+pub(crate) fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative) = text[offset..].find("ref=") {
+        let start = offset + relative + "ref=".len();
+        let tail = &text[start..];
+        let end = tail
+            .find(|ch: char| ch == ']' || ch == ';' || ch == ',' || ch.is_whitespace())
+            .unwrap_or(tail.len());
+        let candidate = tail[..end].trim();
+        if validate_payload_ref(candidate).is_ok() && !refs.iter().any(|value| value == candidate) {
+            refs.push(candidate.to_string());
+        }
+        offset = start.saturating_add(end).min(text.len());
+    }
+    refs
+}
+
 pub(crate) fn write_external_payload(
     storage_root: &Path,
     provider: &str,
@@ -101,7 +119,7 @@ pub(crate) fn write_external_payload(
         byte_count: content.len() as u64,
         char_count: content.chars().count() as u64,
         created_at: unixepoch(),
-        metadata_json: None,
+        metadata_json: _metadata_json,
     })
 }
 
@@ -214,10 +232,45 @@ async fn ensure_current_raw_payload_ref(
         .map_err(|err| LcmError::Db(err.to_string()))?
         .is_some()
     {
-        Ok(())
-    } else {
-        Err(LcmError::PayloadNotFound)
+        return Ok(());
     }
+
+    let mut rows = conn
+        .query(
+            "SELECT content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1
+               AND session_id = ?2
+               AND message_id = ?3
+             LIMIT 1",
+            params![
+                payload.provider.as_str(),
+                payload.session_id.as_str(),
+                payload.message_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    else {
+        return Err(LcmError::PayloadNotFound);
+    };
+    for index in 0..4 {
+        let value: Option<String> = row.get(index).unwrap_or(None);
+        if value
+            .as_deref()
+            .map(extract_payload_refs_from_text)
+            .unwrap_or_default()
+            .iter()
+            .any(|reference| reference == &payload.payload_ref)
+        {
+            return Ok(());
+        }
+    }
+    Err(LcmError::PayloadNotFound)
 }
 
 async fn load_payload_metadata(

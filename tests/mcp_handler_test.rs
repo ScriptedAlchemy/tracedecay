@@ -4031,6 +4031,77 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
 }
 
 #[tokio::test]
+async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let missing_ref = "payload_missing_placeholder_test.payload";
+    let placeholder = format!(
+        "[Externalized LCM ingest payload: kind=ingest_payload; role=user; field=content; chars=2048; bytes=2048; ref={missing_ref}]"
+    );
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-placeholder",
+        "lcm-doctor-placeholder-message",
+        placeholder,
+        1,
+    )
+    .await;
+
+    let payload_dir = cg.project_root().join(".tokensave/lcm-payloads");
+    fs::create_dir_all(&payload_dir).unwrap();
+    fs::write(
+        payload_dir.join("payload_gc_candidate_test.payload"),
+        "gc candidate body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-placeholder",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["payloads"]["gc_candidate_files"], 1);
+    assert!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["payload_ref"] == missing_ref)
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["gc_candidate_payload_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("payload_gc_candidate_test.payload"))
+    );
+    let text = extract_text(&result.value);
+    assert!(!text.contains("gc candidate body that must not be returned"));
+}
+
+#[tokio::test]
 async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_tool_result_message(
