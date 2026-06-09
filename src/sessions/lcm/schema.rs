@@ -1,14 +1,11 @@
 use libsql::{params, Connection, Value};
-use sha2::{Digest, Sha256};
 
-use super::{LcmRawMessage, LcmStorageKind};
+use super::{raw, LcmRawMessage, LcmStorageKind};
 
 pub const LCM_SCHEMA_VERSION: i64 = 1;
 
 const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
-const MAX_SNIPPET_CHARS: usize = 2_048;
-const MAX_INDEX_CHARS: usize = 64 * 1024;
 
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
     conn.execute_batch(
@@ -152,9 +149,8 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
         let content: String = row.get(6).ok()?;
         let metadata_json: Option<String> = row.get(7).ok()?;
         let legacy_truncated = content.contains(LEGACY_TRUNCATION_MARKER);
-        let content_hash = sha256_hex(&content);
-        let snippet_text = bounded_chars(&content, MAX_SNIPPET_CHARS);
-        let index_text = bounded_chars(&content, MAX_INDEX_CHARS);
+        let content_hash = raw::sha256_hex(&content);
+        let derived_text = raw::derived_text_for_index(&content);
 
         conn.execute(
             "INSERT OR IGNORE INTO lcm_raw_messages (
@@ -173,8 +169,8 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
                 content.as_str(),
                 content_hash.as_str(),
                 LcmStorageKind::Inline.as_str(),
-                snippet_text.as_str(),
-                index_text.as_str(),
+                derived_text.as_str(),
+                derived_text.as_str(),
                 if legacy_truncated { 1_i64 } else { 0_i64 },
                 opt_text(metadata_json.as_deref()),
             ],
@@ -183,23 +179,6 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
         .ok()?;
     }
     Some(())
-}
-
-fn sha256_hex(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn bounded_chars(text: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (idx, ch) in text.chars().enumerate() {
-        if idx >= max_chars {
-            break;
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn opt_text(value: Option<&str>) -> Value {
