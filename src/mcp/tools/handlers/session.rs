@@ -1147,6 +1147,8 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
         "summary_nodes_created": response.summary_nodes_created,
         "summary_nodes": response.summary_nodes,
         "replay_messages": response.replay_messages,
+        "replay_token_estimate": response.replay_token_estimate,
+        "replay_over_budget": response.replay_over_budget,
         "frontier": response.frontier,
         "summary_request": response.summary_request,
     })))

@@ -437,6 +437,8 @@ pub struct LcmCompressionResponse {
     pub summary_nodes_created: usize,
     pub summary_nodes: Vec<LcmSummaryNode>,
     pub replay_messages: Vec<serde_json::Value>,
+    pub replay_token_estimate: i64,
+    pub replay_over_budget: bool,
     pub frontier: LcmLifecycleState,
     pub summary_request: Option<LcmSummaryRequest>,
 }

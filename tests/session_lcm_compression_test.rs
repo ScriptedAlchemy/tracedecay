@@ -194,6 +194,21 @@ fn summary_draft(
     }
 }
 
+fn summary_draft_with_times(
+    provider: &str,
+    session_id: &str,
+    depth: i64,
+    summary_text: &str,
+    source_refs: Vec<LcmSourceRef>,
+    source_time_start: i64,
+    source_time_end: i64,
+) -> LcmSummaryNodeDraft {
+    let mut draft = summary_draft(provider, session_id, depth, summary_text, source_refs);
+    draft.source_time_start = Some(source_time_start);
+    draft.source_time_end = Some(source_time_end);
+    draft
+}
+
 #[tokio::test]
 async fn lifecycle_frontier_survives_reopen() {
     let tmp = TempDir::new().unwrap();
@@ -442,6 +457,64 @@ async fn compression_preserves_leading_system_developer_tool_anchor_outside_summ
     assert_eq!(
         summarized_contents,
         vec!["old user request", "old assistant response"]
+    );
+}
+
+#[tokio::test]
+async fn compression_summarizes_historical_tool_messages_instead_of_pinning_all() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "system policy anchor"),
+            ("tool", "large historical tool result"),
+            ("user", "old user follow-up"),
+            ("user", "fresh user request"),
+            ("assistant", "fresh assistant response"),
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "tool result summary".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let replay = response
+        .replay_messages
+        .iter()
+        .map(|message| message["content"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replay,
+        vec![
+            "system policy anchor".to_string(),
+            "tool result summary".to_string(),
+            "fresh user request".to_string(),
+            "fresh assistant response".to_string()
+        ]
+    );
+
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &response.summary_nodes[0].node_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        expanded
+            .sources
+            .iter()
+            .map(|source| source.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["large historical tool result", "old user follow-up"]
     );
 }
 
@@ -889,6 +962,189 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
 }
 
 #[tokio::test]
+async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["one", "two", "three", "four", "five", "six"],
+    )
+    .await;
+    let low = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "depth zero only child",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .unwrap();
+    let high_one = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            1,
+            "depth one child a",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[2],
+            }],
+        ))
+        .await
+        .unwrap();
+    let high_two = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            1,
+            "depth one child b",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[4],
+            }],
+        ))
+        .await
+        .unwrap();
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            messages: Vec::new(),
+            current_tokens: Some(100),
+            focus_topic: None,
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: Some(3),
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "should not mix depths".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "no_backlog_to_compress");
+    assert_eq!(response.summary_nodes_created, 0);
+    let status = db.lcm_status("cursor", Some("session-1")).await.unwrap();
+    assert_eq!(status.summary_node_count, 3);
+    assert_eq!(low.depth, 0);
+    assert_eq!(high_one.depth, 1);
+    assert_eq!(high_two.depth, 1);
+}
+
+#[tokio::test]
+async fn condensation_orders_same_depth_candidates_by_source_time() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["one", "two", "three", "four", "five", "six"],
+    )
+    .await;
+    let mut leaves = Vec::new();
+    for (idx, pair) in store_ids.chunks(2).enumerate() {
+        let leaf = db
+            .lcm_insert_summary_node(summary_draft_with_times(
+                "cursor",
+                "session-1",
+                0,
+                &format!("leaf {}", idx + 1),
+                pair.iter()
+                    .copied()
+                    .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                    .collect(),
+                1_715_000_000 + (idx as i64 * 10),
+                1_715_000_001 + (idx as i64 * 10),
+            ))
+            .await
+            .unwrap();
+        leaves.push(leaf);
+    }
+    let mut depth_one = Vec::new();
+    for idx in [2_usize, 1, 0] {
+        let parent = db
+            .lcm_insert_summary_node(summary_draft_with_times(
+                "cursor",
+                "session-1",
+                1,
+                &format!("depth one {}", idx + 1),
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: leaves[idx].node_id.clone(),
+                }],
+                1_715_000_000 + (idx as i64 * 10),
+                1_715_000_001 + (idx as i64 * 10),
+            ))
+            .await
+            .unwrap();
+        depth_one.push(parent);
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            messages: Vec::new(),
+            current_tokens: Some(100),
+            focus_topic: None,
+            expected_current_frontier_store_id: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: Some(3),
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "depth two condensed".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "condensed_summary_nodes");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(response.summary_nodes[0].depth, 2);
+    assert_eq!(
+        response.summary_nodes[0].source_refs,
+        depth_one
+            .iter()
+            .rev()
+            .map(|node| LcmSourceRef::SummaryNode {
+                node_id: node.node_id.clone()
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn forced_overflow_recovery_compacts_additional_backlog_and_reports_reason() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
@@ -923,6 +1179,7 @@ async fn forced_overflow_recovery_compacts_additional_backlog_and_reports_reason
 
     assert_eq!(response.status, "ok");
     assert_eq!(response.reason, "forced_overflow_recovery");
+    assert_eq!(response.summary_nodes_created, 4);
     assert_eq!(
         response.frontier.current_frontier_store_id,
         Some(store_ids[4])
@@ -937,15 +1194,167 @@ async fn forced_overflow_recovery_compacts_additional_backlog_and_reports_reason
         vec![
             "system policy anchor",
             "forced overflow summary",
+            "forced overflow summary",
+            "forced overflow summary",
+            "forced overflow summary",
             "fresh user",
             "fresh assistant",
         ]
     );
-    let expanded = db
-        .lcm_expand_summary_node("cursor", "session-1", &response.summary_nodes[0].node_id)
-        .await
-        .unwrap();
-    assert_eq!(expanded.sources.len(), 4);
+    let mut expanded_sources = 0;
+    for node in &response.summary_nodes {
+        expanded_sources += db
+            .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+            .await
+            .unwrap()
+            .sources
+            .len();
+    }
+    assert_eq!(expanded_sources, 4);
+}
+
+#[tokio::test]
+async fn forced_overflow_triggers_at_configured_cap_and_catches_up_in_passes() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "catchup summary".into(),
+        },
+        Some(4),
+        Some(2),
+        Some(40),
+    );
+    request.current_tokens = Some(40);
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "forced_overflow_recovery");
+    assert_eq!(response.summary_nodes_created, 2);
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[3])
+    );
+    assert!(response.frontier.maintenance_debt.is_empty());
+}
+
+#[tokio::test]
+async fn forced_overflow_without_backlog_reports_irreducible_best_effort() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "system anchor words"),
+            ("user", "fresh tail words that cannot be compacted"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "unused summary".into(),
+        },
+        None,
+        None,
+        Some(3),
+    );
+    request.current_tokens = Some(3);
+    let response = db.lcm_compress(request).await.unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(response.reason, "irreducible_overflow_no_backlog");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(response_json["replay_over_budget"], true);
+    assert!(response_json["replay_token_estimate"].as_i64().unwrap() > 3);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "system anchor words".to_string(),
+            "fresh tail words that cannot be compacted".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn forced_overflow_reports_best_effort_when_replay_still_exceeds_cap() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "system anchor words words"),
+            ("user", "old backlog one"),
+            ("assistant", "old backlog two"),
+            ("user", "fresh tail words words"),
+            ("assistant", "fresh assistant words words"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "small summary".into(),
+        },
+        None,
+        None,
+        Some(6),
+    );
+    request.current_tokens = Some(20);
+    let response = db.lcm_compress(request).await.unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(
+        response.reason,
+        "forced_overflow_recovery_replay_over_budget"
+    );
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(response_json["replay_over_budget"], true);
+    assert!(response_json["replay_token_estimate"].as_i64().unwrap() > 6);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "system anchor words words".to_string(),
+            "small summary".to_string(),
+            "fresh tail words words".to_string(),
+            "fresh assistant words words".to_string()
+        ]
+    );
 }
 
 #[tokio::test]

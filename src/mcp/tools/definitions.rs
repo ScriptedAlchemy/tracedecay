@@ -2128,7 +2128,7 @@ fn def_lcm_compress() -> ToolDefinition {
                 "max_assembly_tokens": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens exceeds it."
+                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
                 },
                 "leaf_chunk_tokens": {
                     "type": "integer",
