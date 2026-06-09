@@ -433,8 +433,7 @@ impl Database {
                 })?;
 
             for node in nodes {
-                if let Err(e) = stmt
-                    .execute(params![
+                let params = params![
                     node.id.as_str(),
                     node.kind.as_str(),
                     node.name.as_str(),
@@ -458,9 +457,9 @@ impl Database {
                     node.updated_at as i64,
                     i64::from(node.attrs_start_line),
                     opt_str(node.parent_id.as_deref()),
-                ])
-                    .await
-                {
+                ];
+                let insert_result = stmt.execute(params).await;
+                if let Err(e) = insert_result {
                     stmt.reset();
                     return Err(TokenSaveError::Database {
                         message: format!("failed to insert node: {e}"),
