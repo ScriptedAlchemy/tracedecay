@@ -1186,6 +1186,9 @@ async fn search_call_writes_savings_ledger_row() {
     std::env::set_var("HOME", tmp_home.path());
     #[cfg(target_os = "windows")]
     std::env::set_var("USERPROFILE", tmp_home.path());
+    // The global DB (and thus the savings ledger) is opt-in since the
+    // holographic fact store landed; enable it for this test.
+    std::env::set_var("TOKENSAVE_ENABLE_GLOBAL_DB", "1");
 
     let (server, _proj_tmp) = setup_server().await;
 
