@@ -116,8 +116,8 @@ pub(crate) async fn grep(
     conn: &Connection,
     request: LcmGrepRequest,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
-    let query = fts_query(&request.query);
-    if query.is_empty() {
+    let query_plan = grep_query_plan(&request.query);
+    if query_plan.is_empty() {
         return Ok(Vec::new());
     }
     let limit = clamp_limit(request.limit);
@@ -128,10 +128,12 @@ pub(crate) async fn grep(
 
     let raw_only_filters =
         request.role.is_some() || request.start_time.is_some() || request.end_time.is_some();
-    let mut hits = raw_grep_hits(conn, &request, session_filter, &query, limit).await?;
+    let mut hits = raw_grep_hits(conn, &request, session_filter, &query_plan, limit).await?;
     if request.include_summaries && !raw_only_filters && hits.len() < limit {
         let remaining = limit - hits.len();
-        hits.extend(summary_grep_hits(conn, &request, session_filter, &query, remaining).await?);
+        hits.extend(
+            summary_grep_hits(conn, &request, session_filter, &query_plan, remaining).await?,
+        );
     }
     sort_hits(&mut hits, request.sort);
     Ok(hits)
@@ -257,8 +259,8 @@ pub(crate) async fn expand_query(
             .map(str::trim)
             .filter(|query| !query.is_empty())
         {
-            let fts = fts_query(query);
-            if !fts.is_empty() {
+            let query_plan = grep_query_plan(query);
+            if !query_plan.is_empty() {
                 let grep_request = LcmGrepRequest {
                     provider: request.provider.clone(),
                     query: query.to_string(),
@@ -276,7 +278,7 @@ pub(crate) async fn expand_query(
                     conn,
                     &grep_request,
                     Some(&request.session_id),
-                    &fts,
+                    &query_plan,
                     max_results,
                 )
                 .await?;
@@ -300,7 +302,7 @@ pub(crate) async fn expand_query(
                         conn,
                         &grep_request,
                         Some(&request.session_id),
-                        &fts,
+                        &query_plan,
                         remaining,
                     )
                     .await?;
@@ -946,11 +948,14 @@ async fn raw_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
     session_id: Option<&str>,
-    query: &str,
+    query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
+    if query_plan.requires_like_fallback {
+        return raw_like_grep_hits(conn, request, session_id, query_plan, limit).await;
+    }
     let mut values = vec![
-        Value::Text(query.to_string()),
+        Value::Text(query_plan.fts_query.clone()),
         Value::Text(request.provider.clone()),
     ];
     let mut filters = Vec::new();
@@ -993,7 +998,13 @@ async fn raw_grep_hits(
     } else {
         format!(" AND {}", filters.join(" AND "))
     };
-    let order_by = grep_order_by(request.sort, "r.store_id");
+    let order_by = grep_order_by(
+        request.sort,
+        "COALESCE(r.timestamp, r.store_id)",
+        Some(
+            "CASE r.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END",
+        ),
+    );
     let sql = format!(
         "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text
          FROM lcm_raw_messages_fts
@@ -1009,6 +1020,7 @@ async fn raw_grep_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().await? {
         let snippet: String = row.get(4)?;
+        let snippet = match_centered_snippet(&snippet, &query_plan.like_terms);
         hits.push(LcmGrepHit {
             kind: "raw_message".to_string(),
             provider: row.get(0)?,
@@ -1016,7 +1028,7 @@ async fn raw_grep_hits(
             message_id: Some(row.get(2)?),
             node_id: None,
             store_id: Some(row.get(3)?),
-            snippet: raw::derived_text_for_snippet(&snippet),
+            snippet,
         });
     }
     Ok(hits)
@@ -1026,11 +1038,14 @@ async fn summary_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
     session_id: Option<&str>,
-    query: &str,
+    query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
+    if query_plan.requires_like_fallback {
+        return summary_like_grep_hits(conn, request, session_id, query_plan, limit).await;
+    }
     let mut values = vec![
-        Value::Text(query.to_string()),
+        Value::Text(query_plan.fts_query.clone()),
         Value::Text(request.provider.clone()),
     ];
     let mut filters = Vec::new();
@@ -1065,7 +1080,11 @@ async fn summary_grep_hits(
     } else {
         format!(" AND {}", filters.join(" AND "))
     };
-    let order_by = grep_order_by(request.sort, "n.created_at");
+    let order_by = grep_order_by(
+        request.sort,
+        "COALESCE(n.source_time_end, n.source_time_start, n.created_at)",
+        None,
+    );
     let sql = format!(
         "SELECT n.provider, n.session_id, n.node_id, n.summary_text
          FROM lcm_summary_nodes_fts
@@ -1081,6 +1100,7 @@ async fn summary_grep_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().await? {
         let summary_text: String = row.get(3)?;
+        let snippet = match_centered_snippet(&summary_text, &query_plan.like_terms);
         hits.push(LcmGrepHit {
             kind: "summary_node".to_string(),
             provider: row.get(0)?,
@@ -1088,7 +1108,180 @@ async fn summary_grep_hits(
             message_id: None,
             node_id: Some(row.get(2)?),
             store_id: None,
-            snippet: raw::derived_text_for_snippet(&summary_text),
+            snippet,
+        });
+    }
+    Ok(hits)
+}
+
+async fn raw_like_grep_hits(
+    conn: &Connection,
+    request: &LcmGrepRequest,
+    session_id: Option<&str>,
+    query_plan: &GrepQueryPlan,
+    limit: usize,
+) -> Result<Vec<LcmGrepHit>, LcmError> {
+    if query_plan.like_terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut values = vec![Value::Text(request.provider.clone())];
+    let mut filters = Vec::new();
+    if let Some(session_id) = session_id {
+        filters.push("r.session_id = ?".to_string());
+        values.push(Value::Text(session_id.to_string()));
+    }
+    if let Some(source) = request
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push(
+            "(json_extract(r.metadata_json, '$.source') = ? OR r.metadata_json LIKE ?)".to_string(),
+        );
+        values.push(Value::Text(source.to_string()));
+        values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
+    }
+    if let Some(role) = request
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push("r.role = ?".to_string());
+        values.push(Value::Text(role.to_string()));
+    }
+    if let Some(start_time) = request.start_time {
+        filters.push("r.timestamp >= ?".to_string());
+        values.push(Value::Integer(start_time));
+    }
+    if let Some(end_time) = request.end_time {
+        filters.push("r.timestamp <= ?".to_string());
+        values.push(Value::Integer(end_time));
+    }
+
+    let like_sql = like_predicate_sql(
+        query_plan.like_terms.len(),
+        &["r.index_text", "r.snippet_text", "COALESCE(r.content, '')"],
+    );
+    filters.push(like_sql);
+    for term in &query_plan.like_terms {
+        let escaped = escape_like(term);
+        let pattern = format!("%{escaped}%");
+        for _ in 0..3 {
+            values.push(Value::Text(pattern.clone()));
+        }
+    }
+
+    values.push(Value::Integer(limit as i64));
+    let order_by = grep_order_by(
+        request.sort,
+        "COALESCE(r.timestamp, r.store_id)",
+        Some(
+            "CASE r.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END",
+        ),
+    );
+    let sql = format!(
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, 0.0 AS rank
+         FROM lcm_raw_messages r
+         WHERE r.provider = ?
+           AND {}
+         ORDER BY {order_by}
+         LIMIT ?",
+        filters.join(" AND "),
+    );
+    let mut rows = conn.query(&sql, values).await?;
+    let mut hits = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let snippet: String = row.get(4)?;
+        hits.push(LcmGrepHit {
+            kind: "raw_message".to_string(),
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: Some(row.get(2)?),
+            node_id: None,
+            store_id: Some(row.get(3)?),
+            snippet: match_centered_snippet(&snippet, &query_plan.like_terms),
+        });
+    }
+    Ok(hits)
+}
+
+async fn summary_like_grep_hits(
+    conn: &Connection,
+    request: &LcmGrepRequest,
+    session_id: Option<&str>,
+    query_plan: &GrepQueryPlan,
+    limit: usize,
+) -> Result<Vec<LcmGrepHit>, LcmError> {
+    if query_plan.like_terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut values = vec![Value::Text(request.provider.clone())];
+    let mut filters = Vec::new();
+    if let Some(session_id) = session_id {
+        filters.push("n.session_id = ?".to_string());
+        values.push(Value::Text(session_id.to_string()));
+    }
+    if let Some(source) = request
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push(
+            "EXISTS (
+                SELECT 1
+                FROM lcm_summary_sources ss
+                JOIN lcm_raw_messages sr
+                  ON ss.source_kind = 'raw_message'
+                 AND sr.store_id = CAST(ss.source_id AS INTEGER)
+                WHERE ss.node_id = n.node_id
+                  AND (json_extract(sr.metadata_json, '$.source') = ? OR sr.metadata_json LIKE ?)
+             )"
+            .to_string(),
+        );
+        values.push(Value::Text(source.to_string()));
+        values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
+    }
+
+    filters.push(like_predicate_sql(
+        query_plan.like_terms.len(),
+        &["n.summary_text"],
+    ));
+    for term in &query_plan.like_terms {
+        values.push(Value::Text(format!("%{}%", escape_like(term))));
+    }
+
+    values.push(Value::Integer(limit as i64));
+    let order_by = grep_order_by(
+        request.sort,
+        "COALESCE(n.source_time_end, n.source_time_start, n.created_at)",
+        None,
+    );
+    let sql = format!(
+        "SELECT n.provider, n.session_id, n.node_id, n.summary_text, 0.0 AS rank
+         FROM lcm_summary_nodes n
+         WHERE n.provider = ?
+           AND {}
+         ORDER BY {order_by}, n.node_id
+         LIMIT ?",
+        filters.join(" AND "),
+    );
+    let mut rows = conn.query(&sql, values).await?;
+    let mut hits = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let summary_text: String = row.get(3)?;
+        hits.push(LcmGrepHit {
+            kind: "summary_node".to_string(),
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: None,
+            node_id: Some(row.get(2)?),
+            store_id: None,
+            snippet: match_centered_snippet(&summary_text, &query_plan.like_terms),
         });
     }
     Ok(hits)
@@ -1655,29 +1848,322 @@ fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&s
     }
 }
 
-fn fts_query(query: &str) -> String {
-    let mut terms = Vec::new();
-    let mut current = String::new();
-    for ch in query.chars() {
-        if ch.is_alphanumeric() || ch == '_' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            terms.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        terms.push(current);
-    }
-
-    terms
-        .into_iter()
-        .map(|term| quote_fts_term(&term))
-        .collect::<Vec<_>>()
-        .join(" ")
+#[derive(Debug, Clone)]
+struct GrepQueryPlan {
+    fts_query: String,
+    like_terms: Vec<String>,
+    requires_like_fallback: bool,
 }
 
-fn quote_fts_term(term: &str) -> String {
-    format!("\"{}\"", term.replace('"', "\"\""))
+impl GrepQueryPlan {
+    fn is_empty(&self) -> bool {
+        self.fts_query.is_empty() && self.like_terms.is_empty()
+    }
+}
+
+fn grep_query_plan(query: &str) -> GrepQueryPlan {
+    let fts_query = fts_query(query);
+    let terms = extract_search_terms(query);
+    let phrases = extract_quoted_phrases(query);
+    let mut like_terms = Vec::new();
+    for term in phrases.into_iter().chain(terms) {
+        let trimmed = term.trim();
+        if !trimmed.is_empty() && !like_terms.iter().any(|existing| existing == trimmed) {
+            like_terms.push(trimmed.to_string());
+        }
+    }
+    if like_terms.is_empty() {
+        let fallback = query.trim();
+        if !fallback.is_empty() {
+            like_terms.push(fallback.to_string());
+        }
+    }
+    GrepQueryPlan {
+        fts_query,
+        like_terms,
+        requires_like_fallback: requires_like_fallback(query),
+    }
+}
+
+fn fts_query(query: &str) -> String {
+    sanitize_fts5_query(query)
+}
+
+fn sanitize_fts5_query(query: &str) -> String {
+    if query.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let mut quote_buffer = String::new();
+    let mut in_quote = false;
+    for ch in query.chars() {
+        if ch == '"' {
+            if in_quote {
+                result.push('"');
+                result.push_str(&quote_buffer);
+                result.push('"');
+                quote_buffer.clear();
+                in_quote = false;
+            } else {
+                if result
+                    .chars()
+                    .last()
+                    .is_some_and(|last| !last.is_whitespace())
+                {
+                    result.push(' ');
+                }
+                in_quote = true;
+                quote_buffer.clear();
+            }
+            continue;
+        }
+        if in_quote {
+            quote_buffer.push(ch);
+            continue;
+        }
+        result.push(if is_fts5_special_char(ch) { ' ' } else { ch });
+    }
+    if in_quote && !quote_buffer.is_empty() {
+        for ch in quote_buffer.chars() {
+            result.push(if is_fts5_special_char(ch) { ' ' } else { ch });
+        }
+    }
+    result.trim().to_string()
+}
+
+fn is_fts5_special_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '(' | ')' | '*' | '^' | '-' | ':' | '{' | '}' | '.'
+    )
+}
+
+fn requires_like_fallback(query: &str) -> bool {
+    contains_cjk(query) || contains_emoji(query) || contains_risky_fts_ascii(query)
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF
+                | 0x3000..=0x303F
+                | 0x3040..=0x30FF
+                | 0xAC00..=0xD7AF
+                | 0xFF00..=0xFFEF
+        )
+    })
+}
+
+fn contains_emoji(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x2600..=0x27BF | 0x1F300..=0x1FAFF
+        )
+    })
+}
+
+fn contains_risky_fts_ascii(value: &str) -> bool {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if raw.chars().filter(|ch| *ch == '"').count() % 2 != 0 {
+        return true;
+    }
+    let mut without_phrases = String::with_capacity(raw.len());
+    let mut in_quote = false;
+    for ch in raw.chars() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            without_phrases.push(' ');
+            continue;
+        }
+        if !in_quote {
+            without_phrases.push(ch);
+        }
+    }
+    let chars = without_phrases.chars().collect::<Vec<_>>();
+    for window in chars.windows(3) {
+        let [left, mid, right] = [window[0], window[1], window[2]];
+        if left.is_ascii_alphanumeric()
+            && right.is_ascii_alphanumeric()
+            && matches!(mid, '-' | ':' | '/')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_quoted_phrases(query: &str) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let mut in_quote = false;
+    let mut current = String::new();
+    for ch in query.chars() {
+        if ch == '"' {
+            if in_quote {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    phrases.push(trimmed.to_string());
+                }
+                current.clear();
+                in_quote = false;
+            } else {
+                in_quote = true;
+                current.clear();
+            }
+            continue;
+        }
+        if in_quote {
+            current.push(ch);
+        }
+    }
+    phrases
+}
+
+fn extract_search_terms(query: &str) -> Vec<String> {
+    let text = query.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut terms = extract_quoted_phrases(text);
+    let text_without_phrases = strip_quoted_phrases(text);
+    for token in text_without_phrases.split_whitespace() {
+        for variant in token_variants(token) {
+            if !terms.iter().any(|existing| existing == &variant) {
+                terms.push(variant);
+            }
+        }
+    }
+    if terms.is_empty() {
+        let fallback = text.trim_matches(|ch: char| "\"'()[]{}.,;".contains(ch));
+        if !fallback.is_empty() {
+            terms.push(fallback.to_string());
+        }
+    }
+    terms
+}
+
+fn strip_quoted_phrases(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_quote = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            out.push(' ');
+            continue;
+        }
+        if in_quote {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn token_variants(token: &str) -> Vec<String> {
+    let cleaned = token
+        .trim()
+        .trim_matches(|ch: char| "\"'()[]{}.,;".contains(ch));
+    if cleaned.is_empty() {
+        return Vec::new();
+    }
+    if matches!(
+        cleaned.to_ascii_uppercase().as_str(),
+        "AND" | "OR" | "NOT" | "NEAR"
+    ) {
+        return Vec::new();
+    }
+    let mut variants = vec![cleaned.to_string()];
+    if cleaned.contains(['-', ':', '/']) {
+        for part in cleaned.split(['-', ':', '/']) {
+            if !part.is_empty() && !variants.iter().any(|existing| existing == part) {
+                variants.push(part.to_string());
+            }
+        }
+    }
+    variants
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn like_predicate_sql(term_count: usize, columns: &[&str]) -> String {
+    let mut parts = Vec::new();
+    for _ in 0..term_count {
+        let column_checks = columns
+            .iter()
+            .map(|column| format!("{column} LIKE ? ESCAPE '\\' COLLATE NOCASE"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        parts.push(format!("({column_checks})"));
+    }
+    format!("({})", parts.join(" OR "))
+}
+
+fn match_centered_snippet(text: &str, terms: &[String]) -> String {
+    let mut best_match = None;
+    for term in terms {
+        if term.is_empty() {
+            continue;
+        }
+        if let Some(byte_idx) = find_term(text, term) {
+            best_match = Some((byte_idx, term.chars().count().max(1)));
+            break;
+        }
+    }
+    let Some((match_byte_idx, match_char_len)) = best_match else {
+        return raw::derived_text_for_snippet(text);
+    };
+
+    let total_chars = text.chars().count();
+    if total_chars <= 1 {
+        return raw::derived_text_for_snippet(text);
+    }
+
+    let match_char_idx = text[..match_byte_idx].chars().count();
+    let window_chars = 160usize;
+    let start_char = match_char_idx.saturating_sub(window_chars / 2);
+    let end_char = (match_char_idx + match_char_len + (window_chars / 2)).min(total_chars);
+    let start_byte = byte_offset_for_char_index(text, start_char);
+    let end_byte = byte_offset_for_char_index(text, end_char);
+    let mut snippet = String::new();
+    if start_char > 0 {
+        snippet.push_str("...");
+    }
+    snippet.push_str(&text[start_byte..end_byte]);
+    if end_char < total_chars {
+        snippet.push_str("...");
+    }
+    raw::derived_text_for_snippet(&snippet)
+}
+
+fn find_term(text: &str, term: &str) -> Option<usize> {
+    if term.is_ascii() {
+        let lower_text = text.to_ascii_lowercase();
+        let lower_term = term.to_ascii_lowercase();
+        return lower_text.find(&lower_term);
+    }
+    text.find(term)
+}
+
+fn byte_offset_for_char_index(text: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(idx, _)| idx)
 }
 
 fn clamp_limit(limit: usize) -> usize {
@@ -1695,12 +2181,37 @@ fn normalized_strings(values: &[String]) -> Vec<String> {
     out
 }
 
-fn grep_order_by(sort: LcmGrepSort, recency_column: &str) -> String {
+const AGE_DECAY_RATE: f64 = 0.001;
+
+fn grep_order_by(
+    sort: LcmGrepSort,
+    recency_column: &str,
+    role_penalty_expr: Option<&str>,
+) -> String {
     match sort {
-        LcmGrepSort::Recency => format!("{recency_column} DESC"),
-        LcmGrepSort::Relevance | LcmGrepSort::Hybrid => {
-            format!("rank, {recency_column} DESC")
+        LcmGrepSort::Relevance => match role_penalty_expr {
+            Some(role_penalty_expr) => {
+                format!("rank ASC, {role_penalty_expr} ASC, {recency_column} DESC")
+            }
+            None => format!("rank ASC, {recency_column} DESC"),
+        },
+        LcmGrepSort::Hybrid => {
+            let blended = format!(
+                "(rank / (1 + (MAX(0.0, ((strftime('%s','now') - {recency_column}) / 3600.0)) * {AGE_DECAY_RATE})))"
+            );
+            match role_penalty_expr {
+                Some(role_penalty_expr) => {
+                    format!("{blended} ASC, {role_penalty_expr} ASC, {recency_column} DESC")
+                }
+                None => format!("{blended} ASC, {recency_column} DESC"),
+            }
         }
+        LcmGrepSort::Recency => match role_penalty_expr {
+            Some(role_penalty_expr) => {
+                format!("{recency_column} DESC, {role_penalty_expr} ASC, rank ASC")
+            }
+            None => format!("{recency_column} DESC, rank ASC"),
+        },
     }
 }
 

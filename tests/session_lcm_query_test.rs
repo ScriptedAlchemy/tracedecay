@@ -316,9 +316,18 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
         .await
         .expect("path-like grep should not miss because punctuation was collapsed");
 
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].store_id, Some(store_ids[0]));
-    assert!(hits[0].snippet.contains("src/foo.rs"));
+    assert_eq!(hits.len(), 2);
+    let hit_ids = hits
+        .iter()
+        .filter_map(|hit| hit.store_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        hit_ids,
+        std::collections::BTreeSet::from([store_ids[0], store_ids[1]])
+    );
+    assert!(hits
+        .iter()
+        .any(|hit| hit.store_id == Some(store_ids[0]) && hit.snippet.contains("src/foo.rs")));
 }
 
 #[tokio::test]
@@ -339,7 +348,7 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
     let hits = db
         .lcm_grep(LcmGrepRequest {
             provider: "cursor".into(),
-            query: "OR".into(),
+            query: "\"OR\"".into(),
             scope: LcmScope::Session,
             session_id: Some("session-1".into()),
             include_summaries: false,
@@ -356,6 +365,124 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].store_id, Some(store_ids[0]));
     assert!(hits[0].snippet.contains("OR"));
+}
+
+#[tokio::test]
+async fn grep_preserves_quoted_phrase_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "alpha beta phrase canary".to_string(),
+            "alpha phrase beta (not adjacent)".to_string(),
+        ],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "\"alpha beta\"".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("quoted phrase grep should preserve phrase matching");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].store_id, Some(store_ids[0]));
+}
+
+#[tokio::test]
+async fn grep_preserves_boolean_or_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "apple only phrase".to_string(),
+            "banana only phrase".to_string(),
+            "neither fruit term".to_string(),
+        ],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "apple OR banana".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("OR query should preserve boolean operator semantics");
+
+    let matched = hits
+        .iter()
+        .filter_map(|hit| hit.store_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        matched,
+        [store_ids[0], store_ids[1]]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+}
+
+#[tokio::test]
+async fn grep_cjk_query_uses_like_fallback_substring_matching() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "这是一个柠檬测试用例".to_string(),
+            "仅包含苹果关键词".to_string(),
+        ],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "柠檬".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("CJK grep should fall back to LIKE substring matching");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].store_id, Some(store_ids[0]));
+    assert!(hits[0].snippet.contains("柠檬"));
 }
 
 #[tokio::test]
