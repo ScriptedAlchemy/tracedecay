@@ -6,12 +6,14 @@ Status: Approved design direction
 
 ## Goals
 
-Port Hermes LCM into TokenSave by evolving TokenSave's existing session database and session APIs into an LCM-capable store.
+Port Hermes LCM into TokenSave by fully rewriting TokenSave's current simple session internals into an LCM implementation while preserving the useful public session-search surface.
 
 The design goals are:
 
 - Make the existing project-local `sessions.db` the authoritative LCM-capable session database through schema migrations, not by introducing a second parallel LCM database for TokenSave-managed sessions.
-- Preserve the useful public behavior of provider-normalized transcript search, especially `tokensave_message_search`, while adding the durable raw-message, summary-DAG, lifecycle/frontier, externalized-payload, and lineage data that LCM needs.
+- Replace the simple provider-normalized session-message internals with lossless LCM-grade raw-message storage, summary-DAG, lifecycle/frontier, externalized-payload, and lineage state.
+- Preserve the useful public behavior of provider-normalized transcript search, especially `tokensave_message_search`, while allowing its internals to be rebuilt on top of LCM-grade storage and indexed snippets.
+- Remove authoritative session text caps for new writes. Caps may still exist for display snippets, FTS/index text, MCP response truncation, or safety-bounded rendering, but the authoritative stored raw session content must be lossless and expandable/recoverable.
 - Use a hybrid ownership model: Rust owns durable/indexed state, migrations, deterministic query/DAG APIs, storage locality, and path-safety rules; the generated Hermes Python plugin owns Hermes `ContextEngine` lifecycle integration and Hermes auxiliary LLM calls.
 - Start with the existing generated Python bridge that shells to `tokensave tool ... --json --args`, then consider PyO3 or native Python bindings later only if the bridge becomes a measured bottleneck.
 - Keep TokenSave's codegraph context retrieval and fact memory systems separate from LCM session compression.
@@ -26,6 +28,7 @@ Non-goals are:
 - Do not replace `src/context/builder.rs` with LCM. Codegraph context building remains graph/search/source retrieval for code intelligence.
 - Do not repurpose `src/memory/*` fact storage into a summary DAG. The fact store remains structured, user/project memory; LCM stores transcript lineage and compression state.
 - Do not require Hermes users to migrate to project-local storage for non-local installs. Storage locality follows current TokenSave and Hermes install rules.
+- Do not keep the existing 256 KiB session-message cap as an authoritative storage limit for new session content. It can only survive as a derived-view limit for search/display/response safety.
 - Do not preserve branch-only internal shapes that conflict with the approved design. The durable compatibility boundary is public session search and existing session DB data.
 
 ## Architecture
@@ -36,7 +39,7 @@ The high-level split:
 
 - Rust session/LCM core:
   - Owns `sessions.db` schema, migrations, WAL/busy-timeout settings, storage path selection, path containment, and externalized-payload metadata.
-  - Stores provider-normalized sessions/messages and the LCM raw-message store in one migrated database.
+  - Replaces the simple provider-normalized message table as the authoritative raw-content layer with lossless LCM raw storage, while retaining compatibility projections/indexes for provider-normalized search.
   - Exposes deterministic tool/API operations for search, load, describe, expand, expand-query support, compression status, lifecycle/frontier state, and DAG traversal.
   - Preserves stable JSON outputs where existing MCP/Hermes tools depend on them.
 - Generated Hermes Python plugin:
@@ -49,7 +52,7 @@ This keeps durable correctness, migrations, and storage safety in Rust while avo
 
 ## Storage/Migration Model
 
-The existing `sessions.db` becomes the LCM-capable session DB.
+The existing `sessions.db` becomes the LCM-capable session DB, and LCM replaces the simple session internals rather than sitting beside them as a second subsystem.
 
 Today, TokenSave stores project-local sessions at `crate::config::get_tokensave_dir(project_root).join("sessions.db")` through `src/sessions/cursor.rs`. `src/global_db.rs` creates provider-normalized tables:
 
@@ -58,16 +61,18 @@ Today, TokenSave stores project-local sessions at `crate::config::get_tokensave_
 - `session_messages_fts` over `text`, `role`, `kind`, `model`, and `tool_names`
 - parse offsets and accounting tables used by existing transcript ingestion
 
-LCM migrations should extend this database instead of creating a separate TokenSave LCM DB. The migrated schema should support both existing transcript search and LCM-grade raw storage:
+LCM migrations should rewrite/evolve this database instead of creating a separate TokenSave LCM DB. The migrated schema should support both existing transcript search behavior and LCM-grade raw storage:
 
-- Preserve `sessions` and `session_messages` for provider-normalized transcript indexing and compatibility.
-- Add LCM raw-message identity with stable `store_id` ordering, conversation/session linkage, source/provider fields, role, content reference, tool-call fields, timestamps, token estimates, pinned state, and metadata.
+- Preserve `sessions` and provider-normalized message search as compatibility projections, not as the only authoritative session representation.
+- Add or migrate to LCM raw-message identity with stable `store_id` ordering, conversation/session linkage, source/provider fields, role, lossless content reference, tool-call fields, timestamps, token estimates, pinned state, and metadata.
 - Add summary DAG tables equivalent in capability to Hermes `summary_nodes`: `node_id`, session/conversation, depth, summary content/reference, token counts, source token counts, source ids, source type, source time window, expand hint, and FTS/search metadata.
 - Add lifecycle/frontier state equivalent in capability to Hermes `lcm_lifecycle_state`: conversation id, current session, last finalized session, current frontier store id, last finalized frontier store id, debt markers, rollover/reset/maintenance timestamps, and update time.
 - Add migration state/schema version tables in the existing DB layer so old `sessions.db` files can be upgraded idempotently.
 - Add externalized-payload metadata that links placeholders in indexed text to payload files, content hashes, kind, role/tool metadata, session/conversation ownership, byte/char counts, and creation time.
 
-The current `MAX_SESSION_MESSAGE_TEXT_BYTES` cap of 256 KiB is not sufficient for authoritative LCM raw storage. It may remain appropriate for FTS snippets and compatibility search, but the LCM store must preserve full raw content either inline in a dedicated full-content column/table or by externalizing payloads and storing safe placeholders plus recoverable payload references. FTS should index bounded, safe text or snippets, not necessarily the full authoritative payload.
+The current `MAX_SESSION_MESSAGE_TEXT_BYTES` cap of 256 KiB must be removed from authoritative storage for new writes. It may remain appropriate for FTS snippets, compatibility search rows, display previews, MCP response truncation, and safety-bounded rendering, but the LCM store must preserve full raw content either inline in a dedicated full-content column/table or by externalizing payloads and storing safe placeholders plus recoverable payload references. FTS should index bounded, safe text or snippets, not necessarily the full authoritative payload.
+
+Existing rows that were already capped cannot be made lossless retroactively. Migrations should carry those rows forward as best-effort legacy data, mark them as legacy/truncated when detectable, and ensure all new writes use lossless authoritative storage.
 
 Storage locality follows TokenSave install rules:
 
@@ -81,7 +86,8 @@ The Rust core should become the source of truth for LCM state. It should not mer
 
 Core responsibilities:
 
-- Ingest provider-normalized transcript messages as today, then also preserve LCM raw-message records without lossy text caps.
+- Ingest provider-normalized transcript messages into the LCM raw-message model and derive provider-normalized search records from that model where useful.
+- Guarantee lossless authoritative raw storage for new writes. Search snippets, FTS columns, MCP responses, and rendered previews may be capped, but `load`/`expand` APIs must be able to recover full content or the full externalized payload.
 - Maintain append-first raw-message ordering and store-id lineage. Existing Hermes LCM allows one narrow rewrite for GC placeholders on externalized tool result rows; TokenSave should model any such mutation explicitly and keep source lineage intact.
 - Keep the existing search path for `tokensave_message_search` over provider-normalized transcripts, while making LCM search able to combine raw messages and summary nodes with source/session filters.
 - Implement summary-DAG persistence and deterministic traversal/expansion APIs in Rust. Python can request operations, but Rust should own source-id resolution, session ownership checks, FTS queries, pagination, and snippet construction.
@@ -133,7 +139,7 @@ Existing behavior to preserve:
 - Results containing provider-normalized session and message records with scores.
 - The handler opens the project-local `sessions.db` and searches `session_messages_fts`.
 
-Enhancements should be additive. For example, result metadata may indicate truncation, externalized payload references, or LCM availability, but existing callers should still be able to use the current fields.
+Enhancements should be additive at the public API boundary. Internally, search may be served from LCM-derived compatibility tables or indexed snippets rather than from the old capped text column. Result metadata may indicate legacy truncation, externalized payload references, or LCM availability, but existing callers should still be able to use the current fields.
 
 New LCM-oriented tools may be added rather than overloading `tokensave_message_search`:
 
@@ -152,7 +158,7 @@ Names can be finalized during implementation, but the behavioral split should re
 Hermes LCM contains important storage-boundary protections that should carry into TokenSave's Rust-owned store:
 
 - Externalize obvious large or binary-ish payloads, including data URI/base64 media, long base64 runs, oversized raw payloads, and large tool outputs.
-- Store compact placeholders in indexed text while preserving recoverable payload content in files with metadata and hashes.
+- Store compact placeholders in indexed text while preserving recoverable payload content in full-content storage or externalized files with metadata and hashes.
 - Keep externalized payload files private where possible, equivalent to `0700` directories and `0600` payload files.
 - Reject payload refs that are not basenames. Do not allow `/`, `\`, parent traversal, symlink escape, or arbitrary absolute paths.
 - Enforce storage root containment. Local installs stay under project `.tokensave`; non-local profile installs stay under the selected Hermes home/profile root.
@@ -160,7 +166,7 @@ Hermes LCM contains important storage-boundary protections that should carry int
 - Preserve optional sensitive-pattern redaction as metadata-only/lossy when enabled, and make that lossiness visible in status/doctor output.
 - Include integrity scans for missing/unreferenced payloads and SQLite/FTS health without previewing sensitive payload contents.
 
-The security model should treat search indexes as derived, bounded, and safe-to-display. The authoritative raw content path must be separately controlled, paginated, and authorized.
+The security model should treat search indexes, snippets, and rendered previews as derived, bounded, and safe-to-display. The authoritative raw content path must be lossless, separately controlled, paginated, and authorized.
 
 ## Lifecycle/Compression Behavior
 
@@ -187,8 +193,10 @@ Testing should cover the design boundaries rather than only happy-path tool outp
 Required test areas:
 
 - Migration tests from existing `sessions.db` files with only `sessions`, `session_messages`, `session_messages_fts`, parse offsets, and parent/subagent columns into the LCM-capable schema.
+- Migration tests proving already-capped legacy rows are carried forward as best-effort legacy data, marked as truncated/legacy where detectable, and never treated as newly lossless content.
 - Compatibility tests proving `tokensave_message_search` retains current provider/project/subagent filtering and result shape.
-- Raw-storage tests proving content above 256 KiB is preserved authoritatively while search indexes use safe snippets/placeholders.
+- Raw-storage tests proving new content above 256 KiB is preserved authoritatively and recoverable through load/expand APIs while search indexes, snippets, MCP responses, and display renderers use safe bounded views.
+- Regression tests proving no new authoritative session write path uses `MAX_SESSION_MESSAGE_TEXT_BYTES` or any replacement cap before durable raw storage/externalization.
 - Externalization tests for large tool output, data URI/base64 payloads, basename-only refs, private permissions, root containment, missing payloads, and cross-session expansion denial.
 - Lifecycle tests for session start, rollover, reset, frontier advance, last-finalized frontier preservation, maintenance debt, and restart recovery.
 - Compression tests with fake Hermes auxiliary LLM calls covering leaf compaction, condensation, fallback chain, circuit breaker, deterministic truncation fallback, reasoning stripping, and active-context assembly.
@@ -203,14 +211,15 @@ Rollout should be incremental but converge on one session store design.
 Compatibility commitments:
 
 - Existing `sessions.db` files are migrated in place with idempotent schema migrations.
-- Existing provider-normalized transcript ingestion continues to populate `sessions` and `session_messages`.
+- Existing capped rows are preserved as best-effort legacy data. New session writes after migration must be lossless in the LCM raw store.
+- Existing provider-normalized transcript ingestion continues to support `sessions` and `session_messages` behavior, but those simple internals become compatibility projections over the LCM-grade session store where practical.
 - `tokensave_message_search` remains stable or only compatibly enhanced.
 - Existing local installs continue to store under project `.tokensave`; non-local Hermes installs continue to store under the Hermes profile/home.
 - Existing Hermes plugin generation remains the installation mechanism, but its generated Python grows the LCM adapter and tool bridge calls.
 
 Rollout shape:
 
-- Introduce schema migrations and read-only LCM inspection APIs first, behind no behavior-changing compression hook.
+- Introduce schema migrations and read-only LCM inspection APIs first, including proof that new authoritative writes are lossless and old capped rows are flagged as legacy where detectable.
 - Add Hermes adapter preflight/ingest with compression disabled or status-only until storage and search compatibility are verified.
 - Enable compression in Hermes after raw storage, externalization, lifecycle, and active-context assembly tests pass.
 - Measure bridge overhead before considering PyO3/native bindings. A later native milestone should be justified by latency, packaging, or reliability evidence.
@@ -225,6 +234,6 @@ Rollout shape:
 
 ## Self-Review
 
-This spec intentionally describes one plan: evolve the existing TokenSave session implementation and `sessions.db` into the LCM-capable store through migrations, with Rust owning durable state and generated Python owning Hermes lifecycle/auxiliary LLM integration. It rejects the earlier separate-DB starting point and rejects PyO3 as the first milestone.
+This spec intentionally describes one plan: fully rewrite the existing TokenSave session internals into a lossless LCM-capable store inside the existing `sessions.db`, with Rust owning durable state and generated Python owning Hermes lifecycle/auxiliary LLM integration. It rejects the earlier separate-DB starting point, rejects capped authoritative storage for new writes, and rejects PyO3 as the first milestone.
 
 No placeholders or TBD markers remain. The open questions are bounded design choices for implementation, not unresolved contradictions in the approved architecture.
