@@ -18,6 +18,10 @@ const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
 const MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_LCM_CONTENT_LIMIT: usize = 8192;
 const MAX_LCM_RESULT_LIMIT: usize = 100;
+const MAX_LCM_EXPAND_QUERY_PROMPT_CHARS: usize = 2_048;
+const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
+const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
+const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
 fn tool_json(value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
@@ -55,19 +59,25 @@ fn truncated_json_envelope(formatted: &str) -> String {
 
 fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
-    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
-        formatted
-    } else if value
+    let needs_synthesis = value
         .get("needs_synthesis")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
+        formatted
+    } else if needs_synthesis {
         let compact = compact_lcm_expand_query_payload(value, formatted.len());
-        serde_json::to_string_pretty(&compact).unwrap_or_default()
+        let text = serde_json::to_string_pretty(&compact).unwrap_or_default();
+        if text.len() <= MAX_RESPONSE_CHARS {
+            text
+        } else {
+            let fallback = minimal_lcm_expand_query_contract(value, formatted.len(), text.len());
+            serde_json::to_string_pretty(&fallback).unwrap_or_default()
+        }
     } else {
         truncated_json_envelope(&formatted)
     };
-    let text = if text.len() <= MAX_RESPONSE_CHARS {
+    let text = if text.len() <= MAX_RESPONSE_CHARS || needs_synthesis {
         text
     } else {
         truncated_json_envelope(&text)
@@ -83,6 +93,8 @@ fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Val
     const MAX_CONTEXT_BLOCK_CHARS: usize = 600;
     const MAX_MATCHES: usize = 10;
     const MAX_MATCH_SNIPPET_CHARS: usize = 160;
+    const MAX_NODE_IDS: usize = 50;
+    const MAX_NODE_ID_CHARS: usize = 160;
     const MAX_PAGINATION_ITEMS: usize = 50;
 
     let mut object = Map::new();
@@ -91,21 +103,31 @@ fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Val
         "provider",
         "session_id",
         "storage_scope",
-        "prompt",
-        "query",
         "answer",
         "needs_synthesis",
         "max_tokens",
         "context_max_tokens",
         "context_budget",
         "context_truncated",
-        "node_ids",
     ] {
         if let Some(field) = value.get(key) {
             object.insert(key.to_string(), field.clone());
         }
     }
+    insert_bounded_text_field(
+        &mut object,
+        value,
+        "prompt",
+        MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
+    );
+    insert_bounded_text_field(
+        &mut object,
+        value,
+        "query",
+        MAX_LCM_EXPAND_QUERY_QUERY_CHARS,
+    );
     object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert("contract_truncated".to_string(), json!(true));
     object.insert(
         "mcp_original_response_chars".to_string(),
         json!(original_chars),
@@ -122,6 +144,8 @@ fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Val
     );
     let (matches, matches_truncated) =
         compact_matches(value.get("matches"), MAX_MATCHES, MAX_MATCH_SNIPPET_CHARS);
+    let (node_ids, node_ids_truncated) =
+        compact_string_array(value.get("node_ids"), MAX_NODE_IDS, MAX_NODE_ID_CHARS);
     let (context_pagination, pagination_truncated) =
         compact_array(value.get("context_pagination"), MAX_PAGINATION_ITEMS);
 
@@ -135,6 +159,11 @@ fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Val
         "matches_truncated_for_mcp".to_string(),
         json!(matches_truncated),
     );
+    object.insert("node_ids".to_string(), node_ids);
+    object.insert(
+        "node_ids_truncated_for_mcp".to_string(),
+        json!(node_ids_truncated),
+    );
     object.insert("context_pagination".to_string(), context_pagination);
     object.insert(
         "context_pagination_truncated_for_mcp".to_string(),
@@ -143,6 +172,107 @@ fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Val
     object.insert(
         "synthesis_prompt".to_string(),
         compact_synthesis_prompt(value, &context_blocks),
+    );
+
+    Value::Object(object)
+}
+
+fn minimal_lcm_expand_query_contract(
+    value: &Value,
+    original_chars: usize,
+    compact_chars: usize,
+) -> Value {
+    const MAX_CONTEXT_BLOCKS: usize = 1;
+    const MAX_CONTEXT_BLOCK_CHARS: usize = 240;
+    const MAX_MATCHES: usize = 5;
+    const MAX_MATCH_SNIPPET_CHARS: usize = 80;
+    const MAX_NODE_IDS: usize = 25;
+    const MAX_NODE_ID_CHARS: usize = 120;
+    const MAX_PAGINATION_ITEMS: usize = 10;
+    const MAX_SCALAR_CHARS: usize = 512;
+    const MAX_PROMPT_CHARS: usize = 512;
+    const MAX_QUERY_CHARS: usize = 512;
+    const MAX_SYNTHESIS_SYSTEM_CHARS: usize = 512;
+    const MAX_SYNTHESIS_PROMPT_CHARS: usize = 512;
+
+    let mut object = Map::new();
+    for key in [
+        "status",
+        "provider",
+        "session_id",
+        "storage_scope",
+        "answer",
+    ] {
+        insert_bounded_scalar_field(&mut object, value, key, MAX_SCALAR_CHARS);
+    }
+    for key in [
+        "needs_synthesis",
+        "max_tokens",
+        "context_max_tokens",
+        "context_budget",
+        "context_truncated",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    insert_bounded_text_field(&mut object, value, "prompt", MAX_PROMPT_CHARS);
+    insert_bounded_text_field(&mut object, value, "query", MAX_QUERY_CHARS);
+
+    let (context_blocks, context_blocks_truncated) = compact_context_blocks(
+        value.get("context_blocks"),
+        MAX_CONTEXT_BLOCKS,
+        MAX_CONTEXT_BLOCK_CHARS,
+    );
+    let (matches, matches_truncated) =
+        compact_matches(value.get("matches"), MAX_MATCHES, MAX_MATCH_SNIPPET_CHARS);
+    let (node_ids, node_ids_truncated) =
+        compact_string_array(value.get("node_ids"), MAX_NODE_IDS, MAX_NODE_ID_CHARS);
+    let (context_pagination, pagination_truncated) =
+        compact_array(value.get("context_pagination"), MAX_PAGINATION_ITEMS);
+
+    object.insert("context_blocks".to_string(), context_blocks.clone());
+    object.insert(
+        "context_blocks_truncated_for_mcp".to_string(),
+        json!(context_blocks_truncated),
+    );
+    object.insert("matches".to_string(), matches);
+    object.insert(
+        "matches_truncated_for_mcp".to_string(),
+        json!(matches_truncated),
+    );
+    object.insert("node_ids".to_string(), node_ids);
+    object.insert(
+        "node_ids_truncated_for_mcp".to_string(),
+        json!(node_ids_truncated),
+    );
+    object.insert("context_pagination".to_string(), context_pagination);
+    object.insert(
+        "context_pagination_truncated_for_mcp".to_string(),
+        json!(pagination_truncated),
+    );
+    object.insert(
+        "synthesis_prompt".to_string(),
+        compact_synthesis_prompt_with_limits(
+            value,
+            &context_blocks,
+            MAX_SYNTHESIS_SYSTEM_CHARS,
+            MAX_SYNTHESIS_PROMPT_CHARS,
+        ),
+    );
+    object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert("contract_truncated".to_string(), json!(true));
+    object.insert(
+        "mcp_original_response_chars".to_string(),
+        json!(original_chars),
+    );
+    object.insert(
+        "mcp_compact_response_chars".to_string(),
+        json!(compact_chars),
+    );
+    object.insert(
+        "mcp_truncation_reason".to_string(),
+        json!("expand-query response reduced to minimal synthesis contract after compact payload overflow"),
     );
 
     Value::Object(object)
@@ -181,6 +311,24 @@ fn compact_matches(value: Option<&Value>, limit: usize, snippet_chars: usize) ->
         })
         .collect::<Vec<_>>();
     (Value::Array(matches), array.len() > limit)
+}
+
+fn compact_string_array(value: Option<&Value>, limit: usize, item_chars: usize) -> (Value, bool) {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return (json!([]), false);
+    };
+    let mut truncated = array.len() > limit;
+    let values = array
+        .iter()
+        .take(limit)
+        .filter_map(|item| item.as_str())
+        .map(|item| {
+            let (item, item_truncated) = truncate_chars(item, item_chars);
+            truncated |= item_truncated;
+            json!(item)
+        })
+        .collect::<Vec<_>>();
+    (Value::Array(values), truncated)
 }
 
 fn compact_context_blocks(
@@ -222,16 +370,32 @@ fn compact_context_blocks(
 }
 
 fn compact_synthesis_prompt(value: &Value, context_blocks: &Value) -> Value {
+    compact_synthesis_prompt_with_limits(
+        value,
+        context_blocks,
+        MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS,
+        MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS,
+    )
+}
+
+fn compact_synthesis_prompt_with_limits(
+    value: &Value,
+    context_blocks: &Value,
+    system_chars: usize,
+    prompt_chars: usize,
+) -> Value {
     let default_system = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
     let system = value
         .get("synthesis_prompt")
         .and_then(|prompt| prompt.get("system"))
         .and_then(Value::as_str)
         .unwrap_or(default_system);
+    let (system, system_truncated) = truncate_chars(system, system_chars);
     let prompt = value
         .get("prompt")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let (prompt, prompt_truncated) = truncate_chars(prompt, prompt_chars);
     let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
     let truncation_note = if value
         .get("context_truncated")
@@ -242,12 +406,63 @@ fn compact_synthesis_prompt(value: &Value, context_blocks: &Value) -> Value {
     } else {
         ""
     };
+    let prompt_truncation_note = if prompt_truncated {
+        "\n\nNOTE: The original question was truncated in this MCP response; synthesize from the bounded question preview and returned context, or state that the response degraded because the prompt exceeded the MCP response budget."
+    } else {
+        ""
+    };
     json!({
         "system": system,
+        "system_truncated_for_mcp": system_truncated,
+        "user_prompt_truncated_for_mcp": prompt_truncated,
         "user": format!(
-            "QUESTION:\n{prompt}\n\nCOMPACT EXPANDED CONTEXT:\n{context_json}{truncation_note}\n\nNOTE: The MCP response was compacted to preserve the synthesis contract. Use node_ids and context_pagination for follow-up expansion if more context is needed."
+            "QUESTION:\n{prompt}\n\nCOMPACT EXPANDED CONTEXT:\n{context_json}{truncation_note}{prompt_truncation_note}\n\nNOTE: The MCP response was compacted to preserve the synthesis contract. Use node_ids and context_pagination for follow-up expansion if more context is needed."
         ),
     })
+}
+
+fn insert_bounded_text_field(
+    object: &mut Map<String, Value>,
+    value: &Value,
+    key: &str,
+    max_chars: usize,
+) {
+    let truncated_key = format!("{key}_truncated_for_mcp");
+    match value.get(key) {
+        Some(Value::String(text)) => {
+            let (text, truncated) = truncate_chars(text, max_chars);
+            object.insert(key.to_string(), json!(text));
+            object.insert(truncated_key, json!(truncated));
+        }
+        Some(Value::Null) => {
+            object.insert(key.to_string(), Value::Null);
+            object.insert(truncated_key, json!(false));
+        }
+        Some(field) => {
+            object.insert(key.to_string(), field.clone());
+            object.insert(truncated_key, json!(false));
+        }
+        None => {}
+    }
+}
+
+fn insert_bounded_scalar_field(
+    object: &mut Map<String, Value>,
+    value: &Value,
+    key: &str,
+    max_chars: usize,
+) {
+    match value.get(key) {
+        Some(Value::String(text)) => {
+            let (text, truncated) = truncate_chars(text, max_chars);
+            object.insert(key.to_string(), json!(text));
+            object.insert(format!("{key}_truncated_for_mcp"), json!(truncated));
+        }
+        Some(Value::Bool(_) | Value::Number(_) | Value::Null) => {
+            object.insert(key.to_string(), value[key].clone());
+        }
+        _ => {}
+    }
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {

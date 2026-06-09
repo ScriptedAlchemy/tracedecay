@@ -14,7 +14,9 @@ use tokensave::db::Database;
 use tokensave::global_db::GlobalDb;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
 use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt};
+use tokensave::sessions::lcm::{
+    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
+};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
@@ -4687,6 +4689,92 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["context_blocks"].as_array().unwrap().len() <= 3,
         "MCP expand-query context should stay compact"
     );
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
+async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-huge-prompt-expand-query",
+        "lcm-huge-prompt-expand-query-message",
+        "contract overflow evidence lives in this raw message",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-huge-prompt-expand-query-message")
+        .await
+        .expect("raw message should exist");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-huge-prompt-expand-query".to_string(),
+            depth: 0,
+            summary_text: "summary contract overflow evidence".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: raw.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("contract overflow summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+    let huge_prompt = format!(
+        "Explain contract overflow evidence. {}",
+        "PROMPT_OVERFLOW ".repeat(12_000)
+    );
+    let huge_query = format!(
+        "contract overflow evidence {}",
+        "QUERY_OVERFLOW ".repeat(12_000)
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-huge-prompt-expand-query",
+            "prompt": huge_prompt,
+            "query": huge_query,
+            "node_ids": [summary.node_id],
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("oversized expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert!(payload["prompt"].as_str().unwrap().chars().count() <= 2_048);
+    assert!(payload["query"].as_str().unwrap().chars().count() <= 1_024);
+    assert!(payload["prompt_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["query_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["contract_truncated"].as_bool().unwrap());
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("QUESTION:"));
     assert!(text.len() <= 15_000);
 }
 
