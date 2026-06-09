@@ -533,6 +533,160 @@ fn non_negative_i64_arg_alias(args: &Value, primary: &str, alias: &str) -> Resul
     }
 }
 
+fn non_negative_timestamp_arg_alias(
+    args: &Value,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<i64>> {
+    match non_negative_timestamp_arg(args, primary)? {
+        Some(value) => Ok(Some(value)),
+        None => non_negative_timestamp_arg(args, alias),
+    }
+}
+
+fn non_negative_timestamp_arg(args: &Value, name: &str) -> Result<Option<i64>> {
+    let Some(value) = args.get(name) else {
+        return Ok(None);
+    };
+    let timestamp = match value {
+        Value::Number(number) => number
+            .as_i64()
+            .ok_or_else(|| timestamp_argument_error(name))?,
+        Value::String(text) => parse_timestamp_string(text, name)?,
+        _ => return Err(timestamp_argument_error(name)),
+    };
+    if timestamp < 0 {
+        return Err(argument_error(format!("{name} must be >= 0")));
+    }
+    Ok(Some(timestamp))
+}
+
+fn parse_timestamp_string(value: &str, name: &str) -> Result<i64> {
+    let text = value.trim();
+    if text.is_empty() {
+        return Err(argument_error(format!("{name} must not be empty")));
+    }
+    if let Ok(timestamp) = text.parse::<i64>() {
+        if timestamp >= 0 {
+            return Ok(timestamp);
+        }
+        return Err(argument_error(format!("{name} must be >= 0")));
+    }
+    parse_rfc3339_timestamp(text).ok_or_else(|| timestamp_argument_error(name))
+}
+
+fn timestamp_argument_error(name: &str) -> TokenSaveError {
+    argument_error(format!(
+        "{name} must be a non-negative Unix timestamp or timezone-aware ISO/RFC3339 string"
+    ))
+}
+
+fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || !matches!(bytes.get(10), Some(b'T' | b't' | b' '))
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+
+    let year = parse_fixed_i32(value, 0, 4)?;
+    let month = parse_fixed_u32(value, 5, 7)?;
+    let day = parse_fixed_u32(value, 8, 10)?;
+    let hour = parse_fixed_u32(value, 11, 13)?;
+    let minute = parse_fixed_u32(value, 14, 16)?;
+    let second = parse_fixed_u32(value, 17, 19)?;
+    if !(1..=12).contains(&month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || day == 0
+        || day > days_in_month(year, month)
+    {
+        return None;
+    }
+
+    let mut zone_pos = 19;
+    if bytes.get(zone_pos) == Some(&b'.') {
+        zone_pos += 1;
+        let fraction_start = zone_pos;
+        while matches!(bytes.get(zone_pos), Some(b'0'..=b'9')) {
+            zone_pos += 1;
+        }
+        if zone_pos == fraction_start {
+            return None;
+        }
+    }
+
+    let offset_seconds = match bytes.get(zone_pos)? {
+        b'Z' | b'z' => {
+            if zone_pos + 1 != bytes.len() {
+                return None;
+            }
+            0
+        }
+        b'+' | b'-' => {
+            if zone_pos + 6 != bytes.len() || bytes.get(zone_pos + 3) != Some(&b':') {
+                return None;
+            }
+            let offset_hours = parse_fixed_i32(value, zone_pos + 1, zone_pos + 3)?;
+            let offset_minutes = parse_fixed_i32(value, zone_pos + 4, zone_pos + 6)?;
+            if offset_hours > 23 || offset_minutes > 59 {
+                return None;
+            }
+            let offset = offset_hours * 3600 + offset_minutes * 60;
+            if bytes[zone_pos] == b'+' {
+                offset
+            } else {
+                -offset
+            }
+        }
+        _ => return None,
+    };
+
+    let days = days_from_civil(year, month, day);
+    let local_seconds =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    let timestamp = local_seconds - i64::from(offset_seconds);
+    (timestamp >= 0).then_some(timestamp)
+}
+
+fn parse_fixed_i32(value: &str, start: usize, end: usize) -> Option<i32> {
+    value.get(start..end)?.parse().ok()
+}
+
+fn parse_fixed_u32(value: &str, start: usize, end: usize) -> Option<u32> {
+    value.get(start..end)?.parse().ok()
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 fn provider_arg(args: &Value) -> &str {
     string_arg(args, "provider").unwrap_or("cursor")
 }
@@ -1080,8 +1234,8 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
             sort: parse_lcm_grep_sort(&args)?,
             source: string_arg(&args, "source").map(str::to_string),
             role: string_arg(&args, "role").map(str::to_string),
-            start_time: non_negative_i64_arg_alias(&args, "start_time", "time_from")?,
-            end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
+            start_time: non_negative_timestamp_arg_alias(&args, "start_time", "time_from")?,
+            end_time: non_negative_timestamp_arg_alias(&args, "end_time", "time_to")?,
         })
         .await
         .map_err(lcm_error)?;

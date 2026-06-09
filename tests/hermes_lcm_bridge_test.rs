@@ -354,6 +354,7 @@ describe_node_result = engine.handle_tool_call("lcm_describe", {"node_id": 7})
 describe_payload_result = engine.handle_tool_call("lcm_describe", {"externalized_ref": "payload_123.payload"})
 expand_result = engine.handle_tool_call("lcm_expand", {"store_id": 42, "max_tokens": 77})
 direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct", "session_scope": "all"})
+implicit_current_result = engine.handle_tool_call("lcm_grep", {"query": "implicit"})
 
 assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
 assert json.loads(load_result) == {"ok": True, "tool": "tokensave_lcm_load_session"}
@@ -361,6 +362,7 @@ assert json.loads(describe_node_result) == {"ok": True, "tool": "tokensave_lcm_d
 assert json.loads(describe_payload_result) == {"ok": True, "tool": "tokensave_lcm_describe"}
 assert json.loads(expand_result) == {"ok": True, "tool": "tokensave_lcm_expand"}
 assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
+assert json.loads(implicit_current_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
 assert calls[0][0] == "tokensave_lcm_preflight"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
 assert calls[0][1]["session_id"] == "session-1"
@@ -410,6 +412,13 @@ assert "session_scope" not in calls[7][1]
 assert calls[7][1]["storage_scope"] == "project_local"
 assert calls[7][1]["project_root"] == "/tmp/project"
 assert calls[7][1]["session_id"] == "session-1"
+assert calls[8][0] == "tokensave_lcm_grep"
+assert calls[8][1]["query"] == "implicit"
+assert calls[8][1]["scope"] == "current"
+assert "session_scope" not in calls[8][1]
+assert calls[8][1]["storage_scope"] == "project_local"
+assert calls[8][1]["project_root"] == "/tmp/project"
+assert calls[8][1]["session_id"] == "session-1"
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
     );

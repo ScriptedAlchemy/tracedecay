@@ -1531,6 +1531,8 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
     if native_name == "lcm_grep":
         if "session_scope" in translated:
             translated["scope"] = translated.pop("session_scope")
+        else:
+            translated.setdefault("scope", "current")
         if "time_from" in translated:
             translated["start_time"] = translated.pop("time_from")
         if "time_to" in translated:

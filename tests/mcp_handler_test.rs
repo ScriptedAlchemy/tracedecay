@@ -5540,6 +5540,69 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 }
 
 #[tokio::test]
+async fn lcm_grep_accepts_string_timestamp_filters() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-old",
+        "orchard string timestamp old",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-target",
+        "orchard string timestamp target",
+        2,
+        "assistant",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-new",
+        "orchard string timestamp new",
+        3,
+        "assistant",
+        "cli",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard string timestamp",
+            "scope": "session",
+            "session_id": "lcm-string-timestamps",
+            "start_time": "15",
+            "end_time": "1970-01-01T00:00:25Z",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(
+        payload["hits"][0]["message_id"],
+        "lcm-string-timestamps-target"
+    );
+}
+
+#[tokio::test]
 async fn lcm_status_uses_explicit_hermes_profile_session_db() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(

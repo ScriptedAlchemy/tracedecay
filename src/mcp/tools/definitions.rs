@@ -1937,14 +1937,18 @@ fn def_lcm_grep() -> ToolDefinition {
                     "description": "Optional raw-message role filter. When supplied, summary results are omitted."
                 },
                 "start_time": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional inclusive minimum raw-message timestamp."
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive minimum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
                 },
                 "end_time": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional inclusive maximum raw-message timestamp."
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive maximum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
                 },
                 "limit": {
                     "type": "integer",
