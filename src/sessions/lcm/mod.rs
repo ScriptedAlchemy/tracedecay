@@ -1,5 +1,6 @@
 pub mod compression;
 pub mod dag;
+pub mod doctor;
 pub mod hermes;
 pub mod payload;
 pub mod query;

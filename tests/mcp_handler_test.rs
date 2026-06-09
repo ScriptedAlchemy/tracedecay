@@ -110,6 +110,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tokensave_lcm_expand_query",
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
+        "tokensave_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
     }
@@ -130,7 +131,11 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], true);
     }
 
-    for mutating in ["tokensave_lcm_preflight", "tokensave_lcm_compress"] {
+    for mutating in [
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+        "tokensave_lcm_doctor",
+    ] {
         let tool = tools
             .iter()
             .find(|tool| tool.name == mutating)
@@ -148,6 +153,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tokensave_lcm_expand_query",
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
+        "tokensave_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -219,6 +225,19 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     assert_eq!(
         expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
         json!("integer")
+    );
+
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_doctor")
+        .expect("tokensave_lcm_doctor definition");
+    assert_eq!(
+        doctor.input_schema["properties"]["mode"]["enum"],
+        json!(["diagnose", "repair", "retention"])
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["apply"]["type"],
+        json!("boolean")
     );
 }
 
@@ -3779,6 +3798,54 @@ async fn seed_lcm_session_message(
     );
 }
 
+async fn seed_lcm_tool_result_message(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
 async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
     GlobalDb::open_at(&hermes_home.join(".tokensave/sessions.db"))
         .await
@@ -3829,6 +3896,251 @@ async fn seed_lcm_session_message_in_db(
         })
         .await
     );
+}
+
+async fn project_lcm_conn(cg: &TokenSave) -> libsql::Connection {
+    let db = libsql::Builder::new_local(cg.project_root().join(".tokensave/sessions.db"))
+        .build()
+        .await
+        .unwrap();
+    db.connect().unwrap()
+}
+
+async fn lcm_fts_match_count(cg: &TokenSave, query: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH ?1",
+            libsql::params![query],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn wipe_lcm_raw_fts(cg: &TokenSave) {
+    project_lcm_conn(cg)
+        .await
+        .execute_batch("DELETE FROM lcm_raw_messages_fts;")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let secret = format!(
+        "LCM_DOCTOR_SECRET_PAYLOAD\n{}",
+        "doctor-secret ".repeat(30_000)
+    );
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload",
+        "lcm-doctor-payload-message",
+        secret,
+        1,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-message")
+        .await
+        .expect("externalized raw message should load");
+    let payload_ref = raw.payload_ref.expect("external payload ref");
+    fs::remove_file(
+        cg.project_root()
+            .join(".tokensave/lcm-payloads")
+            .join(&payload_ref),
+    )
+    .unwrap();
+    fs::write(
+        cg.project_root()
+            .join(".tokensave/lcm-payloads/payload_unreferenced_test.payload"),
+        "orphan body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 1);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 1);
+    let text = extract_text(&result.value);
+    assert!(!text.contains("LCM_DOCTOR_SECRET_PAYLOAD"));
+    assert!(!text.contains("orphan body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-dry-run",
+        "lcm-doctor-dry-run-message",
+        "dry run searchable needle",
+        1,
+    )
+    .await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["fts"]["rebuild_needed"], true);
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-apply",
+        "lcm-doctor-apply-message",
+        "apply repair searchable needle",
+        1,
+    )
+    .await;
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    assert!(payload["repairs"]["applied_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_retention_reports_candidates_without_deleting() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-retention",
+        "lcm-doctor-retention-message",
+        "old session retention candidate",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "retention"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "retention");
+    assert_eq!(payload["diagnostics"]["retention"]["read_only"], true);
+    assert!(payload["diagnostics"]["retention"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["session_id"] == "lcm-doctor-retention"));
+    assert_eq!(lcm_raw_message_count(&cg, "lcm-doctor-retention").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-project",
+        "project-local doctor should not be counted",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-message",
+        "profile-local doctor should be counted",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path().to_string_lossy()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert_eq!(payload["diagnostics"]["raw_message_count"], 1);
 }
 
 #[tokio::test]

@@ -585,6 +585,16 @@ fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
     })
 }
 
+fn lcm_doctor_mode(args: &Value) -> Result<&str> {
+    let mode = string_arg(args, "mode").unwrap_or("diagnose");
+    match mode {
+        "diagnose" | "repair" | "retention" => Ok(mode),
+        _ => Err(argument_error(
+            "mode must be one of diagnose, repair, retention",
+        )),
+    }
+}
+
 fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
     TokenSaveError::Config {
         message: err.to_string(),
@@ -868,6 +878,26 @@ pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<Too
         "session_id": session_id,
         "lcm": status,
     })))
+}
+
+pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let provider = provider_arg(&args);
+    let session_id = string_arg(&args, "session_id");
+    let mode = lcm_doctor_mode(&args)?;
+    let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
+    };
+    let mut payload = storage
+        .db
+        .lcm_doctor(provider, session_id, mode, apply)
+        .await
+        .map_err(lcm_error)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("storage_scope".to_string(), json!(storage.scope));
+    }
+    Ok(tool_json(&payload))
 }
 
 pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Result<ToolResult> {

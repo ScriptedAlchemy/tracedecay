@@ -711,6 +711,25 @@ impl GlobalDb {
             .await
     }
 
+    /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
+    pub async fn lcm_doctor(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+        mode: &str,
+        apply: bool,
+    ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::doctor::doctor(
+            &self.conn,
+            &self.storage_root,
+            provider,
+            session_id,
+            mode,
+            apply,
+        )
+        .await
+    }
+
     /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
     pub async fn lcm_update_lifecycle(
         &self,

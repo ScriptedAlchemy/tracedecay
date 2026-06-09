@@ -210,6 +210,7 @@ pub async fn handle_tool_call(
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
         "tokensave_lcm_status" => session::handle_lcm_status(cg, args).await,
+        "tokensave_lcm_doctor" => session::handle_lcm_doctor(cg, args).await,
         "tokensave_lcm_load_session" => session::handle_lcm_load_session(cg, args).await,
         "tokensave_lcm_grep" => session::handle_lcm_grep(cg, args).await,
         "tokensave_lcm_describe" => session::handle_lcm_describe(cg, args).await,

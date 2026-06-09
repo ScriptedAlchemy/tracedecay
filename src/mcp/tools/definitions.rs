@@ -169,6 +169,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_memory_status(),
         def_message_search(),
         def_lcm_status(),
+        def_lcm_doctor(),
         def_lcm_load_session(),
         def_lcm_grep(),
         def_lcm_describe(),
@@ -1773,6 +1774,39 @@ fn def_lcm_status() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Optional provider-local session id filter."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
+        }),
+    )
+}
+
+fn def_lcm_doctor() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_doctor",
+        "LCM Doctor",
+        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs, and report retention candidates without payload body exposure.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id to inspect (default: cursor)."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional provider-local session id filter."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["diagnose", "repair", "retention"],
+                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates."
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "When mode=repair, apply safe repairs such as FTS rebuild. Defaults to false for dry-run."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
