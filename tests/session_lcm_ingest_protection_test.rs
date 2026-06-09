@@ -35,6 +35,67 @@ fn classifies_data_uri_and_long_base64_for_externalization() {
     ));
 }
 
+// Mirrors hermes-lcm `_GENERIC_BASE64_MIN_CHARS = 4096` and
+// `looks_like_long_base64` (ingest_protection.py:103,525-547): a run from the
+// base64/base64url alphabet externalizes at 4096 chars when its length mod 4
+// is not 1 and it has at least 8 distinct non-padding characters.
+#[test]
+fn long_base64_runs_externalize_at_hermes_4096_threshold() {
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let run_4096 = alphabet.repeat(64);
+    assert_eq!(run_4096.len(), 4096);
+    assert!(should_externalize("assistant", Some("message"), &run_4096));
+    assert!(should_externalize(
+        "assistant",
+        Some("message"),
+        &format!("log prefix {} log suffix", alphabet.repeat(80))
+    ));
+
+    // base64url runs (`-`/`_`) qualify like in Hermes' `_BASE64_RUN_RE`.
+    let urlsafe = "abcdefgh0123-_".repeat(300);
+    assert_eq!(urlsafe.len() % 4, 0);
+    assert!(should_externalize("assistant", Some("message"), &urlsafe));
+
+    // Below the Hermes minimum stays inline.
+    assert!(!should_externalize(
+        "assistant",
+        Some("message"),
+        &run_4096[..4092]
+    ));
+
+    // Hermes rejects runs whose length mod 4 == 1 (cannot be base64).
+    let run_4097 = format!("{run_4096}A");
+    assert_eq!(run_4097.len() % 4, 1);
+    assert!(!should_externalize("assistant", Some("message"), &run_4097));
+
+    // Low-diversity runs (a repeated character) are not base64 payloads.
+    assert!(!should_externalize(
+        "assistant",
+        Some("message"),
+        &"Q".repeat(8_192)
+    ));
+}
+
+// Mirrors hermes-lcm `_DATA_URI_BASE64_RE` (ingest_protection.py:82-87): a
+// data URI only externalizes when it carries `;base64,` plus at least 256
+// payload characters; JSON-escaped slashes still match.
+#[test]
+fn data_uri_externalization_requires_base64_payload_minimum() {
+    let tiny = format!("data:image/png;base64,{}", "A".repeat(255));
+    assert!(!should_externalize("assistant", Some("message"), &tiny));
+
+    let minimum = format!("data:image/png;base64,{}", "A".repeat(256));
+    assert!(should_externalize("assistant", Some("message"), &minimum));
+
+    // Non-base64 data URIs (comma but no `;base64,`) stay inline.
+    let plain = format!("data:text/plain,{}", "hello%20world".repeat(40));
+    assert!(!should_externalize("assistant", Some("message"), &plain));
+
+    // JSON-escaped slashes in the mime type still match the Hermes regex.
+    let escaped = format!("data:image\\/png;base64,{}", "A".repeat(300));
+    assert!(should_externalize("assistant", Some("message"), &escaped));
+}
+
 #[test]
 fn classifies_repetitive_assistant_output_for_quarantine() {
     let repeated =

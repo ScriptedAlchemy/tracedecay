@@ -197,6 +197,296 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
     assert_eq!(lcm_fts_count(&db_path, "QWxhZGRpbjpvcGVu").await, 0);
 }
 
+// Mirrors hermes-lcm `_protect_payload_substrings`
+// (ingest_protection.py:576-614, Hermes test
+// `test_ingest_preserves_trailing_text_after_data_uri`): only the data-URI
+// span is externalized while surrounding plain text stays inline and
+// searchable.
+#[tokio::test]
+async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchable() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let media_span = format!(
+        "data:application/octet-stream;base64,{}",
+        "QUJDRA==".repeat(64)
+    );
+    let content = format!("substringprefixcanary inspect {media_span} then substringsuffixcanary");
+    let mut message = raw_message("cursor", "substring-media", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("substring media message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "substring-media")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.starts_with("substringprefixcanary inspect ["));
+    assert!(raw.content.ends_with(" then substringsuffixcanary"));
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(!raw.content.contains(";base64,"));
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["nested_external_payloads"], 1);
+
+    assert_eq!(lcm_fts_count(&db_path, "substringprefixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db_path, "substringsuffixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db_path, "QUJDRA").await, 0);
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &payload_ref,
+            0,
+            media_span.chars().count(),
+        )
+        .await
+        .expect("substring payload should expand");
+    assert_eq!(expanded.content, media_span);
+}
+
+// Mirrors hermes-lcm `_protect_payload_substrings` pass 2: a long generic
+// base64 run embedded in plain text is externalized as a substring while the
+// surrounding log text stays inline.
+#[tokio::test]
+async fn long_base64_run_substring_externalizes_span_inline() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let run = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(80);
+    let content = format!("buildlogprefixcanary {run} buildlogsuffixcanary");
+    let mut message = raw_message("cursor", "substring-base64", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("substring base64 message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "substring-base64")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.starts_with("buildlogprefixcanary ["));
+    assert!(raw.content.ends_with(" buildlogsuffixcanary"));
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(!raw.content.contains(&run));
+
+    assert_eq!(lcm_fts_count(&db_path, "buildlogprefixcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db_path, "buildlogsuffixcanary").await, 1);
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = store
+        .lcm_expand_payload("cursor", "session-1", &payload_ref, 0, run.chars().count())
+        .await
+        .expect("substring payload should expand");
+    assert_eq!(expanded.content, run);
+}
+
+// When the message body is nothing but the media payload there is no inline
+// scaffold worth keeping, so whole-message externalization still applies
+// (intentional storage-representation divergence from Hermes; recovery via
+// expand is identical).
+#[tokio::test]
+async fn message_that_is_only_a_media_payload_externalizes_whole_message() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let content = format!(
+        "data:application/octet-stream;base64,{}",
+        "QUJDRA==".repeat(64)
+    );
+    let mut message = raw_message("cursor", "whole-media", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("whole media message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "whole-media")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::External);
+    let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            payload_ref,
+            0,
+            content.chars().count(),
+        )
+        .await
+        .expect("whole media payload should expand");
+    assert_eq!(expanded.content, content);
+}
+
+// Mirrors hermes-lcm `_DATA_URI_BASE64_RE` minimum: tiny inline data URIs
+// (icons/thumbnails below 256 base64 chars) stay inline and lossless.
+#[tokio::test]
+async fn tiny_data_uri_stays_inline_and_lossless() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let content = format!(
+        "tinyiconcanary data:image/png;base64,{} trailing text",
+        "iVBORw0KGgo=".repeat(8)
+    );
+    let mut message = raw_message("cursor", "tiny-data-uri", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("tiny data uri message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "tiny-data-uri")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert_eq!(raw.content, content);
+    assert!(raw.metadata_json.is_none());
+    assert_eq!(lcm_fts_count(&db_path, "tinyiconcanary").await, 1);
+}
+
+// Mirrors hermes-lcm `_sensitive_pattern_for_key` / `redact_sensitive_value`
+// (ingest_protection.py:252-323): when redaction is enabled, JSON values
+// under sensitive keys are fully redacted even when the flat assignment scan
+// misses them (compact aliases, short secrets).
+#[tokio::test]
+async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let content = json!({
+        "apiToken": "shortkey1",
+        "nested": {"client-secret": "tiny66"},
+        "auth": {"token": "tok12"},
+        "note": "keep jsonkeyredactioncanary",
+    })
+    .to_string();
+    let mut message = raw_message(
+        "cursor",
+        "json-key-redaction",
+        "session-1",
+        "user",
+        &content,
+    );
+    message.kind = Some("message".to_string());
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["default"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("json key redacted message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "json-key-redaction")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(!raw.content.contains("shortkey1"));
+    assert!(!raw.content.contains("tiny66"));
+    assert!(!raw.content.contains("tok12"));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=api_key"));
+    assert!(raw
+        .content
+        .contains("[LCM sensitive redaction: name=bearer_token"));
+    assert!(raw.content.contains("keep jsonkeyredactioncanary"));
+
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    let patterns = metadata["ingest_protection"]["redaction_patterns"]
+        .as_array()
+        .expect("redaction patterns");
+    assert!(patterns.contains(&json!("api_key")));
+    assert!(patterns.contains(&json!("bearer_token")));
+
+    assert_eq!(lcm_fts_count(&db_path, "shortkey1").await, 0);
+    assert_eq!(lcm_fts_count(&db_path, "jsonkeyredactioncanary").await, 1);
+}
+
+// Parity with Hermes defaults: the JSON-key walk is opt-in; without the
+// config flag the same content stays lossless.
+#[tokio::test]
+async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let content = json!({"apiToken": "shortkey1", "note": "lossless"}).to_string();
+    let mut message = raw_message("cursor", "json-key-lossless", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("lossless json message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "json-key-lossless")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.content, content);
+    assert!(raw.metadata_json.is_none());
+}
+
 #[tokio::test]
 async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
     let tmp = TempDir::new().unwrap();

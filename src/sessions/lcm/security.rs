@@ -1,20 +1,31 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 const LARGE_TOOL_OUTPUT_CHARS: usize = 256 * 1024;
-const LONG_BASE64_RUN_CHARS: usize = 64 * 1024;
+// Mirrors hermes-lcm `_GENERIC_BASE64_MIN_CHARS` (ingest_protection.py:103).
+const GENERIC_BASE64_MIN_CHARS: usize = 4096;
 const BINARYISH_SAMPLE_CHARS: usize = 8192;
 const QUARANTINED_ASSISTANT_MIN_CHARS: usize = 65_536;
 const QUARANTINED_ASSISTANT_MIN_TOKENS: usize = 1_000;
 const QUARANTINE_HIGH_REPETITION: &str = "high_repetition";
 
 pub fn should_externalize(role: &str, kind: Option<&str>, content: &str) -> bool {
+    prefers_whole_message_externalization(role, kind, content)
+        || contains_data_uri(content)
+        || has_long_base64_run(content)
+}
+
+/// Reasons that externalize the whole message body rather than only the
+/// media/base64 spans inside it (quarantine, binary-ish content, oversized
+/// tool output). Substring protection is skipped for these.
+pub(crate) fn prefers_whole_message_externalization(
+    role: &str,
+    kind: Option<&str>,
+    content: &str,
+) -> bool {
     if quarantine_reason(role, kind, content).is_some() {
-        return true;
-    }
-    if contains_data_uri(content) {
-        return true;
-    }
-    if has_long_base64_run(content) {
         return true;
     }
     if is_binaryish(content) {
@@ -121,25 +132,32 @@ fn session_pattern_regex(pattern: &str) -> String {
     regex
 }
 
+// Port of hermes-lcm `_DATA_URI_BASE64_RE` (ingest_protection.py:81-87): any
+// data URI with a `;base64,` marker and at least 256 payload characters.
+// Raw scans can see JSON-escaped slashes (`\/`, `\u002f`) before decoding.
+static DATA_URI_BASE64_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    const SLASH: &str = r"(?:/|\\/|\\u002[fF])";
+    Regex::new(&format!(
+        r"(?i)data:(?:[A-Za-z0-9.+\-]|{SLASH})*(?:;[A-Za-z0-9_.+%\-]+=(?:[A-Za-z0-9_.+%\-]|{SLASH})*)*;base64,(?:[A-Za-z0-9+=]|{SLASH}){{256,}}"
+    ))
+    .ok()
+});
+
 pub fn contains_data_uri(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    for (idx, _) in lower.match_indices("data:") {
-        let after = &lower[idx + "data:".len()..];
-        let mut saw_comma = false;
-        for ch in after.chars().take(256) {
-            if ch == ',' {
-                saw_comma = true;
-                break;
-            }
-            if ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>') {
-                break;
-            }
-        }
-        if saw_comma {
-            return true;
-        }
-    }
-    false
+    DATA_URI_BASE64_RE
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(content))
+}
+
+/// Byte spans of data-URI base64 payloads eligible for substring
+/// externalization (Hermes `_protect_payload_substrings` pass 1).
+pub(crate) fn data_uri_spans(content: &str) -> Vec<(usize, usize)> {
+    DATA_URI_BASE64_RE.as_ref().map_or_else(Vec::new, |regex| {
+        regex
+            .find_iter(content)
+            .map(|found| (found.start(), found.end()))
+            .collect()
+    })
 }
 
 fn assistant_output_is_high_repetition(content: &str) -> bool {
@@ -224,37 +242,58 @@ fn is_tool_payload(role: &str, kind: Option<&str>) -> bool {
 }
 
 pub fn has_long_base64_run(content: &str) -> bool {
-    let mut run = 0usize;
-    let mut distinct = [false; 256];
-    let mut distinct_count = 0usize;
-    let mut has_symbol = false;
-    let mut has_upper = false;
-    let mut has_lower = false;
-    let mut has_digit = false;
-    for byte in content.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=') {
-            run += 1;
-            if !distinct[byte as usize] {
-                distinct[byte as usize] = true;
-                distinct_count += 1;
+    !long_base64_run_spans(content).is_empty()
+}
+
+// Hermes `_BASE64_RUN_RE` alphabet (ingest_protection.py:89): standard and
+// url-safe base64 plus padding.
+fn is_base64_run_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=' | b'_' | b'-')
+}
+
+/// Byte spans of maximal base64-alphabet runs that qualify as long base64
+/// payloads (Hermes `_BASE64_RUN_RE` + `looks_like_long_base64`).
+pub(crate) fn long_base64_run_spans(content: &str) -> Vec<(usize, usize)> {
+    if content.len() < GENERIC_BASE64_MIN_CHARS {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (idx, byte) in content.bytes().enumerate() {
+        if is_base64_run_byte(byte) {
+            if run_start.is_none() {
+                run_start = Some(idx);
             }
-            has_symbol |= matches!(byte, b'+' | b'/' | b'=');
-            has_upper |= byte.is_ascii_uppercase();
-            has_lower |= byte.is_ascii_lowercase();
-            has_digit |= byte.is_ascii_digit();
-            if run >= LONG_BASE64_RUN_CHARS {
-                let categories =
-                    usize::from(has_upper) + usize::from(has_lower) + usize::from(has_digit);
-                return has_symbol || (categories >= 2 && distinct_count >= 8);
+        } else if let Some(start) = run_start.take() {
+            if looks_like_long_base64(&content[start..idx]) {
+                spans.push((start, idx));
             }
-        } else {
-            run = 0;
-            distinct = [false; 256];
-            distinct_count = 0;
-            has_symbol = false;
-            has_upper = false;
-            has_lower = false;
-            has_digit = false;
+        }
+    }
+    if let Some(start) = run_start {
+        if looks_like_long_base64(&content[start..]) {
+            spans.push((start, content.len()));
+        }
+    }
+    spans
+}
+
+// Port of hermes-lcm `looks_like_long_base64` (ingest_protection.py:525-547)
+// for a maximal alphabet run: very long, length mod 4 != 1, and at least a
+// bit of mixed alphabet so a repeated-character log line does not match.
+fn looks_like_long_base64(run: &str) -> bool {
+    if run.len() < GENERIC_BASE64_MIN_CHARS || run.len() % 4 == 1 {
+        return false;
+    }
+    let mut seen = [false; 256];
+    let mut distinct = 0usize;
+    for byte in run.trim_end_matches('=').bytes() {
+        if !seen[byte as usize] {
+            seen[byte as usize] = true;
+            distinct += 1;
+            if distinct >= 8 {
+                return true;
+            }
         }
     }
     false

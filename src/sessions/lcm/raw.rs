@@ -238,8 +238,24 @@ async fn prepare_message(
         protection.redaction_patterns = redacted.patterns;
     }
 
+    let mut handled_as_structured = false;
     if let Ok(mut value) = serde_json::from_str::<JsonValue>(&text) {
         if matches!(value, JsonValue::Object(_) | JsonValue::Array(_)) {
+            handled_as_structured = true;
+            // Hermes `_protect_value` redacts the structure before
+            // externalizing payload substrings (ingest_protection.py:663-677).
+            let mut json_changed = false;
+            if config.sensitive_patterns_enabled {
+                let mut key_patterns = Vec::new();
+                if redact_sensitive_json_values(&mut value, &config, &mut key_patterns) {
+                    protection.redacted = true;
+                    protection.lossy = true;
+                    protection.redaction_patterns.extend(key_patterns);
+                    protection.redaction_patterns.sort();
+                    protection.redaction_patterns.dedup();
+                    json_changed = true;
+                }
+            }
             let mut nested_payloads = Vec::new();
             protect_json_media_payloads(
                 &mut value,
@@ -253,9 +269,38 @@ async fn prepare_message(
                     payload::upsert_payload_metadata(conn, payload_ref).await?;
                 }
                 protection.nested_external_payloads = nested_payloads.len();
+                json_changed = true;
+            }
+            if json_changed {
                 text = serde_json::to_string(&value)
                     .map_err(|err| LcmError::Db(format!("json protection failed: {err}")))?;
             }
+        }
+    }
+
+    // Hermes `_protect_payload_substrings` (ingest_protection.py:576-614):
+    // externalize only the media/base64 spans of plain text, keeping the
+    // surrounding text inline and searchable. Whole-message externalization
+    // still wins when there is no inline scaffold worth keeping or when a
+    // whole-message reason (quarantine, binary-ish, oversized tool output)
+    // applies.
+    if !handled_as_structured
+        && !security::prefers_whole_message_externalization(
+            &message.role,
+            message.kind.as_deref(),
+            &text,
+        )
+        && has_inline_scaffold_outside_media_spans(&text)
+    {
+        let mut span_payloads = Vec::new();
+        if let Some(protected) =
+            replace_media_substrings(&text, storage_root, message, "content", &mut span_payloads)?
+        {
+            for payload_ref in &span_payloads {
+                payload::upsert_payload_metadata(conn, payload_ref).await?;
+            }
+            protection.nested_external_payloads += span_payloads.len();
+            text = protected;
         }
     }
 
@@ -296,30 +341,120 @@ fn protect_json_media_payloads(
             }
         }
         JsonValue::String(text) if security::contains_media_payload(text) => {
-            let metadata_json = Some(
-                json!({
-                    "ingest_payload": true,
-                    "field_path": field_path,
-                    "lossless": true,
-                })
-                .to_string(),
-            );
-            let payload_ref = payload::write_external_payload(
-                storage_root,
-                &message.provider,
-                &message.session_id,
-                &message.message_id,
-                "ingest_payload",
-                text,
-                metadata_json,
-            )?;
-            let placeholder = ingest_payload_placeholder(&payload_ref, &message.role, field_path);
-            *text = placeholder;
-            payloads.push(payload_ref);
+            // Hermes `_protect_value` applies `_protect_payload_substrings`
+            // to nested strings: only the media spans are externalized while
+            // surrounding text stays in place.
+            if let Some(protected) =
+                replace_media_substrings(text, storage_root, message, field_path, payloads)?
+            {
+                *text = protected;
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Returns true when the text holds non-whitespace content outside its
+/// media/base64 spans, i.e. there is an inline scaffold worth preserving via
+/// substring externalization instead of whole-message externalization.
+fn has_inline_scaffold_outside_media_spans(text: &str) -> bool {
+    let mut spans = security::data_uri_spans(text);
+    spans.extend(security::long_base64_run_spans(text));
+    if spans.is_empty() {
+        return false;
+    }
+    spans.sort_unstable();
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        let start = start.max(cursor);
+        if text[cursor..start].chars().any(|ch| !ch.is_whitespace()) {
+            return true;
+        }
+        cursor = cursor.max(end);
+    }
+    text[cursor..].chars().any(|ch| !ch.is_whitespace())
+}
+
+/// Port of hermes-lcm `_protect_payload_substrings`
+/// (ingest_protection.py:576-614): pass 1 externalizes data-URI base64 spans,
+/// pass 2 externalizes qualifying long base64 runs in the remaining text.
+/// Returns `None` when nothing matched.
+fn replace_media_substrings(
+    text: &str,
+    storage_root: &Path,
+    message: &SessionMessageRecord,
+    field_path: &str,
+    payloads: &mut Vec<LcmPayloadRef>,
+) -> Result<Option<String>, LcmError> {
+    let data_uri_spans = security::data_uri_spans(text);
+    let after_data_uris = if data_uri_spans.is_empty() {
+        text.to_string()
+    } else {
+        externalize_spans(
+            text,
+            &data_uri_spans,
+            storage_root,
+            message,
+            field_path,
+            payloads,
+        )?
+    };
+    let run_spans = security::long_base64_run_spans(&after_data_uris);
+    if run_spans.is_empty() {
+        return Ok((!data_uri_spans.is_empty()).then_some(after_data_uris));
+    }
+    let protected = externalize_spans(
+        &after_data_uris,
+        &run_spans,
+        storage_root,
+        message,
+        field_path,
+        payloads,
+    )?;
+    Ok(Some(protected))
+}
+
+fn externalize_spans(
+    text: &str,
+    spans: &[(usize, usize)],
+    storage_root: &Path,
+    message: &SessionMessageRecord,
+    field_path: &str,
+    payloads: &mut Vec<LcmPayloadRef>,
+) -> Result<String, LcmError> {
+    let mut protected = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for &(start, end) in spans {
+        protected.push_str(&text[cursor..start]);
+        let span = &text[start..end];
+        let metadata_json = Some(
+            json!({
+                "ingest_payload": true,
+                "field_path": field_path,
+                "lossless": true,
+            })
+            .to_string(),
+        );
+        let payload_ref = payload::write_external_payload(
+            storage_root,
+            &message.provider,
+            &message.session_id,
+            &message.message_id,
+            "ingest_payload",
+            span,
+            metadata_json,
+        )?;
+        protected.push_str(&ingest_payload_placeholder(
+            &payload_ref,
+            &message.role,
+            field_path,
+        ));
+        payloads.push(payload_ref);
+        cursor = end;
+    }
+    protected.push_str(&text[cursor..]);
+    Ok(protected)
 }
 
 fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, role: &str, field_path: &str) -> String {
@@ -360,6 +495,96 @@ struct RedactionOutcome {
     text: String,
     redacted: bool,
     patterns: Vec<String>,
+}
+
+const SENSITIVE_REDACTION_PREFIX: &str = "[LCM sensitive redaction:";
+
+fn sensitive_pattern_active(config: &IngestConfig, name: &str) -> bool {
+    config
+        .sensitive_patterns
+        .iter()
+        .any(|pattern| pattern == name || pattern == "all" || pattern == "default")
+}
+
+// Port of hermes-lcm `_sensitive_pattern_for_key`
+// (ingest_protection.py:252-268): match keys by their compact normalized
+// form so aliases like `apiToken` or `client-secret` are covered.
+fn sensitive_pattern_for_key(key: &str, config: &IngestConfig) -> Option<&'static str> {
+    let mut normalized = String::with_capacity(key.len());
+    for ch in key.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+        } else if !normalized.ends_with('_') {
+            normalized.push('_');
+        }
+    }
+    let normalized = normalized.trim_matches('_');
+    let compact = normalized.replace('_', "");
+    if sensitive_pattern_active(config, "api_key")
+        && (matches!(
+            compact.as_str(),
+            "apikey" | "apitoken" | "accesstoken" | "secretkey" | "clientsecret"
+        ) || (normalized.contains("api") && normalized.contains("key"))
+            || (normalized.contains("access") && normalized.contains("token"))
+            || (normalized.contains("secret") && normalized.contains("key")))
+    {
+        return Some("api_key");
+    }
+    if sensitive_pattern_active(config, "bearer_token")
+        && matches!(
+            compact.as_str(),
+            "authorization" | "authtoken" | "bearertoken" | "token"
+        )
+    {
+        return Some("bearer_token");
+    }
+    if sensitive_pattern_active(config, "password_assignment")
+        && matches!(
+            compact.as_str(),
+            "password" | "passwd" | "pwd" | "passphrase"
+        )
+    {
+        return Some("password_assignment");
+    }
+    None
+}
+
+// Port of hermes-lcm `redact_sensitive_value` (ingest_protection.py:291-323):
+// fully redact string values under sensitive keys, recursing through the
+// structure. Values the flat text scan already redacted (placeholder present)
+// are left untouched, matching `_redact_entire_sensitive_string`.
+fn redact_sensitive_json_values(
+    value: &mut JsonValue,
+    config: &IngestConfig,
+    patterns: &mut Vec<String>,
+) -> bool {
+    match value {
+        JsonValue::Object(map) => {
+            let mut changed = false;
+            for (key, child) in map.iter_mut() {
+                if let Some(pattern) = sensitive_pattern_for_key(key, config) {
+                    if let JsonValue::String(text) = child {
+                        if !text.is_empty() && !text.contains(SENSITIVE_REDACTION_PREFIX) {
+                            *text = sensitive_placeholder(pattern, text.as_str());
+                            patterns.push(pattern.to_string());
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+                changed |= redact_sensitive_json_values(child, config, patterns);
+            }
+            changed
+        }
+        JsonValue::Array(items) => {
+            let mut changed = false;
+            for item in items.iter_mut() {
+                changed |= redact_sensitive_json_values(item, config, patterns);
+            }
+            changed
+        }
+        _ => false,
+    }
 }
 
 fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {
@@ -519,8 +744,7 @@ fn redact_assignments(
             !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
         });
         let secret = &text[secret_start..pos];
-        if secret.chars().count() < min_secret_len
-            || secret.starts_with("[LCM sensitive redaction:")
+        if secret.chars().count() < min_secret_len || secret.starts_with(SENSITIVE_REDACTION_PREFIX)
         {
             out.push_str(&text[cursor..pos]);
             cursor = pos;
