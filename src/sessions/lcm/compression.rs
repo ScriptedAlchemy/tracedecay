@@ -27,6 +27,10 @@ const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
 const ACTIVE_REPLAY_MESSAGE_KEY: &str = "active_replay";
+const PRESERVED_TODO_CONTEXT_PREFIX: &str =
+    "[Your active task list was preserved across context compression]";
+const PRESERVED_OBJECTIVE_CONTEXT_PREFIX: &str =
+    "[Current user objective preserved from compacted history]";
 
 fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
     match configured {
@@ -473,6 +477,11 @@ async fn compress_in_transaction(
     conn: &Connection,
     request: LcmCompressionRequest,
 ) -> Result<LcmCompressionResponse, LcmError> {
+    let overflow_assembly_cap = overflow_recovery_assembly_cap(
+        request.current_tokens,
+        request.max_assembly_tokens,
+        &request.messages,
+    );
     let conversation_id = request.session_id.clone();
     let existing_frontier = lifecycle_state_or_default(
         conn,
@@ -527,12 +536,12 @@ async fn compress_in_transaction(
                     deferred_backlog: &[],
                     fresh_tail: &window.fresh_tail,
                 },
-                request.max_assembly_tokens,
+                overflow_assembly_cap,
             )
             .await?;
             let over_budget = replay_exceeds_budget(
                 replay_token_estimate(&replay_messages),
-                request.max_assembly_tokens,
+                overflow_assembly_cap,
             );
             let (status, reason) = if over_budget {
                 ("best_effort", "irreducible_overflow_no_backlog")
@@ -546,7 +555,7 @@ async fn compress_in_transaction(
                 replay_messages,
                 existing_frontier,
                 None,
-                request.max_assembly_tokens,
+                overflow_assembly_cap,
             ));
         }
         if let Some(response) = condense_summary_nodes_if_ready(
@@ -746,7 +755,7 @@ async fn compress_in_transaction(
     };
     let replay_token_estimate = replay_token_estimate(&replay_messages);
     if plan.forced_overflow_recovery
-        && replay_exceeds_budget(replay_token_estimate, request.max_assembly_tokens)
+        && replay_exceeds_budget(replay_token_estimate, overflow_assembly_cap)
     {
         status = "best_effort";
         reason = "forced_overflow_recovery_replay_over_budget";
@@ -770,7 +779,11 @@ async fn compress_in_transaction(
             replay_messages,
             frontier,
             summary_request: None,
-            max_assembly_tokens: request.max_assembly_tokens,
+            max_assembly_tokens: if plan.forced_overflow_recovery {
+                overflow_assembly_cap
+            } else {
+                request.max_assembly_tokens
+            },
         },
         CompressionAttemptState {
             compression_attempts,
@@ -1051,6 +1064,26 @@ fn effective_assembly_token_cap(
         .map(|cap| cap.max(1))
 }
 
+fn overflow_recovery_assembly_cap(
+    current_tokens: Option<i64>,
+    max_assembly_tokens: Option<i64>,
+    messages: &[Value],
+) -> Option<i64> {
+    let assembly_cap = max_assembly_tokens?;
+    let Some(current_tokens) = current_tokens.filter(|tokens| *tokens > 0) else {
+        return Some(assembly_cap);
+    };
+    if messages.is_empty() {
+        return Some(assembly_cap);
+    }
+    let message_tokens = messages
+        .iter()
+        .map(|message| estimate_tokens(&message_content(message)))
+        .sum::<i64>();
+    let overhead_tokens = (current_tokens - message_tokens).max(0);
+    Some((assembly_cap - overhead_tokens).max(1))
+}
+
 fn forced_overflow_pressure(current_tokens: Option<i64>, max_assembly_tokens: Option<i64>) -> bool {
     match (current_tokens, max_assembly_tokens) {
         (Some(current_tokens), Some(max_assembly_tokens)) if max_assembly_tokens > 0 => {
@@ -1185,11 +1218,14 @@ async fn assemble_replay_context(
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let anchor_source = load_raw_messages_for_session(conn, provider, session_id).await?;
+    let anchor_source = anchor_source.iter().collect::<Vec<_>>();
     let (anchors, raws) = split_leading_anchors(&parts);
     Ok(assemble_replay_messages(
         &anchors,
         &summaries,
         &raws,
+        &anchor_source,
         max_assembly_tokens,
     ))
 }
@@ -1205,8 +1241,16 @@ async fn assemble_overflow_recovery_replay(
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
+    let anchor_source = load_raw_messages_for_session(conn, provider, session_id).await?;
+    let anchor_source = anchor_source.iter().collect::<Vec<_>>();
     let (anchors, raws) = split_leading_anchors(&parts);
-    let candidate = assemble_replay_messages(&anchors, &summaries, &raws, max_assembly_tokens);
+    let candidate = assemble_replay_messages(
+        &anchors,
+        &summaries,
+        &raws,
+        &anchor_source,
+        max_assembly_tokens,
+    );
     if candidate.len() == anchors.len() {
         if let Some(last) = raws.last() {
             let mut replay = anchors
@@ -1244,26 +1288,52 @@ fn assemble_replay_messages(
     anchors: &[&LcmRawMessage],
     summaries: &[dag::LcmUncondensedSummaryNode],
     raws: &[&LcmRawMessage],
+    anchor_source: &[&LcmRawMessage],
     max_assembly_tokens: Option<i64>,
 ) -> Vec<Value> {
-    let (selected_raws, selected_summaries) = match max_assembly_tokens {
-        None => (raws.to_vec(), summaries.iter().collect::<Vec<_>>()),
+    let (selected_raws, selected_summaries, preserved_objective_anchor) = match max_assembly_tokens
+    {
+        None => (
+            raws.to_vec(),
+            summaries.iter().collect::<Vec<_>>(),
+            latest_user_context_anchor(anchor_source, raws),
+        ),
         Some(cap) => {
             let used = anchors
                 .iter()
                 .map(|message| estimate_tokens(&message.content))
                 .sum::<i64>();
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
-            let summary_budget = (cap - used - tail_tokens).max(0);
+            let mut summary_budget = (cap - used - tail_tokens).max(0);
+            let preserved_objective_anchor =
+                latest_user_context_anchor(anchor_source, &selected_raws).and_then(
+                    |(store_id, part, already_preserved)| {
+                        if already_preserved {
+                            return Some((store_id, part, already_preserved));
+                        }
+                        let part_tokens = estimate_tokens(&part);
+                        if part_tokens <= summary_budget {
+                            summary_budget -= part_tokens;
+                            Some((store_id, part, already_preserved))
+                        } else {
+                            None
+                        }
+                    },
+                );
             (
                 selected_raws,
                 select_budget_summaries(summaries, summary_budget),
+                preserved_objective_anchor,
             )
         }
     };
 
-    let mut replay_items =
-        Vec::with_capacity(anchors.len() + selected_summaries.len() + selected_raws.len());
+    let mut replay_items = Vec::with_capacity(
+        anchors.len()
+            + selected_summaries.len()
+            + selected_raws.len()
+            + usize::from(preserved_objective_anchor.is_some()),
+    );
     replay_items.extend(anchors.iter().map(|message| {
         (
             message.store_id,
@@ -1278,6 +1348,18 @@ fn assemble_replay_messages(
             summary_replay_message(&summary.node),
         )
     }));
+    if let Some((store_id, preserved_objective_anchor, _already_preserved)) =
+        preserved_objective_anchor
+    {
+        replay_items.push((
+            store_id,
+            SUMMARY_REPLAY_PRIORITY,
+            json!({
+                "role": "system",
+                "content": preserved_objective_anchor,
+            }),
+        ));
+    }
     replay_items.extend(selected_raws.iter().map(|message| {
         (
             message.store_id,
@@ -1307,7 +1389,7 @@ fn select_budget_tail<'a>(
     for message in raws.iter().rev() {
         let message_tokens = estimate_tokens(&message.content);
         if used + tail_tokens + message_tokens > cap {
-            if is_budget_droppable_tail_role(&message.role) {
+            if is_budget_droppable_tail_message(message) {
                 skipped_gap = true;
                 continue;
             }
@@ -1326,8 +1408,60 @@ fn select_budget_tail<'a>(
 /// Mirrors hermes-lcm `_is_budget_droppable_tail_message`: assistant/tool
 /// turns are derived context and may be evicted under budget pressure;
 /// user/system turns are prompt-bearing and stop tail selection.
-fn is_budget_droppable_tail_role(role: &str) -> bool {
-    matches!(role, "assistant" | "tool")
+fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
+    if !matches!(message.role.as_str(), "assistant" | "tool") {
+        return false;
+    }
+    let content = &message.content;
+    !content.contains(PRESERVED_TODO_CONTEXT_PREFIX)
+        && !content.contains(PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+}
+
+fn latest_user_context_anchor(
+    raws: &[&LcmRawMessage],
+    selected_tail: &[&LcmRawMessage],
+) -> Option<(i64, String, bool)> {
+    for message in raws.iter().rev() {
+        if let Some(preserved) = preserved_objective_context_content(&message.content) {
+            if selected_tail.iter().any(|selected| {
+                preserved_objective_context_content(&selected.content) == Some(preserved)
+            }) {
+                return None;
+            }
+            return Some((message.store_id, preserved.to_string(), true));
+        }
+        if message.role != "user" {
+            continue;
+        }
+        if is_preserved_todo_context_message(&message.content) {
+            continue;
+        }
+        if selected_tail
+            .iter()
+            .any(|selected| selected.store_id == message.store_id)
+        {
+            return None;
+        }
+        return Some((
+            message.store_id,
+            format!("{PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n{}", message.content),
+            false,
+        ));
+    }
+    None
+}
+
+fn is_preserved_todo_context_message(content: &str) -> bool {
+    content
+        .trim_start()
+        .starts_with(PRESERVED_TODO_CONTEXT_PREFIX)
+}
+
+fn preserved_objective_context_content(content: &str) -> Option<&str> {
+    content
+        .trim_start()
+        .starts_with(PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+        .then_some(content)
 }
 
 /// Mirrors hermes-lcm summary-block budgeting: highest-depth summaries claim

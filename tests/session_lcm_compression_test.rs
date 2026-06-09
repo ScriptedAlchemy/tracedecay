@@ -1167,7 +1167,7 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
     assert!(response.replay_messages[0]["content"]
         .as_str()
         .unwrap()
-        .contains("[externalized payload"));
+        .contains("[Externalized LCM ingest payload"));
 }
 
 #[tokio::test]
@@ -3262,6 +3262,141 @@ async fn condensation_honors_non_default_incremental_max_depth() {
     assert_eq!(response.reason, "condensed_summary_nodes");
     assert_eq!(response.summary_nodes_created, 1);
     assert_eq!(response.summary_nodes[0].depth, 2);
+}
+
+#[tokio::test]
+async fn compression_reinjects_latest_user_objective_when_tail_is_tool_heavy() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "policy anchor"),
+            ("user", "Ship OAuth login and preserve this objective."),
+            ("assistant", "acknowledged"),
+            ("tool", "first tool result payload"),
+            ("assistant", "working on intermediate steps"),
+            ("tool", "latest tool result payload"),
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "historical summary".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let replay_contents = response
+        .replay_messages
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>();
+    assert!(replay_contents.iter().any(
+        |content| content.contains("[Current user objective preserved from compacted history]")
+    ));
+    assert!(replay_contents
+        .iter()
+        .any(|content| content.contains("Ship OAuth login and preserve this objective.")));
+}
+
+#[tokio::test]
+async fn overflow_recovery_keeps_preserved_objective_scaffold_when_evicting_tail() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "policy anchor stays"),
+            (
+                "assistant",
+                "bulky derived assistant turn with many filler words that should be evicted",
+            ),
+            (
+                "assistant",
+                "[Current user objective preserved from compacted history]\nShip OAuth login now",
+            ),
+            ("user", "keep me"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "unused summary".into(),
+        },
+        None,
+        None,
+        Some(18),
+    );
+    request.current_tokens = Some(50);
+    let response = db.lcm_compress(request).await.unwrap();
+    let replay = response
+        .replay_messages
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>();
+    assert!(replay.iter().any(
+        |content| content.contains("[Current user objective preserved from compacted history]")
+    ));
+    assert!(replay.contains(&"keep me"));
+    assert!(!replay.iter().any(|content| {
+        content.contains("bulky derived assistant turn with many filler words")
+    }));
+}
+
+#[tokio::test]
+async fn forced_overflow_replay_budget_accounts_for_prompt_overhead_delta() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("system", "policy anchor words"),
+            ("user", "fresh tail words"),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "unused summary".into(),
+        },
+        None,
+        None,
+        Some(12),
+    );
+    // Host-observed prompt tokens include local overhead beyond the message
+    // token estimate; overflow recovery should tighten the assembly cap.
+    request.current_tokens = Some(20);
+    request.messages = vec![
+        json!({ "role": "system", "content": "policy anchor words" }),
+        json!({ "role": "user", "content": "fresh tail words" }),
+    ];
+    let response = db.lcm_compress(request).await.unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(
+        response.reason,
+        "forced_overflow_recovery_replay_over_budget"
+    );
+    assert_eq!(response_json["replay_over_budget"], true);
 }
 
 // Mirrors hermes-lcm `_assemble_overflow_recovery_context`: with no backlog
