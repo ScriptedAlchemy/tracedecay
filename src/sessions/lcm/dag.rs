@@ -63,6 +63,7 @@ pub(crate) async fn expand_summary_node(
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
                     content: raw.content.clone(),
+                    content_range: None,
                     raw_message: Some(raw),
                     summary_node: None,
                 });
@@ -77,6 +78,7 @@ pub(crate) async fn expand_summary_node(
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
                     content: child.summary_text.clone(),
+                    content_range: None,
                     raw_message: None,
                     summary_node: Some(Box::new(child)),
                 });

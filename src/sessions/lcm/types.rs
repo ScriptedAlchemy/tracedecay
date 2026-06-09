@@ -264,6 +264,7 @@ pub struct LcmStatus {
 pub struct LcmExpandedSummarySource {
     pub source_ref: LcmSourceRef,
     pub content: String,
+    pub content_range: Option<LcmContentRange>,
     pub raw_message: Option<LcmRawMessage>,
     pub summary_node: Option<Box<LcmSummaryNode>>,
 }

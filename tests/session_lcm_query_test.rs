@@ -449,6 +449,11 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
     assert_eq!(raw.content_range.offset, 2);
     assert_eq!(raw.content_range.returned_chars, 4);
     assert!(raw.content_range.truncated);
+    let raw_metadata = raw.raw_message.as_ref().expect("raw metadata");
+    assert_eq!(raw_metadata.content, "2345");
+    assert_eq!(raw_metadata.content.chars().count(), 4);
+    let rendered_raw = serde_json::to_string(&raw).unwrap();
+    assert!(!rendered_raw.contains("0123456789abcdef"));
 
     let summary_expansion = db
         .lcm_expand(LcmExpandRequest {
@@ -466,6 +471,14 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
         .expect("summary should expand");
     assert_eq!(summary_expansion.kind, "summary_node");
     assert_eq!(summary_expansion.content, "expansion");
+    let summary_metadata = summary_expansion
+        .summary_node
+        .as_ref()
+        .expect("summary metadata");
+    assert_eq!(summary_metadata.summary_text, "expansion");
+    assert_eq!(summary_metadata.summary_text.chars().count(), 9);
+    let rendered_summary = serde_json::to_string(&summary_expansion).unwrap();
+    assert!(!rendered_summary.contains("summary expansion body"));
     assert_eq!(summary_expansion.summary_sources.len(), 1);
 
     let payload_expansion = db
@@ -536,6 +549,15 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
     let source = &expansion.summary_sources[0];
     assert_eq!(source.content, "source-prefix");
     assert!(source.content.chars().count() <= "source-prefix".chars().count());
+    let source_range = source.content_range.as_ref().expect("source range");
+    assert_eq!(source_range.offset, 0);
+    assert_eq!(source_range.limit, "source-prefix".chars().count() as u64);
+    assert_eq!(
+        source_range.returned_chars,
+        "source-prefix".chars().count() as u64
+    );
+    assert_eq!(source_range.total_chars, 128_014);
+    assert!(source_range.truncated);
     let raw_source = source.raw_message.as_ref().expect("raw source metadata");
     assert_eq!(raw_source.store_id, store_ids[0]);
     assert_eq!(raw_source.content, "source-prefix");

@@ -6,7 +6,7 @@ use super::{
     dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit,
     LcmGrepRequest, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
-    LcmRawMessage, LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind,
+    LcmRawMessage, LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind, LcmSummaryNode,
     LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
 };
 
@@ -110,7 +110,8 @@ pub(crate) async fn expand(
             if raw.provider != request.provider || raw.session_id != request.session_id {
                 return Err(LcmError::SummarySourceNotOwnedBySession);
             }
-            let (content, range) = slice_content(&raw.content, request.content_slice);
+            let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
+            let content = raw.content.clone();
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -125,15 +126,16 @@ pub(crate) async fn expand(
             let expansion =
                 dag::expand_summary_node(conn, &request.provider, &request.session_id, &node_id)
                     .await?;
-            let (content, range) =
-                slice_content(&expansion.summary.summary_text, request.content_slice);
+            let (summary, range) =
+                summary_node_with_sliced_text(expansion.summary, request.content_slice);
+            let content = summary.summary_text.clone();
             let summary_sources = slice_summary_sources(expansion.sources, request.content_slice);
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
                 content_range: range,
                 raw_message: None,
-                summary_node: Some(expansion.summary),
+                summary_node: Some(summary),
                 summary_sources,
                 payload_ref: None,
             })
@@ -262,6 +264,24 @@ fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmC
     )
 }
 
+fn raw_message_with_sliced_content(
+    mut raw: LcmRawMessage,
+    slice: Option<LcmContentSlice>,
+) -> (LcmRawMessage, LcmContentRange) {
+    let (content, range) = slice_content(&raw.content, slice);
+    raw.content = content;
+    (raw, range)
+}
+
+fn summary_node_with_sliced_text(
+    mut summary: LcmSummaryNode,
+    slice: Option<LcmContentSlice>,
+) -> (LcmSummaryNode, LcmContentRange) {
+    let (summary_text, range) = slice_content(&summary.summary_text, slice);
+    summary.summary_text = summary_text;
+    (summary, range)
+}
+
 fn slice_summary_sources(
     sources: Vec<LcmExpandedSummarySource>,
     slice: Option<LcmContentSlice>,
@@ -269,8 +289,9 @@ fn slice_summary_sources(
     sources
         .into_iter()
         .map(|mut source| {
-            let (content, _) = slice_content(&source.content, slice);
+            let (content, range) = slice_content(&source.content, slice);
             source.content = content.clone();
+            source.content_range = Some(range);
             if let Some(raw_message) = source.raw_message.as_mut() {
                 raw_message.content = content.clone();
             }
