@@ -559,8 +559,12 @@ impl GlobalDb {
         .await;
         let projection_ok = match raw_result {
             Ok(raw) => {
-                self.upsert_session_message_projection(message, &raw.projection_text)
-                    .await
+                self.upsert_session_message_projection(
+                    message,
+                    &raw.projection_text,
+                    raw.projection_metadata_json.as_deref(),
+                )
+                .await
             }
             Err(_) => false,
         };
@@ -583,6 +587,7 @@ impl GlobalDb {
         &self,
         message: &SessionMessageRecord,
         text: &str,
+        metadata_json: Option<&str>,
     ) -> bool {
         self.conn
             .execute(
@@ -615,7 +620,7 @@ impl GlobalDb {
                     opt_text(message.tool_names.as_deref()),
                     opt_text(message.source_path.as_deref()),
                     opt_i64(message.source_offset),
-                    opt_text(message.metadata_json.as_deref()),
+                    opt_text(metadata_json),
                 ],
             )
             .await

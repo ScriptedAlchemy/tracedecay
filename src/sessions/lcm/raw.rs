@@ -12,6 +12,7 @@ use super::{
 
 pub(crate) struct RawMessageUpsert {
     pub projection_text: String,
+    pub projection_metadata_json: Option<String>,
 }
 
 pub fn derived_text_for_index(raw: &str) -> String {
@@ -109,7 +110,10 @@ pub(crate) async fn upsert_raw_message_with_payload(
     if !security::should_externalize(&message.role, message.kind.as_deref(), &message.text) {
         let projection_text = derived_text_for_index(&message.text);
         return if upsert_raw_message(conn, message).await {
-            Ok(RawMessageUpsert { projection_text })
+            Ok(RawMessageUpsert {
+                projection_text,
+                projection_metadata_json: message.metadata_json.clone(),
+            })
         } else {
             Err(LcmError::Db(
                 "failed to upsert inline raw message".to_string(),
@@ -171,6 +175,7 @@ pub(crate) async fn upsert_raw_message_with_payload(
     .map_err(|err| LcmError::Db(err.to_string()))?;
     Ok(RawMessageUpsert {
         projection_text: placeholder,
+        projection_metadata_json: Some(metadata_json),
     })
 }
 

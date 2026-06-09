@@ -327,8 +327,13 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .get_session_message("cursor", "tool-large")
         .await
         .expect("projection should exist");
+    assert!(fetched.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!fetched.text.contains(body_secret));
     assert!(fetched.text.contains("[externalized payload: tool_result"));
+    let projection_metadata = fetched.metadata_json.as_deref().unwrap_or("");
+    assert!(!projection_metadata.contains(metadata_secret));
+    assert!(projection_metadata.contains("\"external_payload\":true"));
+    assert!(projection_metadata.contains(payload_ref));
 
     let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "tool-large").await;
     assert!(!snippet_text.contains(body_secret));
