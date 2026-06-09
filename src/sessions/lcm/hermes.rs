@@ -16,6 +16,12 @@ pub struct LcmCompressionRequest {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum LcmSummarizerMode {
     Noop,
-    Fake { summary_text: String },
+    Fake {
+        summary_text: String,
+    },
+    Provided {
+        summary_text: String,
+        route: Option<String>,
+    },
     HermesAuxiliary,
 }

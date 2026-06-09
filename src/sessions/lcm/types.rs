@@ -261,6 +261,63 @@ pub struct LcmStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmLifecycleUpdate {
+    pub provider: String,
+    pub conversation_id: String,
+    pub current_session_id: String,
+    pub current_frontier_store_id: Option<i64>,
+    pub last_finalized_session_id: Option<String>,
+    pub last_finalized_frontier_store_id: Option<i64>,
+    pub maintenance_debt: Vec<LcmMaintenanceDebt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmLifecycleState {
+    pub provider: String,
+    pub conversation_id: String,
+    pub current_session_id: String,
+    pub current_frontier_store_id: Option<i64>,
+    pub last_finalized_session_id: Option<String>,
+    pub last_finalized_frontier_store_id: Option<i64>,
+    pub maintenance_debt: Vec<LcmMaintenanceDebt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmMaintenanceDebt {
+    RawBacklog {
+        from_store_id: i64,
+        to_store_id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPreflightRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub messages: Vec<serde_json::Value>,
+    pub current_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPreflightResponse {
+    pub status: String,
+    pub should_compress: bool,
+    pub reason: String,
+    pub replay_messages: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmCompressionResponse {
+    pub status: String,
+    pub reason: String,
+    pub summary_nodes_created: usize,
+    pub summary_nodes: Vec<LcmSummaryNode>,
+    pub replay_messages: Vec<serde_json::Value>,
+    pub frontier: LcmLifecycleState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmExpandedSummarySource {
     pub source_ref: LcmSourceRef,
     pub content: String,

@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use crate::errors::{Result, TokenSaveError};
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
-    LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest,
-    LcmScope,
+    LcmCompressionRequest, LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest,
+    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSummarizerMode,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
@@ -102,6 +102,25 @@ fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
 
 fn provider_arg(args: &Value) -> &str {
     string_arg(args, "provider").unwrap_or("cursor")
+}
+
+fn messages_arg(args: &Value) -> Result<Vec<Value>> {
+    let Some(messages) = args.get("messages") else {
+        return Ok(Vec::new());
+    };
+    let Some(messages) = messages.as_array() else {
+        return Err(argument_error("messages must be an array"));
+    };
+    Ok(messages.clone())
+}
+
+fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
+    let Some(summarizer) = args.get("summarizer") else {
+        return Ok(LcmSummarizerMode::Noop);
+    };
+    serde_json::from_value(summarizer.clone()).map_err(|err| TokenSaveError::Config {
+        message: format!("invalid summarizer: {err}"),
+    })
 }
 
 fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
@@ -391,16 +410,56 @@ pub(super) async fn handle_lcm_expand_query(_cg: &TokenSave, _args: Value) -> Re
     })))
 }
 
-pub(super) async fn handle_lcm_preflight(_cg: &TokenSave, _args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let provider = provider_arg(&args);
+    let session_id = required_string_arg(&args, "session_id")?;
+    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
+        return Ok(lcm_unavailable());
+    };
+    let response = db
+        .lcm_preflight(LcmPreflightRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            messages: messages_arg(&args)?,
+            current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
+        })
+        .await
+        .map_err(lcm_error)?;
     Ok(tool_json(&json!({
-        "status": "not_implemented",
-        "message": "tokensave_lcm_preflight is registered, but compression lifecycle preflight is implemented in a later task.",
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "should_compress": response.should_compress,
+        "reason": response.reason,
+        "replay_messages": response.replay_messages,
     })))
 }
 
-pub(super) async fn handle_lcm_compress(_cg: &TokenSave, _args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let provider = provider_arg(&args);
+    let session_id = required_string_arg(&args, "session_id")?;
+    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
+        return Ok(lcm_unavailable());
+    };
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            messages: messages_arg(&args)?,
+            current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
+            focus_topic: string_arg(&args, "focus_topic").map(str::to_string),
+            summarizer: summarizer_arg(&args)?,
+        })
+        .await
+        .map_err(lcm_error)?;
     Ok(tool_json(&json!({
-        "status": "not_implemented",
-        "message": "tokensave_lcm_compress is registered, but LCM compression is implemented in a later task.",
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "reason": response.reason,
+        "summary_nodes_created": response.summary_nodes_created,
+        "summary_nodes": response.summary_nodes,
+        "replay_messages": response.replay_messages,
+        "frontier": response.frontier,
     })))
 }

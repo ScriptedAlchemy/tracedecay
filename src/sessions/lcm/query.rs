@@ -3,9 +3,9 @@ use std::path::Path;
 use libsql::{params, Connection, Value};
 
 use super::{
-    dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse, LcmError,
-    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit,
-    LcmGrepRequest, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
+    compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse,
+    LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource,
+    LcmGrepHit, LcmGrepRequest, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest,
     LcmRawMessage, LcmRawMessageOverview, LcmScope, LcmStatus, LcmStorageKind, LcmSummaryNode,
     LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
 };
@@ -217,7 +217,8 @@ pub(crate) async fn status(
         external_payload_count: count_external_payloads(conn, provider, session_id).await?,
         missing_payload_count: count_missing_payloads(conn, storage_root, provider, session_id)
             .await?,
-        maintenance_debt_count: 0,
+        maintenance_debt_count: compression::maintenance_debt_count(conn, provider, session_id)
+            .await?,
     })
 }
 

@@ -3857,23 +3857,52 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         .as_bool()
         .unwrap());
 
-    for tool_name in [
+    let result = handle_tool_call(
+        &cg,
         "tokensave_lcm_expand_query",
+        json!({"provider": "cursor", "session_id": "lcm-session", "prompt": "summarize"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "not_implemented");
+
+    let preflight = handle_tool_call(
+        &cg,
         "tokensave_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-preflight", "role": "user", "content": "hello"}]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+
+    let compress = handle_tool_call(
+        &cg,
         "tokensave_lcm_compress",
-    ] {
-        let result = handle_tool_call(
-            &cg,
-            tool_name,
-            json!({"provider": "cursor", "session_id": "lcm-session", "prompt": "summarize"}),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-        assert_eq!(payload["status"], "not_implemented", "{tool_name}");
-    }
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-compress", "role": "user", "content": "hello again"}],
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let compress_payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
+    assert_eq!(compress_payload["status"], "ok");
+    assert_eq!(compress_payload["summary_nodes_created"], 0);
 }
 
 #[tokio::test]

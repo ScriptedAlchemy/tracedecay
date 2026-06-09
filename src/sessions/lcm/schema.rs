@@ -86,6 +86,34 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
             );
         CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
             ON lcm_summary_sources(source_kind, source_id);
+        CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
+            provider TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            current_session_id TEXT NOT NULL,
+            last_finalized_session_id TEXT,
+            current_frontier_store_id INTEGER,
+            last_finalized_frontier_store_id INTEGER,
+            rollover_at INTEGER,
+            reset_at INTEGER,
+            maintenance_at INTEGER,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(provider, conversation_id)
+        );
+        CREATE TABLE IF NOT EXISTS lcm_maintenance_debt (
+            provider TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            debt_id TEXT NOT NULL,
+            debt_kind TEXT NOT NULL,
+            from_store_id INTEGER,
+            to_store_id INTEGER,
+            metadata_json TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(provider, conversation_id, debt_id),
+            FOREIGN KEY(provider, conversation_id)
+                REFERENCES lcm_lifecycle_state(provider, conversation_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_lcm_maintenance_debt_kind
+            ON lcm_maintenance_debt(provider, debt_kind, created_at);
         CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
             index_text, role, metadata_json,
             content='lcm_raw_messages',

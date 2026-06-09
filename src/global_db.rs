@@ -703,6 +703,40 @@ impl GlobalDb {
             .await
     }
 
+    /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
+    pub async fn lcm_update_lifecycle(
+        &self,
+        update: crate::sessions::lcm::LcmLifecycleUpdate,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::update_lifecycle(&self.conn, update).await
+    }
+
+    /// Loads durable LCM lifecycle/frontier state for a provider conversation.
+    pub async fn lcm_lifecycle_state(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::lifecycle_state(&self.conn, provider, conversation_id)
+            .await
+    }
+
+    /// Ingests active messages and reports whether deterministic replay changed.
+    pub async fn lcm_preflight(
+        &self,
+        request: crate::sessions::lcm::LcmPreflightRequest,
+    ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::preflight(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Runs deterministic LCM compression without invoking an auxiliary LLM.
+    pub async fn lcm_compress(
+        &self,
+        request: crate::sessions::lcm::LcmCompressionRequest,
+    ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::compress(&self.conn, &self.storage_root, request).await
+    }
+
     /// Returns an LCM store bound to an explicit storage root for payload files.
     pub fn lcm_store(
         &self,
