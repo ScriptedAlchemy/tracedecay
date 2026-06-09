@@ -886,6 +886,48 @@ def _tokensave_binary_available() -> bool:
         return Path(tools.TOKENSAVE_BIN).is_file() and os.access(tools.TOKENSAVE_BIN, os.X_OK)
     return shutil.which(tools.TOKENSAVE_BIN) is not None
 
+def _storage_args(project_root=None, hermes_home=None):
+    args = {}
+    if project_root:
+        args["storage_scope"] = "project_local"
+        args["project_root"] = str(project_root)
+    elif hermes_home:
+        args["storage_scope"] = "hermes_profile"
+        args["hermes_home"] = str(hermes_home)
+    else:
+        args["storage_scope"] = "hermes_profile"
+    return args
+
+class TokenSaveContextEngine:
+    def __init__(self):
+        self.active_session_id = None
+        self.hermes_home = None
+        self.project_root = None
+
+    def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
+        self.active_session_id = session_id
+        self.hermes_home = hermes_home
+        self.project_root = project_root or kwargs.get("cwd")
+
+    def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
+        args = _storage_args(self.project_root, self.hermes_home)
+        args.update({
+            "session_id": self.active_session_id,
+            "messages": messages,
+            "current_tokens": current_tokens,
+        })
+        return json.loads(tools.call_tokensave_tool("tokensave_lcm_preflight", args, **kwargs))
+
+    def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        args = _storage_args(self.project_root, self.hermes_home)
+        args.update({
+            "session_id": self.active_session_id,
+            "messages": messages,
+            "current_tokens": current_tokens,
+            "focus_topic": focus_topic,
+        })
+        return json.loads(tools.call_tokensave_tool("tokensave_lcm_compress", args, **kwargs))
+
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"
 
@@ -945,6 +987,9 @@ def register(ctx):
 
     if callable(getattr(ctx, "register_memory_provider", None)):
         ctx.register_memory_provider(TokensaveMemoryProvider())
+
+    if callable(getattr(ctx, "register_context_engine", None)):
+        ctx.register_context_engine(TokenSaveContextEngine())
 
     skills_dir = Path(__file__).parent / "skills"
     skill_path = skills_dir / "tokensave" / "SKILL.md"

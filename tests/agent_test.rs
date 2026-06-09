@@ -559,6 +559,22 @@ fn test_hermes_local_install_writes_profile_plugin() {
 }
 
 #[test]
+fn test_hermes_generated_python_registers_lcm_context_engine() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let init_py =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/__init__.py")).unwrap();
+
+    assert!(init_py.contains("class TokenSaveContextEngine"));
+    assert!(init_py.contains("ctx.register_context_engine"));
+    assert!(init_py.contains("tools.call_tokensave_tool(\"tokensave_lcm_preflight\""));
+    assert!(init_py.contains("tools.call_tokensave_tool(\"tokensave_lcm_compress\""));
+}
+
+#[test]
 fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
     let home = TempDir::new().unwrap();
     let tokensave_bin = home.path().join("bin with spaces").join("token\"save-π");
