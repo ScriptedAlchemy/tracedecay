@@ -2193,6 +2193,16 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Optional upper bound for dynamic leaf chunk token budget."
                 },
+                "context_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
+                },
+                "reserve_tokens_floor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
+                },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
                 "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
@@ -2280,6 +2290,16 @@ fn def_lcm_compress() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 0,
                     "description": "Optional upper bound for dynamic leaf chunk token budget."
+                },
+                "context_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
+                },
+                "reserve_tokens_floor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
                 },
                 "summarizer": {
                     "type": "object",

@@ -1381,6 +1381,8 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
             fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
             dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
             dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
+            context_length: non_negative_i64_arg(&args, "context_length")?,
+            reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
             ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
             stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
             ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
@@ -1427,6 +1429,8 @@ pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<T
             fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
             dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
             dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
+            context_length: non_negative_i64_arg(&args, "context_length")?,
+            reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
             summarizer: summarizer_arg(&args)?,
         })
         .await

@@ -897,6 +897,7 @@ assert args == {
     "dynamic_leaf_chunk_enabled": False,
     "dynamic_leaf_chunk_max": 40000,
     "max_assembly_tokens": 0,
+    "reserve_tokens_floor": 0,
     "summary_fan_in": 4,
     "session_id": "session-1",
     "messages": [{"role": "user", "content": "hello"}],
@@ -1010,6 +1011,7 @@ assert args == {
     "dynamic_leaf_chunk_enabled": False,
     "dynamic_leaf_chunk_max": 40000,
     "max_assembly_tokens": 0,
+    "reserve_tokens_floor": 0,
     "summary_fan_in": 4,
     "session_id": "session-2",
     "messages": [{"role": "assistant", "content": "hello"}],
@@ -1099,6 +1101,8 @@ config = {
     "dynamic_leaf_chunk_max": 456,
     "max_assembly_tokens": 999,
     "condensation_fanin": 3,
+    "context_length": 200000,
+    "reserve_tokens_floor": 4096,
 }
 engine = plugin.TokenSaveContextEngine(config=config)
 engine.initialize(session_id="session-1", project_root="/tmp/project")
@@ -1124,6 +1128,8 @@ for args in (preflight_args, compress_args):
     assert args["dynamic_leaf_chunk_max"] == 456
     assert args["max_assembly_tokens"] == 999
     assert args["summary_fan_in"] == 3
+    assert args["context_length"] == 200000
+    assert args["reserve_tokens_floor"] == 4096
 
 assert preflight_args["session_id"] == "session-1"
 assert preflight_args["current_tokens"] == 800
@@ -2267,6 +2273,8 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         summarizer: LcmSummarizerMode::Fake {
             summary_text: "deterministic summary".to_string(),
         },

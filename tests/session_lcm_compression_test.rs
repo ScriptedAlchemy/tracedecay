@@ -156,6 +156,8 @@ fn preflight_request(
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
@@ -185,6 +187,8 @@ fn compress_request(
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         summarizer,
     }
 }
@@ -215,6 +219,8 @@ fn limited_compress_request(
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         summarizer,
     }
 }
@@ -331,6 +337,8 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -399,6 +407,8 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -428,6 +438,8 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -488,6 +500,8 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -519,6 +533,8 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "unused".into(),
             },
@@ -571,6 +587,8 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
@@ -597,6 +615,8 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "unused".into(),
             },
@@ -646,6 +666,8 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -721,6 +743,8 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -779,6 +803,8 @@ async fn ignored_session_pattern_skips_active_ingest_and_compression() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "should not be used".into(),
             },
@@ -826,6 +852,8 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: vec!["scratch-shell-*".into()],
             ignore_message_patterns: Vec::new(),
@@ -873,6 +901,8 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: vec!["Cronjob Response:*".into()],
@@ -937,6 +967,8 @@ async fn ignore_message_patterns_skip_storage_but_heartbeat_noise_is_stored() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -1000,6 +1032,8 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
@@ -1100,6 +1134,114 @@ async fn preflight_requests_compression_for_forced_overflow_without_replay_chang
     assert_eq!(response.status, "ok");
     assert!(response.should_compress);
     assert_eq!(response.reason, "forced_overflow_pressure");
+}
+
+// Mirrors hermes-lcm `_effective_assembly_token_cap`: with no explicit
+// max_assembly_tokens, the assembly cap derives from
+// context_length - reserve_tokens_floor when both are positive.
+#[tokio::test]
+async fn preflight_derives_forced_overflow_cap_from_context_window_reserve_floor() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[("system", "system anchor"), ("user", "fresh user")],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
+    request.context_length = Some(80);
+    request.reserve_tokens_floor = Some(30);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "forced_overflow_pressure");
+}
+
+// Mirrors hermes-lcm: a reserve floor that consumes the whole context window
+// disables the reserve-based cap instead of clamping it to zero.
+#[tokio::test]
+async fn preflight_reserve_floor_without_headroom_disables_derived_cap() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[("system", "system anchor"), ("user", "fresh user")],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
+    request.context_length = Some(30);
+    request.reserve_tokens_floor = Some(30);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "no_compression_needed");
+}
+
+// Mirrors hermes-lcm: when both an explicit max_assembly_tokens and a
+// reserve-derived cap apply, the effective cap is the minimum of the two.
+#[tokio::test]
+async fn preflight_effective_cap_uses_minimum_of_explicit_and_reserve_derived() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[("system", "system anchor"), ("user", "fresh user")],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(50));
+    request.max_assembly_tokens = Some(200);
+    request.context_length = Some(80);
+    request.reserve_tokens_floor = Some(30);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "forced_overflow_pressure");
+}
+
+#[tokio::test]
+async fn compress_forces_overflow_recovery_with_reserve_derived_cap() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "forced summary".into(),
+        },
+        Some(10),
+        None,
+        None,
+    );
+    request.context_length = Some(150);
+    request.reserve_tokens_floor = Some(50);
+
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.reason, "forced_overflow_recovery");
+    assert!(response.summary_nodes_created >= 1);
 }
 
 #[tokio::test]
@@ -1634,6 +1776,8 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
@@ -1669,6 +1813,8 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
         summarizer: LcmSummarizerMode::Noop,
     })
     .await
@@ -1726,6 +1872,8 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "stale summary".into(),
             },
@@ -1775,6 +1923,8 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
@@ -1990,6 +2140,8 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "depth one condensed".into(),
             },
@@ -2090,6 +2242,8 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "should not mix depths".into(),
             },
@@ -2186,6 +2340,8 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "depth two condensed".into(),
             },

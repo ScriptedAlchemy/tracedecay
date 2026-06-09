@@ -153,6 +153,8 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
             fresh_tail_count: None,
             dynamic_leaf_chunk_enabled: None,
             dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),

@@ -1270,6 +1270,16 @@ def _lcm_config_args(config) -> dict:
         ),
         "dynamic_leaf_chunk_max": _configured_int(config, "dynamic_leaf_chunk_max", default=40000),
         "max_assembly_tokens": _configured_int(config, "max_assembly_tokens", default=0),
+        # Hermes derives an assembly cap of context_length - reserve_tokens_floor
+        # when both are positive; pass both through so tokensave can apply the
+        # same derivation (reserve_tokens_floor defaults to 0 = disabled).
+        "reserve_tokens_floor": _configured_int(config, "reserve_tokens_floor", default=0),
+        "context_length": _configured_int(
+            config,
+            "context_length",
+            "max_context_tokens",
+            "model_context_tokens",
+        ),
         "summary_fan_in": _configured_int(config, "summary_fan_in", "condensation_fanin", default=4),
     }
     threshold_tokens = _configured_threshold_tokens(config)
@@ -1706,6 +1716,8 @@ class TokenSaveContextEngine(ContextEngine):
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
+            "context_length",
+            "reserve_tokens_floor",
             "ignore_session_patterns",
             "stateless_session_patterns",
             "ignore_message_patterns",
@@ -1754,6 +1766,8 @@ class TokenSaveContextEngine(ContextEngine):
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
+            "context_length",
+            "reserve_tokens_floor",
             "ignore_session_patterns",
             "stateless_session_patterns",
             "ignore_message_patterns",
@@ -1913,6 +1927,8 @@ class TokenSaveContextEngine(ContextEngine):
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
+            "context_length",
+            "reserve_tokens_floor",
             "ignore_session_patterns",
             "stateless_session_patterns",
             "ignore_message_patterns",

@@ -96,6 +96,12 @@ pub(crate) async fn preflight(
     storage_root: &Path,
     request: LcmPreflightRequest,
 ) -> Result<LcmPreflightResponse, LcmError> {
+    let mut request = request;
+    request.max_assembly_tokens = effective_assembly_token_cap(
+        request.max_assembly_tokens,
+        request.context_length,
+        request.reserve_tokens_floor,
+    );
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -154,6 +160,12 @@ pub(crate) async fn compress(
     storage_root: &Path,
     request: LcmCompressionRequest,
 ) -> Result<LcmCompressionResponse, LcmError> {
+    let mut request = request;
+    request.max_assembly_tokens = effective_assembly_token_cap(
+        request.max_assembly_tokens,
+        request.context_length,
+        request.reserve_tokens_floor,
+    );
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -755,6 +767,33 @@ fn threshold_pressure(current_tokens: Option<i64>, threshold_tokens: Option<i64>
         }
         _ => false,
     }
+}
+
+// Mirrors hermes-lcm `_effective_assembly_token_cap`: the active assembly cap
+// is the minimum of the explicit max_assembly_tokens knob and the
+// reserve-derived `context_length - reserve_tokens_floor` headroom cap. A
+// reserve floor that leaves no headroom disables the reserve-based cap
+// (Hermes logs a warning and drops it) instead of clamping it to zero.
+fn effective_assembly_token_cap(
+    max_assembly_tokens: Option<i64>,
+    context_length: Option<i64>,
+    reserve_tokens_floor: Option<i64>,
+) -> Option<i64> {
+    let explicit_cap = max_assembly_tokens.filter(|cap| *cap > 0);
+    let reserve_cap = match (
+        context_length.filter(|length| *length > 0),
+        reserve_tokens_floor.filter(|floor| *floor > 0),
+    ) {
+        (Some(context_length), Some(reserve_tokens_floor)) => {
+            Some(context_length - reserve_tokens_floor).filter(|cap| *cap > 0)
+        }
+        _ => None,
+    };
+    [explicit_cap, reserve_cap]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|cap| cap.max(1))
 }
 
 fn forced_overflow_pressure(current_tokens: Option<i64>, max_assembly_tokens: Option<i64>) -> bool {

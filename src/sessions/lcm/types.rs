@@ -515,6 +515,10 @@ pub struct LcmPreflightRequest {
     pub dynamic_leaf_chunk_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_leaf_chunk_max: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserve_tokens_floor: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
