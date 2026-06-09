@@ -144,6 +144,16 @@ fn lcm_unavailable() -> ToolResult {
     }))
 }
 
+fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
+    tool_json(&json!({
+        "status": "unavailable",
+        "storage_scope": storage_scope,
+        "message": format!(
+            "{storage_scope} LCM status storage is not available from the project-local handler"
+        ),
+    }))
+}
+
 fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
     let Some(value) = args.get("scope") else {
         return Ok(LcmScope::All);
@@ -289,16 +299,18 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
 pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
+    if let Some(storage_scope) = string_arg(&args, "storage_scope") {
+        if storage_scope != "project_local" {
+            return Ok(lcm_storage_scope_unavailable(storage_scope));
+        }
+    }
     let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
         return Ok(lcm_unavailable());
     };
-    let mut status = db
+    let status = db
         .lcm_status(provider, session_id)
         .await
         .map_err(lcm_error)?;
-    if let Some(storage_scope) = string_arg(&args, "storage_scope") {
-        status.storage_scope = Some(storage_scope.to_string());
-    }
     Ok(tool_json(&json!({
         "status": "ok",
         "provider": provider,

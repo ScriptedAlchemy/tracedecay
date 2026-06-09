@@ -15,6 +15,13 @@ use super::{
 
 const MAX_PAGE_LIMIT: usize = 100;
 
+struct LcmLifecycleMetadata {
+    current_session_id: Option<String>,
+    current_frontier_store_id: Option<i64>,
+    last_finalized_session_id: Option<String>,
+    last_finalized_frontier_store_id: Option<i64>,
+}
+
 pub(crate) async fn load_session(
     conn: &Connection,
     request: LcmLoadSessionRequest,
@@ -219,6 +226,7 @@ pub(crate) async fn status(
         compression::maintenance_debt_count(conn, provider, session_id).await?;
     let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
     let frontier_count = count_frontier_rows(conn, provider, session_id).await?;
+    let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
     let legacy_truncated_count = count_legacy_truncated(conn, provider, session_id).await?;
 
     Ok(LcmStatus {
@@ -242,6 +250,10 @@ pub(crate) async fn status(
             lifecycle_state_count,
             frontier_count,
             maintenance_debt_count,
+            current_session_id: lifecycle_metadata.current_session_id,
+            current_frontier_store_id: lifecycle_metadata.current_frontier_store_id,
+            last_finalized_session_id: lifecycle_metadata.last_finalized_session_id,
+            last_finalized_frontier_store_id: lifecycle_metadata.last_finalized_frontier_store_id,
         },
         redaction: LcmRedactionStatus {
             enabled: false,
@@ -682,6 +694,46 @@ async fn count_lifecycle_states(
         .map_err(|err| LcmError::Db(err.to_string()))?
         .ok_or_else(|| LcmError::Db("lifecycle count query returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+}
+
+async fn load_lifecycle_metadata(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<LcmLifecycleMetadata, LcmError> {
+    let session_value = opt_text(session_id);
+    let mut rows = conn
+        .query(
+            "SELECT current_session_id, current_frontier_store_id,
+                    last_finalized_session_id, last_finalized_frontier_store_id
+             FROM lcm_lifecycle_state
+             WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)
+             ORDER BY updated_at DESC, conversation_id DESC
+             LIMIT 1",
+            params![provider, session_value],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    else {
+        return Ok(LcmLifecycleMetadata {
+            current_session_id: None,
+            current_frontier_store_id: None,
+            last_finalized_session_id: None,
+            last_finalized_frontier_store_id: None,
+        });
+    };
+    Ok(LcmLifecycleMetadata {
+        current_session_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+        current_frontier_store_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+        last_finalized_session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+        last_finalized_frontier_store_id: row
+            .get(3)
+            .map_err(|err| LcmError::Db(err.to_string()))?,
+    })
 }
 
 async fn count_frontier_rows(

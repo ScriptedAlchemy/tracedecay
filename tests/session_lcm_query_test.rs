@@ -2,8 +2,8 @@ use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
     LcmContentSlice, LcmError, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest,
-    LcmLoadSessionRequest, LcmScope, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
-    LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
+    LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope, LcmSourceRef,
+    LcmStorageKind, LcmSummaryNodeDraft, LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -356,6 +356,20 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     ))
     .await
     .expect("summary should insert");
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: Some(store_ids[1]),
+        last_finalized_session_id: Some("session-0".into()),
+        last_finalized_frontier_store_id: Some(store_ids[0]),
+        maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[0],
+            to_store_id: store_ids[1],
+        }],
+    })
+    .await
+    .expect("lifecycle state should update");
 
     let status = db
         .lcm_status("cursor", Some("session-1"))
@@ -366,7 +380,26 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     assert_eq!(status.summary_node_count, 1);
     assert_eq!(status.external_payload_count, 1);
     assert_eq!(status.missing_payload_count, 0);
-    assert_eq!(status.maintenance_debt_count, 0);
+    assert_eq!(status.maintenance_debt_count, 1);
+    assert_eq!(status.lifecycle.lifecycle_state_count, 1);
+    assert_eq!(status.lifecycle.frontier_count, 1);
+    assert_eq!(status.lifecycle.maintenance_debt_count, 1);
+    assert_eq!(
+        status.lifecycle.current_session_id.as_deref(),
+        Some("session-1")
+    );
+    assert_eq!(
+        status.lifecycle.current_frontier_store_id,
+        Some(store_ids[1])
+    );
+    assert_eq!(
+        status.lifecycle.last_finalized_session_id.as_deref(),
+        Some("session-0")
+    );
+    assert_eq!(
+        status.lifecycle.last_finalized_frontier_store_id,
+        Some(store_ids[0])
+    );
 
     let rendered = serde_json::to_string(&status).unwrap();
     assert!(!rendered.contains("private payload marker"));

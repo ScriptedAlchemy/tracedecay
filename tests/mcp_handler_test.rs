@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use tokensave::db::Database;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
 use tokensave::sessions::cursor::open_project_session_db;
+use tokensave::sessions::lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
@@ -3973,6 +3974,109 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     assert_eq!(payload["lcm"]["payload"]["unreferenced_count"], 0);
     assert_eq!(payload["lcm"]["redaction"]["enabled"], false);
     assert!(!text.contains("MCP_STATUS_SECRET_PAYLOAD"));
+}
+
+#[tokio::test]
+async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-1",
+        "frontier seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-2",
+        "frontier seed two",
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let first = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-1")
+        .await
+        .expect("first raw message should load");
+    let second = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-2")
+        .await
+        .expect("second raw message should load");
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "lcm-status-frontier".into(),
+        current_session_id: "lcm-status-frontier".into(),
+        current_frontier_store_id: Some(second.store_id),
+        last_finalized_session_id: Some("lcm-status-prior".into()),
+        last_finalized_frontier_store_id: Some(first.store_id),
+        maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: first.store_id,
+            to_store_id: second.store_id,
+        }],
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_session_id"],
+        "lcm-status-frontier"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_frontier_store_id"],
+        second.store_id
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_session_id"],
+        "lcm-status-prior"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_frontier_store_id"],
+        first.store_id
+    );
+    assert_eq!(payload["lcm"]["lifecycle"]["maintenance_debt_count"], 1);
+
+    let profile_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let profile_payload: Value = serde_json::from_str(extract_text(&profile_result.value)).unwrap();
+    assert_eq!(profile_payload["status"], "unavailable");
+    assert_eq!(profile_payload["storage_scope"], "hermes_profile");
+    assert!(
+        profile_payload.get("lcm").is_none(),
+        "hermes_profile requests must not return project-local LCM counts"
+    );
 }
 
 #[tokio::test]

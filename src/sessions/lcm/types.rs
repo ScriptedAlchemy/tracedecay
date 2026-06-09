@@ -278,6 +278,10 @@ pub struct LcmLifecycleStatus {
     pub lifecycle_state_count: i64,
     pub frontier_count: i64,
     pub maintenance_debt_count: i64,
+    pub current_session_id: Option<String>,
+    pub current_frontier_store_id: Option<i64>,
+    pub last_finalized_session_id: Option<String>,
+    pub last_finalized_frontier_store_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
