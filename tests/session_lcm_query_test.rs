@@ -182,11 +182,20 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
         Some(store_ids[99].to_string().as_str())
     );
 
+    let next_after_store_id = first
+        .next_cursor
+        .as_deref()
+        .and_then(|cursor| cursor.parse::<i64>().ok());
     let second = db
         .lcm_load_session(LcmLoadSessionRequest {
-            after_store_id: Some(store_ids[99]),
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            after_store_id: next_after_store_id,
             limit: 2,
-            ..first.request_for_next()
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
         })
         .await
         .expect("second page should load");

@@ -125,20 +125,8 @@ pub struct LcmLoadSessionRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmLoadSessionPage {
-    pub request: LcmLoadSessionRequest,
     pub messages: Vec<LcmLoadSessionMessage>,
     pub next_cursor: Option<String>,
-}
-
-impl LcmLoadSessionPage {
-    pub fn request_for_next(&self) -> LcmLoadSessionRequest {
-        let mut request = self.request.clone();
-        request.after_store_id = self
-            .next_cursor
-            .as_deref()
-            .and_then(|cursor| cursor.parse::<i64>().ok());
-        request
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

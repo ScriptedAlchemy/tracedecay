@@ -69,6 +69,9 @@ pub(crate) struct RawMessageUpsert {
 struct IngestProtection {
     nested_external_payloads: usize,
     redacted: bool,
+    // `lossy` is reserved for irreversible redaction. Hermes quarantine and
+    // payload externalization keep recoverable content refs, so they are not
+    // lossy unless a sensitive value was actually redacted.
     lossy: bool,
     redaction_patterns: Vec<String>,
     quarantine_reason: Option<String>,

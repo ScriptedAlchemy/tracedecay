@@ -106,7 +106,6 @@ pub(crate) async fn load_session(
     };
 
     Ok(LcmLoadSessionPage {
-        request,
         messages,
         next_cursor,
     })

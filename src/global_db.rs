@@ -681,11 +681,17 @@ impl GlobalDb {
     }
 
     /// Returns the current LCM schema version recorded for this session DB.
+    ///
+    /// Intentional integration-test seam for verifying migrations without
+    /// routing through MCP/tool handlers.
     pub async fn lcm_schema_version(&self) -> Option<i64> {
         crate::sessions::lcm::schema::schema_version(&self.conn).await
     }
 
     /// Loads a raw LCM message by provider and provider-local message ID.
+    ///
+    /// Intentional integration-test seam for asserting raw-store fidelity while
+    /// keeping production callers on higher-level LCM query APIs.
     pub async fn lcm_load_raw_message(
         &self,
         provider: &str,
@@ -769,6 +775,9 @@ impl GlobalDb {
     }
 
     /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
+    ///
+    /// Intentional integration-test seam for lifecycle state setup; production
+    /// code updates this state through LCM preflight/compression flows.
     pub async fn lcm_update_lifecycle(
         &self,
         update: crate::sessions::lcm::LcmLifecycleUpdate,
@@ -777,6 +786,9 @@ impl GlobalDb {
     }
 
     /// Loads durable LCM lifecycle/frontier state for a provider conversation.
+    ///
+    /// Intentional integration-test seam for verifying lifecycle persistence
+    /// without coupling tests to compression internals.
     pub async fn lcm_lifecycle_state(
         &self,
         provider: &str,
@@ -813,6 +825,9 @@ impl GlobalDb {
     }
 
     /// Returns an LCM store bound to an explicit storage root for payload files.
+    ///
+    /// Intentional integration-test seam for ingesting payload-backed messages
+    /// with temporary storage roots.
     pub fn lcm_store(
         &self,
         storage_root: impl AsRef<Path>,
@@ -824,6 +839,9 @@ impl GlobalDb {
     }
 
     /// Inserts or updates an LCM summary node and its ordered source lineage.
+    ///
+    /// Intentional integration-test seam for constructing DAG fixtures without
+    /// invoking the summarization pipeline.
     pub async fn lcm_insert_summary_node(
         &self,
         draft: crate::sessions::lcm::LcmSummaryNodeDraft,
@@ -832,6 +850,9 @@ impl GlobalDb {
     }
 
     /// Expands one summary node to its direct raw-message or summary-node sources.
+    ///
+    /// Intentional integration-test seam for asserting DAG lineage expansion
+    /// directly while production callers use `lcm_expand`.
     pub async fn lcm_expand_summary_node(
         &self,
         provider: &str,
