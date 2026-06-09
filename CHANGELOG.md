@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Fallback branch DBs are now read-only for sync/index writes.** `tokensave sync`, lazy single-file syncs, and full indexing now refuse to write when the active git branch is being served from an ancestor branch database, preventing branch-only files from being indexed into the fallback DB.
+
 ## [6.1.3] - 2026-06-04
 
 ### Fixed
