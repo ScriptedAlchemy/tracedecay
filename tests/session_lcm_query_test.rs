@@ -779,6 +779,8 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
                 offset: 2,
                 limit: 4,
             }),
+            source_offset: 0,
+            source_limit: None,
         })
         .await
         .expect("raw should expand");
@@ -804,6 +806,8 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
                 offset: 8,
                 limit: 9,
             }),
+            source_offset: 0,
+            source_limit: None,
         })
         .await
         .expect("summary should expand");
@@ -830,6 +834,8 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
                 offset: 0,
                 limit: "payload-prefix".chars().count(),
             }),
+            source_offset: 0,
+            source_limit: None,
         })
         .await
         .expect("payload should expand");
@@ -854,7 +860,14 @@ async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
 async fn expand_slices_summary_source_content_and_nested_source_bodies() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
-    let huge_source = format!("source-prefix-{}", "X".repeat(128_000));
+    // Varied prose-like filler keeps the oversized body inline (no base64
+    // runs, no high-repetition quarantine) so this exercises char slicing.
+    let filler = (0..12_000)
+        .map(|index| format!("filler{index:05}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let huge_source = format!("source-prefix-{filler}");
+    let huge_source_chars = huge_source.chars().count() as u64;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &[huge_source]).await;
     let summary = db
         .lcm_insert_summary_node(summary_draft(
@@ -879,6 +892,8 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
                 offset: 0,
                 limit: "source-prefix".chars().count(),
             }),
+            source_offset: 0,
+            source_limit: None,
         })
         .await
         .expect("summary should expand");
@@ -894,7 +909,7 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
         source_range.returned_chars,
         "source-prefix".chars().count() as u64
     );
-    assert_eq!(source_range.total_chars, 128_014);
+    assert_eq!(source_range.total_chars, huge_source_chars);
     assert!(source_range.truncated);
     let raw_source = source.raw_message.as_ref().expect("raw source metadata");
     assert_eq!(raw_source.store_id, store_ids[0]);
@@ -906,7 +921,7 @@ async fn expand_slices_summary_source_content_and_nested_source_bodies() {
     assert!(!raw_source.content_hash.is_empty());
 
     let rendered = serde_json::to_string(&expansion).unwrap();
-    assert!(!rendered.contains("XXXXXXXXXX"));
+    assert!(!rendered.contains("filler11999"));
     assert!(rendered.contains("\"content_hash\""));
 }
 
@@ -937,6 +952,8 @@ async fn expand_wrapper_denies_cross_session_summary_nodes() {
                 node_id: summary.node_id,
             },
             content_slice: None,
+            source_offset: 0,
+            source_limit: None,
         })
         .await
         .expect_err("wrapper expansion should reject nodes from another session");
@@ -1091,4 +1108,267 @@ async fn expand_query_reports_context_budget_truncation() {
         .context_pagination
         .iter()
         .any(|page| page.has_more && page.node_id.as_deref() == Some(&summary.node_id)));
+}
+
+#[tokio::test]
+async fn expand_paginates_summary_sources_with_offset_and_limit() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let contents: Vec<String> = (1..=5)
+        .map(|index| format!("source body {index}"))
+        .collect();
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &contents).await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "paginated summary",
+            store_ids
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+        ))
+        .await
+        .expect("summary should insert");
+    let expand_request = |source_offset: usize, source_limit: Option<usize>| LcmExpandRequest {
+        provider: "cursor".into(),
+        session_id: "session-1".into(),
+        target: LcmExpandTarget::SummaryNode {
+            node_id: summary.node_id.clone(),
+        },
+        content_slice: None,
+        source_offset,
+        source_limit,
+    };
+
+    let page = db
+        .lcm_expand(expand_request(1, Some(2)))
+        .await
+        .expect("paginated expand should succeed");
+    let returned_store_ids: Vec<i64> = page
+        .summary_sources
+        .iter()
+        .filter_map(|source| source.raw_message.as_ref().map(|raw| raw.store_id))
+        .collect();
+    assert_eq!(returned_store_ids, vec![store_ids[1], store_ids[2]]);
+    let pagination = page.source_pagination.expect("pagination metadata");
+    assert_eq!(pagination.source_offset, 1);
+    assert_eq!(pagination.source_limit, 2);
+    assert_eq!(pagination.returned_sources, 2);
+    assert_eq!(pagination.total_sources, 5);
+    assert_eq!(pagination.next_source_offset, Some(3));
+    assert!(pagination.has_more);
+    assert_eq!(pagination.remaining_sources, 2);
+
+    // Resuming from the cursor drains the list; an omitted limit clamps to
+    // the remaining sources like hermes-lcm.
+    let tail = db
+        .lcm_expand(expand_request(3, None))
+        .await
+        .expect("cursor resume should succeed");
+    assert_eq!(tail.summary_sources.len(), 2);
+    let tail_pagination = tail.source_pagination.expect("tail pagination");
+    assert_eq!(tail_pagination.source_limit, 2);
+    assert_eq!(tail_pagination.next_source_offset, None);
+    assert!(!tail_pagination.has_more);
+    assert_eq!(tail_pagination.remaining_sources, 0);
+
+    // An offset beyond the end clamps to the source count and returns an
+    // empty page instead of erroring.
+    let beyond = db
+        .lcm_expand(expand_request(9, Some(2)))
+        .await
+        .expect("out-of-range offset should clamp");
+    assert!(beyond.summary_sources.is_empty());
+    let beyond_pagination = beyond.source_pagination.expect("beyond pagination");
+    assert_eq!(beyond_pagination.source_offset, 5);
+    assert_eq!(beyond_pagination.returned_sources, 0);
+    assert!(!beyond_pagination.has_more);
+
+    // The default request still returns every source with full metadata.
+    let full = db
+        .lcm_expand(expand_request(0, None))
+        .await
+        .expect("default expand should succeed");
+    assert_eq!(full.summary_sources.len(), 5);
+    let full_pagination = full.source_pagination.expect("default pagination");
+    assert_eq!(full_pagination.returned_sources, 5);
+    assert!(!full_pagination.has_more);
+}
+
+#[tokio::test]
+async fn expand_allows_cross_session_raw_store_id_with_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["cross session body".to_string()],
+    )
+    .await;
+    insert_session(&db, "cursor", "session-2").await;
+    let raw_request = |provider: &str, session_id: &str| LcmExpandRequest {
+        provider: provider.into(),
+        session_id: session_id.into(),
+        target: LcmExpandTarget::RawMessage {
+            store_id: store_ids[0],
+        },
+        content_slice: None,
+        source_offset: 0,
+        source_limit: None,
+    };
+
+    let cross = db
+        .lcm_expand(raw_request("cursor", "session-2"))
+        .await
+        .expect("cross-session store_id expand should succeed");
+    assert_eq!(cross.kind, "raw_message");
+    assert_eq!(cross.from_current_session, Some(false));
+    assert_eq!(cross.content, "cross session body");
+    assert_eq!(
+        cross.raw_message.as_ref().expect("raw metadata").session_id,
+        "session-1"
+    );
+
+    let same = db
+        .lcm_expand(raw_request("cursor", "session-1"))
+        .await
+        .expect("same-session store_id expand should succeed");
+    assert_eq!(same.from_current_session, Some(true));
+    assert_eq!(same.externalized_note, None);
+
+    // Cross-provider raw rows stay rejected: providers are a TokenSave
+    // concept with no hermes-lcm equivalent.
+    insert_session(&db, "claude", "session-9").await;
+    let err = db
+        .lcm_expand(raw_request("claude", "session-9"))
+        .await
+        .expect_err("cross-provider store_id expand should be rejected");
+    assert_eq!(err, LcmError::SummarySourceNotOwnedBySession);
+}
+
+#[tokio::test]
+async fn expand_cross_session_external_row_surfaces_ref_without_payload_body() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-1").await;
+    insert_session(&db, "cursor", "session-2").await;
+    let payload = format!("cross-payload-{}", "Z".repeat(300_000));
+    let mut external = raw_message("cursor", "cross-external", "session-1", 1, &payload);
+    external.role = "tool".to_string();
+    external.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&external)
+        .await
+        .expect("external payload should ingest");
+    let raw = db
+        .lcm_load_raw_message("cursor", "cross-external")
+        .await
+        .expect("external raw message should exist");
+    let payload_ref = raw.payload_ref.clone().expect("payload ref");
+
+    let cross = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-2".into(),
+            target: LcmExpandTarget::RawMessage {
+                store_id: raw.store_id,
+            },
+            content_slice: None,
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .expect("cross-session external row should expand");
+    assert_eq!(cross.from_current_session, Some(false));
+    assert_eq!(cross.payload_ref.as_deref(), Some(payload_ref.as_str()));
+    let note = cross
+        .externalized_note
+        .as_deref()
+        .expect("cross-session externalized note");
+    assert!(note.contains("session-scoped"));
+    let rendered = serde_json::to_string(&cross).unwrap();
+    assert!(
+        !rendered.contains("ZZZZZZZZZZ"),
+        "cross-session expand must not leak externalized payload bodies"
+    );
+}
+
+#[tokio::test]
+async fn status_reports_dag_depth_distribution_store_estimate_and_config_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["alpha beta gamma".to_string(), "delta epsilon".to_string()],
+    )
+    .await;
+    let leaf = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "leaf summary",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("leaf summary should insert");
+    let mut parent = summary_draft(
+        "cursor",
+        "session-1",
+        "condensed parent summary",
+        vec![LcmSourceRef::SummaryNode {
+            node_id: leaf.node_id.clone(),
+        }],
+    );
+    parent.depth = 1;
+    parent.summary_token_count = 3;
+    parent.source_token_count = 5;
+    db.lcm_insert_summary_node(parent)
+        .await
+        .expect("parent summary should insert");
+
+    let status = db
+        .lcm_status("cursor", Some("session-1"))
+        .await
+        .expect("status should load");
+
+    assert_eq!(status.store.messages, 2);
+    assert_eq!(status.store.estimated_tokens, 5);
+
+    assert_eq!(status.dag.total_nodes, 2);
+    assert_eq!(status.dag.total_tokens, 8);
+    assert_eq!(status.dag.total_source_tokens, 35);
+    assert_eq!(status.dag.compression_ratio, "4.4:1");
+    let depth_zero = status.dag.depths.get("d0").expect("depth-0 bucket");
+    assert_eq!(depth_zero.count, 1);
+    assert_eq!(depth_zero.tokens, 5);
+    assert_eq!(depth_zero.source_tokens, 30);
+    let depth_one = status.dag.depths.get("d1").expect("depth-1 bucket");
+    assert_eq!(depth_one.count, 1);
+    assert_eq!(depth_one.tokens, 3);
+    assert_eq!(depth_one.source_tokens, 5);
+
+    assert_eq!(status.config.fresh_tail_count, 2);
+    assert_eq!(status.config.summary_fan_in, 4);
+    assert_eq!(status.config.compression_boundary_cooldown_seconds, 60);
+
+    // An empty scope reports an inert DAG rather than dividing by zero.
+    insert_session(&db, "cursor", "session-empty").await;
+    let empty = db
+        .lcm_status("cursor", Some("session-empty"))
+        .await
+        .expect("empty status should load");
+    assert_eq!(empty.dag.total_nodes, 0);
+    assert_eq!(empty.dag.compression_ratio, "0:1");
+    assert!(empty.dag.depths.is_empty());
+    assert_eq!(empty.store.messages, 0);
+    assert_eq!(empty.store.estimated_tokens, 0);
 }

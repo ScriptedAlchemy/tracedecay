@@ -1300,6 +1300,8 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
             session_id: session_id.to_string(),
             target,
             content_slice: Some(lcm_content_slice(&args)?),
+            source_offset: bounded_usize_arg(&args, "source_offset", 0, usize::MAX)?.unwrap_or(0),
+            source_limit: bounded_usize_arg(&args, "source_limit", 1, usize::MAX)?,
         })
         .await
         .map_err(lcm_error)?;

@@ -229,6 +229,14 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
         json!("integer")
     );
+    assert_eq!(
+        expand.input_schema["properties"]["source_offset"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["source_limit"]["type"],
+        json!("integer")
+    );
 
     let doctor = tools
         .iter()
@@ -7998,4 +8006,186 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn lcm_expand_paginates_summary_sources_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=4 {
+        let message_id = format!("page-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-page-session",
+            &message_id,
+            format!("paged source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-page-session".to_string(),
+            session_id: "lcm-page-session".to_string(),
+            depth: 0,
+            summary_text: "paged summary".to_string(),
+            source_refs: store_ids
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 16,
+            summary_token_count: 2,
+            source_time_start: Some(1),
+            source_time_end: Some(4),
+            expand_hint: Some("pagination test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary.node_id},
+            "source_offset": 1,
+            "source_limit": 2
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
+    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
+    let pagination = &payload["expansion"]["source_pagination"];
+    assert_eq!(pagination["source_offset"], 1);
+    assert_eq!(pagination["source_limit"], 2);
+    assert_eq!(pagination["returned_sources"], 2);
+    assert_eq!(pagination["total_sources"], 4);
+    assert_eq!(pagination["next_source_offset"], 3);
+    assert_eq!(pagination["has_more"], true);
+    assert_eq!(pagination["remaining_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-message",
+        "cross session grep target body",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "the caller's active session",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "raw_message");
+    assert_eq!(payload["expansion"]["from_current_session"], false);
+    assert_eq!(
+        payload["expansion"]["raw_message"]["session_id"],
+        "lcm-origin-session"
+    );
+    assert_eq!(
+        payload["expansion"]["content"],
+        "cross session grep target body"
+    );
+}
+
+#[tokio::test]
+async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-diag-session",
+        "diag-message",
+        "alpha beta gamma delta",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "diag-message").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-diag-session".to_string(),
+        session_id: "lcm-diag-session".to_string(),
+        depth: 0,
+        summary_text: "diag summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage { store_id }],
+        source_token_count: 24,
+        summary_token_count: 6,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("diagnostics test".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let lcm = &payload["lcm"];
+    assert_eq!(lcm["store"]["messages"], 1);
+    assert_eq!(lcm["store"]["estimated_tokens"], 4);
+    assert_eq!(lcm["dag"]["total_nodes"], 1);
+    assert_eq!(lcm["dag"]["total_tokens"], 6);
+    assert_eq!(lcm["dag"]["total_source_tokens"], 24);
+    assert_eq!(lcm["dag"]["compression_ratio"], "4.0:1");
+    assert_eq!(lcm["dag"]["depths"]["d0"]["count"], 1);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["tokens"], 6);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["source_tokens"], 24);
+    assert_eq!(lcm["config"]["fresh_tail_count"], 2);
+    assert_eq!(lcm["config"]["summary_fan_in"], 4);
+    assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
 }

@@ -6,15 +6,18 @@ use libsql::{params, Connection, Value};
 
 use super::types::{LcmLifecycleStatus, LcmPayloadStatus, LcmRedactionStatus};
 use super::{
-    compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice,
-    LcmDescribeExternalPayload, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeSourceOverview,
-    LcmDescribeSummaryNode, LcmDescribeTarget, LcmError, LcmExpandQueryBudget,
-    LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryPagination,
-    LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmExpandRequest,
-    LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest,
-    LcmGrepSort, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
-    LcmRawMessageOverview, LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
+    compression, dag, payload, raw, schema, LcmConfigStatus, LcmContentRange, LcmContentSlice,
+    LcmDagDepthStatus, LcmDagStatus, LcmDescribeExternalPayload, LcmDescribeRequest,
+    LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
+    LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
+    LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
+    LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination,
+    LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmGrepSort,
+    LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
+    LcmRawMessageOverview, LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview,
+    LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
+    LCM_DEFAULT_SUMMARY_FAN_IN, LCM_SCHEMA_VERSION,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -140,11 +143,29 @@ pub(crate) async fn expand(
     match request.target {
         LcmExpandTarget::RawMessage { store_id } => {
             let raw = load_raw_message_by_store_id(conn, store_id).await?;
-            if raw.provider != request.provider || raw.session_id != request.session_id {
+            // Raw store_id expansion works across sessions like hermes-lcm
+            // `lcm_expand` store_id mode (grep scope=all -> expand the hit),
+            // but stays provider-scoped: providers are a TokenSave concept
+            // with no Hermes equivalent.
+            if raw.provider != request.provider {
                 return Err(LcmError::SummarySourceNotOwnedBySession);
             }
+            let from_current_session = raw.session_id == request.session_id;
+            let externalized_ref = raw.payload_ref.clone();
             let (raw, range) = raw_message_with_sliced_content(raw, request.content_slice);
             let content = raw.content.clone();
+            let (payload_ref, externalized_note) = if from_current_session {
+                (None, None)
+            } else {
+                (
+                    externalized_ref.clone(),
+                    externalized_ref.map(|_| {
+                        "Externalized payload metadata is session-scoped; cross-session ref is \
+                         surfaced for traceability only and cannot be expanded in this version."
+                            .to_string()
+                    }),
+                )
+            };
             Ok(LcmExpandResponse {
                 kind: "raw_message".to_string(),
                 content,
@@ -152,7 +173,10 @@ pub(crate) async fn expand(
                 raw_message: Some(raw),
                 summary_node: None,
                 summary_sources: Vec::new(),
-                payload_ref: None,
+                payload_ref,
+                from_current_session: Some(from_current_session),
+                externalized_note,
+                source_pagination: None,
             })
         }
         LcmExpandTarget::SummaryNode { node_id } => {
@@ -162,7 +186,12 @@ pub(crate) async fn expand(
             let (summary, range) =
                 summary_node_with_sliced_text(expansion.summary, request.content_slice);
             let content = summary.summary_text.clone();
-            let summary_sources = slice_summary_sources(expansion.sources, request.content_slice);
+            let (sources, source_pagination) = paginate_summary_sources(
+                expansion.sources,
+                request.source_offset,
+                request.source_limit,
+            );
+            let summary_sources = slice_summary_sources(sources, request.content_slice);
             Ok(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content,
@@ -171,6 +200,9 @@ pub(crate) async fn expand(
                 summary_node: Some(summary),
                 summary_sources,
                 payload_ref: None,
+                from_current_session: None,
+                externalized_note: None,
+                source_pagination: Some(source_pagination),
             })
         }
         LcmExpandTarget::ExternalPayload { payload_ref } => {
@@ -205,6 +237,9 @@ pub(crate) async fn expand(
                 summary_node: None,
                 summary_sources: Vec::new(),
                 payload_ref: Some(expansion.payload_ref),
+                from_current_session: None,
+                externalized_note: None,
+                source_pagination: None,
             })
         }
     }
@@ -431,6 +466,8 @@ pub(crate) async fn status(
     let legacy_truncated_count = count_legacy_truncated(conn, provider, session_id).await?;
     let lossy_ingest_records = count_lossy_ingest_records(conn, provider, session_id).await?;
     let lossy_records = legacy_truncated_count + lossy_ingest_records;
+    let store = store_status(conn, provider, session_id).await?;
+    let dag = dag_status(conn, provider, session_id).await?;
 
     Ok(LcmStatus {
         schema_version: schema::schema_version(conn)
@@ -443,6 +480,13 @@ pub(crate) async fn status(
         missing_payload_count,
         unreferenced_payload_count,
         maintenance_debt_count,
+        store,
+        dag,
+        config: LcmConfigStatus {
+            fresh_tail_count: LCM_DEFAULT_FRESH_TAIL_COUNT,
+            summary_fan_in: LCM_DEFAULT_SUMMARY_FAN_IN,
+            compression_boundary_cooldown_seconds: LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS,
+        },
         payload: LcmPayloadStatus {
             externalized_count: external_payload_count,
             missing_count: missing_payload_count,
@@ -550,6 +594,140 @@ fn slice_summary_sources(
             source
         })
         .collect()
+}
+
+/// Pages a summary node's immediate source list with hermes-lcm `lcm_expand`
+/// cursor semantics: the offset clamps to the source count, an omitted limit
+/// returns all remaining sources, and `next_source_offset` is the resume
+/// cursor while more sources remain.
+fn paginate_summary_sources(
+    sources: Vec<LcmExpandedSummarySource>,
+    source_offset: usize,
+    source_limit: Option<usize>,
+) -> (Vec<LcmExpandedSummarySource>, LcmExpandSourcePagination) {
+    let total_sources = sources.len();
+    let source_offset = source_offset.min(total_sources);
+    let remaining = total_sources - source_offset;
+    let source_limit = source_limit.map_or(remaining, |limit| limit.min(remaining));
+    let page: Vec<LcmExpandedSummarySource> = sources
+        .into_iter()
+        .skip(source_offset)
+        .take(source_limit)
+        .collect();
+    let consumed = source_offset.saturating_add(source_limit);
+    let has_more = consumed < total_sources;
+    let pagination = LcmExpandSourcePagination {
+        source_offset,
+        source_limit,
+        returned_sources: page.len(),
+        total_sources,
+        next_source_offset: has_more.then_some(consumed),
+        has_more,
+        remaining_sources: if has_more {
+            total_sources - consumed
+        } else {
+            0
+        },
+    };
+    (page, pagination)
+}
+
+/// Mirrors `compression::estimate_tokens`: deterministic whitespace-word
+/// token estimate used for the `lcm_status` store size diagnostic.
+fn estimate_tokens(text: &str) -> i64 {
+    text.split_whitespace().count().max(1) as i64
+}
+
+async fn store_status(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<LcmStoreStatus, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT content, snippet_text
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut messages = 0_i64;
+    let mut estimated_tokens = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        messages += 1;
+        let content: Option<String> = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let snippet: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        // Externalized rows count their inline placeholder, matching what the
+        // engine replays into active context.
+        let text = content.unwrap_or(snippet);
+        estimated_tokens += estimate_tokens(&text);
+    }
+    Ok(LcmStoreStatus {
+        messages,
+        estimated_tokens,
+    })
+}
+
+async fn dag_status(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<LcmDagStatus, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT depth, COUNT(*), SUM(summary_token_count), SUM(source_token_count)
+             FROM lcm_summary_nodes
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+             GROUP BY depth
+             ORDER BY depth",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut depths = std::collections::BTreeMap::new();
+    let mut total_nodes = 0_i64;
+    let mut total_tokens = 0_i64;
+    let mut total_source_tokens = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let depth: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let count: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        let tokens: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+        let source_tokens: i64 = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+        total_nodes += count;
+        total_tokens += tokens;
+        total_source_tokens += source_tokens;
+        depths.insert(
+            format!("d{depth}"),
+            LcmDagDepthStatus {
+                count,
+                tokens,
+                source_tokens,
+            },
+        );
+    }
+    // Hermes renders `round(source/summary, 1)` as "N.N:1" and "0:1" for an
+    // empty DAG (`hermes-lcm/tools.py` lcm_status).
+    let compression_ratio = if total_tokens > 0 {
+        format!("{:.1}:1", total_source_tokens as f64 / total_tokens as f64)
+    } else {
+        "0:1".to_string()
+    };
+    Ok(LcmDagStatus {
+        total_nodes,
+        total_tokens,
+        total_source_tokens,
+        compression_ratio,
+        depths,
+    })
 }
 
 struct ExpandQueryAssembler {

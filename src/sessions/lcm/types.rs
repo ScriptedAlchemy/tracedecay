@@ -229,6 +229,32 @@ pub struct LcmExpandRequest {
     pub session_id: String,
     pub target: LcmExpandTarget,
     pub content_slice: Option<LcmContentSlice>,
+    /// Zero-based offset into a summary node's immediate source list
+    /// (summary-node targets only). Mirrors hermes-lcm `lcm_expand`
+    /// `source_offset`.
+    #[serde(default)]
+    pub source_offset: usize,
+    /// Maximum number of immediate sources returned from `source_offset`
+    /// (summary-node targets only). `None` returns all remaining sources,
+    /// mirroring hermes-lcm `lcm_expand` `source_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_limit: Option<usize>,
+}
+
+/// Pagination metadata for a summary node's immediate source list, mirroring
+/// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
+/// `tools.py`). TokenSave slices each returned source by characters via
+/// `content_slice` instead of sharing a token budget across sources, so the
+/// resume cursor is `next_source_offset` alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandSourcePagination {
+    pub source_offset: usize,
+    pub source_limit: usize,
+    pub returned_sources: usize,
+    pub total_sources: usize,
+    pub next_source_offset: Option<usize>,
+    pub has_more: bool,
+    pub remaining_sources: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -240,6 +266,19 @@ pub struct LcmExpandResponse {
     pub summary_node: Option<LcmSummaryNode>,
     pub summary_sources: Vec<LcmExpandedSummarySource>,
     pub payload_ref: Option<String>,
+    /// Whether a raw-message target belongs to the requesting session.
+    /// Mirrors hermes-lcm `from_current_session`; raw-message targets only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_current_session: Option<bool>,
+    /// Set on cross-session raw-message expansions whose row references an
+    /// externalized payload: payload bodies are session-scoped, so the ref
+    /// is surfaced for traceability only. Mirrors hermes-lcm
+    /// `externalized_note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub externalized_note: Option<String>,
+    /// Source-list pagination metadata (summary-node targets only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pagination: Option<LcmExpandSourcePagination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -417,9 +456,65 @@ pub struct LcmStatus {
     pub missing_payload_count: i64,
     pub unreferenced_payload_count: i64,
     pub maintenance_debt_count: i64,
+    pub store: LcmStoreStatus,
+    pub dag: LcmDagStatus,
+    pub config: LcmConfigStatus,
     pub payload: LcmPayloadStatus,
     pub lifecycle: LcmLifecycleStatus,
     pub redaction: LcmRedactionStatus,
+}
+
+/// Default fresh-tail size applied when the host omits `fresh_tail_count`.
+/// Mirrors `compression.rs` `DEFAULT_FRESH_TAIL_COUNT`; keep in sync.
+pub const LCM_DEFAULT_FRESH_TAIL_COUNT: usize = 2;
+
+/// Default condensation fan-in applied when the host omits `summary_fan_in`.
+/// Mirrors `compression.rs` `DEFAULT_SUMMARY_FAN_IN`; keep in sync.
+pub const LCM_DEFAULT_SUMMARY_FAN_IN: usize = 4;
+
+/// Compression-boundary skip cooldown in seconds. Mirrors `compression.rs`
+/// `COMPRESSION_BOUNDARY_COOLDOWN_SECONDS`; keep in sync.
+pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
+
+/// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`
+/// block. `estimated_tokens` uses the engine's deterministic whitespace
+/// token estimate over stored message content.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmStoreStatus {
+    pub messages: i64,
+    pub estimated_tokens: i64,
+}
+
+/// Per-depth summary DAG counters mirroring the hermes-lcm `lcm_status`
+/// `dag.depths` entries.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDagDepthStatus {
+    pub count: i64,
+    pub tokens: i64,
+    pub source_tokens: i64,
+}
+
+/// Summary DAG diagnostics mirroring the hermes-lcm `lcm_status` `dag`
+/// block: node/depth distribution and the source-to-summary compression
+/// ratio rendered as `"N.N:1"` (`"0:1"` when the DAG is empty).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDagStatus {
+    pub total_nodes: i64,
+    pub total_tokens: i64,
+    pub total_source_tokens: i64,
+    pub compression_ratio: String,
+    pub depths: std::collections::BTreeMap<String, LcmDagDepthStatus>,
+}
+
+/// Effective engine defaults applied when the stateless host omits the
+/// corresponding knobs, mirroring the hermes-lcm `lcm_status` `config`
+/// block. Per-call host overrides are not visible to this storage-side
+/// status report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmConfigStatus {
+    pub fresh_tail_count: usize,
+    pub summary_fan_in: usize,
+    pub compression_boundary_cooldown_seconds: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

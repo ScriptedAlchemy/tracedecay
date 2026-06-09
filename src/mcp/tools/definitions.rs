@@ -1772,7 +1772,7 @@ fn def_lcm_status() -> ToolDefinition {
     def(
         "tokensave_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts from project-local or Hermes profile sessions.db storage.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, and effective engine config defaults from project-local or Hermes profile sessions.db storage.",
         json!({
             "type": "object",
             "properties": {
@@ -2059,6 +2059,16 @@ fn def_lcm_expand() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 8192,
                     "description": "Maximum characters returned."
+                },
+                "source_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Zero-based pagination offset into a summary node's immediate source list (summary_node targets only)."
+                },
+                "source_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
