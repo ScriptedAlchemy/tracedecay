@@ -1,7 +1,7 @@
 //! Tests for the `TokenSave` orchestrator methods that aren't fully exercised
 //! by the MCP handler tests.
 
-use std::fs;
+use std::{fs, process::Command};
 use tempfile::TempDir;
 use tokensave::tokensave::{is_test_file, TokenSave};
 use tokensave::types::NodeKind;
@@ -39,6 +39,20 @@ pub fn helper() { foo(); }
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
+}
+
+fn run_git(project: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +309,54 @@ async fn test_check_file_staleness_deleted_indexed_file() {
         stale,
         vec!["a.rs".to_string()],
         "indexed file deleted from disk should be reported stale"
+    );
+}
+
+#[tokio::test]
+async fn sync_refuses_to_mutate_fallback_branch_db() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    run_git(project, &["init", "-b", "main"]);
+    run_git(project, &["config", "user.email", "test@test.com"]);
+    run_git(project, &["config", "user.name", "Test"]);
+    run_git(project, &["add", "."]);
+    run_git(project, &["commit", "-m", "initial"]);
+
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    run_git(project, &["checkout", "-b", "feature/sync-safety"]);
+    fs::write(
+        project.join("src/feature.rs"),
+        "pub fn feature_symbol() {}\n",
+    )
+    .unwrap();
+    run_git(project, &["add", "."]);
+    run_git(project, &["commit", "-m", "feature"]);
+
+    let feature_cg = TokenSave::open(project).await.unwrap();
+    assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
+    assert_eq!(feature_cg.serving_branch(), Some("main"));
+    assert!(feature_cg.is_fallback());
+
+    let err = feature_cg
+        .sync()
+        .await
+        .expect_err("syncing a fallback DB should be refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("feature/sync-safety") && message.contains("tokensave branch add"),
+        "error should explain how to track the branch, got: {message}",
+    );
+
+    let main_cg = TokenSave::open_branch(project, "main").await.unwrap();
+    let main_files = main_cg.get_all_files().await.unwrap();
+    assert!(
+        !main_files.iter().any(|file| file.path == "src/feature.rs"),
+        "fallback sync must not insert feature files into the main DB"
     );
 }
 

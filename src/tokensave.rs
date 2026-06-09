@@ -1044,6 +1044,11 @@ impl TokenSave {
             self.project_root.is_dir(),
             "sync: project root is not a directory"
         );
+        if let Some(warning) = self.fallback_warning() {
+            return Err(TokenSaveError::Config {
+                message: format!("cannot sync while using a fallback branch index: {warning}"),
+            });
+        }
         let _lock = try_acquire_sync_lock(&self.project_root)?;
         write_dirty_sentinel(&self.project_root);
         let start = Instant::now();
