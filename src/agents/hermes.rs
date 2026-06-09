@@ -1026,6 +1026,12 @@ def _summary_source_messages(source_messages):
         })
     return normalized
 
+def _summary_source_size(messages) -> int:
+    total = 0
+    for message in messages or []:
+        total += len(_message_content(message))
+    return total
+
 def _deterministic_truncation(messages, limit: int = 2048) -> str:
     lines = []
     for message in messages or []:
@@ -1177,6 +1183,15 @@ class TokenSaveContextEngine(ContextEngine):
             summary_request=summary_request,
             **kwargs,
         )
+        source_size = _summary_source_size(source_messages)
+        if summary.get("status") == "ok" and source_size > 0 and len(summary.get("text", "")) >= source_size:
+            summary = {
+                "status": "fallback",
+                "text": _deterministic_truncation(source_messages),
+                "route": "deterministic_fallback",
+                "model": None,
+                "error": "Hermes auxiliary summary was not smaller than source",
+            }
         provided_args = dict(args)
         provided_args["summarizer"] = {
             "mode": "provided",
