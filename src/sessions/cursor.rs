@@ -108,15 +108,7 @@ fn resolve_hermes_profile_tokensave_dir(
     Ok(canonical_parent)
 }
 
-pub async fn open_hermes_profile_session_db(hermes_home: &Path) -> Option<GlobalDb> {
-    let db_path = resolve_hermes_profile_session_db_path(hermes_home).ok()?;
-    GlobalDb::open_at(&db_path).await
-}
-
-/// A Cursor hook event scoped to one transcript file. Cursor is hook-driven —
-/// the transcript path, session id, and project all come from the event payload
-/// rather than from a directory scan — so the source wraps the parsed event and
-/// yields exactly that one path.
+/// A Cursor hook event scoped to one transcript file.
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,

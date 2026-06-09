@@ -856,7 +856,6 @@ LCM_TOOL_ALIASES = {
     "lcm_status": "tokensave_lcm_status",
     "lcm_doctor": "tokensave_lcm_doctor",
 }
-LCM_NATIVE_TOOL_NAMES = tuple(LCM_TOOL_ALIASES.keys())
 LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
 LCM_DIRECT_TO_NATIVE = {tokensave_name: native_name for native_name, tokensave_name in LCM_TOOL_ALIASES.items()}
 
@@ -1127,19 +1126,6 @@ def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) ->
     return {
         "name": hermes_name,
         "description": f"Tokensave memory tool {hermes_name}.",
-        "parameters": {"type": "object", "properties": {}},
-    }
-
-def _clone_schema(tokensave_name: str, public_name: str = None) -> dict:
-    for schema in schemas.TOOL_SCHEMAS:
-        if schema.get("name") == tokensave_name:
-            cloned = json.loads(json.dumps(schema))
-            if public_name is not None:
-                cloned["name"] = public_name
-            return cloned
-    return {
-        "name": public_name or tokensave_name,
-        "description": f"Tokensave tool {public_name or tokensave_name}.",
         "parameters": {"type": "object", "properties": {}},
     }
 
@@ -2218,6 +2204,11 @@ class TokenSaveContextEngine(ContextEngine):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
+    def _tool_args(self, session_id=None):
+        args = _storage_args(self.project_root, self.hermes_home)
+        args["session_id"] = session_id if session_id is not None else self.active_session_id
+        return args
+
     def _report_compression_boundary(self, session_id, bound_session_id, kwargs):
         # Mirrors Hermes' compression-boundary session starts: hand the
         # bound/old session ids to tokensave so it can record a boundary-skip
@@ -2245,7 +2236,7 @@ class TokenSaveContextEngine(ContextEngine):
             logger.warning("LCM session boundary report failed: %s", exc)
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
-        args = _storage_args(self.project_root, self.hermes_home)
+        args = self._tool_args()
         args.update(_lcm_config_args(self.config, self.hermes_home))
         args.update({
             "session_id": self.active_session_id,
@@ -2271,8 +2262,7 @@ class TokenSaveContextEngine(ContextEngine):
         return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
 
     def status(self, session_id=None, **kwargs):
-        args = _storage_args(self.project_root, self.hermes_home)
-        args["session_id"] = session_id or self.active_session_id
+        args = self._tool_args(session_id)
         return call_tokensave_json("tokensave_lcm_status", args, **kwargs)
 
     def get_tool_schemas(self):
@@ -2333,8 +2323,6 @@ class TokenSaveContextEngine(ContextEngine):
         if tokensave_name is None and native_name in LCM_DIRECT_TOOL_NAMES:
             tokensave_name = native_name
             native_name = LCM_DIRECT_TO_NATIVE.get(native_name, native_name)
-        if tokensave_name is None and tool_name in LCM_DIRECT_TOOL_NAMES:
-            tokensave_name = tool_name
         if tokensave_name is None:
             return tools.error_payload(f"unknown LCM tool: {tool_name}")
 
@@ -2357,8 +2345,7 @@ class TokenSaveContextEngine(ContextEngine):
         return tools.call_tokensave_tool(tokensave_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
-        args = _storage_args(self.project_root, self.hermes_home)
-        args["session_id"] = kwargs.pop("session_id", None) or self.active_session_id
+        args = self._tool_args(kwargs.pop("session_id", None))
         args["prompt"] = prompt
         if query is not None:
             args["query"] = query
@@ -2626,10 +2613,9 @@ class TokenSaveContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         )
-        args = _storage_args(self.project_root, self.hermes_home)
+        args = self._tool_args()
         args.update(_lcm_config_args(self.config, self.hermes_home))
         args.update({
-            "session_id": self.active_session_id,
             "messages": messages,
             "current_tokens": current_tokens,
             "focus_topic": focus_topic,
@@ -2712,14 +2698,6 @@ class TokenSaveContextEngine(ContextEngine):
                 error_classification=error_classification,
                 fallback_used=fallback_used,
             )
-
-        return _auxiliary_error_result(
-            {"frontier": {"current_frontier_store_id": None, "maintenance_debt": []}},
-            attempts=attempts,
-            retry_status="retry_exhausted",
-            error_classification=error_classification or "retry_worthy",
-            error="auxiliary retry budget exhausted",
-        )
 
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"
