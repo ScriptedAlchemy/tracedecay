@@ -757,13 +757,15 @@ impl GlobalDb {
     ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
         crate::sessions::lcm::doctor::doctor(
             &self.conn,
-            &self.storage_root,
-            &self.db_path,
-            provider,
-            session_id,
-            mode,
-            apply,
-            clean_config,
+            crate::sessions::lcm::doctor::DoctorRequest {
+                storage_root: &self.storage_root,
+                db_path: &self.db_path,
+                provider,
+                session_id,
+                mode,
+                apply,
+                clean_config,
+            },
         )
         .await
     }

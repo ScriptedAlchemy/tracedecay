@@ -25,28 +25,51 @@ fn unixepoch() -> i64 {
         .unwrap_or_default()
 }
 
+pub(crate) struct DoctorRequest<'a> {
+    pub(crate) storage_root: &'a Path,
+    pub(crate) db_path: &'a Path,
+    pub(crate) provider: &'a str,
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) mode: &'a str,
+    pub(crate) apply: bool,
+    pub(crate) clean_config: LcmCleanConfig,
+}
+
+struct RepairRequest<'a> {
+    db_path: &'a Path,
+    storage_root: &'a Path,
+    provider: &'a str,
+    session_id: Option<&'a str>,
+    diagnostics: &'a Value,
+    mode: &'a str,
+    apply: bool,
+    clean_config: &'a LcmCleanConfig,
+}
+
 pub(crate) async fn doctor(
     conn: &Connection,
-    storage_root: &Path,
-    db_path: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    mode: &str,
-    apply: bool,
-    clean_config: LcmCleanConfig,
+    request: DoctorRequest<'_>,
 ) -> Result<Value, LcmError> {
-    let diagnostics =
-        gather_diagnostics(conn, storage_root, provider, session_id, &clean_config).await?;
+    let diagnostics = gather_diagnostics(
+        conn,
+        request.storage_root,
+        request.provider,
+        request.session_id,
+        &request.clean_config,
+    )
+    .await?;
     let repairs = plan_and_apply_repairs(
         conn,
-        db_path,
-        storage_root,
-        provider,
-        session_id,
-        &diagnostics,
-        mode,
-        apply,
-        &clean_config,
+        RepairRequest {
+            db_path: request.db_path,
+            storage_root: request.storage_root,
+            provider: request.provider,
+            session_id: request.session_id,
+            diagnostics: &diagnostics,
+            mode: request.mode,
+            apply: request.apply,
+            clean_config: &request.clean_config,
+        },
     )
     .await?;
     let issue_count = issue_count(&diagnostics);
@@ -64,11 +87,11 @@ pub(crate) async fn doctor(
 
     Ok(json!({
         "status": status,
-        "provider": provider,
-        "session_id": session_id,
-        "mode": mode,
-        "dry_run": matches!(mode, "repair" | "clean") && !apply,
-        "apply": apply,
+        "provider": request.provider,
+        "session_id": request.session_id,
+        "mode": request.mode,
+        "dry_run": matches!(request.mode, "repair" | "clean") && !request.apply,
+        "apply": request.apply,
         "diagnostics": diagnostics,
         "repairs": repairs,
     }))
@@ -116,15 +139,18 @@ async fn gather_diagnostics(
 
 async fn plan_and_apply_repairs(
     conn: &Connection,
-    db_path: &Path,
-    storage_root: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    diagnostics: &Value,
-    mode: &str,
-    apply: bool,
-    clean_config: &LcmCleanConfig,
+    request: RepairRequest<'_>,
 ) -> Result<Value, LcmError> {
+    let RepairRequest {
+        db_path,
+        storage_root,
+        provider,
+        session_id,
+        diagnostics,
+        mode,
+        apply,
+        clean_config,
+    } = request;
     let mut planned = Vec::new();
     let mut applied = Vec::new();
     let mut backup = Value::Null;
@@ -1421,40 +1447,60 @@ mod tests {
         Ok(())
     }
 
-    async fn raw_count(conn: &Connection, session_id: &str) -> i64 {
+    async fn raw_count(conn: &Connection, session_id: &str) -> Result<i64, String> {
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
                 params![session_id],
             )
             .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get(0).unwrap()
+            .map_err(|err| format!("count raw messages for {session_id}: {err}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| format!("read raw message count row for {session_id}: {err}"))?
+        else {
+            return Err(format!("missing raw message count row for {session_id}"));
+        };
+        row.get(0)
+            .map_err(|err| format!("read raw message count for {session_id}: {err}"))
     }
 
     #[tokio::test]
-    async fn clean_apply_backup_callback_runs_under_immediate_transaction() {
-        let temp = tempfile::tempdir().unwrap();
+    async fn clean_apply_backup_callback_runs_under_immediate_transaction() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         let project_root = temp.path().to_path_buf();
         let db_path = project_root.join("sessions.db");
         let _global = crate::global_db::GlobalDb::open_at(&db_path)
             .await
-            .expect("test session database should open");
-        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            .ok_or_else(|| "test session database should open".to_string())?;
+        let db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|err| format!("build test database: {err}"))?;
+        let conn = db
+            .connect()
+            .map_err(|err| format!("connect to test database: {err}"))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|err| format!("set test database busy timeout: {err}"))?;
         insert_test_clean_candidate(
             &conn,
             &project_root,
             "cron-before-lock",
             "cron-before-lock-message",
         )
-        .await
-        .unwrap();
+        .await?;
 
-        let writer_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let writer_conn = writer_db.connect().unwrap();
-        writer_conn.busy_timeout(Duration::from_millis(25)).unwrap();
+        let writer_db = libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|err| format!("build writer database: {err}"))?;
+        let writer_conn = writer_db
+            .connect()
+            .map_err(|err| format!("connect to writer database: {err}"))?;
+        writer_conn
+            .busy_timeout(Duration::from_millis(25))
+            .map_err(|err| format!("set writer database busy timeout: {err}"))?;
         let writer_project_root = project_root.clone();
         let backup_path = project_root.join("backup.db");
         let backup_path_for_callback = backup_path.clone();
@@ -1487,11 +1533,12 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .map_err(|err| format!("backup and delete clean candidates: {err}"))?;
 
         assert_eq!(backup["ok"], true);
         assert_eq!(deleted["sessions"], 1);
-        assert_eq!(raw_count(&conn, "cron-before-lock").await, 0);
-        assert_eq!(raw_count(&conn, "cron-raced-lock").await, 0);
+        assert_eq!(raw_count(&conn, "cron-before-lock").await?, 0);
+        assert_eq!(raw_count(&conn, "cron-raced-lock").await?, 0);
+        Ok(())
     }
 }

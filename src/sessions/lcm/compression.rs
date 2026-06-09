@@ -412,16 +412,20 @@ async fn compress_in_transaction(
     };
 
     Ok(compression_response_with_attempt_state(
-        status,
-        reason,
-        summary_nodes,
-        replay_messages,
-        frontier,
-        None,
-        request.max_assembly_tokens,
-        compression_attempts,
-        fallback_used,
-        retry_status,
+        CompressionResponseParts {
+            status,
+            reason,
+            summary_nodes,
+            replay_messages,
+            frontier,
+            summary_request: None,
+            max_assembly_tokens: request.max_assembly_tokens,
+        },
+        CompressionAttemptState {
+            compression_attempts,
+            fallback_used,
+            retry_status,
+        },
     ))
 }
 
@@ -754,6 +758,44 @@ fn compression_response(
     max_assembly_tokens: Option<i64>,
 ) -> LcmCompressionResponse {
     compression_response_with_attempt_state(
+        CompressionResponseParts {
+            status,
+            reason,
+            summary_nodes,
+            replay_messages,
+            frontier,
+            summary_request,
+            max_assembly_tokens,
+        },
+        CompressionAttemptState {
+            compression_attempts: 0,
+            fallback_used: false,
+            retry_status: None,
+        },
+    )
+}
+
+struct CompressionResponseParts<'a> {
+    status: &'a str,
+    reason: &'a str,
+    summary_nodes: Vec<LcmSummaryNode>,
+    replay_messages: Vec<Value>,
+    frontier: LcmLifecycleState,
+    summary_request: Option<LcmSummaryRequest>,
+    max_assembly_tokens: Option<i64>,
+}
+
+struct CompressionAttemptState<'a> {
+    compression_attempts: usize,
+    fallback_used: bool,
+    retry_status: Option<&'a str>,
+}
+
+fn compression_response_with_attempt_state(
+    parts: CompressionResponseParts<'_>,
+    attempt_state: CompressionAttemptState<'_>,
+) -> LcmCompressionResponse {
+    let CompressionResponseParts {
         status,
         reason,
         summary_nodes,
@@ -761,24 +803,12 @@ fn compression_response(
         frontier,
         summary_request,
         max_assembly_tokens,
-        0,
-        false,
-        None,
-    )
-}
-
-fn compression_response_with_attempt_state(
-    status: &str,
-    reason: &str,
-    summary_nodes: Vec<LcmSummaryNode>,
-    replay_messages: Vec<Value>,
-    frontier: LcmLifecycleState,
-    summary_request: Option<LcmSummaryRequest>,
-    max_assembly_tokens: Option<i64>,
-    compression_attempts: usize,
-    fallback_used: bool,
-    retry_status: Option<&str>,
-) -> LcmCompressionResponse {
+    } = parts;
+    let CompressionAttemptState {
+        compression_attempts,
+        fallback_used,
+        retry_status,
+    } = attempt_state;
     let replay_token_estimate = replay_token_estimate(&replay_messages);
     LcmCompressionResponse {
         status: status.to_string(),
@@ -1220,7 +1250,7 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
     let mut metadata = existing_metadata_json
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|value| value.as_object().cloned())
-        .unwrap_or_else(Map::new);
+        .unwrap_or_default();
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
     metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), replay.clone());
     Value::Object(metadata).to_string()
