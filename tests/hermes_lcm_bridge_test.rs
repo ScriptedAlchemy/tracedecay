@@ -334,19 +334,31 @@ plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
 
 native_result = engine.handle_tool_call(
     "lcm_grep",
-    {"query": "orchard", "session_scope": "current"},
+    {
+        "query": "orchard",
+        "session_scope": "current",
+        "sort": "relevance",
+        "source": "cli",
+        "role": "assistant",
+        "time_from": 1,
+        "time_to": 2,
+    },
     messages=[{"role": "user", "content": "current turn"}],
 )
 load_result = engine.handle_tool_call(
     "lcm_load_session",
-    {"session_id": "session-1", "max_content_chars": 123, "roles": ["user"], "time_from": 1, "time_to": 2},
+    {"session_id": "session-1", "max_content_chars": 123, "roles": ["user", "tool"], "time_from": 1, "time_to": 2},
     messages=[{"role": "assistant", "content": "load turn"}],
 )
+describe_node_result = engine.handle_tool_call("lcm_describe", {"node_id": 7})
+describe_payload_result = engine.handle_tool_call("lcm_describe", {"externalized_ref": "payload_123.payload"})
 expand_result = engine.handle_tool_call("lcm_expand", {"store_id": 42, "max_tokens": 77})
 direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct", "session_scope": "all"})
 
 assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
 assert json.loads(load_result) == {"ok": True, "tool": "tokensave_lcm_load_session"}
+assert json.loads(describe_node_result) == {"ok": True, "tool": "tokensave_lcm_describe"}
+assert json.loads(describe_payload_result) == {"ok": True, "tool": "tokensave_lcm_describe"}
 assert json.loads(expand_result) == {"ok": True, "tool": "tokensave_lcm_expand"}
 assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
 assert calls[0][0] == "tokensave_lcm_preflight"
@@ -356,7 +368,14 @@ assert calls[0][1]["storage_scope"] == "project_local"
 assert calls[1][0] == "tokensave_lcm_grep"
 assert calls[1][1]["query"] == "orchard"
 assert calls[1][1]["scope"] == "current"
+assert calls[1][1]["sort"] == "relevance"
+assert calls[1][1]["source"] == "cli"
+assert calls[1][1]["role"] == "assistant"
+assert calls[1][1]["start_time"] == 1
+assert calls[1][1]["end_time"] == 2
 assert "session_scope" not in calls[1][1]
+assert "time_from" not in calls[1][1]
+assert "time_to" not in calls[1][1]
 assert "messages" not in calls[1][1]
 assert calls[1][1]["storage_scope"] == "project_local"
 assert calls[1][1]["project_root"] == "/tmp/project"
@@ -366,25 +385,31 @@ assert calls[2][0] == "tokensave_lcm_preflight"
 assert calls[2][1]["messages"] == [{"role": "assistant", "content": "load turn"}]
 assert calls[3][0] == "tokensave_lcm_load_session"
 assert calls[3][1]["content_limit"] == 123
-assert calls[3][1]["role"] == "user"
+assert calls[3][1]["roles"] == ["user", "tool"]
 assert calls[3][1]["start_time"] == 1
 assert calls[3][1]["end_time"] == 2
 assert "max_content_chars" not in calls[3][1]
-assert "roles" not in calls[3][1]
+assert "role" not in calls[3][1]
 assert "time_from" not in calls[3][1]
 assert "time_to" not in calls[3][1]
-assert calls[4][0] == "tokensave_lcm_expand"
-assert calls[4][1]["target"] == {"kind": "raw_message", "store_id": 42}
-assert calls[4][1]["content_limit"] == 308
-assert "store_id" not in calls[4][1]
-assert "max_tokens" not in calls[4][1]
-assert calls[5][0] == "tokensave_lcm_grep"
-assert calls[5][1]["query"] == "direct"
-assert calls[5][1]["scope"] == "all"
-assert "session_scope" not in calls[5][1]
-assert calls[5][1]["storage_scope"] == "project_local"
-assert calls[5][1]["project_root"] == "/tmp/project"
-assert calls[5][1]["session_id"] == "session-1"
+assert calls[4][0] == "tokensave_lcm_describe"
+assert calls[4][1]["target"] == {"kind": "summary_node", "node_id": "7"}
+assert "node_id" not in calls[4][1]
+assert calls[5][0] == "tokensave_lcm_describe"
+assert calls[5][1]["target"] == {"kind": "external_payload", "payload_ref": "payload_123.payload"}
+assert "externalized_ref" not in calls[5][1]
+assert calls[6][0] == "tokensave_lcm_expand"
+assert calls[6][1]["target"] == {"kind": "raw_message", "store_id": 42}
+assert calls[6][1]["content_limit"] == 308
+assert "store_id" not in calls[6][1]
+assert "max_tokens" not in calls[6][1]
+assert calls[7][0] == "tokensave_lcm_grep"
+assert calls[7][1]["query"] == "direct"
+assert calls[7][1]["scope"] == "all"
+assert "session_scope" not in calls[7][1]
+assert calls[7][1]["storage_scope"] == "project_local"
+assert calls[7][1]["project_root"] == "/tmp/project"
+assert calls[7][1]["session_id"] == "session-1"
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
     );
@@ -451,6 +476,55 @@ assert calls[1][1]["storage_scope"] == "hermes_profile"
 assert calls[1][1]["hermes_home"] == "/tmp/hermes-from-env"
 "#,
         "generated context engine should resolve HERMES_HOME for profile storage",
+    );
+}
+
+#[test]
+fn generated_context_engine_defaults_to_hermes_home_even_when_missing() {
+    run_generated_plugin_script(
+        "check_context_engine_default_home.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+import tempfile
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_default_home"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+os.environ.pop("HERMES_HOME", None)
+with tempfile.TemporaryDirectory() as tmp:
+    home = pathlib.Path(tmp) / "isolated-home"
+    home.mkdir()
+    os.environ["HOME"] = str(home)
+    expected = str(home / ".hermes")
+    assert not pathlib.Path(expected).exists()
+
+    engine = plugin.TokenSaveContextEngine()
+    engine.initialize(session_id="session-1")
+
+    assert engine.hermes_home == expected
+    status = engine.get_status()
+    assert status["storage_scope"] == "hermes_profile"
+    assert status["hermes_home"] == expected
+"#,
+        "generated context engine should default to ~/.hermes even if missing",
     );
 }
 

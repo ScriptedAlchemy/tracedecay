@@ -1203,7 +1203,7 @@ def _resolve_hermes_home(config=None, hermes_home=None):
     except Exception:
         pass
     fallback = os.path.expanduser("~/.hermes")
-    return fallback if fallback and os.path.isdir(fallback) else None
+    return fallback or None
 
 REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
 FALLBACK_MARKER = "[deterministic compression fallback]"
@@ -1502,13 +1502,6 @@ def _tokens_from_native_max(max_tokens):
     except Exception:
         return None
 
-def _first_role(roles):
-    if isinstance(roles, list) and roles:
-        return roles[0]
-    if isinstance(roles, str):
-        return roles
-    return None
-
 def _native_expand_target(args: dict):
     provided = [key for key in ("node_id", "store_id", "externalized_ref") if args.get(key) is not None]
     if len(provided) > 1:
@@ -1522,30 +1515,41 @@ def _native_expand_target(args: dict):
         return {"kind": "raw_message", "store_id": args[key]}, None
     return {"kind": "external_payload", "payload_ref": args[key]}, None
 
+def _native_describe_target(args: dict):
+    provided = [key for key in ("node_id", "externalized_ref") if args.get(key) is not None]
+    if len(provided) > 1:
+        return None, "lcm_describe expects at most one of node_id or externalized_ref"
+    if not provided:
+        return {"kind": "session"}, None
+    key = provided[0]
+    if key == "node_id":
+        return {"kind": "summary_node", "node_id": str(args[key])}, None
+    return {"kind": "external_payload", "payload_ref": args[key]}, None
+
 def _translate_lcm_args(native_name: str, args: dict) -> dict:
     translated = dict(args or {})
     if native_name == "lcm_grep":
         if "session_scope" in translated:
             translated["scope"] = translated.pop("session_scope")
-        for unsupported in ("sort", "source", "role", "time_from", "time_to"):
-            translated.pop(unsupported, None)
+        if "time_from" in translated:
+            translated["start_time"] = translated.pop("time_from")
+        if "time_to" in translated:
+            translated["end_time"] = translated.pop("time_to")
         return translated
     if native_name == "lcm_load_session":
         if "max_content_chars" in translated:
             translated["content_limit"] = translated.pop("max_content_chars")
-        if "roles" in translated:
-            role = _first_role(translated.pop("roles"))
-            if role is not None:
-                translated["role"] = role
         if "time_from" in translated:
             translated["start_time"] = translated.pop("time_from")
         if "time_to" in translated:
             translated["end_time"] = translated.pop("time_to")
         return translated
     if native_name == "lcm_describe":
-        # TokenSave currently exposes session-level describe; node/externalized
-        # inspection is represented in the native schema for Hermes parity but
-        # ignored until the Rust read handler grows those narrower modes.
+        if "target" not in translated:
+            target, error = _native_describe_target(translated)
+            if error is not None:
+                return {"error": error}
+            translated["target"] = target
         translated.pop("node_id", None)
         translated.pop("externalized_ref", None)
         return translated

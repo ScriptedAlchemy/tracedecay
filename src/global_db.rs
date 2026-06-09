@@ -730,10 +730,9 @@ impl GlobalDb {
     /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.
     pub async fn lcm_describe(
         &self,
-        provider: &str,
-        session_id: &str,
+        request: crate::sessions::lcm::LcmDescribeRequest,
     ) -> Result<crate::sessions::lcm::LcmDescribeResponse, crate::sessions::lcm::LcmError> {
-        crate::sessions::lcm::query::describe(&self.conn, provider, session_id).await
+        crate::sessions::lcm::query::describe(&self.conn, request).await
     }
 
     /// Reports LCM schema, storage, payload, and currently implemented maintenance counts.

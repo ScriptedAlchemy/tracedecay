@@ -201,7 +201,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     );
     assert_eq!(
         load.input_schema["properties"]["content_limit"]["maximum"],
-        json!(8192)
+        json!(20000)
     );
 
     let grep = tools
@@ -3846,6 +3846,57 @@ async fn seed_lcm_tool_result_message(
     );
 }
 
+async fn seed_lcm_session_message_with_role_source_timestamp(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    role: &str,
+    source: &str,
+    timestamp: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: role.to_string(),
+            timestamp: Some(timestamp),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: Some(serde_json::json!({"source": source}).to_string()),
+        })
+        .await
+    );
+}
+
 async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
     GlobalDb::open_at(&hermes_home.join(".tokensave/sessions.db"))
         .await
@@ -5274,6 +5325,217 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
     assert!(
         profile_payload.get("lcm").is_none(),
         "hermes_profile requests must not return project-local LCM counts"
+    );
+}
+
+#[tokio::test]
+async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-source",
+        "describe source body must not leak through metadata",
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-tool",
+        format!("describe external secret {}", "payload ".repeat(40_000)),
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let source = db
+        .lcm_load_raw_message("cursor", "lcm-describe-source")
+        .await
+        .expect("source raw message should exist");
+    let external = db
+        .lcm_load_raw_message("cursor", "lcm-describe-tool")
+        .await
+        .expect("external raw message should exist");
+    let payload_ref = external.payload_ref.expect("payload ref");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-describe-targets".to_string(),
+            depth: 0,
+            summary_text: "summary secret body must not leak through metadata".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: source.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("describe target summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let node_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "summary_node", "node_id": summary.node_id.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let node_payload: Value = serde_json::from_str(extract_text(&node_result.value)).unwrap();
+    assert_eq!(node_payload["status"], "ok");
+    assert_eq!(node_payload["description"]["target"], "summary_node");
+    assert_eq!(
+        node_payload["description"]["summary_node"]["node_id"],
+        summary.node_id
+    );
+    assert_eq!(
+        node_payload["description"]["summary_node"]["source_count"],
+        1
+    );
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload_payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload_payload["status"], "ok");
+    assert_eq!(payload_payload["description"]["target"], "external_payload");
+    assert_eq!(
+        payload_payload["description"]["external_payload"]["payload_ref"],
+        payload_ref
+    );
+    assert!(
+        payload_payload["description"]["external_payload"]["content_preview"]
+            .as_str()
+            .unwrap()
+            .contains(payload_ref.as_str())
+    );
+
+    let rendered = format!(
+        "{}\n{}",
+        extract_text(&node_result.value),
+        extract_text(&payload_result.value)
+    );
+    assert!(!rendered.contains("summary secret body"));
+    assert!(!rendered.contains("describe source body"));
+    assert!(!rendered.contains("describe external secret"));
+}
+
+#[tokio::test]
+async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-old-cli-assistant",
+        "orchard native old cli assistant",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-cli-user",
+        "orchard native new cli user",
+        2,
+        "user",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-api-assistant",
+        "orchard native new api assistant",
+        3,
+        "assistant",
+        "api",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard native",
+            "scope": "session",
+            "session_id": "lcm-native-filters",
+            "sort": "recency",
+            "source": "cli",
+            "role": "assistant",
+            "start_time": 5,
+            "end_time": 25,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(
+        grep_payload["hits"][0]["message_id"],
+        "lcm-native-old-cli-assistant"
+    );
+    assert_eq!(grep_payload["sort"], "recency");
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-native-filters",
+            "roles": ["assistant", "user"],
+            "time_from": 1,
+            "time_to": 25,
+            "content_limit": 25_000,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["content_limit"], 20_000);
+    assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
+    assert_eq!(
+        loaded_payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["message_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["lcm-native-old-cli-assistant", "lcm-native-new-cli-user"]
     );
 }
 

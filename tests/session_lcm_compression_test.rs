@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
-    LcmCompressionRequest, LcmGrepRequest, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
     LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSourceRef, LcmStorageKind,
     LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
@@ -313,7 +313,7 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
             session_id: "session-1".into(),
             after_store_id: None,
             limit: 10,
-            role: None,
+            roles: Vec::new(),
             start_time: None,
             end_time: None,
             content_slice: None,
@@ -648,6 +648,11 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
             session_id: Some("session-bounded".into()),
             include_summaries: false,
             limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
         })
         .await
         .unwrap();
@@ -791,7 +796,7 @@ async fn ignore_message_patterns_and_heartbeat_noise_are_storage_only() {
             session_id: "session-noise".into(),
             after_store_id: None,
             limit: 10,
-            role: None,
+            roles: Vec::new(),
             start_time: None,
             end_time: None,
             content_slice: None,

@@ -1,10 +1,10 @@
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
-    LcmContentSlice, LcmError, LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget,
-    LcmGrepRequest, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
-    LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft, LCM_SCHEMA_VERSION,
-    MAX_DERIVED_SNIPPET_CHARS,
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandQueryRequest,
+    LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate,
+    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope, LcmSourceRef, LcmStorageKind,
+    LcmSummaryNodeDraft, LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -58,6 +58,23 @@ fn raw_message(
         source_offset: None,
         metadata_json: None,
     }
+}
+
+fn raw_message_with_role_source_timestamp(
+    provider: &str,
+    message_id: &str,
+    session_id: &str,
+    ordinal: i64,
+    role: &str,
+    source: &str,
+    timestamp: i64,
+    text: &str,
+) -> SessionMessageRecord {
+    let mut message = raw_message(provider, message_id, session_id, ordinal, text);
+    message.role = role.to_string();
+    message.timestamp = Some(timestamp);
+    message.metadata_json = Some(serde_json::json!({"source": source}).to_string());
+    message
 }
 
 async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
@@ -149,7 +166,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
             session_id: "session-1".into(),
             after_store_id: None,
             limit: 500,
-            role: None,
+            roles: Vec::new(),
             start_time: None,
             end_time: None,
             content_slice: None,
@@ -191,7 +208,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
             session_id: "session-1".into(),
             after_store_id: None,
             limit: 0,
-            role: None,
+            roles: Vec::new(),
             start_time: None,
             end_time: None,
             content_slice: None,
@@ -249,6 +266,11 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
             session_id: Some("session-1".into()),
             include_summaries: true,
             limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
         })
         .await
         .expect("grep should succeed");
@@ -284,6 +306,11 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
             session_id: Some("session-1".into()),
             include_summaries: false,
             limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
         })
         .await
         .expect("path-like grep should not miss because punctuation was collapsed");
@@ -316,6 +343,11 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
             session_id: Some("session-1".into()),
             include_summaries: false,
             limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
         })
         .await
         .expect("reserved FTS operator text should be treated as literal text");
@@ -323,6 +355,140 @@ async fn grep_quotes_reserved_operator_looking_query_text() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].store_id, Some(store_ids[0]));
     assert!(hits[0].snippet.contains("OR"));
+}
+
+#[tokio::test]
+async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-1").await;
+
+    for message in [
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "old-cli-assistant",
+            "session-1",
+            1,
+            "assistant",
+            "cli",
+            10,
+            "orchard parity old cli assistant",
+        ),
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "new-cli-user",
+            "session-1",
+            2,
+            "user",
+            "cli",
+            20,
+            "orchard parity new cli user",
+        ),
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "new-api-assistant",
+            "session-1",
+            3,
+            "assistant",
+            "api",
+            30,
+            "orchard parity new api assistant",
+        ),
+    ] {
+        assert!(db.upsert_session_message(&message).await);
+    }
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "orchard parity".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: true,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: Some("cli".into()),
+            role: Some("assistant".into()),
+            start_time: Some(5),
+            end_time: Some(25),
+        })
+        .await
+        .expect("filtered grep should succeed");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id.as_deref(), Some("old-cli-assistant"));
+    assert_eq!(hits[0].kind, "raw_message");
+}
+
+#[tokio::test]
+async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-1").await;
+
+    for message in [
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "role-user",
+            "session-1",
+            1,
+            "user",
+            "cli",
+            10,
+            "user message content",
+        ),
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "role-tool",
+            "session-1",
+            2,
+            "tool",
+            "cli",
+            20,
+            "tool message content",
+        ),
+        raw_message_with_role_source_timestamp(
+            "cursor",
+            "role-assistant",
+            "session-1",
+            3,
+            "assistant",
+            "cli",
+            30,
+            "assistant message content",
+        ),
+    ] {
+        assert!(db.upsert_session_message(&message).await);
+    }
+
+    let page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: vec!["user".into(), "tool".into()],
+            start_time: Some(1),
+            end_time: Some(25),
+            content_slice: Some(LcmContentSlice {
+                offset: 0,
+                limit: 12,
+            }),
+        })
+        .await
+        .expect("multi-role page should load");
+
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["role-user", "role-tool"]
+    );
+    assert!(page
+        .messages
+        .iter()
+        .all(|message| message.content_range.returned_chars <= 12));
 }
 
 #[tokio::test]
@@ -433,7 +599,11 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
         .expect("summary should insert");
 
     let description = db
-        .lcm_describe("cursor", "session-1")
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmDescribeTarget::Session,
+        })
         .await
         .expect("description should load");
     assert_eq!(description.provider, "cursor");
@@ -448,6 +618,115 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
     let rendered = serde_json::to_string(&description).unwrap();
     assert!(rendered.contains("tool-describe"));
     assert!(!rendered.contains("describe secret body"));
+}
+
+#[tokio::test]
+async fn describe_node_and_external_payload_return_metadata_without_body_leaks() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "leaf source alpha body".to_string(),
+            "leaf source beta body".to_string(),
+        ],
+    )
+    .await;
+    let payload = format!("external describe secret {}", "P".repeat(300_000));
+    let mut external = raw_message("cursor", "tool-describe-target", "session-1", 3, &payload);
+    external.role = "tool".to_string();
+    external.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&external)
+        .await
+        .expect("external payload should ingest");
+    let payload_ref = db
+        .lcm_load_raw_message("cursor", "tool-describe-target")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("payload ref");
+
+    let leaf = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "leaf summary body must not appear in describe",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("leaf summary should insert");
+    let parent = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            depth: 1,
+            summary_text: "parent summary body must not appear in describe".to_string(),
+            source_refs: vec![
+                LcmSourceRef::SummaryNode {
+                    node_id: leaf.node_id.clone(),
+                },
+                LcmSourceRef::RawMessage {
+                    store_id: store_ids[1],
+                },
+            ],
+            ..summary_draft("cursor", "session-1", "", Vec::new())
+        })
+        .await
+        .expect("parent summary should insert");
+
+    let node_description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmDescribeTarget::SummaryNode {
+                node_id: parent.node_id.clone(),
+            },
+        })
+        .await
+        .expect("node description should load");
+    assert_eq!(node_description.target, "summary_node");
+    let node = node_description
+        .summary_node
+        .as_ref()
+        .expect("summary metadata");
+    assert_eq!(node.node_id, parent.node_id);
+    assert_eq!(node.source_count, 2);
+    assert!(node
+        .children
+        .iter()
+        .any(|child| child.node_id.as_deref() == Some(leaf.node_id.as_str())));
+
+    let payload_description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmDescribeTarget::ExternalPayload {
+                payload_ref: payload_ref.clone(),
+            },
+        })
+        .await
+        .expect("payload description should load");
+    assert_eq!(payload_description.target, "external_payload");
+    let payload_meta = payload_description
+        .external_payload
+        .as_ref()
+        .expect("payload metadata");
+    assert_eq!(payload_meta.payload_ref, payload_ref);
+    assert!(payload_meta
+        .content_preview
+        .contains(&payload_meta.payload_ref));
+    assert!(!payload_meta
+        .content_preview
+        .contains("external describe secret"));
+
+    let rendered = serde_json::to_string(&(node_description, payload_description)).unwrap();
+    assert!(!rendered.contains("parent summary body"));
+    assert!(!rendered.contains("leaf summary body"));
+    assert!(!rendered.contains("external describe secret"));
 }
 
 #[tokio::test]

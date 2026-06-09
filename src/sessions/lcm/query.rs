@@ -6,14 +6,15 @@ use libsql::{params, Connection, Value};
 
 use super::types::{LcmLifecycleStatus, LcmPayloadStatus, LcmRedactionStatus};
 use super::{
-    compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse,
-    LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
-    LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
-    LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget,
-    LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmLoadSessionMessage,
-    LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview, LcmScope,
-    LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryExpansion, LcmSummaryNode,
-    LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
+    compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice,
+    LcmDescribeExternalPayload, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeSourceOverview,
+    LcmDescribeSummaryNode, LcmDescribeTarget, LcmError, LcmExpandQueryBudget,
+    LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryPagination,
+    LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmExpandRequest,
+    LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest,
+    LcmGrepSort, LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
+    LcmRawMessageOverview, LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmSummaryExpansion,
+    LcmSummaryNode, LcmSummaryNodeOverview, LCM_SCHEMA_VERSION,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -37,33 +38,44 @@ pub(crate) async fn load_session(
 ) -> Result<LcmLoadSessionPage, LcmError> {
     let limit = clamp_limit(request.limit);
     let fetch_limit = limit.saturating_add(1);
-    let role = opt_text(request.role.as_deref());
+    let mut values = vec![
+        Value::Text(request.provider.clone()),
+        Value::Text(request.session_id.clone()),
+        Value::Integer(request.after_store_id.unwrap_or(0)),
+    ];
+    let mut role_clause = String::new();
+    let roles = normalized_strings(&request.roles);
+    if !roles.is_empty() {
+        let placeholders = std::iter::repeat("?")
+            .take(roles.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        role_clause = format!(" AND role IN ({placeholders})");
+        values.extend(roles.into_iter().map(Value::Text));
+    }
     let start_time = opt_i64(request.start_time);
     let end_time = opt_i64(request.end_time);
+    values.push(start_time.clone());
+    values.push(start_time);
+    values.push(end_time.clone());
+    values.push(end_time);
+    values.push(Value::Integer(fetch_limit as i64));
+    let sql = format!(
+        "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                timestamp, content, content_hash, storage_kind, payload_ref,
+                snippet_text, legacy_source, legacy_truncated, metadata_json
+         FROM lcm_raw_messages
+         WHERE provider = ?
+           AND session_id = ?
+           AND store_id > ?
+           {role_clause}
+           AND (? IS NULL OR timestamp >= ?)
+           AND (? IS NULL OR timestamp <= ?)
+         ORDER BY store_id
+         LIMIT ?"
+    );
     let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1
-               AND session_id = ?2
-               AND store_id > ?3
-               AND (?4 IS NULL OR role = ?4)
-               AND (?5 IS NULL OR timestamp >= ?5)
-               AND (?6 IS NULL OR timestamp <= ?6)
-             ORDER BY store_id
-             LIMIT ?7",
-            params![
-                request.provider.as_str(),
-                request.session_id.as_str(),
-                request.after_store_id.unwrap_or(0),
-                role,
-                start_time,
-                end_time,
-                fetch_limit as i64,
-            ],
-        )
+        .query(&sql, values)
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
 
@@ -108,13 +120,14 @@ pub(crate) async fn grep(
         return Ok(Vec::new());
     }
 
-    let mut hits = raw_grep_hits(conn, &request.provider, session_filter, &query, limit).await?;
-    if request.include_summaries && hits.len() < limit {
+    let raw_only_filters =
+        request.role.is_some() || request.start_time.is_some() || request.end_time.is_some();
+    let mut hits = raw_grep_hits(conn, &request, session_filter, &query, limit).await?;
+    if request.include_summaries && !raw_only_filters && hits.len() < limit {
         let remaining = limit - hits.len();
-        hits.extend(
-            summary_grep_hits(conn, &request.provider, session_filter, &query, remaining).await?,
-        );
+        hits.extend(summary_grep_hits(conn, &request, session_filter, &query, remaining).await?);
     }
+    sort_hits(&mut hits, request.sort);
     Ok(hits)
 }
 
@@ -216,9 +229,22 @@ pub(crate) async fn expand_query(
         {
             let fts = fts_query(query);
             if !fts.is_empty() {
+                let grep_request = LcmGrepRequest {
+                    provider: request.provider.clone(),
+                    query: query.to_string(),
+                    scope: LcmScope::Session,
+                    session_id: Some(request.session_id.clone()),
+                    include_summaries: true,
+                    limit: max_results,
+                    sort: LcmGrepSort::Recency,
+                    source: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
+                };
                 let summary_hits = summary_grep_hits(
                     conn,
-                    &request.provider,
+                    &grep_request,
                     Some(&request.session_id),
                     &fts,
                     max_results,
@@ -242,7 +268,7 @@ pub(crate) async fn expand_query(
                     let remaining = max_results - selected_summaries.len();
                     let raw_hits = raw_grep_hits(
                         conn,
-                        &request.provider,
+                        &grep_request,
                         Some(&request.session_id),
                         &fts,
                         remaining,
@@ -335,17 +361,41 @@ pub(crate) async fn expand_query(
 
 pub(crate) async fn describe(
     conn: &Connection,
-    provider: &str,
-    session_id: &str,
+    request: LcmDescribeRequest,
 ) -> Result<LcmDescribeResponse, LcmError> {
+    let provider = request.provider.as_str();
+    let session_id = request.session_id.as_str();
     let raw_message_count = count_raw_messages(conn, provider, Some(session_id)).await?;
     let summary_node_count = count_summary_nodes(conn, provider, Some(session_id)).await?;
     let external_payload_count = count_external_payloads(conn, provider, Some(session_id)).await?;
     let (first_store_id, last_store_id) = raw_store_bounds(conn, provider, session_id).await?;
-    let raw_messages = raw_message_overviews(conn, provider, session_id).await?;
-    let summary_nodes = summary_overviews(conn, provider, session_id).await?;
+    let (target, raw_messages, summary_nodes, summary_node, external_payload) = match request.target
+    {
+        LcmDescribeTarget::Session => (
+            "session".to_string(),
+            raw_message_overviews(conn, provider, session_id).await?,
+            summary_overviews(conn, provider, session_id).await?,
+            None,
+            None,
+        ),
+        LcmDescribeTarget::SummaryNode { node_id } => (
+            "summary_node".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Some(describe_summary_node(conn, provider, session_id, &node_id).await?),
+            None,
+        ),
+        LcmDescribeTarget::ExternalPayload { payload_ref } => (
+            "external_payload".to_string(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(describe_external_payload(conn, provider, session_id, &payload_ref).await?),
+        ),
+    };
 
     Ok(LcmDescribeResponse {
+        target,
         provider: provider.to_string(),
         session_id: session_id.to_string(),
         raw_message_count,
@@ -355,6 +405,8 @@ pub(crate) async fn describe(
         last_store_id,
         raw_messages,
         summary_nodes,
+        summary_node,
+        external_payload,
     })
 }
 
@@ -669,24 +721,68 @@ fn expand_query_synthesis_prompt(
 
 async fn raw_grep_hits(
     conn: &Connection,
-    provider: &str,
+    request: &LcmGrepRequest,
     session_id: Option<&str>,
     query: &str,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
-    let session_value = opt_text(session_id);
+    let mut values = vec![
+        Value::Text(query.to_string()),
+        Value::Text(request.provider.clone()),
+    ];
+    let mut filters = Vec::new();
+    if let Some(session_id) = session_id {
+        filters.push("r.session_id = ?".to_string());
+        values.push(Value::Text(session_id.to_string()));
+    }
+    if let Some(source) = request
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push(
+            "(json_extract(r.metadata_json, '$.source') = ? OR r.metadata_json LIKE ?)".to_string(),
+        );
+        values.push(Value::Text(source.to_string()));
+        values.push(Value::Text(format!("%\"source\":\"{}\"%", source)));
+    }
+    if let Some(role) = request
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push("r.role = ?".to_string());
+        values.push(Value::Text(role.to_string()));
+    }
+    if let Some(start_time) = request.start_time {
+        filters.push("r.timestamp >= ?".to_string());
+        values.push(Value::Integer(start_time));
+    }
+    if let Some(end_time) = request.end_time {
+        filters.push("r.timestamp <= ?".to_string());
+        values.push(Value::Integer(end_time));
+    }
+    values.push(Value::Integer(limit as i64));
+    let filter_sql = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", filters.join(" AND "))
+    };
+    let order_by = grep_order_by(request.sort, "r.store_id");
+    let sql = format!(
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text
+         FROM lcm_raw_messages_fts
+         JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
+         WHERE lcm_raw_messages_fts MATCH ?
+           AND r.provider = ?
+           {filter_sql}
+         ORDER BY {order_by}
+         LIMIT ?"
+    );
     let mut rows = conn
-        .query(
-            "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text
-             FROM lcm_raw_messages_fts
-             JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
-             WHERE lcm_raw_messages_fts MATCH ?1
-               AND r.provider = ?2
-               AND (?3 IS NULL OR r.session_id = ?3)
-             ORDER BY r.store_id
-             LIMIT ?4",
-            params![query, provider, session_value, limit as i64],
-        )
+        .query(&sql, values)
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
 
@@ -712,24 +808,60 @@ async fn raw_grep_hits(
 
 async fn summary_grep_hits(
     conn: &Connection,
-    provider: &str,
+    request: &LcmGrepRequest,
     session_id: Option<&str>,
     query: &str,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
-    let session_value = opt_text(session_id);
+    let mut values = vec![
+        Value::Text(query.to_string()),
+        Value::Text(request.provider.clone()),
+    ];
+    let mut filters = Vec::new();
+    if let Some(session_id) = session_id {
+        filters.push("n.session_id = ?".to_string());
+        values.push(Value::Text(session_id.to_string()));
+    }
+    if let Some(source) = request
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filters.push(
+            "EXISTS (
+                SELECT 1
+                FROM lcm_summary_sources ss
+                JOIN lcm_raw_messages sr
+                  ON ss.source_kind = 'raw_message'
+                 AND sr.store_id = CAST(ss.source_id AS INTEGER)
+                WHERE ss.node_id = n.node_id
+                  AND (json_extract(sr.metadata_json, '$.source') = ? OR sr.metadata_json LIKE ?)
+             )"
+            .to_string(),
+        );
+        values.push(Value::Text(source.to_string()));
+        values.push(Value::Text(format!("%\"source\":\"{}\"%", source)));
+    }
+    values.push(Value::Integer(limit as i64));
+    let filter_sql = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", filters.join(" AND "))
+    };
+    let order_by = grep_order_by(request.sort, "n.created_at");
+    let sql = format!(
+        "SELECT n.provider, n.session_id, n.node_id, n.summary_text
+         FROM lcm_summary_nodes_fts
+         JOIN lcm_summary_nodes n ON n.rowid = lcm_summary_nodes_fts.rowid
+         WHERE lcm_summary_nodes_fts MATCH ?
+           AND n.provider = ?
+           {filter_sql}
+         ORDER BY {order_by}, n.node_id
+         LIMIT ?"
+    );
     let mut rows = conn
-        .query(
-            "SELECT n.provider, n.session_id, n.node_id, n.summary_text
-             FROM lcm_summary_nodes_fts
-             JOIN lcm_summary_nodes n ON n.rowid = lcm_summary_nodes_fts.rowid
-             WHERE lcm_summary_nodes_fts MATCH ?1
-               AND n.provider = ?2
-               AND (?3 IS NULL OR n.session_id = ?3)
-             ORDER BY n.created_at, n.node_id
-             LIMIT ?4",
-            params![query, provider, session_value, limit as i64],
-        )
+        .query(&sql, values)
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
 
@@ -832,6 +964,233 @@ async fn summary_overviews(
         });
     }
     Ok(overviews)
+}
+
+async fn describe_summary_node(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+) -> Result<LcmDescribeSummaryNode, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT node_id, conversation_id, depth, summary_token_count,
+                    source_token_count, source_time_start, source_time_end,
+                    expand_hint, metadata_json, created_at
+             FROM lcm_summary_nodes
+             WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
+            params![provider, session_id, node_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or(LcmError::SummaryNodeNotFound)?;
+    let children = describe_summary_sources(conn, provider, session_id, node_id).await?;
+    Ok(LcmDescribeSummaryNode {
+        node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+        conversation_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+        depth: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+        summary_token_count: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
+        source_token_count: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+        source_time_start: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+        source_time_end: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
+        expand_hint: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
+        metadata_json: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
+        created_at: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+        source_count: children.len(),
+        children,
+    })
+}
+
+async fn describe_summary_sources(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+) -> Result<Vec<LcmDescribeSourceOverview>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT source_kind, source_id
+             FROM lcm_summary_sources
+             WHERE node_id = ?1
+             ORDER BY ordinal",
+            params![node_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let source_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let source_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        match source_kind.as_str() {
+            "raw_message" => {
+                let store_id = source_id
+                    .parse::<i64>()
+                    .map_err(|err| LcmError::Db(format!("invalid raw source id: {err}")))?;
+                let mut raw_rows = conn
+                    .query(
+                        "SELECT role, storage_kind
+                         FROM lcm_raw_messages
+                         WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
+                        params![provider, session_id, store_id],
+                    )
+                    .await
+                    .map_err(|err| LcmError::Db(err.to_string()))?;
+                let Some(raw_row) = raw_rows
+                    .next()
+                    .await
+                    .map_err(|err| LcmError::Db(err.to_string()))?
+                else {
+                    continue;
+                };
+                let storage_kind_text: String = raw_row
+                    .get(1)
+                    .map_err(|err| LcmError::Db(err.to_string()))?;
+                out.push(LcmDescribeSourceOverview {
+                    source_kind,
+                    source_ref: LcmSourceRef::RawMessage { store_id },
+                    store_id: Some(store_id),
+                    node_id: None,
+                    role: Some(
+                        raw_row
+                            .get(0)
+                            .map_err(|err| LcmError::Db(err.to_string()))?,
+                    ),
+                    storage_kind: LcmStorageKind::from_db(&storage_kind_text),
+                    summary_token_count: None,
+                    source_token_count: None,
+                    expand_hint: None,
+                });
+            }
+            "summary_node" => {
+                let mut summary_rows = conn
+                    .query(
+                        "SELECT summary_token_count, source_token_count, expand_hint
+                         FROM lcm_summary_nodes
+                         WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
+                        params![provider, session_id, source_id.as_str()],
+                    )
+                    .await
+                    .map_err(|err| LcmError::Db(err.to_string()))?;
+                let Some(summary_row) = summary_rows
+                    .next()
+                    .await
+                    .map_err(|err| LcmError::Db(err.to_string()))?
+                else {
+                    continue;
+                };
+                out.push(LcmDescribeSourceOverview {
+                    source_kind,
+                    source_ref: LcmSourceRef::SummaryNode {
+                        node_id: source_id.clone(),
+                    },
+                    store_id: None,
+                    node_id: Some(source_id),
+                    role: None,
+                    storage_kind: None,
+                    summary_token_count: Some(
+                        summary_row
+                            .get(0)
+                            .map_err(|err| LcmError::Db(err.to_string()))?,
+                    ),
+                    source_token_count: Some(
+                        summary_row
+                            .get(1)
+                            .map_err(|err| LcmError::Db(err.to_string()))?,
+                    ),
+                    expand_hint: summary_row
+                        .get(2)
+                        .map_err(|err| LcmError::Db(err.to_string()))?,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+async fn describe_external_payload(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    payload_ref: &str,
+) -> Result<LcmDescribeExternalPayload, LcmError> {
+    payload::validate_payload_ref(payload_ref)?;
+    let mut rows = conn
+        .query(
+            "SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
+                    byte_count, char_count, created_at, metadata_json
+             FROM lcm_external_payloads
+             WHERE payload_ref = ?1 AND provider = ?2 AND session_id = ?3",
+            params![payload_ref, provider, session_id],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or(LcmError::PayloadNotFound)?;
+    let byte_count: i64 = row.get(6).map_err(|err| LcmError::Db(err.to_string()))?;
+    let char_count: i64 = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
+    let message_id: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(LcmDescribeExternalPayload {
+        payload_ref: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
+        provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+        message_id: message_id.clone(),
+        kind: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+        content_hash: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+        byte_count: byte_count.max(0) as u64,
+        char_count: char_count.max(0) as u64,
+        created_at: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
+        metadata_json: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+        content_preview: external_payload_placeholder_preview(
+            conn,
+            provider,
+            session_id,
+            &message_id,
+            payload_ref,
+        )
+        .await?,
+    })
+}
+
+async fn external_payload_placeholder_preview(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    payload_ref: &str,
+) -> Result<String, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT snippet_text
+             FROM lcm_raw_messages
+             WHERE provider = ?1
+               AND session_id = ?2
+               AND message_id = ?3
+               AND payload_ref = ?4
+             LIMIT 1",
+            params![provider, session_id, message_id, payload_ref],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        return row.get(0).map_err(|err| LcmError::Db(err.to_string()));
+    }
+    Ok(format!("[externalized payload ref={payload_ref}]"))
 }
 
 async fn raw_store_bounds(
@@ -1309,6 +1668,36 @@ fn quote_fts_term(term: &str) -> String {
 
 fn clamp_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_PAGE_LIMIT)
+}
+
+fn normalized_strings(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && !out.iter().any(|existing| existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn grep_order_by(sort: LcmGrepSort, recency_column: &str) -> String {
+    match sort {
+        LcmGrepSort::Recency => format!("{recency_column} DESC"),
+        LcmGrepSort::Relevance => format!("rank, {recency_column} DESC"),
+        LcmGrepSort::Hybrid => format!("rank, {recency_column} DESC"),
+    }
+}
+
+fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
+    if matches!(sort, LcmGrepSort::Recency) {
+        hits.sort_by(|left, right| {
+            right
+                .store_id
+                .unwrap_or(i64::MIN)
+                .cmp(&left.store_id.unwrap_or(i64::MIN))
+        });
+    }
 }
 
 fn opt_text(value: Option<&str>) -> Value {

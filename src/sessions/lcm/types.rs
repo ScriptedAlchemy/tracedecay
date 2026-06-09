@@ -117,7 +117,7 @@ pub struct LcmLoadSessionRequest {
     pub session_id: String,
     pub after_store_id: Option<i64>,
     pub limit: usize,
-    pub role: Option<String>,
+    pub roles: Vec<String>,
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
     pub content_slice: Option<LcmContentSlice>,
@@ -168,6 +168,25 @@ pub enum LcmScope {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmGrepSort {
+    Recency,
+    Relevance,
+    Hybrid,
+}
+
+impl LcmGrepSort {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "recency" => Some(Self::Recency),
+            "relevance" => Some(Self::Relevance),
+            "hybrid" => Some(Self::Hybrid),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGrepRequest {
     pub provider: String,
@@ -176,6 +195,11 @@ pub struct LcmGrepRequest {
     pub session_id: Option<String>,
     pub include_summaries: bool,
     pub limit: usize,
+    pub sort: LcmGrepSort,
+    pub source: Option<String>,
+    pub role: Option<String>,
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -307,7 +331,67 @@ pub struct LcmRawMessageOverview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmDescribeTarget {
+    Session,
+    SummaryNode { node_id: String },
+    ExternalPayload { payload_ref: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeRequest {
+    pub provider: String,
+    pub session_id: String,
+    pub target: LcmDescribeTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeSourceOverview {
+    pub source_kind: String,
+    pub source_ref: LcmSourceRef,
+    pub store_id: Option<i64>,
+    pub node_id: Option<String>,
+    pub role: Option<String>,
+    pub storage_kind: Option<LcmStorageKind>,
+    pub summary_token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
+    pub expand_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeSummaryNode {
+    pub node_id: String,
+    pub conversation_id: String,
+    pub depth: i64,
+    pub summary_token_count: i64,
+    pub source_token_count: i64,
+    pub source_time_start: Option<i64>,
+    pub source_time_end: Option<i64>,
+    pub expand_hint: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub source_count: usize,
+    pub children: Vec<LcmDescribeSourceOverview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmDescribeExternalPayload {
+    pub payload_ref: String,
+    pub provider: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub char_count: u64,
+    pub created_at: i64,
+    pub metadata_json: Option<String>,
+    pub content_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmDescribeResponse {
+    pub target: String,
     pub provider: String,
     pub session_id: String,
     pub raw_message_count: i64,
@@ -317,6 +401,8 @@ pub struct LcmDescribeResponse {
     pub last_store_id: Option<i64>,
     pub raw_messages: Vec<LcmRawMessageOverview>,
     pub summary_nodes: Vec<LcmSummaryNodeOverview>,
+    pub summary_node: Option<LcmDescribeSummaryNode>,
+    pub external_payload: Option<LcmDescribeExternalPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

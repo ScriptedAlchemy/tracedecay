@@ -6,9 +6,9 @@ use crate::errors::{Result, TokenSaveError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
-    LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmExpandQueryRequest,
-    LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest, LcmPreflightRequest,
-    LcmScope, LcmSummarizerMode,
+    LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
+    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort,
+    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSummarizerMode,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
@@ -17,6 +17,7 @@ const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
 const MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 65_536;
 const MAX_LCM_CONTENT_LIMIT: usize = 8192;
+const MAX_LCM_LOAD_CONTENT_LIMIT: usize = 20_000;
 const MAX_LCM_RESULT_LIMIT: usize = 100;
 const MAX_LCM_EXPAND_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
@@ -525,6 +526,13 @@ fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
     Ok(Some(integer))
 }
 
+fn non_negative_i64_arg_alias(args: &Value, primary: &str, alias: &str) -> Result<Option<i64>> {
+    match non_negative_i64_arg(args, primary)? {
+        Some(value) => Ok(Some(value)),
+        None => non_negative_i64_arg(args, alias),
+    }
+}
+
 fn provider_arg(args: &Value) -> &str {
     string_arg(args, "provider").unwrap_or("cursor")
 }
@@ -583,6 +591,29 @@ fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
         limit: bounded_usize_arg(args, "content_limit", 1, MAX_LCM_CONTENT_LIMIT)?
             .unwrap_or(DEFAULT_LCM_CONTENT_LIMIT),
     })
+}
+
+fn lcm_load_content_slice(args: &Value) -> Result<(LcmContentSlice, Option<usize>)> {
+    let offset = bounded_usize_arg(args, "content_offset", 0, usize::MAX)?.unwrap_or(0);
+    let requested_limit = match args.get("content_limit") {
+        Some(value) => {
+            let Some(integer) = value.as_i64() else {
+                return Err(argument_error("content_limit must be an integer"));
+            };
+            if integer <= 0 {
+                return Err(argument_error("content_limit must be >= 1"));
+            }
+            usize::try_from(integer).map_err(|_| {
+                argument_error(format!(
+                    "content_limit must be <= {MAX_LCM_LOAD_CONTENT_LIMIT}"
+                ))
+            })?
+        }
+        None => DEFAULT_LCM_CONTENT_LIMIT,
+    };
+    let limit = requested_limit.min(MAX_LCM_LOAD_CONTENT_LIMIT);
+    let clamped_from = (requested_limit > limit).then_some(requested_limit);
+    Ok((LcmContentSlice { offset, limit }, clamped_from))
 }
 
 fn lcm_doctor_mode(args: &Value) -> Result<&str> {
@@ -773,6 +804,45 @@ fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
     }
 }
 
+fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
+    let Some(sort) = string_arg(args, "sort") else {
+        return Ok(LcmGrepSort::Recency);
+    };
+    LcmGrepSort::from_str(sort)
+        .ok_or_else(|| argument_error("sort must be one of recency, relevance, hybrid"))
+}
+
+fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
+    let Some(target) = args.get("target") else {
+        return Ok(LcmDescribeTarget::Session);
+    };
+    match string_arg(target, "kind").unwrap_or_default() {
+        "summary_node" => {
+            let node_id = required_string_arg(target, "node_id")
+                .map(str::to_string)
+                .map_err(|_| TokenSaveError::Config {
+                    message: "target.node_id is required when target.kind is summary_node"
+                        .to_string(),
+                })?;
+            Ok(LcmDescribeTarget::SummaryNode { node_id })
+        }
+        "external_payload" => {
+            let payload_ref = required_string_arg(target, "payload_ref")
+                .map(str::to_string)
+                .map_err(|_| TokenSaveError::Config {
+                    message: "target.payload_ref is required when target.kind is external_payload"
+                        .to_string(),
+                })?;
+            Ok(LcmDescribeTarget::ExternalPayload { payload_ref })
+        }
+        "session" => Ok(LcmDescribeTarget::Session),
+        _ => Err(TokenSaveError::Config {
+            message: "target.kind must be one of session, summary_node, external_payload"
+                .to_string(),
+        }),
+    }
+}
+
 fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
     let target = args.get("target").ok_or_else(|| TokenSaveError::Config {
         message: "missing required parameter: target".to_string(),
@@ -942,6 +1012,7 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
 pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
+    let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
     let storage = match open_lcm_storage(cg, &args).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
@@ -953,20 +1024,38 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
             session_id: session_id.to_string(),
             after_store_id: non_negative_i64_arg(&args, "after_store_id")?,
             limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(50),
-            role: string_arg(&args, "role").map(str::to_string),
-            start_time: non_negative_i64_arg(&args, "start_time")?,
-            end_time: non_negative_i64_arg(&args, "end_time")?,
-            content_slice: Some(lcm_content_slice(&args)?),
+            roles: {
+                let mut roles = string_array_arg(&args, "roles")?;
+                if roles.is_empty() {
+                    if let Some(role) = string_arg(&args, "role") {
+                        roles.push(role.to_string());
+                    }
+                }
+                roles
+            },
+            start_time: non_negative_i64_arg_alias(&args, "start_time", "time_from")?,
+            end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
+            content_slice: Some(content_slice),
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
+    let mut payload = json!({
         "status": "ok",
         "provider": provider,
         "session_id": session_id,
         "messages": page.messages,
         "next_cursor": page.next_cursor,
-    })))
+        "content_limit": content_slice.limit,
+    });
+    if let Some(clamped_from) = content_limit_clamped_from {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "content_limit_clamped_from".to_string(),
+                json!(clamped_from),
+            );
+        }
+    }
+    Ok(tool_json(&payload))
 }
 
 pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolResult> {
@@ -988,6 +1077,11 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(10),
+            sort: parse_lcm_grep_sort(&args)?,
+            source: string_arg(&args, "source").map(str::to_string),
+            role: string_arg(&args, "role").map(str::to_string),
+            start_time: non_negative_i64_arg_alias(&args, "start_time", "time_from")?,
+            end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         })
         .await
         .map_err(lcm_error)?;
@@ -997,6 +1091,7 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
         "query": query,
         "count": hits.len(),
         "hits": hits,
+        "sort": string_arg(&args, "sort").unwrap_or("recency"),
     })))
 }
 
@@ -1009,7 +1104,11 @@ pub(super) async fn handle_lcm_describe(cg: &TokenSave, args: Value) -> Result<T
     };
     let description = storage
         .db
-        .lcm_describe(provider, session_id)
+        .lcm_describe(LcmDescribeRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            target: parse_lcm_describe_target(&args)?,
+        })
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(&json!({

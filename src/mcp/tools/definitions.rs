@@ -1856,7 +1856,12 @@ fn def_lcm_load_session() -> ToolDefinition {
                 },
                 "role": {
                     "type": "string",
-                    "description": "Optional role filter."
+                    "description": "Optional single role filter. Prefer roles for native Hermes parity."
+                },
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional role filters. Matches any listed role."
                 },
                 "start_time": {
                     "type": "integer",
@@ -1876,8 +1881,8 @@ fn def_lcm_load_session() -> ToolDefinition {
                 "content_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 8192,
-                    "description": "Maximum characters returned per message."
+                    "maximum": 20000,
+                    "description": "Maximum characters returned per message. Values above 20000 are clamped and reported in content_limit_clamped_from."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
@@ -1917,6 +1922,30 @@ fn def_lcm_grep() -> ToolDefinition {
                     "type": "boolean",
                     "description": "Include summary node text after raw-message matches (default: true)."
                 },
+                "sort": {
+                    "type": "string",
+                    "enum": ["recency", "relevance", "hybrid"],
+                    "description": "How to order matches. Defaults to recency."
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Optional source/platform filter from raw-message metadata."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "description": "Optional raw-message role filter. When supplied, summary results are omitted."
+                },
+                "start_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional inclusive minimum raw-message timestamp."
+                },
+                "end_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional inclusive maximum raw-message timestamp."
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -1947,6 +1976,24 @@ fn def_lcm_describe() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Provider-local session id."
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Optional describe target. Omit for session overview.",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["session", "summary_node", "external_payload"]
+                        },
+                        "node_id": {
+                            "type": "string",
+                            "description": "Summary node id when kind=summary_node."
+                        },
+                        "payload_ref": {
+                            "type": "string",
+                            "description": "External payload ref when kind=external_payload."
+                        }
+                    }
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
