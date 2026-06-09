@@ -13,9 +13,14 @@ use super::{payload, schema, security, LcmCleanConfig, LcmError, LCM_SCHEMA_VERS
 const MAX_SAMPLES: usize = 20;
 const RETENTION_OLD_DAYS: f64 = 30.0;
 const RETENTION_HEAVY_CHARS: i64 = 128 * 1024;
+const SQLITE_IN_BATCH_SIZE: usize = 500;
 
 fn opt_text(value: Option<&str>) -> SqlValue {
     value.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()))
+}
+
+fn sql_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
 fn unixepoch() -> i64 {
@@ -917,15 +922,29 @@ async fn retention_candidates(
     let now = unixepoch();
     let mut rows = conn
         .query(
-            "SELECT session_id,
-                    COUNT(*) AS message_count,
-                    COALESCE(SUM(LENGTH(index_text)), 0) AS retained_chars,
-                    MIN(COALESCE(timestamp, 0)) AS first_message_at,
-                    MAX(COALESCE(timestamp, 0)) AS last_message_at
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
-             GROUP BY session_id
-             ORDER BY retained_chars DESC, last_message_at ASC
+            "SELECT raw.session_id,
+                    raw.message_count,
+                    raw.retained_chars,
+                    raw.first_message_at,
+                    raw.last_message_at,
+                    COALESCE(summary_counts.summary_node_count, 0) AS summary_node_count
+             FROM (
+                SELECT session_id,
+                       COUNT(*) AS message_count,
+                       COALESCE(SUM(LENGTH(index_text)), 0) AS retained_chars,
+                       MIN(COALESCE(timestamp, 0)) AS first_message_at,
+                       MAX(COALESCE(timestamp, 0)) AS last_message_at
+                FROM lcm_raw_messages
+                WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+                GROUP BY session_id
+             ) raw
+             LEFT JOIN (
+                SELECT session_id, COUNT(*) AS summary_node_count
+                FROM lcm_summary_nodes
+                WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+                GROUP BY session_id
+             ) summary_counts ON summary_counts.session_id = raw.session_id
+             ORDER BY raw.retained_chars DESC, raw.last_message_at ASC
              LIMIT 100",
             params![provider, opt_text(session_id)],
         )
@@ -944,6 +963,7 @@ async fn retention_candidates(
         let retained_chars: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
         let first_message_at: i64 = row.get(3).unwrap_or_default();
         let last_message_at: i64 = row.get(4).unwrap_or_default();
+        let summary_node_count: i64 = row.get(5).unwrap_or_default();
         let age_days = if last_message_at > 0 {
             (now.saturating_sub(last_message_at) as f64) / 86_400.0
         } else {
@@ -951,7 +971,7 @@ async fn retention_candidates(
         };
         let old = age_days >= RETENTION_OLD_DAYS;
         let heavy = retained_chars >= RETENTION_HEAVY_CHARS;
-        let session_only = summary_count_for_session(conn, provider, &session_id).await? == 0;
+        let session_only = summary_node_count == 0;
         if old || heavy || session_only {
             candidates.push(json!({
                 "session_id": session_id,
@@ -992,6 +1012,16 @@ async fn cleanup_candidates(
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
 ) -> Result<Value, LcmError> {
+    let ignore_session_patterns =
+        security::compile_session_patterns(&clean_config.ignore_session_patterns);
+    let stateless_session_patterns =
+        security::compile_session_patterns(&clean_config.stateless_session_patterns);
+    let ignore_message_patterns =
+        security::compile_message_patterns(&clean_config.ignore_message_patterns);
+    let summary_counts = summary_counts_by_session(conn, provider, session_id).await?;
+    let protected_raw_sources =
+        raw_store_ids_with_summary_sources(conn, provider, session_id).await?;
+
     let mut rows = conn
         .query(
             "SELECT store_id, message_id, session_id, role, COALESCE(content, index_text, '')
@@ -1025,22 +1055,18 @@ async fn cleanup_candidates(
         let content: String = row.get(4).unwrap_or_default();
 
         let ignored =
-            security::matches_any_pattern(&clean_config.ignore_session_patterns, &row_session_id);
-        let stateless = security::matches_any_pattern(
-            &clean_config.stateless_session_patterns,
-            &row_session_id,
-        );
+            security::matches_any_compiled_pattern(&ignore_session_patterns, &row_session_id);
+        let stateless =
+            security::matches_any_compiled_pattern(&stateless_session_patterns, &row_session_id);
         if ignored || stateless {
             let is_new = !sessions.contains_key(&row_session_id);
-            let summary_node_count = if is_new {
-                summary_count_for_session(conn, provider, &row_session_id).await?
-            } else {
-                0
-            };
             let candidate = sessions.entry(row_session_id.clone()).or_default();
             candidate.message_count += 1;
             if is_new {
-                candidate.summary_node_count = summary_node_count;
+                candidate.summary_node_count = summary_counts
+                    .get(&row_session_id)
+                    .copied()
+                    .unwrap_or_default();
             }
             if ignored {
                 candidate.classes.insert("ignored_session");
@@ -1065,11 +1091,11 @@ async fn cleanup_candidates(
         }
 
         let Some(reason) =
-            security::ignore_message_reason(&role, &content, &clean_config.ignore_message_patterns)
+            security::ignore_message_reason_with_compiled(&content, &ignore_message_patterns)
         else {
             continue;
         };
-        if raw_message_has_summary_source(conn, store_id).await? {
+        if protected_raw_sources.contains(&store_id) {
             protected_noise_count += 1;
             continue;
         }
@@ -1119,28 +1145,6 @@ async fn cleanup_candidates(
         "message_candidates": message_candidates,
         "heartbeat_message_candidates": heartbeat_message_candidates,
     }))
-}
-
-async fn raw_message_has_summary_source(
-    conn: &Connection,
-    store_id: i64,
-) -> Result<bool, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_summary_sources
-             WHERE source_kind = 'raw_message' AND source_id = ?1",
-            params![store_id.to_string()],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("summary source count returned no rows".to_string()))?;
-    let count: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-    Ok(count > 0)
 }
 
 fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
@@ -1268,9 +1272,18 @@ async fn collect_clean_delete_targets(
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
 ) -> Result<(Vec<String>, Vec<i64>), LcmError> {
+    let ignore_session_patterns =
+        security::compile_session_patterns(&clean_config.ignore_session_patterns);
+    let stateless_session_patterns =
+        security::compile_session_patterns(&clean_config.stateless_session_patterns);
+    let ignore_message_patterns =
+        security::compile_message_patterns(&clean_config.ignore_message_patterns);
+    let protected_raw_sources =
+        raw_store_ids_with_summary_sources(conn, provider, session_id).await?;
+
     let mut rows = conn
         .query(
-            "SELECT store_id, session_id, role, COALESCE(content, index_text, '')
+            "SELECT store_id, session_id, COALESCE(content, index_text, '')
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
              ORDER BY session_id, store_id",
@@ -1288,13 +1301,12 @@ async fn collect_clean_delete_targets(
     {
         let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
         let row_session_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let role: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
-        let content: String = row.get(3).unwrap_or_default();
+        let content: String = row.get(2).unwrap_or_default();
 
         let filtered_session =
-            security::matches_any_pattern(&clean_config.ignore_session_patterns, &row_session_id)
-                || security::matches_any_pattern(
-                    &clean_config.stateless_session_patterns,
+            security::matches_any_compiled_pattern(&ignore_session_patterns, &row_session_id)
+                || security::matches_any_compiled_pattern(
+                    &stateless_session_patterns,
                     &row_session_id,
                 );
         if filtered_session {
@@ -1302,9 +1314,9 @@ async fn collect_clean_delete_targets(
             continue;
         }
 
-        if security::ignore_message_reason(&role, &content, &clean_config.ignore_message_patterns)
+        if security::ignore_message_reason_with_compiled(&content, &ignore_message_patterns)
             .is_some()
-            && !raw_message_has_summary_source(conn, store_id).await?
+            && !protected_raw_sources.contains(&store_id)
         {
             message_store_ids.push(store_id);
         }
@@ -1319,67 +1331,104 @@ async fn delete_clean_candidates_in_transaction(
     session_ids: &[String],
     message_store_ids: &[i64],
 ) -> Result<Value, LcmError> {
-    let mut deleted_sessions = 0_i64;
+    let deleted_sessions = session_ids.len() as i64;
     let mut deleted_messages = 0_i64;
-    for session_id in session_ids {
+
+    for session_chunk in session_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if session_chunk.is_empty() {
+            continue;
+        }
+        let placeholders = sql_placeholders(session_chunk.len());
+
+        let mut summary_values = vec![SqlValue::Text(provider.to_string())];
+        summary_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
         conn.execute(
-            "DELETE FROM lcm_summary_nodes WHERE provider = ?1 AND session_id = ?2",
-            params![provider, session_id.as_str()],
+            &format!(
+                "DELETE FROM lcm_summary_nodes
+                 WHERE provider = ? AND session_id IN ({placeholders})"
+            ),
+            summary_values,
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
+
+        let mut payload_values = vec![SqlValue::Text(provider.to_string())];
+        payload_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
         conn.execute(
-            "DELETE FROM lcm_external_payloads WHERE provider = ?1 AND session_id = ?2",
-            params![provider, session_id.as_str()],
+            &format!(
+                "DELETE FROM lcm_external_payloads
+                 WHERE provider = ? AND session_id IN ({placeholders})"
+            ),
+            payload_values,
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
+
+        let mut raw_values = vec![SqlValue::Text(provider.to_string())];
+        raw_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
         let changed = conn
             .execute(
-                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND session_id = ?2",
-                params![provider, session_id.as_str()],
+                &format!(
+                    "DELETE FROM lcm_raw_messages
+                     WHERE provider = ? AND session_id IN ({placeholders})"
+                ),
+                raw_values,
             )
             .await
             .map_err(|err| LcmError::Db(err.to_string()))?;
         deleted_messages += changed as i64;
+
+        let mut lifecycle_values = vec![SqlValue::Text(provider.to_string())];
+        lifecycle_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
+        lifecycle_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
+        lifecycle_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
         conn.execute(
-            "DELETE FROM lcm_lifecycle_state
-             WHERE provider = ?1
-               AND (conversation_id = ?2 OR current_session_id = ?2 OR last_finalized_session_id = ?2)",
-            params![provider, session_id.as_str()],
+            &format!(
+                "DELETE FROM lcm_lifecycle_state
+                 WHERE provider = ?
+                   AND (
+                        conversation_id IN ({placeholders})
+                        OR current_session_id IN ({placeholders})
+                        OR last_finalized_session_id IN ({placeholders})
+                   )"
+            ),
+            lifecycle_values,
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
-        deleted_sessions += 1;
     }
 
-    for store_id in message_store_ids {
-        let mut rows = conn
-            .query(
-                "SELECT provider, message_id FROM lcm_raw_messages WHERE store_id = ?1",
-                params![*store_id],
-            )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?
-        else {
+    let message_ids = message_ids_for_store_ids(conn, message_store_ids).await?;
+    let message_ids = message_ids.into_iter().collect::<Vec<_>>();
+    for message_id_chunk in message_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if message_id_chunk.is_empty() {
             continue;
-        };
-        let provider: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let message_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        }
+        let placeholders = sql_placeholders(message_id_chunk.len());
+        let mut values = vec![SqlValue::Text(provider.to_string())];
+        values.extend(message_id_chunk.iter().cloned().map(SqlValue::Text));
         conn.execute(
-            "DELETE FROM lcm_external_payloads WHERE provider = ?1 AND message_id = ?2",
-            params![provider.as_str(), message_id.as_str()],
+            &format!(
+                "DELETE FROM lcm_external_payloads
+                 WHERE provider = ? AND message_id IN ({placeholders})"
+            ),
+            values,
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
+    }
+    for store_id_chunk in message_store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if store_id_chunk.is_empty() {
+            continue;
+        }
+        let placeholders = sql_placeholders(store_id_chunk.len());
         let changed = conn
             .execute(
-                "DELETE FROM lcm_raw_messages WHERE store_id = ?1",
-                params![*store_id],
+                &format!("DELETE FROM lcm_raw_messages WHERE store_id IN ({placeholders})"),
+                store_id_chunk
+                    .iter()
+                    .map(|store_id| SqlValue::Integer(*store_id))
+                    .collect::<Vec<_>>(),
             )
             .await
             .map_err(|err| LcmError::Db(err.to_string()))?;
@@ -1392,24 +1441,96 @@ async fn delete_clean_candidates_in_transaction(
     }))
 }
 
-async fn summary_count_for_session(
+async fn summary_counts_by_session(
     conn: &Connection,
     provider: &str,
-    session_id: &str,
-) -> Result<i64, LcmError> {
+    session_id: Option<&str>,
+) -> Result<BTreeMap<String, i64>, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT COUNT(*) FROM lcm_summary_nodes WHERE provider = ?1 AND session_id = ?2",
-            params![provider, session_id],
+            "SELECT session_id, COUNT(*)
+             FROM lcm_summary_nodes
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+             GROUP BY session_id",
+            params![provider, opt_text(session_id)],
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
+    let mut counts = BTreeMap::new();
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("summary count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+    {
+        let session_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let count: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        counts.insert(session_id, count);
+    }
+    Ok(counts)
+}
+
+async fn raw_store_ids_with_summary_sources(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<BTreeSet<i64>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT raw.store_id
+             FROM lcm_summary_sources src
+             JOIN lcm_raw_messages raw
+               ON src.source_kind = 'raw_message'
+              AND raw.store_id = CAST(src.source_id AS INTEGER)
+             WHERE raw.provider = ?1
+               AND (?2 IS NULL OR raw.session_id = ?2)",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut store_ids = BTreeSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        store_ids.insert(store_id);
+    }
+    Ok(store_ids)
+}
+
+async fn message_ids_for_store_ids(
+    conn: &Connection,
+    store_ids: &[i64],
+) -> Result<BTreeSet<String>, LcmError> {
+    let mut message_ids = BTreeSet::new();
+    for store_id_chunk in store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if store_id_chunk.is_empty() {
+            continue;
+        }
+        let placeholders = sql_placeholders(store_id_chunk.len());
+        let sql =
+            format!("SELECT message_id FROM lcm_raw_messages WHERE store_id IN ({placeholders})");
+        let mut rows = conn
+            .query(
+                &sql,
+                store_id_chunk
+                    .iter()
+                    .map(|store_id| SqlValue::Integer(*store_id))
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|err| LcmError::Db(err.to_string()))?
+        {
+            let message_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+            message_ids.insert(message_id);
+        }
+    }
+    Ok(message_ids)
 }
 
 fn sha256_hex(content: &[u8]) -> String {

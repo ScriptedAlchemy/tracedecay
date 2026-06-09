@@ -21,6 +21,15 @@ use super::{
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
+const PLACEHOLDER_PREFIXES: [&str; 5] = [
+    "[externalized payload:",
+    "[gc'd externalized payload:",
+    "[externalized lcm ingest payload:",
+    "[externalized tool output:",
+    "[gc'd externalized tool output:",
+];
+const PLACEHOLDER_TEXT_COLUMNS: [&str; 4] =
+    ["content", "snippet_text", "index_text", "metadata_json"];
 
 #[allow(clippy::struct_field_names)]
 struct LcmLifecycleMetadata {
@@ -445,12 +454,13 @@ pub(crate) async fn status(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStatus, LcmError> {
-    let external_payload_count = count_external_payloads(conn, provider, session_id).await?;
-    let missing_payload_count =
-        count_missing_payloads(conn, storage_root, provider, session_id).await?;
+    let metadata_refs = metadata_refs_for_scope(conn, provider, session_id).await?;
+    let external_payload_count = metadata_refs.len() as i64;
+    let missing_payload_count = count_missing_payloads_for_refs(storage_root, &metadata_refs);
     let unreferenced_payload_count = count_unreferenced_payloads(conn, storage_root).await?;
     let placeholder_status =
-        placeholder_payload_status(conn, storage_root, provider, session_id).await?;
+        placeholder_payload_status(conn, storage_root, provider, session_id, &metadata_refs)
+            .await?;
     let maintenance_debt_count =
         compression::maintenance_debt_count(conn, provider, session_id).await?;
     let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
@@ -511,30 +521,61 @@ fn load_message_from_raw(
     raw: LcmRawMessage,
     slice: Option<LcmContentSlice>,
 ) -> LcmLoadSessionMessage {
-    let (content, content_range) = slice_content(&raw.content, slice);
+    let LcmRawMessage {
+        provider,
+        message_id,
+        session_id,
+        store_id,
+        role,
+        ordinal,
+        timestamp,
+        content,
+        content_hash,
+        storage_kind,
+        payload_ref,
+        legacy_source,
+        legacy_truncated,
+        metadata_json,
+    } = raw;
+    let (content, content_range) = slice_content_owned(content, slice);
     LcmLoadSessionMessage {
-        provider: raw.provider,
-        message_id: raw.message_id,
-        session_id: raw.session_id,
-        store_id: raw.store_id,
-        role: raw.role,
-        ordinal: raw.ordinal,
-        timestamp: raw.timestamp,
+        provider,
+        message_id,
+        session_id,
+        store_id,
+        role,
+        ordinal,
+        timestamp,
         content,
         content_range,
-        content_hash: raw.content_hash,
-        storage_kind: raw.storage_kind,
-        payload_ref: raw.payload_ref,
-        legacy_source: raw.legacy_source,
-        legacy_truncated: raw.legacy_truncated,
-        metadata_json: raw.metadata_json,
+        content_hash,
+        storage_kind,
+        payload_ref,
+        legacy_source,
+        legacy_truncated,
+        metadata_json,
     }
 }
 
-fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmContentRange) {
+fn slice_content_owned(
+    content: String,
+    slice: Option<LcmContentSlice>,
+) -> (String, LcmContentRange) {
     let total_chars = content.chars().count();
     let offset = slice.map_or(0, |slice| slice.offset).min(total_chars);
     let limit = slice.map_or(total_chars.saturating_sub(offset), |slice| slice.limit);
+    if offset == 0 && limit >= total_chars {
+        return (
+            content,
+            LcmContentRange {
+                offset: 0,
+                limit: limit as u64,
+                returned_chars: total_chars as u64,
+                total_chars: total_chars as u64,
+                truncated: false,
+            },
+        );
+    }
     let sliced = content.chars().skip(offset).take(limit).collect::<String>();
     let returned_chars = sliced.chars().count();
     let truncated = offset > 0 || offset.saturating_add(returned_chars) < total_chars;
@@ -550,11 +591,15 @@ fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmC
     )
 }
 
+fn slice_content(content: &str, slice: Option<LcmContentSlice>) -> (String, LcmContentRange) {
+    slice_content_owned(content.to_string(), slice)
+}
+
 fn raw_message_with_sliced_content(
     mut raw: LcmRawMessage,
     slice: Option<LcmContentSlice>,
 ) -> (LcmRawMessage, LcmContentRange) {
-    let (content, range) = slice_content(&raw.content, slice);
+    let (content, range) = slice_content_owned(std::mem::take(&mut raw.content), slice);
     raw.content = content;
     (raw, range)
 }
@@ -563,7 +608,8 @@ fn summary_node_with_sliced_text(
     mut summary: LcmSummaryNode,
     slice: Option<LcmContentSlice>,
 ) -> (LcmSummaryNode, LcmContentRange) {
-    let (summary_text, range) = slice_content(&summary.summary_text, slice);
+    let (summary_text, range) =
+        slice_content_owned(std::mem::take(&mut summary.summary_text), slice);
     summary.summary_text = summary_text;
     (summary, range)
 }
@@ -575,15 +621,15 @@ fn slice_summary_sources(
     sources
         .into_iter()
         .map(|mut source| {
-            let (content, range) = slice_content(&source.content, slice);
-            source.content.clone_from(&content);
+            let (content, range) = slice_content_owned(std::mem::take(&mut source.content), slice);
+            source.content = content;
             source.content_truncated = range.truncated;
             source.content_range = Some(range);
             if let Some(raw_message) = source.raw_message.as_mut() {
-                raw_message.content.clone_from(&content);
+                raw_message.content.clone_from(&source.content);
             }
             if let Some(summary_node) = source.summary_node.as_mut() {
-                summary_node.summary_text = content;
+                summary_node.summary_text.clone_from(&source.content);
             }
             source
         })
@@ -1460,36 +1506,41 @@ async fn count_by_provider_session(
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
 
-async fn count_missing_payloads(
+fn count_missing_payloads_for_refs(storage_root: &Path, payload_refs: &BTreeSet<String>) -> i64 {
+    let dir = payload::payload_dir(storage_root);
+    payload_refs
+        .iter()
+        .filter(|payload_ref| {
+            let payload_ref = payload_ref.as_str();
+            payload::validate_payload_ref(payload_ref).is_err() || !dir.join(payload_ref).is_file()
+        })
+        .count() as i64
+}
+
+async fn placeholder_payload_status(
     conn: &Connection,
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref
-             FROM lcm_external_payloads
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_value],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    metadata_refs: &BTreeSet<String>,
+) -> Result<PlaceholderPayloadStatus, LcmError> {
+    let placeholder_refs = placeholder_refs_for_scope(conn, provider, session_id).await?;
     let dir = payload::payload_dir(storage_root);
-    let mut missing = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        if payload::validate_payload_ref(&payload_ref).is_err() || !dir.join(&payload_ref).is_file()
-        {
-            missing += 1;
+    let mut missing_metadata_count = 0_i64;
+    let mut missing_file_count = 0_i64;
+    for payload_ref in &placeholder_refs {
+        if !metadata_refs.contains(payload_ref) {
+            missing_metadata_count += 1;
+        }
+        if payload::validate_payload_ref(payload_ref).is_err() || !dir.join(payload_ref).is_file() {
+            missing_file_count += 1;
         }
     }
-    Ok(missing)
+    Ok(PlaceholderPayloadStatus {
+        placeholder_ref_count: placeholder_refs.len() as i64,
+        missing_metadata_count,
+        missing_file_count,
+    })
 }
 
 async fn count_unreferenced_payloads(
@@ -1534,32 +1585,6 @@ async fn count_unreferenced_payloads(
     Ok(unreferenced)
 }
 
-async fn placeholder_payload_status(
-    conn: &Connection,
-    storage_root: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<PlaceholderPayloadStatus, LcmError> {
-    let metadata_refs = metadata_refs_for_scope(conn, provider, session_id).await?;
-    let placeholder_refs = placeholder_refs_for_scope(conn, provider, session_id).await?;
-    let dir = payload::payload_dir(storage_root);
-    let mut missing_metadata_count = 0_i64;
-    let mut missing_file_count = 0_i64;
-    for payload_ref in &placeholder_refs {
-        if !metadata_refs.contains(payload_ref) {
-            missing_metadata_count += 1;
-        }
-        if payload::validate_payload_ref(payload_ref).is_err() || !dir.join(payload_ref).is_file() {
-            missing_file_count += 1;
-        }
-    }
-    Ok(PlaceholderPayloadStatus {
-        placeholder_ref_count: placeholder_refs.len() as i64,
-        missing_metadata_count,
-        missing_file_count,
-    })
-}
-
 async fn metadata_refs_for_scope(
     conn: &Connection,
     provider: &str,
@@ -1590,14 +1615,36 @@ async fn placeholder_refs_for_scope(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
+    let placeholder_predicates = PLACEHOLDER_TEXT_COLUMNS
+        .iter()
+        .flat_map(|column| {
+            PLACEHOLDER_PREFIXES
+                .iter()
+                .map(move |_| format!("{column} LIKE ? COLLATE NOCASE"))
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
+        "SELECT content, snippet_text, index_text, metadata_json
+         FROM lcm_raw_messages
+         WHERE provider = ?
+           AND (? IS NULL OR session_id = ?)
+           AND ({placeholder_predicates})"
+    );
+    let session_value = opt_text(session_id);
+    let mut values = vec![
+        Value::Text(provider.to_string()),
+        session_value.clone(),
+        session_value,
+    ];
+    for _column in PLACEHOLDER_TEXT_COLUMNS {
+        for prefix in PLACEHOLDER_PREFIXES {
+            values.push(Value::Text(format!("%{prefix}%")));
+        }
+    }
     let mut refs = BTreeSet::new();
     let mut rows = conn
-        .query(
-            "SELECT content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
-        )
+        .query(&sql, values)
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;
     while let Some(row) = rows
