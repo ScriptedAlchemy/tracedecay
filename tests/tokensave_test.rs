@@ -4,7 +4,7 @@
 use std::fs;
 use tempfile::TempDir;
 use tokensave::tokensave::{is_test_file, TokenSave};
-use tokensave::types::NodeKind;
+use tokensave::types::{EdgeKind, NodeKind};
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -543,6 +543,85 @@ async fn test_get_stats() {
 // ---------------------------------------------------------------------------
 // sync_if_stale_silent
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sync_if_stale_removes_deleted_indexed_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
+    fs::write(
+        project.join("src/remove_me.rs"),
+        "pub fn deleted_symbol() {}\n",
+    )
+    .unwrap();
+
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+    fs::remove_file(project.join("src/remove_me.rs")).unwrap();
+
+    let still_stale = cg
+        .sync_if_stale(&["src/remove_me.rs".to_string()])
+        .await
+        .unwrap();
+
+    assert!(
+        !still_stale,
+        "targeted sync should clear stale state for deleted indexed files"
+    );
+    let files = cg.get_all_files().await.unwrap();
+    assert!(
+        !files.iter().any(|file| file.path == "src/remove_me.rs"),
+        "deleted file row should be removed, got {files:?}"
+    );
+    let nodes = cg.get_all_nodes().await.unwrap();
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| node.file_path == "src/remove_me.rs"),
+        "deleted file nodes should be removed"
+    );
+}
+
+#[tokio::test]
+async fn str_replace_reindex_resolves_new_cross_file_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
+    fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
+
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    let edit = cg
+        .str_replace(
+            "src/caller.rs",
+            "pub fn caller() {}\n",
+            "pub fn caller() { target(); }\n",
+        )
+        .await
+        .unwrap();
+    assert!(edit.success, "edit should succeed: {edit:?}");
+
+    let nodes = cg.get_all_nodes().await.unwrap();
+    let caller = nodes
+        .iter()
+        .find(|node| node.name == "caller" && node.file_path == "src/caller.rs")
+        .unwrap();
+    let target = nodes
+        .iter()
+        .find(|node| node.name == "target" && node.file_path == "src/target.rs")
+        .unwrap();
+    let edges = cg.get_all_edges().await.unwrap();
+
+    assert!(
+        edges.iter().any(|edge| {
+            edge.kind == EdgeKind::Calls && edge.source == caller.id && edge.target == target.id
+        }),
+        "direct edit reindex should resolve the new caller -> target edge; edges={edges:?}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
