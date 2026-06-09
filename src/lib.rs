@@ -44,6 +44,7 @@ pub mod runtime_telemetry;
 pub mod sessions;
 pub mod sync;
 pub mod text;
+pub mod timeutil;
 pub mod tokensave;
 pub mod types;
 pub mod upgrade;

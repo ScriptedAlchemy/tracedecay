@@ -162,39 +162,12 @@ fn parse_line(line: &str, project_hash: &str, session_id: &str) -> Option<CostTu
     })
 }
 
-/// Parse an ISO 8601 timestamp to unix epoch seconds.
+/// Parse an ISO 8601 / RFC3339 timestamp (e.g. `2026-04-14T10:32:15.039Z`)
+/// to unix epoch seconds via the shared zero-dependency parser, which also
+/// validates calendar fields and applies explicit `±HH:MM` offsets.
 pub(crate) fn parse_timestamp(ts: &str) -> Option<u64> {
-    // Handle "2026-04-14T10:32:15.039Z" format
-    // Simple parsing without pulling in chrono: split on known positions
-    if ts.len() < 19 {
-        return None;
-    }
-    let year: i64 = ts.get(0..4)?.parse().ok()?;
-    let month: u64 = ts.get(5..7)?.parse().ok()?;
-    let day: u64 = ts.get(8..10)?.parse().ok()?;
-    let hour: u64 = ts.get(11..13)?.parse().ok()?;
-    let min: u64 = ts.get(14..16)?.parse().ok()?;
-    let sec: u64 = ts.get(17..19)?.parse().ok()?;
-
-    // Days from epoch using a simple formula (good enough for 2000-2100)
-    let mut days: i64 = 0;
-    for y in 1970..year {
-        days += if is_leap(y) { 366 } else { 365 };
-    }
-    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    for m in 1..month {
-        days += i64::from(month_days[m as usize] as u8);
-    }
-    if month > 2 && is_leap(year) {
-        days += 1;
-    }
-    days += (day as i64) - 1;
-
-    Some((days as u64) * 86400 + hour * 3600 + min * 60 + sec)
-}
-
-fn is_leap(y: i64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    let secs = crate::timeutil::parse_rfc3339_timestamp(ts)?;
+    u64::try_from(secs).ok()
 }
 
 /// Stats returned by the `ingest` function.
