@@ -570,8 +570,9 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
 
     assert!(init_py.contains("class TokenSaveContextEngine"));
     assert!(init_py.contains("ctx.register_context_engine"));
-    assert!(init_py.contains("tools.call_tokensave_tool(\"tokensave_lcm_preflight\""));
-    assert!(init_py.contains("tools.call_tokensave_tool(\"tokensave_lcm_compress\""));
+    assert!(init_py.contains("def call_tokensave_json"));
+    assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_preflight\""));
+    assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_compress\""));
 }
 
 #[test]

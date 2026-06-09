@@ -1,4 +1,5 @@
 pub mod dag;
+pub mod hermes;
 pub mod payload;
 pub mod query;
 pub mod raw;
@@ -6,6 +7,7 @@ pub mod schema;
 pub mod security;
 pub mod types;
 
+pub use hermes::{LcmCompressionRequest, LcmSummarizerMode};
 pub use raw::derived_text_for_index;
 pub use schema::LCM_SCHEMA_VERSION;
 pub use types::{

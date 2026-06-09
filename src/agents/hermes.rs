@@ -837,6 +837,26 @@ def _pre_llm_call(*args, **kwargs):
 def _tokensave_status(raw_args: str = ""):
     return tools.call_tokensave_tool("tokensave_status", {})
 
+def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
+    raw = tools.call_tokensave_tool(name, args, **kwargs)
+    try:
+        outer = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"error": "tokensave tool returned invalid JSON", "raw": raw}
+    content = outer.get("content")
+    if not isinstance(content, list) or not content:
+        return outer
+    first = content[0]
+    if not isinstance(first, dict):
+        return outer
+    text = first.get("text")
+    if not isinstance(text, str):
+        return outer
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"error": "tokensave tool returned invalid nested JSON", "text": text}
+
 def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
         if schema.get("name") == tokensave_name:
@@ -933,17 +953,19 @@ class TokenSaveContextEngine(ContextEngine):
             "messages": messages,
             "current_tokens": current_tokens,
         })
-        return json.loads(tools.call_tokensave_tool("tokensave_lcm_preflight", args, **kwargs))
+        return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         args = _storage_args(self.project_root, self.hermes_home)
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
             "current_tokens": current_tokens,
             "focus_topic": focus_topic,
+            "summarizer": summarizer,
         })
-        return json.loads(tools.call_tokensave_tool("tokensave_lcm_compress", args, **kwargs))
+        return call_tokensave_json("tokensave_lcm_compress", args, **kwargs)
 
 class TokensaveMemoryProvider(MemoryProvider):
     provider_id = "tokensave"
