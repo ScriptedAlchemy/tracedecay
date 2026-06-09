@@ -1363,17 +1363,245 @@ def _summary_source_messages(source_messages):
         if not isinstance(message, dict):
             normalized.append({"role": "user", "content": str(message)})
             continue
-        normalized.append({
+        entry = {
             "role": message.get("role") or "user",
             "content": _message_content(message),
-        })
+        }
+        if message.get("tool_calls"):
+            entry["tool_calls"] = message["tool_calls"]
+        if message.get("tool_call_id"):
+            entry["tool_call_id"] = message["tool_call_id"]
+        normalized.append(entry)
     return normalized
 
-def _summary_source_size(messages) -> int:
-    total = 0
-    for message in messages or []:
-        total += len(_message_content(message))
+_TOKEN_ENCODER = None
+_TOKEN_ENCODER_CHECKED = False
+
+def _token_encoder():
+    global _TOKEN_ENCODER, _TOKEN_ENCODER_CHECKED
+    if _TOKEN_ENCODER_CHECKED:
+        return _TOKEN_ENCODER
+    _TOKEN_ENCODER_CHECKED = True
+    try:
+        import tiktoken
+        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        _TOKEN_ENCODER = None
+    return _TOKEN_ENCODER
+
+def _count_tokens(text):
+    # Mirrors hermes-lcm tokens.count_tokens: tiktoken when available with a
+    # 4-chars-per-token estimate fallback.
+    if not text:
+        return 0
+    encoder = _token_encoder()
+    if encoder is not None:
+        try:
+            return len(encoder.encode(text))
+        except Exception:
+            pass
+    return len(text) // 4 + 1
+
+def _tool_call_arguments_text(arguments):
+    if isinstance(arguments, str):
+        return arguments
+    if arguments is None:
+        return ""
+    try:
+        return json.dumps(arguments, ensure_ascii=False)
+    except Exception:
+        return str(arguments)
+
+def _count_message_tokens(message):
+    total = 4
+    if not isinstance(message, dict):
+        return total + _count_tokens(str(message))
+    total += _count_tokens(_message_content(message))
+    for tool_call in message.get("tool_calls") or []:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or {}
+            total += _count_tokens(str(function.get("name") or ""))
+            total += _count_tokens(_tool_call_arguments_text(function.get("arguments")))
+        total += 3
     return total
+
+def _count_messages_tokens(messages):
+    return sum(_count_message_tokens(message) for message in messages or [])
+
+def _matched_tool_call_ids(messages):
+    matched = set()
+    for message in messages or []:
+        if isinstance(message, dict) and message.get("role") == "tool":
+            tool_id = str(message.get("tool_call_id") or "").strip()
+            if tool_id:
+                matched.add(tool_id)
+    return matched
+
+def _summary_tool_call_id(tool_call):
+    if isinstance(tool_call, dict):
+        return str(tool_call.get("id") or "").strip()
+    return ""
+
+def _truncate_serialized_content(content):
+    if len(content) > 3000:
+        return content[:2000] + "\n...[truncated]...\n" + content[-800:]
+    return content
+
+def _serialize_summary_messages(messages):
+    # Mirrors hermes-lcm engine._serialize_messages: labeled per-role text with
+    # matched tool-call enrichment and long-content truncation. Redaction and
+    # externalization stay in the Rust ingest pipeline.
+    parts = []
+    matched_tool_ids = _matched_tool_call_ids(messages)
+    for message in messages or []:
+        if not isinstance(message, dict):
+            parts.append(f"[USER]: {message}")
+            continue
+        role = str(message.get("role") or "unknown")
+        content = _message_content(message)
+        if role == "tool":
+            tool_id = str(message.get("tool_call_id") or "").strip()
+            parts.append(f"[TOOL RESULT {tool_id}]: {_truncate_serialized_content(content)}")
+            continue
+        if role == "assistant":
+            tool_calls = message.get("tool_calls") or []
+            matched_tool_calls = [
+                tool_call
+                for tool_call in tool_calls
+                if not _summary_tool_call_id(tool_call)
+                or _summary_tool_call_id(tool_call) in matched_tool_ids
+            ]
+            content = _truncate_serialized_content(content)
+            if matched_tool_calls:
+                tool_call_parts = []
+                for tool_call in matched_tool_calls:
+                    if isinstance(tool_call, dict):
+                        function = tool_call.get("function") or {}
+                        name = function.get("name") or "?"
+                        arguments = _tool_call_arguments_text(function.get("arguments"))
+                        if len(arguments) > 500:
+                            arguments = arguments[:400] + "..."
+                        tool_call_parts.append(f"  {name}({arguments})")
+                content += "\n[Tool calls:\n" + "\n".join(tool_call_parts) + "\n]"
+            parts.append(f"[ASSISTANT]: {content}")
+            continue
+        parts.append(f"[{role.upper()}]: {_truncate_serialized_content(content)}")
+    return "\n\n".join(parts)
+
+def _normalized_focus_topic(focus_topic, max_chars=160):
+    normalized = " ".join(str(focus_topic or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 1)].rstrip() + "…"
+
+def _build_l1_focus_brief(focus_topic):
+    topic = _normalized_focus_topic(focus_topic)
+    if not topic:
+        return ""
+    return (
+        "Focus brief:\n"
+        f"Primary focus: {topic}\n"
+        "Preserve concrete decisions, constraints, files, commands, identifiers, and current state for this focus.\n"
+        "Spend roughly 60-70% of the summary budget on the focus when relevant.\n"
+        "Do not discard unrelated blockers or active tasks just because they are off-focus.\n"
+    )
+
+def _build_l2_focus_brief(focus_topic):
+    topic = _normalized_focus_topic(focus_topic)
+    if not topic:
+        return ""
+    return (
+        "Focus brief:\n"
+        f"Primary focus: {topic}\n"
+        "Prefer bullets that preserve decisions, blockers, files, commands, identifiers, and current state for this focus.\n"
+        "Keep other active tasks only when they are current blockers or handoff state.\n"
+    )
+
+_L1_DEPTH_GUIDANCE = {
+    0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
+    1: "Distill into arc-level outcomes: what evolved, what was decided, current state. Drop per-turn detail.",
+    2: "Capture durable narrative: decisions in effect, completed milestones, timeline. Drop process detail.",
+}
+
+def _build_l1_prompt(text, token_budget, depth, focus_topic="", custom_instructions=""):
+    guidance = _L1_DEPTH_GUIDANCE.get(depth, _L1_DEPTH_GUIDANCE[2])
+    focus_guidance = _build_l1_focus_brief(focus_topic)
+    custom_block = ""
+    if custom_instructions:
+        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
+    return f"""Summarize this conversation segment for future turns.
+{guidance}
+Remove repetition and conversational filler.
+End with: "Expand for details about: <what was compressed>"
+{focus_guidance}{custom_block}
+
+Target ~{token_budget} tokens.
+
+CONTENT:
+{text}"""
+
+def _build_l2_prompt(text, token_budget, focus_topic="", custom_instructions=""):
+    focus_guidance = _build_l2_focus_brief(focus_topic)
+    custom_block = ""
+    if custom_instructions:
+        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
+    return f"""Compress this into bullet points. Maximum {token_budget} tokens.
+Keep only: decisions made, files changed, errors hit, current state.
+Drop all reasoning, alternatives considered, and process detail.
+{focus_guidance}{custom_block}
+
+CONTENT:
+{text}"""
+
+# Conservative allowlist mirroring hermes-lcm model_routing._PROVIDER_PREFIXES:
+# many registry provider IDs double as OpenRouter model namespaces, so only
+# explicit entries (plus non-canonical named custom providers) split into
+# provider/model routes.
+_LCM_PROVIDER_ROUTE_PREFIXES = frozenset({"cerebras"})
+
+def _provider_route_is_resolvable(provider):
+    provider = str(provider or "").strip().lower()
+    if not provider:
+        return False
+    if provider.startswith("custom:"):
+        provider = provider.split(":", 1)[1].strip()
+        if not provider:
+            return False
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        if provider in PROVIDER_REGISTRY:
+            return provider in _LCM_PROVIDER_ROUTE_PREFIXES
+    except Exception:
+        pass
+    try:
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+        if _get_named_custom_provider(provider):
+            return True
+    except Exception:
+        pass
+    return False
+
+def _parse_lcm_model_override(value):
+    model = str(value or "").strip()
+    if not model:
+        return None, ""
+    provider, separator, rest = model.partition("/")
+    provider = provider.strip().lower()
+    rest = rest.strip()
+    route_provider = provider
+    if provider.startswith("custom:"):
+        route_provider = provider.split(":", 1)[1].strip()
+    if separator and rest and route_provider and _provider_route_is_resolvable(route_provider):
+        return route_provider, rest
+    return None, model
+
+def _apply_lcm_model_route(call_kwargs, model):
+    # Mirrors hermes-lcm model_routing.apply_lcm_model_route.
+    provider, routed_model = _parse_lcm_model_override(model)
+    if provider:
+        call_kwargs["provider"] = provider
+    if routed_model:
+        call_kwargs["model"] = routed_model
 
 def _deterministic_truncation(messages, limit: int = 2048) -> str:
     lines = []
@@ -1876,11 +2104,15 @@ class TokenSaveContextEngine(ContextEngine):
         client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
         summary_request = kwargs.get("summary_request")
         allow_retry_signal = bool(kwargs.pop("allow_retry_signal", False))
+        accepts_result = kwargs.pop("accepts_result", None)
         route_kwargs = dict(kwargs)
         route_kwargs.pop("summary_request", None)
         routes = self._auxiliary_routes(summary_request, **route_kwargs)
         last_error = None
         last_classification = None
+        rejected_text = None
+        rejected_route = None
+        rejected_model = None
         if client is None or not callable(getattr(client, "call_llm", None)):
             last_error = RuntimeError("Hermes auxiliary_client.call_llm is unavailable")
         else:
@@ -1892,24 +2124,38 @@ class TokenSaveContextEngine(ContextEngine):
                     continue
                 call_kwargs = {
                     "task": "compression",
-                    "messages": [{"role": "system", "content": prompt}, *list(messages or [])],
-                    "temperature": route.get("temperature", 0.1),
+                    # Hermes escalation sends the full prompt (guidance plus
+                    # serialized CONTENT block) as a single user message.
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": route.get("temperature", 0.3),
                     "max_tokens": route.get("max_tokens", 2048),
                     "timeout": route.get("timeout", 60),
                 }
-                model = route.get("model")
-                if model is not None:
-                    call_kwargs["model"] = model
+                _apply_lcm_model_route(call_kwargs, route.get("model"))
                 try:
                     response = client.call_llm(**call_kwargs)
                     text = _strip_reasoning(_llm_response_text(response))
                     if not text:
                         raise RuntimeError("Hermes auxiliary summary was empty")
+                    if accepts_result is not None and not accepts_result(text):
+                        rejected_text = text
+                        rejected_route = route_key
+                        rejected_model = route.get("model")
+                        failures = self._route_failures.get(route_key, 0) + 1
+                        self._route_failures[route_key] = failures
+                        # Quality rejections mirror the Hermes summary circuit
+                        # breaker threshold of 2 failures, so the immediate L2
+                        # retry on the same route stays available.
+                        if failures >= 2:
+                            self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+                        continue
+                    self._route_failures.pop(route_key, None)
+                    self._cooldown_until.pop(route_key, None)
                     return {
                         "status": "ok",
                         "text": text,
                         "route": route_key,
-                        "model": model,
+                        "model": route.get("model"),
                     }
                 except Exception as exc:
                     last_error = exc
@@ -1917,6 +2163,15 @@ class TokenSaveContextEngine(ContextEngine):
                     failures = self._route_failures.get(route_key, 0) + 1
                     self._route_failures[route_key] = failures
                     self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+        if rejected_text is not None:
+            return {
+                "status": "rejected",
+                "text": rejected_text,
+                "route": rejected_route,
+                "model": rejected_model,
+                "error": "Hermes auxiliary summary was not smaller than source",
+                "error_classification": "non_compressing_summary",
+            }
         if last_error is not None:
             last_classification = last_classification or _auxiliary_error_classification(last_error)
             if allow_retry_signal and last_classification == "retry_worthy":
@@ -1941,6 +2196,65 @@ class TokenSaveContextEngine(ContextEngine):
             fallback["error"] = str(last_error)
             fallback["error_classification"] = last_classification
         return fallback
+
+    def _summarize_with_escalation(self, source_messages, focus_topic="", **kwargs):
+        # Port of hermes-lcm escalation.summarize_with_escalation: L1 detailed
+        # summary, L2 aggressive bullets at reduced budget, then deterministic
+        # L3 truncation. Each LLM rung accepts a result only when its token
+        # estimate is below the source token estimate.
+        serialized = _serialize_summary_messages(source_messages)
+        source_tokens = _count_messages_tokens(source_messages)
+        # Mirrors the leaf budget in hermes-lcm engine._summarize_leaf_chunk_with_rescue.
+        token_budget = min(12000, max(2000, int(source_tokens * 0.20)))
+        custom_instructions = str(_configured_value(self.config, "custom_instructions", default="") or "")
+        try:
+            l2_budget_ratio = float(_configured_value(self.config, "l2_budget_ratio", default=0.50))
+        except Exception:
+            l2_budget_ratio = 0.50
+        l3_truncate_tokens = _configured_int(self.config, "l3_truncate_tokens", default=512) or 512
+
+        def accepts_result(text):
+            return source_tokens <= 0 or _count_tokens(text) < source_tokens
+
+        l1_kwargs = dict(kwargs)
+        l1_kwargs["accepts_result"] = accepts_result
+        l1_kwargs["max_tokens"] = token_budget * 2
+        l1_prompt = _build_l1_prompt(
+            serialized,
+            token_budget,
+            0,
+            focus_topic=focus_topic,
+            custom_instructions=custom_instructions,
+        )
+        summary = self._call_auxiliary_summary(l1_prompt, source_messages, **l1_kwargs)
+        if summary.get("status") != "rejected":
+            return summary
+
+        l2_budget = max(1, int(token_budget * l2_budget_ratio))
+        l2_kwargs = dict(kwargs)
+        l2_kwargs["accepts_result"] = accepts_result
+        l2_kwargs["max_tokens"] = l2_budget * 2
+        l2_kwargs["allow_retry_signal"] = False
+        l2_prompt = _build_l2_prompt(
+            serialized,
+            l2_budget,
+            focus_topic=focus_topic,
+            custom_instructions=custom_instructions,
+        )
+        summary = self._call_auxiliary_summary(l2_prompt, source_messages, **l2_kwargs)
+        if summary.get("status") != "rejected":
+            if summary.get("status") == "fallback":
+                summary.setdefault("error", "Hermes auxiliary summary was not smaller than source")
+                summary.setdefault("error_classification", "non_compressing_summary")
+            return summary
+        return {
+            "status": "fallback",
+            "text": _deterministic_truncation(source_messages, limit=max(1, l3_truncate_tokens * 4)),
+            "route": "deterministic_fallback",
+            "model": None,
+            "error": "Hermes auxiliary summary was not smaller than source",
+            "error_classification": "non_compressing_summary",
+        }
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
@@ -1994,9 +2308,9 @@ class TokenSaveContextEngine(ContextEngine):
                 summary_request.get("source_messages") or messages
             )
             attempts += 1
-            summary = self._call_auxiliary_summary(
-                summary_request.get("prompt") or "Summarize the conversation so far.",
+            summary = self._summarize_with_escalation(
                 source_messages,
+                focus_topic=summary_request.get("focus_topic") or focus_topic or "",
                 summary_request=summary_request,
                 allow_retry_signal=True,
                 **kwargs,
@@ -2028,33 +2342,7 @@ class TokenSaveContextEngine(ContextEngine):
                     error=summary.get("error"),
                 )
 
-            source_size = _summary_source_size(source_messages)
-            if (
-                summary_status == "ok"
-                and source_size > 0
-                and len(summary.get("text", "")) >= source_size
-            ):
-                error_classification = "non_compressing_summary"
-                smaller_limit = _next_smaller_source_limit(
-                    source_messages,
-                    attempt_args.get("max_source_messages"),
-                )
-                if smaller_limit is not None and attempts < max_auxiliary_attempts:
-                    retry_status = "retried"
-                    attempt_args = dict(args)
-                    attempt_args["max_source_messages"] = smaller_limit
-                    continue
-                fallback_used = True
-                retry_status = "fallback_summary"
-                summary = {
-                    "status": "fallback",
-                    "text": _deterministic_truncation(source_messages),
-                    "route": "deterministic_fallback",
-                    "model": None,
-                    "error": "Hermes auxiliary summary was not smaller than source",
-                    "error_classification": error_classification,
-                }
-            elif summary_status == "fallback":
+            if summary_status == "fallback":
                 fallback_used = True
                 retry_status = retry_status or "fallback_summary"
                 error_classification = summary.get("error_classification") or error_classification

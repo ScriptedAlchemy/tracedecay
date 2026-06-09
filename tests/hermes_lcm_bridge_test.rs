@@ -1447,10 +1447,11 @@ assert summary["text"] == "Useful compact summary"
 assert summary["route"] == "default"
 assert summary["model"] is None
 assert agent.auxiliary_client.calls[0]["task"] == "compression"
-assert agent.auxiliary_client.calls[0]["messages"][0] == {
-    "role": "system",
-    "content": "Summarize",
-}
+# Hermes _call_llm_for_summary sends the full prompt as one user message.
+assert agent.auxiliary_client.calls[0]["messages"] == [
+    {"role": "user", "content": "Summarize"},
+]
+assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
 "#,
     )
     .unwrap();
@@ -1735,11 +1736,22 @@ assert result["status"] == "ok"
 assert result["reason"] == "compressed_backlog"
 assert len(calls) == 2
 assert agent.auxiliary_client.calls[0]["task"] == "compression"
-assert agent.auxiliary_client.calls[0]["messages"][0]["content"] == "Summarize backlog"
-assert agent.auxiliary_client.calls[0]["messages"][1:] == [
-    {"role": "user", "content": old_one},
-    {"role": "assistant", "content": old_two},
-]
+# Hermes escalation L1 contract: a single user message carrying the depth-0
+# prompt with focus brief, token budget, and serialized CONTENT block.
+assert len(agent.auxiliary_client.calls[0]["messages"]) == 1
+assert agent.auxiliary_client.calls[0]["messages"][0]["role"] == "user"
+prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
+assert prompt.startswith("Summarize this conversation segment for future turns.")
+assert "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values." in prompt
+assert 'End with: "Expand for details about: <what was compressed>"' in prompt
+assert "Focus brief:" in prompt
+assert "Primary focus: handoff" in prompt
+assert "Target ~2000 tokens." in prompt
+assert "CONTENT:" in prompt
+assert f"[USER]: {old_one}" in prompt
+assert f"[ASSISTANT]: {old_two}" in prompt
+assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
+assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
 "#,
     )
     .unwrap();
@@ -1870,8 +1882,18 @@ result = engine.compress(
 )
 
 assert result["status"] == "ok"
+assert result["fallback_used"] is True
 assert len(calls) == 2
-assert len(agent.auxiliary_client.calls) == 1
+# Hermes escalation: oversized L1 retries once with the aggressive L2
+# bullet prompt at half budget before deterministic (L3) fallback.
+assert len(agent.auxiliary_client.calls) == 2
+l1_prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
+l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
+assert l1_prompt.startswith("Summarize this conversation segment for future turns.")
+assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
+assert "Keep only: decisions made, files changed, errors hit, current state." in l2_prompt
+assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
+assert agent.auxiliary_client.calls[1]["max_tokens"] == 2000
 "#,
     )
     .unwrap();
@@ -1991,7 +2013,7 @@ class ContextLimitedAux:
 
     def call_llm(self, **kwargs):
         self.calls.append(kwargs)
-        if len(kwargs["messages"]) > 2:
+        if "old two" in kwargs["messages"][0]["content"]:
             raise RuntimeError("context length exceeded")
         return "Smaller chunk summary"
 
@@ -2007,7 +2029,9 @@ result = engine.compress(
 assert result["status"] == "ok"
 assert len(calls) == 3
 assert len(agent.auxiliary_client.calls) == 2
-assert [len(call["messages"]) - 1 for call in agent.auxiliary_client.calls] == [2, 1]
+assert "old two" in agent.auxiliary_client.calls[0]["messages"][0]["content"]
+assert "old two" not in agent.auxiliary_client.calls[1]["messages"][0]["content"]
+assert "old one" in agent.auxiliary_client.calls[1]["messages"][0]["content"]
 assert result["auxiliary_attempts"] == 2
 assert result["auxiliary_retry_status"] == "retried"
 assert result["auxiliary_error_classification"] == "retry_worthy"
@@ -2274,6 +2298,318 @@ assert failing_engine._cooldown_until["default"] > 0
         "generated context engine should route, cooldown, and fallback auxiliary summaries\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn auxiliary_model_route_splits_resolvable_providers() {
+    run_generated_plugin_script(
+        "check_auxiliary_model_routing.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_model_routing"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+# Fake Hermes host provider registries used by the model-route resolver.
+hermes_cli = types.ModuleType("hermes_cli")
+hermes_cli.__path__ = []
+auth = types.ModuleType("hermes_cli.auth")
+auth.PROVIDER_REGISTRY = {"cerebras": {}, "anthropic": {}, "openai-codex": {}}
+runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+
+def _get_named_custom_provider(name):
+    return {"name": name} if name == "mycustom" else None
+
+runtime_provider._get_named_custom_provider = _get_named_custom_provider
+sys.modules["hermes_cli"] = hermes_cli
+sys.modules["hermes_cli.auth"] = auth
+sys.modules["hermes_cli.runtime_provider"] = runtime_provider
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+def routed(value):
+    kwargs = {}
+    plugin._apply_lcm_model_route(kwargs, value)
+    return kwargs
+
+# Registry allowlist provider splits into provider/model.
+assert routed("cerebras/llama-3.3-70b") == {"provider": "cerebras", "model": "llama-3.3-70b"}
+# Registry providers off the allowlist stay model-only (OpenRouter-style slugs).
+assert routed("anthropic/claude-sonnet") == {"model": "anthropic/claude-sonnet"}
+# Named custom providers are resolvable, including the custom: prefix form.
+assert routed("mycustom/bar-model") == {"provider": "mycustom", "model": "bar-model"}
+assert routed("custom:mycustom/foo-model") == {"provider": "mycustom", "model": "foo-model"}
+# Canonical built-ins behind custom: stay model-only.
+assert routed("custom:openai-codex/gpt") == {"model": "custom:openai-codex/gpt"}
+# Plain model names and empty overrides pass through untouched.
+assert routed("plain-model") == {"model": "plain-model"}
+assert routed("") == {}
+assert routed(None) == {}
+
+# End to end: routed kwargs reach the Hermes auxiliary client.
+class Aux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        return "Routed summary"
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+summary = engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "raw"}],
+    routes=[{"model": "cerebras/llama-3.3-70b"}],
+)
+assert summary["status"] == "ok"
+assert summary["model"] == "cerebras/llama-3.3-70b"
+assert agent.auxiliary_client.calls[0]["provider"] == "cerebras"
+assert agent.auxiliary_client.calls[0]["model"] == "llama-3.3-70b"
+"#,
+        "generated plugin should split resolvable provider-prefixed LCM model overrides",
+    );
+}
+
+#[test]
+fn oversized_l1_summary_escalates_to_l2_bullets() {
+    run_generated_plugin_script(
+        "check_l2_escalation_rung.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_l2_escalation"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+source_content = "alpha beta " * 300
+oversize_l1 = "L1 too big " * 2000
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    args = json.loads(argv[argv.index("--args") + 1])
+    calls.append(args)
+    if len(calls) == 1:
+        return mcp_response({
+            "status": "needs_summary",
+            "reason": "summary_required",
+            "summary_nodes_created": 0,
+            "summary_nodes": [],
+            "replay_messages": [{"role": "user", "content": "fresh"}],
+            "frontier": {"current_frontier_store_id": None},
+            "summary_request": {
+                "provider": "cursor",
+                "session_id": "session-1",
+                "focus_topic": "handoff",
+                "prompt": "Summarize backlog",
+                "source_range": {"from_store_id": 1, "to_store_id": 1},
+                "source_messages": [
+                    {"store_id": 1, "role": "user", "content": source_content},
+                ],
+            },
+        })
+    summary = args["summarizer"]
+    assert summary["mode"] == "provided"
+    assert summary["summary_text"] == "Bullet summary of decisions"
+    assert summary["route"] == "default"
+    return mcp_response({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
+        "frontier": {"current_frontier_store_id": 1},
+        "summary_request": None,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+class EscalatingAux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["messages"][0]["content"]
+        if prompt.startswith("Summarize this conversation segment"):
+            return oversize_l1
+        return "Bullet summary of decisions"
+
+agent = type("Agent", (), {"auxiliary_client": EscalatingAux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+result = engine.compress(
+    [{"role": "user", "content": source_content}],
+    current_tokens=1200,
+    focus_topic="handoff",
+)
+
+assert result["status"] == "ok"
+assert result.get("fallback_used") is not True
+assert len(calls) == 2
+assert len(agent.auxiliary_client.calls) == 2
+l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
+assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
+assert "Drop all reasoning, alternatives considered, and process detail." in l2_prompt
+assert "Primary focus: handoff" in l2_prompt
+assert "CONTENT:" in l2_prompt
+"#,
+        "oversized L1 summaries should escalate to the L2 bullet rung before fallback",
+    );
+}
+
+#[test]
+fn summary_acceptance_uses_token_estimates_not_chars() {
+    run_generated_plugin_script(
+        "check_token_based_acceptance.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_token_acceptance"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# Per-message role overhead means short messages cost ~5 tokens each even
+# though they are only two characters long. A 51-char summary therefore has
+# fewer tokens than the source but more characters than the char sum, which
+# the old char-based acceptance falsely rejected.
+source_messages = [
+    {"store_id": idx + 1, "role": "user", "content": "hi"} for idx in range(10)
+]
+accepted_summary = "This summary is longer than the raw character sum."
+assert len(accepted_summary) > sum(len(m["content"]) for m in source_messages)
+assert plugin._count_messages_tokens(source_messages) > plugin._count_tokens(accepted_summary)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    args = json.loads(argv[argv.index("--args") + 1])
+    calls.append(args)
+    if len(calls) == 1:
+        return mcp_response({
+            "status": "needs_summary",
+            "reason": "summary_required",
+            "summary_nodes_created": 0,
+            "summary_nodes": [],
+            "replay_messages": [{"role": "user", "content": "fresh"}],
+            "frontier": {"current_frontier_store_id": None},
+            "summary_request": {
+                "provider": "cursor",
+                "session_id": "session-1",
+                "focus_topic": None,
+                "prompt": "Summarize backlog",
+                "source_range": {"from_store_id": 1, "to_store_id": 10},
+                "source_messages": source_messages,
+            },
+        })
+    summary = args["summarizer"]
+    assert summary["mode"] == "provided"
+    assert summary["summary_text"] == accepted_summary
+    assert summary["route"] == "default"
+    return mcp_response({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
+        "summary_nodes": [],
+        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
+        "frontier": {"current_frontier_store_id": 10},
+        "summary_request": None,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+class Aux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        return accepted_summary
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+result = engine.compress(
+    [{"role": "user", "content": "active"}],
+    current_tokens=1200,
+)
+
+assert result["status"] == "ok"
+assert result.get("fallback_used") is not True
+assert len(calls) == 2
+assert len(agent.auxiliary_client.calls) == 1
+"#,
+        "summary acceptance should compare token estimates, not character lengths",
     );
 }
 
