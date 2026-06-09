@@ -166,7 +166,8 @@ impl GlobalDb {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;",
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
         )
         .await
         .ok()?;
@@ -537,13 +538,26 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
-        let store = crate::sessions::lcm::store::LcmStore::new(&self.conn);
-        if !store.ingest_raw_message(message).await {
+        let text = crate::sessions::lcm::derived_text_for_index(&message.text);
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
             return false;
         }
 
-        let text = crate::sessions::lcm::derived_text_for_index(&message.text);
-        self.upsert_session_message_projection(message, &text).await
+        let raw_ok = crate::sessions::lcm::raw::upsert_raw_message(&self.conn, message).await;
+        let projection_ok = raw_ok && self.upsert_session_message_projection(message, &text).await;
+
+        if projection_ok {
+            match self.conn.execute("COMMIT", ()).await {
+                Ok(_) => true,
+                Err(_) => {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    false
+                }
+            }
+        } else {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            false
+        }
     }
 
     async fn upsert_session_message_projection(

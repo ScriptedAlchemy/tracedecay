@@ -150,7 +150,8 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
         let metadata_json: Option<String> = row.get(7).ok()?;
         let legacy_truncated = content.contains(LEGACY_TRUNCATION_MARKER);
         let content_hash = raw::sha256_hex(&content);
-        let derived_text = raw::derived_text_for_index(&content);
+        let snippet_text = raw::derived_text_for_snippet(&content);
+        let index_text = raw::derived_text_for_index(&content);
 
         conn.execute(
             "INSERT OR IGNORE INTO lcm_raw_messages (
@@ -169,8 +170,8 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
                 content.as_str(),
                 content_hash.as_str(),
                 LcmStorageKind::Inline.as_str(),
-                derived_text.as_str(),
-                derived_text.as_str(),
+                snippet_text.as_str(),
+                index_text.as_str(),
                 if legacy_truncated { 1_i64 } else { 0_i64 },
                 opt_text(metadata_json.as_deref()),
             ],

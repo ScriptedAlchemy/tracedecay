@@ -1,10 +1,56 @@
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::{SessionMessageRecord, SessionRecord, SessionSearchScope};
 
+fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
+    tmp.path().join(".tokensave").join("global.db")
+}
+
 async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = tmp.path().join(".tokensave").join("global.db");
+    let db_path = isolated_db_path(tmp);
     GlobalDb::open_at(&db_path).await.expect("global db open")
+}
+
+async fn raw_message_count(db_path: &std::path::Path, provider: &str, message_id: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2",
+            libsql::params![provider, message_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn raw_snippet_and_index(
+    db_path: &std::path::Path,
+    provider: &str,
+    message_id: &str,
+) -> (String, String) {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT snippet_text, index_text
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2",
+            libsql::params![provider, message_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    (row.get(0).unwrap(), row.get(1).unwrap())
+}
+
+fn sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 fn sample_session(provider: &str, session_id: &str, project_key: &str) -> SessionRecord {
@@ -88,6 +134,7 @@ async fn upsert_session_round_trips_and_updates() {
 #[tokio::test]
 async fn upsert_session_message_round_trips_and_updates() {
     let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
     let db = open_isolated_db(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
     db.upsert_session(&session).await;
@@ -98,20 +145,104 @@ async fn upsert_session_message_round_trips_and_updates() {
         "session-1",
         "Initial answer about parsing transcripts.",
     );
-    db.upsert_session_message(&message).await;
-    message.text = "Updated answer about parsing transcripts.".to_string();
+    assert!(db.upsert_session_message(&message).await);
+    let updated = format!(
+        "Updated answer about parsing transcripts.\n{}::updated-tail",
+        "x".repeat(tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 2)
+    );
+    message.text = updated.clone();
     message.tool_names = Some("tokensave_context".to_string());
     message.source_offset = Some(99);
-    db.upsert_session_message(&message).await;
+    assert!(db.upsert_session_message(&message).await);
 
     let fetched = db
         .get_session_message("cursor", "message-1")
         .await
         .expect("message should exist");
     assert_eq!(fetched.session_id, "session-1");
-    assert_eq!(fetched.text, "Updated answer about parsing transcripts.");
+    assert!(fetched
+        .text
+        .starts_with("Updated answer about parsing transcripts."));
+    assert!(fetched.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(fetched
+        .text
+        .contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
     assert_eq!(fetched.tool_names.as_deref(), Some("tokensave_context"));
     assert_eq!(fetched.source_offset, Some(99));
+
+    assert_eq!(raw_message_count(&db_path, "cursor", "message-1").await, 1);
+    let raw = db
+        .lcm_load_raw_message("cursor", "message-1")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.content, updated);
+    assert_eq!(raw.content_hash, sha256_hex(&updated));
+
+    let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "message-1").await;
+    assert!(snippet_text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_SNIPPET_CHARS);
+    assert!(snippet_text.contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(index_text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(index_text.contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+}
+
+#[tokio::test]
+async fn upsert_session_message_rejects_missing_session_without_orphan_raw() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_isolated_db(&tmp).await;
+    let message = sample_message("cursor", "orphan-message", "missing-session", "orphan text");
+
+    assert!(!db.upsert_session_message(&message).await);
+    assert!(db
+        .get_session_message("cursor", "orphan-message")
+        .await
+        .is_none());
+    assert!(db
+        .lcm_load_raw_message("cursor", "orphan-message")
+        .await
+        .is_none());
+    assert_eq!(
+        raw_message_count(&db_path, "cursor", "orphan-message").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn upsert_session_message_rolls_back_raw_when_projection_fails() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "session-1", "project-a");
+    assert!(db.upsert_session(&session).await);
+
+    let trigger_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let trigger_conn = trigger_db.connect().unwrap();
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_session_message_projection
+             BEFORE INSERT ON session_messages
+             BEGIN
+                SELECT RAISE(ABORT, 'projection failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let message = sample_message(
+        "cursor",
+        "message-rollback",
+        "session-1",
+        "raw before failure",
+    );
+    assert!(!db.upsert_session_message(&message).await);
+    assert_eq!(
+        raw_message_count(&db_path, "cursor", "message-rollback").await,
+        0
+    );
+    assert!(db
+        .lcm_load_raw_message("cursor", "message-rollback")
+        .await
+        .is_none());
 }
 
 #[tokio::test]

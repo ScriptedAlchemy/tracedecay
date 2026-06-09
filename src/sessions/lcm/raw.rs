@@ -3,22 +3,33 @@ use sha2::{Digest, Sha256};
 
 use crate::sessions::SessionMessageRecord;
 
-use super::{LcmStorageKind, DERIVED_TRUNCATION_MARKER, MAX_DERIVED_TEXT_CHARS};
+use super::{
+    LcmStorageKind, DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+};
 
 pub fn derived_text_for_index(raw: &str) -> String {
-    if raw.chars().count() <= MAX_DERIVED_TEXT_CHARS {
+    derived_text_with_cap(raw, MAX_DERIVED_TEXT_CHARS)
+}
+
+pub(crate) fn derived_text_for_snippet(raw: &str) -> String {
+    derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
+}
+
+fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
+    if raw.chars().count() <= max_chars {
         return raw.to_string();
     }
 
     let marker_chars = DERIVED_TRUNCATION_MARKER.chars().count();
-    let budget = MAX_DERIVED_TEXT_CHARS.saturating_sub(marker_chars);
+    let budget = max_chars.saturating_sub(marker_chars);
     let mut derived = raw.chars().take(budget).collect::<String>();
     derived.push_str(DERIVED_TRUNCATION_MARKER);
     derived
 }
 
 pub(crate) async fn upsert_raw_message(conn: &Connection, message: &SessionMessageRecord) -> bool {
-    let derived = derived_text_for_index(&message.text);
+    let snippet = derived_text_for_snippet(&message.text);
+    let index = derived_text_for_index(&message.text);
     let content_hash = sha256_hex(&message.text);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
@@ -26,7 +37,7 @@ pub(crate) async fn upsert_raw_message(conn: &Connection, message: &SessionMessa
             content, content_hash, storage_kind, payload_ref, snippet_text,
             index_text, legacy_source, legacy_truncated, metadata_json
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10, 0, 0, ?11)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, 0, 0, ?12)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -51,7 +62,8 @@ pub(crate) async fn upsert_raw_message(conn: &Connection, message: &SessionMessa
             message.text.as_str(),
             content_hash.as_str(),
             LcmStorageKind::Inline.as_str(),
-            derived.as_str(),
+            snippet.as_str(),
+            index.as_str(),
             opt_text(message.metadata_json.as_deref()),
         ],
     )

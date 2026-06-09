@@ -1,4 +1,5 @@
 pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
+pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
 pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tokensave]";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
