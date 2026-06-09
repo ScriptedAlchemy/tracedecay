@@ -791,6 +791,7 @@ def make_handler(name: str):
 fn plugin_init() -> String {
     r#""""tokensave Hermes plugin registration."""
 import json
+import hashlib
 import logging
 import os
 import re
@@ -1601,6 +1602,28 @@ def _lcm_expansion_timeout_ms(config):
     except Exception:
         return 120000
 
+def _lcm_extraction_enabled(config):
+    value = _lcm_bool_setting(
+        config,
+        "LCM_EXTRACTION_ENABLED",
+        "extraction_enabled",
+        default=False,
+    )
+    return bool(value)
+
+def _lcm_extraction_model(config):
+    value = _lcm_str_setting(config, "LCM_EXTRACTION_MODEL", "extraction_model", default="")
+    return str(value or "").strip()
+
+def _lcm_extraction_output_path(config):
+    value = _lcm_str_setting(
+        config,
+        "LCM_EXTRACTION_OUTPUT_PATH",
+        "extraction_output_path",
+        default="",
+    )
+    return str(value or "").strip()
+
 def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
     for key in keys:
         if key in kwargs and kwargs[key] is not None:
@@ -1621,6 +1644,21 @@ RETRY_WORTHY_AUXILIARY_ERRORS = (
     "timeout",
 )
 
+EXTRACTION_PROMPT = """Extract decisions, commitments, outcomes, and rules from this conversation segment.
+
+Format as a flat list of bullet points. Each bullet should be self-contained and understandable
+without the surrounding conversation. Include:
+- Decisions made (what was chosen, and why if stated)
+- Commitments (who will do what)
+- Outcomes (what happened as a result of an action)
+- Rules or constraints discovered
+
+Skip: greetings, meta-discussion, reasoning that led nowhere, repeated information.
+If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT
+
+CONTENT:
+{text}"""
+
 def _strip_reasoning(text: str) -> str:
     output = text or ""
     for tag in REASONING_TAGS:
@@ -1632,6 +1670,13 @@ def _strip_reasoning(text: str) -> str:
             flags=re.IGNORECASE | re.DOTALL,
         )
     return output.strip()
+
+def _messages_hash(messages):
+    try:
+        payload = json.dumps(messages or [], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        payload = repr(messages)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def _llm_response_text(response) -> str:
     if isinstance(response, str):
@@ -1961,6 +2006,30 @@ def _next_smaller_source_limit(source_messages, current_limit=None):
         next_limit = source_count - 1
     return max(1, next_limit)
 
+def _normalize_extraction_items(text):
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    items = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("- ", "* ")):
+            stripped = stripped[2:].strip()
+        items.append(stripped)
+    if not items:
+        items = [cleaned]
+    return items
+
+def _extraction_route_payload(route, extraction_result):
+    if extraction_result is None:
+        return route
+    payload = {"pre_compaction_extraction": extraction_result}
+    if route:
+        payload["route"] = route
+    return json.dumps(payload, ensure_ascii=False)
+
 def _with_auxiliary_metadata(
     result,
     *,
@@ -2215,6 +2284,7 @@ class TokenSaveContextEngine(ContextEngine):
         self._session_start_context_length = None
         self._route_failures = {}
         self._cooldown_until = {}
+        self._last_preflight_signature = None
 
     @property
     def name(self) -> str:
@@ -2222,6 +2292,8 @@ class TokenSaveContextEngine(ContextEngine):
 
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         if session_id is not None:
+            if session_id != self.active_session_id:
+                self._last_preflight_signature = None
             self.active_session_id = session_id
         if kwargs.get("config") is not None:
             self.config = kwargs.get("config")
@@ -2365,6 +2437,9 @@ class TokenSaveContextEngine(ContextEngine):
     def _current_turn_preflight(self, messages, **kwargs):
         if not messages or not self.active_session_id:
             return
+        signature = f"{self.active_session_id}:{_messages_hash(messages)}"
+        if signature == self._last_preflight_signature:
+            return
         args = _storage_args(self.project_root, self.hermes_home)
         args.update(
             _lcm_config_args(
@@ -2398,6 +2473,7 @@ class TokenSaveContextEngine(ContextEngine):
             tools.call_tokensave_tool("tokensave_lcm_preflight", args, **_copy_without_none({
                 "project_root": kwargs.get("project_root"),
             }))
+            self._last_preflight_signature = signature
         except Exception as exc:
             logger.warning("LCM current-turn preflight failed: %s", exc)
 
@@ -2691,6 +2767,73 @@ class TokenSaveContextEngine(ContextEngine):
             fallback["auxiliary_error_classification"] = summary.get("error_classification")
         return fallback
 
+    def _run_pre_compaction_extraction(self, summary_request, source_messages, **kwargs):
+        if not _lcm_extraction_enabled(self.config):
+            return None
+        if not source_messages:
+            return {"status": "no_source"}
+        extraction_request = {}
+        if isinstance(summary_request, dict):
+            extraction_request = summary_request.get("extraction_request") or {}
+        serialized_messages = extraction_request.get("serialized_messages")
+        if not serialized_messages:
+            serialized_messages = _serialize_summary_messages(source_messages)
+        prompt = extraction_request.get("prompt")
+        if not prompt:
+            prompt = EXTRACTION_PROMPT.format(text=serialized_messages)
+        extraction_model = str(
+            extraction_request.get("model")
+            or _lcm_extraction_model(self.config)
+            or _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="")
+            or ""
+        ).strip()
+        timeout_seconds = extraction_request.get("timeout_seconds")
+        if timeout_seconds is None:
+            timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
+        output_path = extraction_request.get("output_path")
+        if output_path is None:
+            output_path = _lcm_extraction_output_path(self.config)
+        client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
+        if client is None or not callable(getattr(client, "call_llm", None)):
+            return {
+                "status": "failed_non_blocking",
+                "error": "Hermes auxiliary_client.call_llm is unavailable",
+                "model": extraction_model or None,
+                "output_path": output_path or None,
+            }
+        call_kwargs = {
+            "task": "extraction",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+            "max_tokens": 2000,
+        }
+        _apply_lcm_model_route(call_kwargs, extraction_model)
+        if timeout_seconds is not None:
+            call_kwargs["timeout"] = timeout_seconds
+        try:
+            response = client.call_llm(**call_kwargs)
+        except Exception as exc:
+            return {
+                "status": "failed_non_blocking",
+                "error": str(exc),
+                "model": extraction_model or None,
+                "output_path": output_path or None,
+            }
+        cleaned = _strip_reasoning(_llm_response_text(response)).strip()
+        if not cleaned or cleaned == "NOTHING_TO_EXTRACT":
+            return {
+                "status": "nothing_to_extract",
+                "model": extraction_model or None,
+                "output_path": output_path or None,
+            }
+        return {
+            "status": "ok",
+            "items": _normalize_extraction_items(cleaned),
+            "text": cleaned,
+            "model": extraction_model or None,
+            "output_path": output_path or None,
+        }
+
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
@@ -2749,6 +2892,11 @@ class TokenSaveContextEngine(ContextEngine):
                 summary_request.get("source_messages") or messages
             )
             attempts += 1
+            extraction_result = self._run_pre_compaction_extraction(
+                summary_request,
+                source_messages,
+                **kwargs,
+            )
             summary = self._summarize_with_escalation(
                 source_messages,
                 focus_topic=summary_request.get("focus_topic") or focus_topic or "",
@@ -2789,10 +2937,11 @@ class TokenSaveContextEngine(ContextEngine):
                 error_classification = summary.get("error_classification") or error_classification
 
             provided_args = dict(attempt_args)
+            provided_route = _extraction_route_payload(summary.get("route"), extraction_result)
             provided_args["summarizer"] = {
                 "mode": "provided",
                 "summary_text": summary["text"],
-                "route": summary.get("route"),
+                "route": provided_route,
             }
             result = call_tokensave_json("tokensave_lcm_compress", provided_args, **kwargs)
             return _with_auxiliary_metadata(

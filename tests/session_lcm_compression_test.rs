@@ -2235,6 +2235,22 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             .collect::<Vec<_>>(),
         vec![(store_ids[0], "old-1"), (store_ids[1], "old-2")]
     );
+    let extraction_request = summary_request
+        .extraction_request
+        .as_ref()
+        .expect("auxiliary summary request should include extraction contract");
+    assert_eq!(extraction_request.session_id, "session-1");
+    assert_eq!(
+        extraction_request.source_range,
+        summary_request.source_range
+    );
+    assert!(extraction_request.prompt.contains("NOTHING_TO_EXTRACT"));
+    assert!(extraction_request
+        .serialized_messages
+        .contains("[ASSISTANT]: old-1"));
+    assert!(extraction_request
+        .serialized_messages
+        .contains("[ASSISTANT]: old-2"));
     assert_eq!(response.replay_messages[0]["content"], "fresh-1");
     assert_eq!(response.replay_messages[1]["content"], "fresh-2");
 }
@@ -2289,6 +2305,207 @@ async fn provided_summarizer_advances_frontier_consistently() {
     assert_eq!(
         state.current_frontier_store_id,
         second.frontier.current_frontier_store_id
+    );
+}
+
+#[tokio::test]
+async fn provided_route_envelope_persists_extraction_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(&db, "cursor", "session-1", &["old-1", "old-2", "fresh-1"]).await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Provided {
+                summary_text: "summary with extraction".into(),
+                route: Some(
+                    json!({
+                        "route": "backup",
+                        "pre_compaction_extraction": {
+                            "status": "ok",
+                            "items": [
+                                "Decision: keep nightly backups",
+                                "Commitment: rotate keys weekly"
+                            ],
+                            "model": "openai/gpt-5.4-mini",
+                            "output_path": "/tmp/extractions"
+                        }
+                    })
+                    .to_string(),
+                ),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 1);
+    let metadata: Value = serde_json::from_str(
+        response.summary_nodes[0]
+            .metadata_json
+            .as_deref()
+            .expect("summary metadata"),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["summary_route"],
+        Value::String("backup".to_string())
+    );
+    assert_eq!(
+        metadata["pre_compaction_extraction"]["status"],
+        Value::String("ok".to_string())
+    );
+    assert_eq!(
+        metadata["pre_compaction_extraction"]["items"],
+        json!([
+            "Decision: keep nightly backups",
+            "Commitment: rotate keys weekly"
+        ])
+    );
+    assert_eq!(
+        metadata["pre_compaction_extraction"]["model"],
+        Value::String("openai/gpt-5.4-mini".to_string())
+    );
+}
+
+#[tokio::test]
+async fn zero_leaf_chunk_tokens_disables_threshold_guard() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-zero-leaf",
+        &["old one", "old two", "fresh one"],
+    )
+    .await;
+
+    let blocked = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-zero-leaf".into(),
+            messages: Vec::new(),
+            current_tokens: Some(1_000),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: Some(100_000),
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: Some(1),
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "should not be used".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.reason, "backlog_below_leaf_chunk_threshold");
+    assert_eq!(blocked.summary_nodes_created, 0);
+
+    let allowed = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-zero-leaf".into(),
+            messages: Vec::new(),
+            current_tokens: Some(1_000),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: Some(0),
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: Some(1),
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "zero leaf summary".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(allowed.reason, "compressed_backlog");
+    assert_eq!(allowed.summary_nodes_created, 1);
+}
+
+#[tokio::test]
+async fn zero_fresh_tail_count_keeps_no_raw_tail() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-zero-tail",
+        &["first", "second", "third"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "session-zero-tail".into(),
+            messages: Vec::new(),
+            current_tokens: Some(1_000),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            threshold_tokens: None,
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: None,
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: Some(0),
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            summarizer: LcmSummarizerMode::Fake {
+                summary_text: "zero tail summary".into(),
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.reason, "compressed_backlog");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(
+        response.summary_nodes[0]
+            .source_refs
+            .iter()
+            .filter_map(|source| match source {
+                LcmSourceRef::RawMessage { store_id } => Some(*store_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        store_ids
+    );
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["zero tail summary"]
     );
 }
 
@@ -2361,11 +2578,12 @@ async fn dynamic_chunking_compacts_bounded_oldest_leaf_chunk_and_records_backlog
     assert_eq!(expanded.sources.len(), 2);
     assert_eq!(expanded.sources[0].content, "old-1 token");
     assert_eq!(expanded.sources[1].content, "old-2 token");
-    assert!(response.summary_nodes[0]
-        .metadata_json
-        .as_deref()
-        .unwrap()
-        .contains(r#""pre_compaction_extraction":"noop_contract""#));
+    let metadata: Value =
+        serde_json::from_str(response.summary_nodes[0].metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["pre_compaction_extraction"]["status"],
+        Value::String("not_requested".to_string())
+    );
 }
 
 #[tokio::test]

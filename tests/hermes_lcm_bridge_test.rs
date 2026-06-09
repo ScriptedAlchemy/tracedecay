@@ -498,6 +498,295 @@ assert calls[1][1]["hermes_home"] == "/tmp/hermes-from-env"
 }
 
 #[test]
+fn context_engine_debounces_current_turn_preflight_when_messages_unchanged() {
+    run_generated_plugin_script(
+        "check_preflight_debounce.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_preflight_debounce"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    return json.dumps({"status": "ok", "tool": name})
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+same_messages = [{"role": "user", "content": "unchanged context"}]
+changed_messages = [{"role": "user", "content": "changed context"}]
+
+for _ in range(3):
+    engine.handle_tool_call("lcm_status", {}, messages=same_messages)
+engine.handle_tool_call("lcm_status", {}, messages=changed_messages)
+
+preflight_calls = [call for call in calls if call[0] == "tokensave_lcm_preflight"]
+status_calls = [call for call in calls if call[0] == "tokensave_lcm_status"]
+
+assert len(status_calls) == 4
+assert len(preflight_calls) == 2
+assert preflight_calls[0][1]["messages"] == same_messages
+assert preflight_calls[1][1]["messages"] == changed_messages
+"#,
+        "generated context engine should debounce unchanged preflight message arrays",
+    );
+}
+
+#[test]
+fn context_engine_wraps_extraction_result_into_provided_summarizer_route() {
+    run_generated_plugin_script(
+        "check_auxiliary_extraction_route.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_extraction_route"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+os.environ["LCM_EXTRACTION_ENABLED"] = "true"
+os.environ["LCM_EXTRACTION_MODEL"] = "openai/gpt-5.4-mini"
+os.environ["LCM_EXTRACTION_OUTPUT_PATH"] = "/tmp/extractions"
+os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
+
+compress_calls = []
+
+def fake_call_tokensave_json(name, args, **kwargs):
+    if name != "tokensave_lcm_compress":
+        raise AssertionError(name)
+    compress_calls.append((name, dict(args)))
+    summarizer_mode = (args.get("summarizer") or {}).get("mode")
+    if summarizer_mode == "hermes_auxiliary":
+        return {
+            "status": "needs_summary",
+            "summary_request": {
+                "focus_topic": "billing",
+                "source_range": {"from_store_id": 11, "to_store_id": 11},
+                "source_messages": [
+                    {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
+                ],
+                "extraction_request": {
+                    "session_id": "session-1",
+                    "source_range": {"from_store_id": 11, "to_store_id": 11},
+                    "source_messages": [
+                        {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
+                    ],
+                    "serialized_messages": "[USER]: We decided to rotate keys weekly.",
+                    "prompt": "extract decisions"
+                },
+            },
+            "replay_messages": [{"role": "user", "content": "fresh"}],
+        }
+    if summarizer_mode == "provided":
+        return {
+            "status": "ok",
+            "reason": "compressed_backlog",
+            "summary_nodes_created": 1,
+            "summary_nodes": [],
+            "replay_messages": [{"role": "system", "content": "summary"}],
+            "frontier": {
+                "provider": "cursor",
+                "conversation_id": "session-1",
+                "current_session_id": "session-1",
+                "current_frontier_store_id": 11,
+                "last_finalized_session_id": None,
+                "last_finalized_frontier_store_id": None,
+                "maintenance_debt": [],
+            },
+        }
+    raise AssertionError(f"unexpected summarizer mode: {summarizer_mode}")
+
+plugin.call_tokensave_json = fake_call_tokensave_json
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+class _AuxClient:
+    def __init__(self):
+        self.calls = []
+    def call_llm(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if kwargs.get("task") == "extraction":
+            return _FakeResponse("<think>hidden reasoning</think>- Decision: rotate keys weekly")
+        if kwargs.get("task") == "compression":
+            return _FakeResponse("Compact summary text")
+        raise AssertionError(kwargs.get("task"))
+
+agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
+
+engine = plugin.TokenSaveContextEngine()
+engine.agent = agent
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+result = engine.compress([{"role": "user", "content": "current"}], current_tokens=700)
+
+assert result["status"] == "ok"
+assert len(compress_calls) == 2
+provided_args = compress_calls[1][1]
+assert provided_args["summarizer"]["mode"] == "provided"
+route_payload = json.loads(provided_args["summarizer"]["route"])
+assert route_payload["pre_compaction_extraction"]["status"] == "ok"
+assert route_payload["pre_compaction_extraction"]["items"] == ["Decision: rotate keys weekly"]
+assert route_payload["pre_compaction_extraction"]["model"] == "openai/gpt-5.4-mini"
+assert route_payload["pre_compaction_extraction"]["output_path"] == "/tmp/extractions"
+assert route_payload["route"] == "default"
+
+tasks = [call["task"] for call in agent.auxiliary_client.calls]
+assert tasks == ["extraction", "compression"]
+"#,
+        "generated context engine should attach extraction results to provided route envelope",
+    );
+}
+
+#[test]
+fn context_engine_compress_continues_when_extraction_call_fails() {
+    run_generated_plugin_script(
+        "check_auxiliary_extraction_failure_non_blocking.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_extraction_fail_open"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+os.environ["LCM_EXTRACTION_ENABLED"] = "true"
+
+compress_calls = []
+
+def fake_call_tokensave_json(name, args, **kwargs):
+    compress_calls.append(dict(args))
+    mode = (args.get("summarizer") or {}).get("mode")
+    if mode == "hermes_auxiliary":
+        return {
+            "status": "needs_summary",
+            "summary_request": {
+                "source_messages": [{"store_id": 1, "role": "user", "content": "hello"}],
+                "source_range": {"from_store_id": 1, "to_store_id": 1},
+            },
+            "replay_messages": [],
+        }
+    return {
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
+        "summary_nodes": [],
+        "replay_messages": [],
+        "frontier": {
+            "provider": "cursor",
+            "conversation_id": "session-1",
+            "current_session_id": "session-1",
+            "current_frontier_store_id": 1,
+            "last_finalized_session_id": None,
+            "last_finalized_frontier_store_id": None,
+            "maintenance_debt": [],
+        },
+    }
+
+plugin.call_tokensave_json = fake_call_tokensave_json
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+class _AuxClient:
+    def call_llm(self, **kwargs):
+        if kwargs.get("task") == "extraction":
+            raise RuntimeError("extraction backend unavailable")
+        return _FakeResponse("summary text")
+
+agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
+
+engine = plugin.TokenSaveContextEngine()
+engine.agent = agent
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+result = engine.compress([{"role": "user", "content": "current"}], current_tokens=700)
+assert result["status"] == "ok"
+provided = compress_calls[1]
+payload = json.loads(provided["summarizer"]["route"])
+assert payload["pre_compaction_extraction"]["status"] == "failed_non_blocking"
+assert "extraction backend unavailable" in payload["pre_compaction_extraction"]["error"]
+"#,
+        "generated context engine should never block compression when extraction fails",
+    );
+}
+
+#[test]
 fn generated_context_engine_defaults_to_hermes_home_even_when_missing() {
     run_generated_plugin_script(
         "check_context_engine_default_home.py",
@@ -2931,6 +3220,68 @@ with tempfile.TemporaryDirectory() as tmp:
     assert args["threshold_tokens"] == 55000
 "#,
         "generated plugin should fall back to the Hermes YAML compression threshold",
+    );
+}
+
+#[test]
+fn generated_plugin_preserves_zero_value_leaf_and_tail_knobs() {
+    run_generated_plugin_script(
+        "check_zero_value_knobs.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_zero_knobs"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(json.loads(argv[argv.index("--args") + 1]))
+    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+os.environ["LCM_FRESH_TAIL_COUNT"] = "0"
+os.environ["LCM_LEAF_CHUNK_TOKENS"] = "0"
+
+engine = plugin.TokenSaveContextEngine(config={"fresh_tail_count": 9, "leaf_chunk_tokens": 9000})
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
+
+args = calls.pop()
+assert args["fresh_tail_count"] == 0
+assert args["leaf_chunk_tokens"] == 0
+"#,
+        "generated plugin should preserve zero-valued LCM env knobs",
     );
 }
 

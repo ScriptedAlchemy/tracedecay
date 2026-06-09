@@ -675,6 +675,30 @@ pub struct LcmSummarySourceMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExtractionRequest {
+    pub session_id: String,
+    pub source_range: LcmSummarySourceRange,
+    pub source_messages: Vec<LcmSummarySourceMessage>,
+    pub serialized_messages: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExtractionResult {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmSummaryRequest {
     pub provider: String,
     pub session_id: String,
@@ -682,6 +706,8 @@ pub struct LcmSummaryRequest {
     pub prompt: String,
     pub source_range: LcmSummarySourceRange,
     pub source_messages: Vec<LcmSummarySourceMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_request: Option<LcmExtractionRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

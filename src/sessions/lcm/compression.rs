@@ -5,6 +5,8 @@ use serde_json::{json, Map, Value};
 
 use crate::sessions::SessionMessageRecord;
 
+use super::extraction;
+use super::types::LcmExtractionResult;
 use super::{
     dag, payload, raw, security, util, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -651,12 +653,15 @@ async fn compress_in_transaction(
         ));
     }
 
-    let (summary_text, route) = match request.summarizer {
-        LcmSummarizerMode::Fake { summary_text } => (summary_text, None),
+    let (summary_text, route, extraction_result) = match request.summarizer {
+        LcmSummarizerMode::Fake { summary_text } => (summary_text, None, None),
         LcmSummarizerMode::Provided {
             summary_text,
             route,
-        } => (summary_text, route),
+        } => {
+            let (route, extraction_result) = extraction::split_summary_route(route.as_deref());
+            (summary_text, route, extraction_result)
+        }
         LcmSummarizerMode::Noop | LcmSummarizerMode::HermesAuxiliary => unreachable!(),
     };
     let mut remaining_backlog = window.backlog.clone();
@@ -695,6 +700,7 @@ async fn compress_in_transaction(
                 &request.session_id,
                 &pass_summary_text,
                 route.clone(),
+                extraction_result.as_ref(),
                 &selected_backlog,
             ),
         )
@@ -1587,6 +1593,7 @@ fn summary_draft(
     session_id: &str,
     summary_text: &str,
     route: Option<String>,
+    extraction_result: Option<&LcmExtractionResult>,
     backlog: &[LcmRawMessage],
 ) -> LcmSummaryNodeDraft {
     let source_refs = backlog
@@ -1598,7 +1605,12 @@ fn summary_draft(
     let source_token_count = source_token_count(backlog);
     let source_time_start = backlog.iter().filter_map(|message| message.timestamp).min();
     let source_time_end = backlog.iter().filter_map(|message| message.timestamp).max();
-    let mut metadata = json!({ "pre_compaction_extraction": "noop_contract" });
+    let mut metadata = json!({
+        "pre_compaction_extraction": extraction::summary_metadata_extraction(
+            extraction_result,
+            false,
+        )
+    });
     if let Some(route) = route {
         metadata["summary_route"] = Value::String(route);
     }
@@ -1659,7 +1671,12 @@ fn condensation_draft(
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} summary nodes", children.len())),
-        metadata_json: Some(json!({ "pre_compaction_extraction": "noop_contract" }).to_string()),
+        metadata_json: Some(
+            json!({
+                "pre_compaction_extraction": extraction::summary_metadata_extraction(None, true)
+            })
+            .to_string(),
+        ),
     }
 }
 
@@ -1849,6 +1866,18 @@ fn summary_request_for_backlog(
 ) -> LcmSummaryRequest {
     let first_store_id = backlog.first().map_or(0, |message| message.store_id);
     let last_store_id = backlog.last().map_or(0, |message| message.store_id);
+    let source_range = LcmSummarySourceRange {
+        from_store_id: first_store_id,
+        to_store_id: last_store_id,
+    };
+    let source_messages = backlog
+        .iter()
+        .map(|message| LcmSummarySourceMessage {
+            store_id: message.store_id,
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect::<Vec<_>>();
     let focus = focus_topic.as_deref().unwrap_or("the conversation so far");
     let prompt = format!(
         "Summarize LCM raw messages for provider '{provider}', session '{session_id}', \
@@ -1861,18 +1890,13 @@ fn summary_request_for_backlog(
         session_id: session_id.to_string(),
         focus_topic,
         prompt,
-        source_range: LcmSummarySourceRange {
-            from_store_id: first_store_id,
-            to_store_id: last_store_id,
-        },
-        source_messages: backlog
-            .iter()
-            .map(|message| LcmSummarySourceMessage {
-                store_id: message.store_id,
-                role: message.role.clone(),
-                content: message.content.clone(),
-            })
-            .collect(),
+        source_range: source_range.clone(),
+        source_messages: source_messages.clone(),
+        extraction_request: extraction::build_extraction_request(
+            session_id,
+            &source_range,
+            &source_messages,
+        ),
     }
 }
 
