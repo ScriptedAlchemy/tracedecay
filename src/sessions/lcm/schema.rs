@@ -10,7 +10,13 @@ const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
 
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
-    if schema_version(conn).await == Some(LCM_SCHEMA_VERSION) {
+    // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
+    // monotonic, so a database written by a newer release is left untouched
+    // (no marker downgrade, no carry-forward re-run against newer data).
+    if schema_version(conn)
+        .await
+        .is_some_and(|version| version >= LCM_SCHEMA_VERSION)
+    {
         return Some(());
     }
 

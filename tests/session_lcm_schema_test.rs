@@ -141,6 +141,19 @@ async fn set_migration_applied_at(db_path: &Path, applied_at: i64) {
     .unwrap();
 }
 
+async fn set_migration_version(db_path: &Path, version: i64) {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "UPDATE session_schema_migrations
+         SET version = ?1
+         WHERE name = 'lcm'",
+        libsql::params![version],
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let tmp = TempDir::new().unwrap();
@@ -223,6 +236,55 @@ async fn lcm_schema_migration_is_idempotent() {
     assert_eq!(
         fts_legacy_message_ids(&db_path).await,
         vec!["legacy-message".to_string()]
+    );
+}
+
+// Mirrors hermes-lcm `run_versioned_migrations` (db_bootstrap.py:580-601):
+// version steps are monotonic and `set_schema_version(conn, current_version)`
+// never lowers a marker written by a newer release. Opening a database whose
+// LCM schema version is newer than this binary must not downgrade the marker
+// or re-run the legacy carry-forward against data the newer schema owns.
+#[tokio::test]
+async fn lcm_schema_future_version_is_preserved_without_remigration() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    create_legacy_sessions_db(&db_path).await;
+
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    assert_eq!(
+        db.lcm_schema_version().await.unwrap(),
+        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+    );
+    drop(db);
+
+    // Simulate a database last touched by a newer tokensave: bump the version
+    // marker past this binary and have the newer schema relocate carried rows
+    // out of lcm_raw_messages.
+    let future_version = tokensave::sessions::lcm::LCM_SCHEMA_VERSION + 97;
+    set_migration_version(&db_path, future_version).await;
+    set_migration_applied_at(&db_path, 456).await;
+    {
+        let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = raw_db.connect().unwrap();
+        conn.execute("DELETE FROM lcm_raw_messages", ())
+            .await
+            .unwrap();
+    }
+    assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 0);
+
+    let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    assert_eq!(
+        reopened.lcm_schema_version().await.unwrap(),
+        future_version,
+        "future schema version marker must not be downgraded"
+    );
+    drop(reopened);
+    assert_eq!(schema_version(&db_path).await, future_version);
+    assert_eq!(migration_applied_at(&db_path).await, 456);
+    assert_eq!(
+        row_count(&db_path, "lcm_raw_messages").await,
+        0,
+        "legacy carry-forward must not re-run against a newer schema's data"
     );
 }
 
