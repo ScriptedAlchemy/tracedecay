@@ -977,7 +977,7 @@ LCM_NATIVE_SCHEMAS = [
                 },
                 "source_limit": {
                     "type": "integer",
-                    "description": "Maximum immediate sources to return from source_offset.",
+                    "description": "Maximum immediate sources to return from source_offset. If a returned source marks content_truncated=true, continue from its own store_id + content_offset.",
                 },
                 "content_offset": {
                     "type": "integer",
@@ -1321,11 +1321,15 @@ def _config_bool_disabled(value):
             return False
     return False
 
-def _hermes_yaml_compression_threshold(default):
+def _hermes_yaml_compression_threshold(default, hermes_home=None):
     # Port of hermes-lcm config._hermes_compression_threshold: read the main
     # Hermes compression.threshold from {HERMES_HOME}/config.yaml when no LCM
     # override exists. Disabled Hermes compression must not leak its threshold.
-    home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
+    home = (
+        hermes_home
+        or os.environ.get("HERMES_HOME")
+        or os.path.join(os.path.expanduser("~"), ".hermes")
+    )
     cfg_path = Path(home) / "config.yaml"
     try:
         text = cfg_path.read_text()
@@ -1377,7 +1381,111 @@ def _hermes_yaml_compression_threshold(default):
     except Exception:
         return default
 
-def _lcm_context_threshold(config):
+def _hermes_yaml_auxiliary_compression_timeout_ms(default, hermes_home=None):
+    # Port of hermes-lcm config._hermes_auxiliary_compression_timeout_ms:
+    # read auxiliary.compression.timeout (seconds) from config.yaml and expose
+    # it in milliseconds for LCM summary timeout parity.
+    home = (
+        hermes_home
+        or os.environ.get("HERMES_HOME")
+        or os.path.join(os.path.expanduser("~"), ".hermes")
+    )
+    cfg_path = Path(home) / "config.yaml"
+    try:
+        text = cfg_path.read_text()
+    except Exception:
+        return default
+    try:
+        import yaml
+    except Exception:
+        yaml = None
+    try:
+        if yaml is not None:
+            cfg = yaml.safe_load(text) or {}
+            auxiliary = cfg.get("auxiliary") or {}
+            compression = auxiliary.get("compression") or {}
+            value = compression.get("timeout")
+            if value is None:
+                return default
+            return int(float(value) * 1000)
+
+        in_auxiliary = False
+        in_compression = False
+        auxiliary_indent = None
+        compression_indent = None
+        for raw_line in text.splitlines():
+            line = raw_line.split('#', 1)[0].rstrip()
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip(" \t"))
+            stripped = line.strip()
+            if indent == 0:
+                in_auxiliary = stripped == "auxiliary:"
+                in_compression = False
+                auxiliary_indent = None
+                compression_indent = None
+                continue
+            if not in_auxiliary:
+                continue
+            if auxiliary_indent is None:
+                auxiliary_indent = indent
+            if indent == auxiliary_indent:
+                if stripped == "compression:":
+                    in_compression = True
+                    compression_indent = None
+                    continue
+                in_compression = False
+                compression_indent = None
+                continue
+            if not in_compression:
+                continue
+            if compression_indent is None:
+                compression_indent = indent
+            if indent != compression_indent or ":" not in stripped:
+                continue
+            key, raw_value = stripped.split(":", 1)
+            if key == "timeout":
+                return int(float(raw_value.strip().strip("'\"")) * 1000)
+        return default
+    except Exception:
+        return default
+
+def _lcm_summary_timeout_ms(config, hermes_home=None):
+    raw = os.environ.get("LCM_SUMMARY_TIMEOUT_MS")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    configured = _configured_int(config, "summary_timeout_ms")
+    if configured is not None:
+        return configured
+    return _hermes_yaml_auxiliary_compression_timeout_ms(60000, hermes_home=hermes_home)
+
+def _summary_circuit_breaker_settings(config):
+    threshold = _lcm_int_setting(
+        config,
+        "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+        "summary_circuit_breaker_failure_threshold",
+        default=2,
+    )
+    cooldown = _lcm_int_setting(
+        config,
+        "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+        "summary_circuit_breaker_cooldown_seconds",
+        default=300,
+    )
+    try:
+        threshold = max(1, int(threshold or 1))
+    except Exception:
+        threshold = 1
+    try:
+        cooldown = max(0, int(cooldown or 0))
+    except Exception:
+        cooldown = 0
+    return threshold, cooldown
+
+def _lcm_context_threshold(config, hermes_home=None):
     raw = os.environ.get("LCM_CONTEXT_THRESHOLD")
     if raw is not None:
         try:
@@ -1390,9 +1498,9 @@ def _lcm_context_threshold(config):
             return float(configured)
         except (TypeError, ValueError):
             pass
-    return _hermes_yaml_compression_threshold(0.75)
+    return _hermes_yaml_compression_threshold(0.75, hermes_home=hermes_home)
 
-def _configured_threshold_tokens(config):
+def _configured_threshold_tokens(config, hermes_home=None):
     explicit = _configured_int(config, "threshold_tokens")
     if explicit is not None:
         return explicit
@@ -1405,11 +1513,11 @@ def _configured_threshold_tokens(config):
     if context_length is None:
         return None
     try:
-        return int(context_length * float(_lcm_context_threshold(config)))
+        return int(context_length * float(_lcm_context_threshold(config, hermes_home=hermes_home)))
     except Exception:
         return None
 
-def _lcm_config_args(config) -> dict:
+def _lcm_config_args(config, hermes_home=None) -> dict:
     args = {
         "fresh_tail_count": _lcm_int_setting(config, "LCM_FRESH_TAIL_COUNT", "fresh_tail_count", default=64),
         "leaf_chunk_tokens": _lcm_int_setting(config, "LCM_LEAF_CHUNK_TOKENS", "leaf_chunk_tokens", default=20000),
@@ -1457,7 +1565,7 @@ def _lcm_config_args(config) -> dict:
             default=1,
         ),
     }
-    threshold_tokens = _configured_threshold_tokens(config)
+    threshold_tokens = _configured_threshold_tokens(config, hermes_home=hermes_home)
     if threshold_tokens is not None:
         args["threshold_tokens"] = threshold_tokens
     for env_key, name in (
@@ -2138,7 +2246,7 @@ class TokenSaveContextEngine(ContextEngine):
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)
-        args.update(_lcm_config_args(self.config))
+        args.update(_lcm_config_args(self.config, self.hermes_home))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
@@ -2150,6 +2258,7 @@ class TokenSaveContextEngine(ContextEngine):
             "leaf_chunk_tokens",
             "max_source_messages",
             "summary_fan_in",
+            "incremental_max_depth",
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
@@ -2188,7 +2297,7 @@ class TokenSaveContextEngine(ContextEngine):
         if not messages or not self.active_session_id:
             return
         args = _storage_args(self.project_root, self.hermes_home)
-        args.update(_lcm_config_args(self.config))
+        args.update(_lcm_config_args(self.config, self.hermes_home))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,
@@ -2200,6 +2309,7 @@ class TokenSaveContextEngine(ContextEngine):
             "leaf_chunk_tokens",
             "max_source_messages",
             "summary_fan_in",
+            "incremental_max_depth",
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
@@ -2273,12 +2383,7 @@ class TokenSaveContextEngine(ContextEngine):
             if kwargs.get(key) is not None:
                 defaults[key] = kwargs[key]
         if "timeout" not in defaults:
-            timeout_ms = _lcm_int_setting(
-                self.config,
-                "LCM_SUMMARY_TIMEOUT_MS",
-                "summary_timeout_ms",
-                default=60000,
-            )
+            timeout_ms = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home)
             if timeout_ms:
                 defaults["timeout"] = timeout_ms / 1000
         if not routes:
@@ -2321,6 +2426,7 @@ class TokenSaveContextEngine(ContextEngine):
         route_kwargs = dict(kwargs)
         route_kwargs.pop("summary_request", None)
         routes = self._auxiliary_routes(summary_request, **route_kwargs)
+        breaker_threshold, breaker_cooldown_seconds = _summary_circuit_breaker_settings(self.config)
         last_error = None
         last_classification = None
         rejected_text = None
@@ -2333,7 +2439,7 @@ class TokenSaveContextEngine(ContextEngine):
             for route in routes:
                 route_name = route.get("route") or route.get("name") or route.get("model") or "default"
                 route_key = str(route_name)
-                if not allow_retry_signal and self._cooldown_until.get(route_key, 0) > now:
+                if self._cooldown_until.get(route_key, 0) > now:
                     continue
                 call_kwargs = {
                     "task": "compression",
@@ -2356,11 +2462,10 @@ class TokenSaveContextEngine(ContextEngine):
                         rejected_model = route.get("model")
                         failures = self._route_failures.get(route_key, 0) + 1
                         self._route_failures[route_key] = failures
-                        # Quality rejections mirror the Hermes summary circuit
-                        # breaker threshold of 2 failures, so the immediate L2
-                        # retry on the same route stays available.
-                        if failures >= 2:
-                            self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+                        if failures >= breaker_threshold:
+                            self._cooldown_until[route_key] = (
+                                time.time() + breaker_cooldown_seconds
+                            )
                         continue
                     self._route_failures.pop(route_key, None)
                     self._cooldown_until.pop(route_key, None)
@@ -2375,7 +2480,10 @@ class TokenSaveContextEngine(ContextEngine):
                     last_classification = _auxiliary_error_classification(exc)
                     failures = self._route_failures.get(route_key, 0) + 1
                     self._route_failures[route_key] = failures
-                    self._cooldown_until[route_key] = time.time() + min(300, 2 ** failures)
+                    if failures >= breaker_threshold:
+                        self._cooldown_until[route_key] = (
+                            time.time() + breaker_cooldown_seconds
+                        )
         if rejected_text is not None:
             return {
                 "status": "rejected",
@@ -2447,15 +2555,27 @@ class TokenSaveContextEngine(ContextEngine):
             focus_topic=focus_topic,
             custom_instructions=custom_instructions,
         )
+        rung_failures = []
+
+        def record_rung_failure(level, summary):
+            rung_failures.append({
+                "level": level,
+                "status": summary.get("status"),
+                "route": summary.get("route"),
+                "model": summary.get("model"),
+                "error": summary.get("error"),
+                "error_classification": summary.get("error_classification"),
+            })
+
         summary = self._call_auxiliary_summary(l1_prompt, source_messages, **l1_kwargs)
-        if summary.get("status") != "rejected":
+        if summary.get("status") == "ok":
             return summary
+        record_rung_failure(1, summary)
 
         l2_budget = max(1, int(token_budget * l2_budget_ratio))
         l2_kwargs = dict(kwargs)
         l2_kwargs["accepts_result"] = accepts_result
         l2_kwargs["max_tokens"] = l2_budget * 2
-        l2_kwargs["allow_retry_signal"] = False
         l2_prompt = _build_l2_prompt(
             serialized,
             l2_budget,
@@ -2463,19 +2583,28 @@ class TokenSaveContextEngine(ContextEngine):
             custom_instructions=custom_instructions,
         )
         summary = self._call_auxiliary_summary(l2_prompt, source_messages, **l2_kwargs)
-        if summary.get("status") != "rejected":
-            if summary.get("status") == "fallback":
-                summary.setdefault("error", "Hermes auxiliary summary was not smaller than source")
-                summary.setdefault("error_classification", "non_compressing_summary")
+        if summary.get("status") == "ok":
+            if rung_failures:
+                summary["rung_failures"] = rung_failures
             return summary
-        return {
+        record_rung_failure(2, summary)
+        if summary.get("status") == "fallback":
+            summary.setdefault("error", "Hermes auxiliary summary was not smaller than source")
+            summary.setdefault("error_classification", "non_compressing_summary")
+        fallback = {
             "status": "fallback",
             "text": _deterministic_truncation(source_messages, limit=max(1, l3_truncate_tokens * 4)),
             "route": "deterministic_fallback",
             "model": None,
-            "error": "Hermes auxiliary summary was not smaller than source",
-            "error_classification": "non_compressing_summary",
+            "error": summary.get("error") or "Hermes auxiliary summary was not smaller than source",
+            "error_classification": summary.get("error_classification") or "non_compressing_summary",
+            "rung_failures": rung_failures,
         }
+        if summary.get("error"):
+            fallback["auxiliary_error"] = summary.get("error")
+        if summary.get("error_classification"):
+            fallback["auxiliary_error_classification"] = summary.get("error_classification")
+        return fallback
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
@@ -2487,6 +2616,7 @@ class TokenSaveContextEngine(ContextEngine):
             "leaf_chunk_tokens",
             "max_source_messages",
             "summary_fan_in",
+            "incremental_max_depth",
             "fresh_tail_count",
             "dynamic_leaf_chunk_enabled",
             "dynamic_leaf_chunk_max",
@@ -2497,7 +2627,7 @@ class TokenSaveContextEngine(ContextEngine):
             "ignore_message_patterns",
         )
         args = _storage_args(self.project_root, self.hermes_home)
-        args.update(_lcm_config_args(self.config))
+        args.update(_lcm_config_args(self.config, self.hermes_home))
         args.update({
             "session_id": self.active_session_id,
             "messages": messages,

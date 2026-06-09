@@ -508,6 +508,8 @@ import os
 import pathlib
 import sys
 import tempfile
+import tempfile
+import tempfile
 
 plugin_dir = pathlib.Path(sys.argv[1])
 parent_name = "_hermes_user_default_home"
@@ -1937,7 +1939,7 @@ assert agent.auxiliary_client.calls[1]["max_tokens"] == 2000
 }
 
 #[test]
-fn retry_worthy_auxiliary_failure_retries_smaller_summary_request() {
+fn retry_worthy_auxiliary_failures_fall_through_escalation_rungs() {
     run_generated_plugin_script(
         "check_auxiliary_retry_shrinks_chunk.py",
         r#"
@@ -2007,21 +2009,15 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
         assert args["summarizer"] == {"mode": "hermes_auxiliary"}
         assert "max_source_messages" not in args
         return mcp_response(needs_summary(source_messages))
-    if len(calls) == 2:
-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
-        assert args["max_source_messages"] == 1
-        return mcp_response(needs_summary(source_messages[:1]))
-    assert args["summarizer"] == {
-        "mode": "provided",
-        "summary_text": "Smaller chunk summary",
-        "route": "default",
-    }
+    assert args["summarizer"]["mode"] == "provided"
+    assert args["summarizer"]["route"] == "deterministic_fallback"
+    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
     return mcp_response({
         "status": "ok",
         "reason": "compressed_backlog",
         "summary_nodes_created": 1,
         "summary_nodes": [],
-        "replay_messages": [{"role": "system", "content": "Smaller chunk summary"}],
+        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
         "frontier": {"current_frontier_store_id": 1, "maintenance_debt": [
             {"kind": "raw_backlog", "from_store_id": 2, "to_store_id": 2}
         ]},
@@ -2052,16 +2048,15 @@ result = engine.compress(
 )
 
 assert result["status"] == "ok"
-assert len(calls) == 3
+assert len(calls) == 2
 assert len(agent.auxiliary_client.calls) == 2
 assert "old two" in agent.auxiliary_client.calls[0]["messages"][0]["content"]
-assert "old two" not in agent.auxiliary_client.calls[1]["messages"][0]["content"]
-assert "old one" in agent.auxiliary_client.calls[1]["messages"][0]["content"]
-assert result["auxiliary_attempts"] == 2
-assert result["auxiliary_retry_status"] == "retried"
+assert "old two" in agent.auxiliary_client.calls[1]["messages"][0]["content"]
+assert result["auxiliary_attempts"] == 1
+assert result["auxiliary_retry_status"] == "fallback_summary"
 assert result["auxiliary_error_classification"] == "retry_worthy"
 "#,
-        "retry-worthy auxiliary failures should retry with a smaller summary request",
+        "retry-worthy auxiliary failures should fall through L1/L2 before deterministic fallback",
     );
 }
 
@@ -2123,7 +2118,7 @@ for marker in permanent_markers:
 }
 
 #[test]
-fn permanent_auxiliary_failure_returns_error_without_advancing_frontier() {
+fn permanent_auxiliary_failure_falls_back_deterministically() {
     run_generated_plugin_script(
         "check_auxiliary_permanent_failure.py",
         r#"
@@ -2164,27 +2159,43 @@ def mcp_response(inner):
 def fake_run(argv, check, capture_output, text, timeout, shell):
     args = json.loads(argv[argv.index("--args") + 1])
     calls.append(args)
-    assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+    if len(calls) == 1:
+        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+        return mcp_response({
+            "status": "needs_summary",
+            "reason": "summary_required",
+            "summary_nodes_created": 0,
+            "summary_nodes": [],
+            "replay_messages": [{"role": "user", "content": "fresh"}],
+            "frontier": {"current_frontier_store_id": None, "maintenance_debt": [
+                {"kind": "raw_backlog", "from_store_id": 1, "to_store_id": 2}
+            ]},
+            "summary_request": {
+                "provider": "cursor",
+                "session_id": "session-1",
+                "focus_topic": "handoff",
+                "prompt": "Summarize backlog",
+                "source_range": {"from_store_id": 1, "to_store_id": 2},
+                "source_messages": [
+                    {"store_id": 1, "role": "user", "content": "old one"},
+                    {"store_id": 2, "role": "assistant", "content": "old two"},
+                ],
+            },
+        })
+
+    assert args["summarizer"]["mode"] == "provided"
+    assert args["summarizer"]["route"] == "deterministic_fallback"
+    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
     return mcp_response({
-        "status": "needs_summary",
-        "reason": "summary_required",
-        "summary_nodes_created": 0,
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "summary_nodes_created": 1,
         "summary_nodes": [],
-        "replay_messages": [{"role": "user", "content": "fresh"}],
-        "frontier": {"current_frontier_store_id": None, "maintenance_debt": [
-            {"kind": "raw_backlog", "from_store_id": 1, "to_store_id": 2}
-        ]},
-        "summary_request": {
-            "provider": "cursor",
-            "session_id": "session-1",
-            "focus_topic": "handoff",
-            "prompt": "Summarize backlog",
-            "source_range": {"from_store_id": 1, "to_store_id": 2},
-            "source_messages": [
-                {"store_id": 1, "role": "user", "content": "old one"},
-                {"store_id": 2, "role": "assistant", "content": "old two"},
-            ],
-        },
+        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
+        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": []},
+        "summary_request": None,
+        "replay_token_estimate": 3,
+        "replay_over_budget": False,
     })
 
 plugin.tools.subprocess.run = fake_run
@@ -2206,16 +2217,16 @@ result = engine.compress(
     focus_topic="handoff",
 )
 
-assert result["status"] == "error"
-assert result["reason"] == "auxiliary_summary_permanent_failure"
+assert result["status"] == "ok"
+assert result["reason"] == "compressed_backlog"
 assert result["auxiliary_attempts"] == 1
-assert result["auxiliary_retry_status"] == "not_retryable"
+assert result["auxiliary_retry_status"] == "fallback_summary"
 assert result["auxiliary_error_classification"] == "permanent"
-assert result["frontier"]["current_frontier_store_id"] is None
-assert len(calls) == 1
-assert len(agent.auxiliary_client.calls) == 1
+assert result["frontier"]["current_frontier_store_id"] == 1
+assert len(calls) == 2
+assert len(agent.auxiliary_client.calls) == 2
 "#,
-        "permanent auxiliary failures should not write a provided summary",
+        "permanent auxiliary failures should still fall through to deterministic fallback",
     );
 }
 
@@ -2286,8 +2297,19 @@ assert summary["text"] == "Fallback route summary"
 assert summary["route"] == "backup"
 assert summary["model"] == "backup"
 assert engine._route_failures["primary"] == 1
-assert engine._cooldown_until["primary"] > 0
+assert "primary" not in engine._cooldown_until
 assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
+summary_second = engine._call_auxiliary_summary(
+    "Summarize again",
+    [{"role": "user", "content": "raw"}],
+    routes=[
+        {"model": "primary", "temperature": 0.2},
+        {"model": "backup", "temperature": 0.3},
+    ],
+)
+assert summary_second["status"] == "ok"
+assert engine._route_failures["primary"] == 2
+assert engine._cooldown_until["primary"] > 0
 
 class FailingAux:
     def __init__(self):
@@ -2308,7 +2330,21 @@ assert fallback["status"] == "fallback"
 assert len(fallback["text"]) < 10000
 assert fallback["text"].endswith("[deterministic compression fallback]")
 assert failing_engine._route_failures["default"] == 1
-assert failing_engine._cooldown_until["default"] > 0
+assert "default" not in failing_engine._cooldown_until
+
+import os
+os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"] = "1"
+os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"] = "30"
+tuned_engine = plugin.TokenSaveContextEngine()
+tuned_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
+tuned_engine._call_auxiliary_summary(
+    "Summarize",
+    [{"role": "user", "content": "B" * 1000}],
+)
+assert tuned_engine._route_failures["default"] == 1
+assert tuned_engine._cooldown_until["default"] > 0
+del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"]
+del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"]
 "#,
     )
     .unwrap();
@@ -2524,6 +2560,71 @@ assert "Primary focus: handoff" in l2_prompt
 assert "CONTENT:" in l2_prompt
 "#,
         "oversized L1 summaries should escalate to the L2 bullet rung before fallback",
+    );
+}
+
+#[test]
+fn l1_auxiliary_errors_fall_through_to_l2_success() {
+    run_generated_plugin_script(
+        "check_l1_error_l2_success.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_l1_error_l2_success"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+source_messages = [
+    {"store_id": 1, "role": "user", "content": "alpha " * 120},
+    {"store_id": 2, "role": "assistant", "content": "beta " * 120},
+]
+
+class Aux:
+    def __init__(self):
+        self.calls = []
+
+    def call_llm(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["messages"][0]["content"]
+        if prompt.startswith("Summarize this conversation segment"):
+            raise RuntimeError("timed out")
+        return "L2 concise summary"
+
+agent = type("Agent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+summary = engine._summarize_with_escalation(
+    source_messages,
+    focus_topic="handoff",
+    allow_retry_signal=True,
+)
+
+assert summary["status"] == "ok"
+assert summary["text"] == "L2 concise summary"
+assert summary["route"] == "default"
+assert len(summary["rung_failures"]) == 1
+assert summary["rung_failures"][0]["level"] == 1
+assert summary["rung_failures"][0]["status"] in ("retry", "error")
+assert summary["rung_failures"][0]["error_classification"] == "retry_worthy"
+assert len(agent.auxiliary_client.calls) == 2
+"#,
+        "L1 auxiliary errors should fall through to L2 success",
     );
 }
 
@@ -2783,9 +2884,13 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 
 plugin.tools.subprocess.run = fake_run
 
-def preflight_threshold(config):
+def preflight_threshold(config, hermes_home=None):
     engine = plugin.TokenSaveContextEngine(config=config)
-    engine.initialize(session_id="session-1", project_root="/tmp/project")
+    engine.initialize(
+        session_id="session-1",
+        project_root="/tmp/project",
+        hermes_home=hermes_home,
+    )
     engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
     return calls.pop().get("threshold_tokens")
 
@@ -2814,6 +2919,16 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["HERMES_HOME"] = tmp
     assert preflight_threshold({"context_length": 100000}) == 75000
     assert preflight_threshold(None) is None
+
+with tempfile.TemporaryDirectory() as tmp:
+    # The engine's resolved hermes_home should be used when HERMES_HOME is unset.
+    os.environ.pop("HERMES_HOME", None)
+    cfg = pathlib.Path(tmp) / "config.yaml"
+    cfg.write_text("compression:\n  enabled: true\n  threshold: 0.55\n")
+    engine = plugin.TokenSaveContextEngine(config={"context_length": 100000})
+    engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+    args = plugin._lcm_config_args(engine.config, engine.hermes_home)
+    assert args["threshold_tokens"] == 55000
 "#,
         "generated plugin should fall back to the Hermes YAML compression threshold",
     );
@@ -2829,6 +2944,7 @@ import importlib.util
 import os
 import pathlib
 import sys
+import tempfile
 
 for key in [name for name in os.environ if name.startswith("LCM_")]:
     del os.environ[key]
@@ -2863,12 +2979,39 @@ routes = engine._auxiliary_routes()
 assert [route.get("model") for route in routes] == ["primary", "backup"]
 assert [route.get("timeout") for route in routes] == [30.0, 30.0]
 
-# Hosts that pass no config keep the single task-default route.
-bare_engine = plugin.TokenSaveContextEngine()
-bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
-bare_routes = bare_engine._auxiliary_routes()
-assert len(bare_routes) == 1
-assert "model" not in bare_routes[0]
+# Hosts that pass no config keep the single task-default route when Hermes
+# home has no config.yaml timeout override.
+with tempfile.TemporaryDirectory() as tmp:
+    os.environ["HERMES_HOME"] = tmp
+    bare_engine = plugin.TokenSaveContextEngine()
+    bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
+    bare_routes = bare_engine._auxiliary_routes()
+    assert len(bare_routes) == 1
+    assert "model" not in bare_routes[0]
+    assert bare_routes[0]["timeout"] == 60.0
+    os.environ.pop("HERMES_HOME", None)
+
+with tempfile.TemporaryDirectory() as tmp:
+    cfg = pathlib.Path(tmp) / "config.yaml"
+    cfg.write_text("auxiliary:\n  compression:\n    timeout: 12.5\n")
+    yaml_engine = plugin.TokenSaveContextEngine()
+    yaml_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+    yaml_routes = yaml_engine._auxiliary_routes()
+    assert yaml_routes[0]["timeout"] == 12.5
+
+with tempfile.TemporaryDirectory() as tmp:
+    cfg = pathlib.Path(tmp) / "config.yaml"
+    cfg.write_text("auxiliary:\n  compression:\n    timeout: not-a-number\n")
+    malformed_engine = plugin.TokenSaveContextEngine()
+    malformed_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+    malformed_routes = malformed_engine._auxiliary_routes()
+    assert malformed_routes[0]["timeout"] == 60.0
+
+with tempfile.TemporaryDirectory() as tmp:
+    missing_engine = plugin.TokenSaveContextEngine()
+    missing_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+    missing_routes = missing_engine._auxiliary_routes()
+    assert missing_routes[0]["timeout"] == 60.0
 
 # Documented env vars override ctx.config for the route chain.
 os.environ["LCM_SUMMARY_MODEL"] = "env-primary"
@@ -3018,6 +3161,7 @@ fn lcm_compression_request_contract_serializes_fake_summarizer() {
         leaf_chunk_tokens: None,
         max_source_messages: None,
         summary_fan_in: None,
+        incremental_max_depth: None,
         fresh_tail_count: None,
         dynamic_leaf_chunk_enabled: None,
         dynamic_leaf_chunk_max: None,
