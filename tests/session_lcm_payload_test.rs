@@ -1034,3 +1034,242 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
         .await
         .is_none());
 }
+
+// Substring externalization splices placeholders at byte spans reported by
+// the media scanners; multibyte text immediately around the span must survive
+// intact (Hermes `_protect_payload_substrings` operates on Python str
+// offsets, so unicode scaffold is preserved by construction there).
+#[tokio::test]
+async fn unicode_scaffold_survives_data_uri_substring_externalization() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let media_span = format!(
+        "data:application/octet-stream;base64,{}",
+        "QUJDRA==".repeat(64)
+    );
+    // Multibyte chars border the span on both sides: the closing boundary
+    // char (a CJK ideograph) is not base64 alphabet, so the span must end
+    // exactly at the `==` padding without splitting the following char.
+    let prefix = "日本語のログ🦀 unicodescaffoldcanary ";
+    let suffix = "終わり🎈のテキスト";
+    let content = format!("{prefix}{media_span}{suffix}");
+    let mut message = raw_message("cursor", "unicode-media", "session-1", "user", &content);
+    message.kind = Some("message".to_string());
+
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("unicode media message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "unicode-media")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert!(raw.content.starts_with(prefix));
+    assert!(raw.content.ends_with(suffix));
+    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(!raw.content.contains(";base64,"));
+    assert!(!raw.content.contains("QUJDRA"));
+
+    assert_eq!(lcm_fts_count(&db_path, "unicodescaffoldcanary").await, 1);
+    assert_eq!(lcm_fts_count(&db_path, "QUJDRA").await, 0);
+
+    let payload_ref = externalized_ref_from_placeholder(&raw.content);
+    let expanded = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &payload_ref,
+            0,
+            media_span.chars().count(),
+        )
+        .await
+        .expect("unicode-bounded payload should expand");
+    assert_eq!(expanded.content, media_span);
+}
+
+// Mirrors hermes-lcm
+// `test_sensitive_patterns_redact_before_large_payload_externalization`
+// (ingest_protection.py `_protect_value` order): redaction runs before
+// externalization, so the externalized payload file on disk must hold the
+// redaction placeholder and never the secret.
+#[tokio::test]
+async fn redaction_applies_before_whole_message_externalization() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let secret = "sk-prequel1234567890abcdef";
+    let content = format!(
+        "tool output api_key={secret} preexternalredactcanary\n{}",
+        "B".repeat(300_000)
+    );
+    let mut message = raw_message(
+        "cursor",
+        "redact-then-extern",
+        "session-1",
+        "tool",
+        &content,
+    );
+    message.metadata_json = Some(
+        json!({
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["api_key"]
+            }
+        })
+        .to_string(),
+    );
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("oversized redacted tool message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "redact-then-extern")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::External);
+    let payload_ref = raw.payload_ref.clone().expect("payload ref");
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
+    assert_eq!(
+        metadata["ingest_protection"]["redaction_patterns"],
+        json!(["api_key"])
+    );
+
+    // The durable payload body was redacted before it ever hit disk.
+    let payload_path =
+        tokensave::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_body = std::fs::read_to_string(&payload_path).expect("payload file should exist");
+    assert!(!payload_body.contains(secret));
+    assert!(payload_body.contains("[LCM sensitive redaction: name=api_key"));
+    assert!(payload_body.contains("preexternalredactcanary"));
+
+    // Neither the secret nor the payload body is searchable.
+    assert_eq!(lcm_fts_count(&db_path, "prequel1234567890abcdef").await, 0);
+    assert_eq!(lcm_fts_count(&db_path, "preexternalredactcanary").await, 0);
+}
+
+// Mirrors hermes-lcm `test_ingest_keeps_scanning_after_existing_placeholder_prefix`
+// and the placeholder idempotency tests: text that already carries an
+// externalized-payload placeholder is not re-externalized, while new media
+// spans after it are still protected.
+#[tokio::test]
+async fn existing_ingest_placeholder_is_not_double_externalized() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+    let store = db.lcm_store(&storage_root);
+
+    // First ingest produces a real placeholder for the original data URI.
+    let first_span = format!(
+        "data:application/octet-stream;base64,{}",
+        "QUJDRA==".repeat(64)
+    );
+    let mut first = raw_message(
+        "cursor",
+        "placeholder-origin",
+        "session-1",
+        "user",
+        &format!("origin scaffold {first_span} tail"),
+    );
+    first.kind = Some("message".to_string());
+    store
+        .ingest_raw_message(&first)
+        .await
+        .expect("first media message should ingest");
+    let protected_first = db
+        .lcm_load_raw_message("cursor", "placeholder-origin")
+        .await
+        .expect("first raw message should exist")
+        .content;
+    let existing_ref = externalized_ref_from_placeholder(&protected_first);
+
+    // A later message replays that placeholder text and appends a new span.
+    let second_span = format!(
+        "data:application/octet-stream;base64,{}",
+        "WFlaQQ==".repeat(64)
+    );
+    let mut second = raw_message(
+        "cursor",
+        "placeholder-replay",
+        "session-1",
+        "user",
+        &format!("{protected_first} appended {second_span} done"),
+    );
+    second.kind = Some("message".to_string());
+    second.ordinal = 2;
+    store
+        .ingest_raw_message(&second)
+        .await
+        .expect("replayed placeholder message should ingest");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "placeholder-replay")
+        .await
+        .expect("second raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    // The pre-existing placeholder text is preserved verbatim, not wrapped
+    // in another placeholder.
+    assert!(raw.content.starts_with(&protected_first));
+    assert!(raw.content.ends_with(" done"));
+    assert!(!raw.content.contains(";base64,"));
+    let placeholder_count = raw
+        .content
+        .matches("[Externalized LCM ingest payload:")
+        .count();
+    assert_eq!(placeholder_count, 2);
+    let new_ref = externalized_ref_from_placeholder(&raw.content[protected_first.len()..]);
+    assert_ne!(new_ref, existing_ref);
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["ingest_protection"]["nested_external_payloads"], 1,
+        "only the new media span should externalize"
+    );
+
+    // Both payloads stay recoverable: the original through its first owner,
+    // the new span through the replaying message.
+    let original = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &existing_ref,
+            0,
+            first_span.chars().count(),
+        )
+        .await
+        .expect("original payload should still expand");
+    assert_eq!(original.content, first_span);
+    let appended = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &new_ref,
+            0,
+            second_span.chars().count(),
+        )
+        .await
+        .expect("new span payload should expand");
+    assert_eq!(appended.content, second_span);
+}
