@@ -742,9 +742,15 @@ def error_payload(message: str, result=None) -> str:
 
 def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
     try:
-        payload = json.dumps(args or {{}})
+        tool_args = args or {{}}
+        payload = json.dumps(tool_args)
+        project_root = kwargs.get("project_root") or tool_args.get("project_root")
+        argv = [TOKENSAVE_BIN, "tool"]
+        if project_root:
+            argv.extend(["--project", str(project_root)])
+        argv.extend([name, "--json", "--args", payload])
         result = subprocess.run(
-            [TOKENSAVE_BIN, "tool", name, "--json", "--args", payload],
+            argv,
             check=False,
             capture_output=True,
             text=True,

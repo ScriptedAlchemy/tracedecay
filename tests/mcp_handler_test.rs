@@ -4869,10 +4869,14 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
 #[tokio::test]
 async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
+    let outside_cwd = TempDir::new().unwrap();
+    let project_arg = cg.project_root().display().to_string();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
-        .current_dir(cg.project_root())
+        .current_dir(outside_cwd.path())
         .args([
             "tool",
+            "--project",
+            &project_arg,
             "tokensave_lcm_status",
             "--json",
             "--args",

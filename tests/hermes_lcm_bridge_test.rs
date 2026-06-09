@@ -288,7 +288,7 @@ assert result["messages"] == []
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TOKENSAVE_BIN
-assert argv[1:4] == ["tool", "tokensave_lcm_preflight", "--json"]
+assert argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_preflight", "--json"]
 args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
@@ -396,7 +396,7 @@ assert result == {"status": "not_implemented", "message": "placeholder parsed"}
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TOKENSAVE_BIN
-assert argv[1:4] == ["tool", "tokensave_lcm_compress", "--json"]
+assert argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_compress", "--json"]
 args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
     "storage_scope": "project_local",
@@ -419,6 +419,124 @@ assert args == {
     assert!(
         output.status.success(),
         "generated context engine should call tokensave_lcm_compress through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn context_engine_expand_query_and_profile_storage_project_flags() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_project_flag_bridge.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_context"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]})
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(argv)
+    tool_name = argv[4] if "--project" in argv else argv[2]
+    if tool_name == "tokensave_lcm_expand_query":
+        inner = {
+            "status": "ok",
+            "prompt": "What changed?",
+            "query": "orchard",
+            "needs_synthesis": False,
+            "answer": "orchard summary",
+        }
+    else:
+        inner = {"status": "ok", "messages": []}
+    return Result(0, mcp_response(inner), "")
+
+plugin.tools.subprocess.run = fake_run
+
+project_engine = plugin.TokenSaveContextEngine()
+project_engine.initialize(session_id="session-1", project_root="/tmp/project")
+answer = project_engine.expand_query(prompt="What changed?", query="orchard")
+assert answer["status"] == "ok"
+project_argv = calls.pop()
+assert project_argv[0] == plugin.tools.TOKENSAVE_BIN
+assert project_argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_expand_query", "--json"]
+project_args = json.loads(project_argv[project_argv.index("--args") + 1])
+assert project_args["storage_scope"] == "project_local"
+assert project_args["project_root"] == "/tmp/project"
+
+profile_engine = plugin.TokenSaveContextEngine()
+profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
+profile_result = profile_engine.should_compress_preflight(messages=[], current_tokens=100)
+assert profile_result["status"] == "ok"
+profile_argv = calls.pop()
+assert profile_argv[0] == plugin.tools.TOKENSAVE_BIN
+assert profile_argv[1:4] == ["tool", "tokensave_lcm_preflight", "--json"]
+assert "--project" not in profile_argv
+profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
+assert profile_args["storage_scope"] == "hermes_profile"
+assert profile_args["hermes_home"] == "/tmp/hermes-profile"
+
+explicit = plugin.tools.call_tokensave_tool(
+    "tokensave_lcm_status",
+    {"storage_scope": "hermes_profile", "hermes_home": "/tmp/hermes-profile"},
+    project_root="/tmp/project",
+)
+assert json.loads(explicit)["content"]
+explicit_argv = calls.pop()
+assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_status", "--json"]
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes project flag bridge check");
+    assert!(
+        output.status.success(),
+        "generated bridge should pass project-local roots through tokensave tool --project without affecting profile calls\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

@@ -622,8 +622,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 global::check_for_update(&mut config, false, true);
             }
         }
-        Commands::Tool { name, args } => {
-            tool_command::run(name, args).await?;
+        Commands::Tool {
+            project,
+            name,
+            args,
+        } => {
+            tool_command::run(project, name, args).await?;
         }
         Commands::Install {
             agent,
@@ -1441,6 +1445,7 @@ mod startup_tests {
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
+            project: None,
             name: Some("message_search".to_string()),
             args: Vec::new(),
         }));

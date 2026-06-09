@@ -70,6 +70,9 @@ pub enum Commands {
     // so we can print the per-tool schema instead of clap's generic help.
     #[command(disable_help_flag = true)]
     Tool {
+        /// Project root to open before dispatching the tool. Defaults to cwd.
+        #[arg(long)]
+        project: Option<String>,
         /// MCP tool name (with or without the `tokensave_` prefix). Omit to list all tools.
         name: Option<String>,
         /// Tool arguments as alternating `--key value` flags, plus reserved flags

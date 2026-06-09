@@ -532,7 +532,11 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
-    assert!(tools_py.contains("\"tool\", name, \"--json\", \"--args\", payload"));
+    assert!(tools_py.contains(
+        "project_root = kwargs.get(\"project_root\") or tool_args.get(\"project_root\")"
+    ));
+    assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
+    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
     assert!(!tools_py.contains("shell=True"));
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),

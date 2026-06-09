@@ -36,7 +36,11 @@ use crate::serve;
 const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
 
 /// Entry point for `tokensave tool ...`.
-pub(crate) async fn run(name: Option<String>, args: Vec<String>) -> Result<()> {
+pub(crate) async fn run(
+    project: Option<String>,
+    name: Option<String>,
+    args: Vec<String>,
+) -> Result<()> {
     let defs = get_tool_definitions();
 
     let Some(raw_name) = name else {
@@ -60,7 +64,7 @@ pub(crate) async fn run(name: Option<String>, args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let project_path = tokensave::config::resolve_path(parsed.project.clone());
+    let project_path = tokensave::config::resolve_path(project.or(parsed.project));
     let cg = serve::ensure_initialized(&project_path).await?;
     let result = handle_tool_call(&cg, &def.name, parsed.tool_args, None, None).await?;
 
