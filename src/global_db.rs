@@ -555,7 +555,7 @@ impl GlobalDb {
                     opt_text(session.transcript_path.as_deref()),
                     opt_text(session.metadata_json.as_deref()),
                     opt_text(session.parent_session_id.as_deref()),
-                    if session.is_subagent { 1_i64 } else { 0_i64 },
+                    i64::from(session.is_subagent),
                     opt_text(session.agent_id.as_deref()),
                     opt_text(session.parent_tool_use_id.as_deref()),
                 ],
@@ -605,12 +605,11 @@ impl GlobalDb {
         };
 
         if projection_ok {
-            match self.conn.execute("COMMIT", ()).await {
-                Ok(_) => true,
-                Err(_) => {
-                    let _ = self.conn.execute("ROLLBACK", ()).await;
-                    false
-                }
+            if self.conn.execute("COMMIT", ()).await.is_ok() {
+                true
+            } else {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                false
             }
         } else {
             let _ = self.conn.execute("ROLLBACK", ()).await;

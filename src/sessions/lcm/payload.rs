@@ -11,7 +11,7 @@ use crate::sessions::SessionMessageRecord;
 use super::{raw, LcmError, LcmPayloadExpansion, LcmPayloadRef};
 
 #[cfg(target_os = "linux")]
-const O_NOFOLLOW: i32 = 0o400000;
+const O_NOFOLLOW: i32 = 0o40_0000;
 
 pub struct LcmStore<'db> {
     conn: &'db Connection,
@@ -122,7 +122,7 @@ pub(crate) fn write_external_payload(
     message_id: &str,
     kind: &str,
     content: &str,
-    _metadata_json: Option<String>,
+    metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
     let content_hash = sha256_hex(content.as_bytes());
     let owner_hash =
@@ -145,7 +145,7 @@ pub(crate) fn write_external_payload(
         byte_count: content.len() as u64,
         char_count: content.chars().count() as u64,
         created_at: unixepoch(),
-        metadata_json: _metadata_json,
+        metadata_json,
     })
 }
 
@@ -338,7 +338,7 @@ fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let root = canonical_storage_root(storage_root)?;
     let dir = root.join("lcm-payloads");
     match fs::symlink_metadata(&dir) {
-        Ok(metadata) => ensure_actual_private_dir(&dir, metadata)?,
+        Ok(metadata) => ensure_actual_private_dir(&dir, &metadata)?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
             set_private_dir_permissions(&dir)?;
@@ -353,7 +353,7 @@ fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let root = canonical_storage_root(storage_root)?;
     let dir = root.join("lcm-payloads");
     let metadata = fs::symlink_metadata(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
-    ensure_actual_private_dir(&dir, metadata)?;
+    ensure_actual_private_dir(&dir, &metadata)?;
     ensure_payload_dir_under_root(&root, &dir)?;
     Ok(dir)
 }
@@ -369,7 +369,7 @@ fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
         .map_err(|err| LcmError::Io(err.to_string()))
 }
 
-fn ensure_actual_private_dir(dir: &Path, metadata: fs::Metadata) -> Result<(), LcmError> {
+fn ensure_actual_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<(), LcmError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(LcmError::InvalidPayloadRef);
     }
@@ -486,8 +486,7 @@ fn sha256_hex(content: &[u8]) -> String {
 fn unixepoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_secs() as i64)
 }
 
 fn opt_text(value: Option<&str>) -> Value {

@@ -92,7 +92,7 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
     let marker = "ref=";
     let start = text.find(marker).expect("placeholder ref") + marker.len();
     let tail = &text[start..];
-    let end = tail.find([']', ',', ';']).unwrap_or_else(|| tail.len());
+    let end = tail.find([']', ',', ';']).unwrap_or(tail.len());
     tail[..end].trim().to_string()
 }
 
@@ -252,7 +252,7 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
         .lcm_status("cursor", Some("session-1"))
         .await
         .expect("status should load");
-    assert_eq!(status.redaction.enabled, true);
+    assert!(status.redaction.enabled);
     assert_eq!(status.redaction.lossy_records, 1);
     assert_eq!(
         lcm_fts_count(&db_path, "redaction1234567890abcdef").await,

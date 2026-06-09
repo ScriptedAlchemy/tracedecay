@@ -60,6 +60,7 @@ fn raw_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn raw_message_with_role_source_timestamp(
     provider: &str,
     message_id: &str,

@@ -393,7 +393,7 @@ fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {
         config.sensitive_patterns = patterns
             .iter()
             .filter_map(JsonValue::as_str)
-            .map(|value| value.to_ascii_lowercase())
+            .map(str::to_ascii_lowercase)
             .collect();
     }
     config
@@ -504,8 +504,7 @@ fn redact_assignments(
         if !text[pos..]
             .chars()
             .next()
-            .map(|ch| matches!(ch, '=' | ':'))
-            .unwrap_or(false)
+            .is_some_and(|ch| matches!(ch, '=' | ':'))
         {
             out.push_str(&text[cursor..pos.min(text.len())]);
             cursor = pos.min(text.len());

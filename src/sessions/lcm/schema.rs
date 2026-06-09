@@ -276,7 +276,7 @@ async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
                 LcmStorageKind::Inline.as_str(),
                 snippet_text.as_str(),
                 index_text.as_str(),
-                if legacy_truncated { 1_i64 } else { 0_i64 },
+                i64::from(legacy_truncated),
                 opt_text(metadata_json.as_deref()),
             ],
         )

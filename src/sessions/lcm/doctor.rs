@@ -240,14 +240,11 @@ async fn plan_and_apply_repairs(
 }
 
 fn issue_count(diagnostics: &Value) -> i64 {
-    let schema_issues = if diagnostics["schema"]["schema_current"]
-        .as_bool()
-        .unwrap_or(false)
-    {
-        0
-    } else {
-        1
-    };
+    let schema_issues = i64::from(
+        !diagnostics["schema"]["schema_current"]
+            .as_bool()
+            .unwrap_or(false),
+    );
     schema_issues
         + diagnostics["payloads"]["missing_files"]
             .as_i64()
@@ -684,12 +681,11 @@ async fn fts_probe_needs_rebuild(
                AND content.provider = ?2
                AND (?3 IS NULL OR content.session_id = ?3)"
         );
-        let mut match_rows = match conn
+        let Ok(mut match_rows) = conn
             .query(&match_sql, params![term, provider, opt_text(session_id)])
             .await
-        {
-            Ok(rows) => rows,
-            Err(_) => return Ok(true),
+        else {
+            return Ok(true);
         };
         let row = match_rows
             .next()

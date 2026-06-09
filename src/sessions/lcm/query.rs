@@ -19,6 +19,7 @@ use super::{
 
 const MAX_PAGE_LIMIT: usize = 100;
 
+#[allow(clippy::struct_field_names)]
 struct LcmLifecycleMetadata {
     current_session_id: Option<String>,
     current_frontier_store_id: Option<i64>,
@@ -26,6 +27,7 @@ struct LcmLifecycleMetadata {
     last_finalized_frontier_store_id: Option<i64>,
 }
 
+#[allow(clippy::struct_field_names)]
 struct PlaceholderPayloadStatus {
     placeholder_ref_count: i64,
     missing_metadata_count: i64,
@@ -537,10 +539,10 @@ fn slice_summary_sources(
         .into_iter()
         .map(|mut source| {
             let (content, range) = slice_content(&source.content, slice);
-            source.content = content.clone();
+            source.content.clone_from(&content);
             source.content_range = Some(range);
             if let Some(raw_message) = source.raw_message.as_mut() {
-                raw_message.content = content.clone();
+                raw_message.content.clone_from(&content);
             }
             if let Some(summary_node) = source.summary_node.as_mut() {
                 summary_node.summary_text = content;
@@ -578,7 +580,7 @@ impl ExpandQueryAssembler {
             self.take_content("summary", Some(node_id.clone()), None, &summary_text)
         {
             let mut summary = expansion.summary.clone();
-            summary.summary_text = content.clone();
+            summary.summary_text.clone_from(&content);
             self.context_blocks.push(LcmExpandQueryContextBlock {
                 kind: "summary".to_string(),
                 node_id: Some(node_id.clone()),
@@ -605,12 +607,12 @@ impl ExpandQueryAssembler {
                 continue;
             };
             let raw_message = source.raw_message.map(|mut raw| {
-                raw.content = content.clone();
+                raw.content.clone_from(&content);
                 raw
             });
             let summary_node = source.summary_node.map(|summary| {
                 let mut summary = *summary;
-                summary.summary_text = content.clone();
+                summary.summary_text.clone_from(&content);
                 summary
             });
             self.context_blocks.push(LcmExpandQueryContextBlock {
@@ -638,7 +640,7 @@ impl ExpandQueryAssembler {
             return;
         };
         let mut raw_message = raw;
-        raw_message.content = content.clone();
+        raw_message.content.clone_from(&content);
         self.context_blocks.push(LcmExpandQueryContextBlock {
             kind: "raw_message".to_string(),
             node_id,
@@ -744,7 +746,7 @@ async fn raw_grep_hits(
             "(json_extract(r.metadata_json, '$.source') = ? OR r.metadata_json LIKE ?)".to_string(),
         );
         values.push(Value::Text(source.to_string()));
-        values.push(Value::Text(format!("%\"source\":\"{}\"%", source)));
+        values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
     }
     if let Some(role) = request
         .role
@@ -840,7 +842,7 @@ async fn summary_grep_hits(
             .to_string(),
         );
         values.push(Value::Text(source.to_string()));
-        values.push(Value::Text(format!("%\"source\":\"{}\"%", source)));
+        values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
     }
     values.push(Value::Integer(limit as i64));
     let filter_sql = if filters.is_empty() {
@@ -1683,8 +1685,9 @@ fn normalized_strings(values: &[String]) -> Vec<String> {
 fn grep_order_by(sort: LcmGrepSort, recency_column: &str) -> String {
     match sort {
         LcmGrepSort::Recency => format!("{recency_column} DESC"),
-        LcmGrepSort::Relevance => format!("rank, {recency_column} DESC"),
-        LcmGrepSort::Hybrid => format!("rank, {recency_column} DESC"),
+        LcmGrepSort::Relevance | LcmGrepSort::Hybrid => {
+            format!("rank, {recency_column} DESC")
+        }
     }
 }
 

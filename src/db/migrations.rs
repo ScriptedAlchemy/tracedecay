@@ -304,6 +304,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
 /// The dirty-bank schema now lives in the folded v11/fresh schema, but existing
 /// databases may already carry `user_version = 12`. Keep the version monotonic
 /// so later schema work can safely use v13 instead of reusing an exposed number.
+#[allow(clippy::unused_async)] // keeps the migration dispatch uniform
 async fn migrate_v12(_conn: &Connection) -> Result<()> {
     Ok(())
 }

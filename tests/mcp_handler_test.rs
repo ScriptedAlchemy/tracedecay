@@ -3846,6 +3846,7 @@ async fn seed_lcm_tool_result_message(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn seed_lcm_session_message_with_role_source_timestamp(
     cg: &TokenSave,
     session_id: &str,

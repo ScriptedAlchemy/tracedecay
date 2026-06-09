@@ -687,7 +687,7 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let year = i64::from(year) - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
     let month = i64::from(month);
@@ -798,6 +798,8 @@ fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
     })
 }
 
+// By-value so it can be used point-free as a `map_err` adapter.
+#[allow(clippy::needless_pass_by_value)]
 fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
     TokenSaveError::Config {
         message: err.to_string(),
@@ -973,7 +975,7 @@ fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
         return Ok(LcmGrepSort::Recency);
     };
     sort.parse::<LcmGrepSort>()
-        .map_err(|_| argument_error("sort must be one of recency, relevance, hybrid"))
+        .map_err(|()| argument_error("sort must be one of recency, relevance, hybrid"))
 }
 
 fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
@@ -1078,8 +1080,7 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
     let mut scope = match args
         .get("scope")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("all")
+        .map_or("all", str::trim)
     {
         "parents_only" => SessionSearchScope::ParentsOnly,
         "subagents_only" => SessionSearchScope::SubagentsOnly,

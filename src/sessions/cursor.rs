@@ -150,10 +150,10 @@ impl TranscriptSource for CursorEventSource {
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let parent_session_id = event_session_id(&self.event, &self.transcript_path);
         let subagent = cursor_subagent_identity(path, &parent_session_id);
-        let session_id = subagent
-            .as_ref()
-            .map(|(session_id, _agent_id)| session_id.clone())
-            .unwrap_or_else(|| parent_session_id.clone());
+        let session_id = subagent.as_ref().map_or_else(
+            || parent_session_id.clone(),
+            |(session_id, _agent_id)| session_id.clone(),
+        );
         let mut messages = Vec::new();
         for line in &new.lines {
             // The byte offset doubles as the message ordinal and source_offset,
@@ -194,8 +194,9 @@ impl TranscriptSource for CursorEventSource {
         } else {
             let (project_key, project_path) = event_project(&self.event);
             let (draft_parent_session_id, agent_id) = subagent
-                .map(|(_session_id, agent_id)| (Some(parent_session_id), Some(agent_id)))
-                .unwrap_or((None, None));
+                .map_or((None, None), |(_session_id, agent_id)| {
+                    (Some(parent_session_id), Some(agent_id))
+                });
             let is_subagent = draft_parent_session_id.is_some();
             SessionDraft {
                 session_id,

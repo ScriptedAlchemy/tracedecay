@@ -312,7 +312,7 @@ fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
         lines.insert(plugins_start + 2, "    - tokensave".to_string());
     }
 
-    enable_memory_provider_config(&join_lines(lines, had_trailing_newline))
+    enable_memory_provider_config(&join_lines(&lines, had_trailing_newline))
 }
 
 fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
@@ -330,7 +330,7 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
     if let Some((enabled_start, enabled_end)) = enabled {
         lines = remove_list_item(lines, enabled_start, enabled_end, "tokensave");
     }
-    disable_memory_provider_config(&join_lines(lines, had_trailing_newline))
+    disable_memory_provider_config(&join_lines(&lines, had_trailing_newline))
 }
 
 fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
@@ -363,7 +363,7 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
         lines.insert(memory_start + 1, "  provider: tokensave".to_string());
     }
 
-    Ok(join_lines(lines, had_trailing_newline))
+    Ok(join_lines(&lines, had_trailing_newline))
 }
 
 fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
@@ -390,7 +390,7 @@ fn disable_memory_provider_config(existing: &str) -> std::result::Result<String,
         remove_empty_top_level_section(&mut lines, "memory");
     }
 
-    Ok(join_lines(lines, had_trailing_newline))
+    Ok(join_lines(&lines, had_trailing_newline))
 }
 
 fn validate_top_level_plugins_shape(existing: &str) -> std::result::Result<(), String> {
@@ -457,6 +457,9 @@ fn find_top_level_section_in(lines: &[&str], key: &str) -> Option<(usize, usize)
     Some((start, end))
 }
 
+// Outer `None` means the config is unsupported/ambiguous; inner `None` means
+// the section was simply not found.
+#[allow(clippy::option_option)]
 fn find_child_section_from_strings(
     lines: &[String],
     plugins_start: usize,
@@ -467,6 +470,7 @@ fn find_child_section_from_strings(
     find_child_section_in(&borrowed, plugins_start, plugins_end, key)
 }
 
+#[allow(clippy::option_option)]
 fn find_child_section_in(
     lines: &[&str],
     plugins_start: usize,
@@ -512,6 +516,7 @@ fn find_child_section_in(
     Some(Some((start, end)))
 }
 
+#[allow(clippy::option_option)]
 fn find_memory_provider_line(
     lines: &[String],
     memory_start: usize,
@@ -569,7 +574,7 @@ fn line_indent(line: &str) -> usize {
     line.chars().take_while(|ch| *ch == ' ').count()
 }
 
-fn join_lines(lines: Vec<String>, had_trailing_newline: bool) -> String {
+fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
     let mut out = lines.join("\n");
     if had_trailing_newline || !out.is_empty() {
         out.push('\n');
@@ -2148,7 +2153,7 @@ def register(ctx):
     .to_string()
 }
 
-const HERMES_SKILL: &str = r#"---
+const HERMES_SKILL: &str = r"---
 name: tokensave
 description: Prefer tokensave tools for codebase exploration and graph queries.
 ---
@@ -2157,4 +2162,4 @@ description: Prefer tokensave tools for codebase exploration and graph queries.
 
 Use tokensave tools before broad file reads for codebase exploration, symbol lookup,
 call graph traversal, impact analysis, affected files, and architectural navigation.
-"#;
+";

@@ -99,9 +99,7 @@ fn message_pattern_matches(pattern: &str, content: &str) -> bool {
     if pattern.is_empty() || content.is_empty() {
         return false;
     }
-    regex::Regex::new(pattern)
-        .map(|regex| regex.is_match(content))
-        .unwrap_or(false)
+    regex::Regex::new(pattern).is_ok_and(|regex| regex.is_match(content))
 }
 
 fn session_pattern_regex(pattern: &str) -> String {
@@ -219,12 +217,10 @@ fn distinct_char_count(text: &str) -> usize {
 
 fn is_tool_payload(role: &str, kind: Option<&str>) -> bool {
     role.eq_ignore_ascii_case("tool")
-        || kind
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                value == "tool_result" || value == "tool_output"
-            })
-            .unwrap_or(false)
+        || kind.is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value == "tool_result" || value == "tool_output"
+        })
 }
 
 pub fn has_long_base64_run(content: &str) -> bool {
