@@ -253,9 +253,7 @@ async fn compress_in_transaction(
     )
     .await?;
     let new_frontier = window
-        .backlog
-        .last()
-        .map(|message| message.store_id)
+        .compacted_frontier_store_id
         .or(existing_frontier.current_frontier_store_id);
     let update = LcmLifecycleUpdate {
         provider: request.provider.clone(),
@@ -275,7 +273,12 @@ async fn compress_in_transaction(
     )
     .await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
-    let replay_messages = replay_with_summary(&window.pinned_anchors, &summary, &window.fresh_tail);
+    let replay_messages = replay_with_summary(
+        &window.pinned_anchors,
+        &summary,
+        window.summary_position_store_id,
+        &window.fresh_tail,
+    );
 
     Ok(LcmCompressionResponse {
         status: "ok".to_string(),
@@ -436,30 +439,44 @@ struct CompressionWindow {
     pinned_anchors: Vec<LcmRawMessage>,
     backlog: Vec<LcmRawMessage>,
     fresh_tail: Vec<LcmRawMessage>,
+    summary_position_store_id: Option<i64>,
+    compacted_frontier_store_id: Option<i64>,
 }
 
 fn compression_window(
     raw_messages: &[LcmRawMessage],
     current_frontier_store_id: Option<i64>,
 ) -> CompressionWindow {
-    let pinned_anchors = raw_messages
-        .iter()
-        .take_while(|message| is_policy_anchor_role(&message.role))
-        .cloned()
-        .collect::<Vec<_>>();
     let frontier_store_id = current_frontier_store_id.unwrap_or(0);
     let unsummarized = raw_messages
         .iter()
-        .skip(pinned_anchors.len())
         .filter(|message| message.store_id > frontier_store_id)
         .cloned()
         .collect::<Vec<_>>();
     let backlog_len = unsummarized.len().saturating_sub(DEFAULT_FRESH_TAIL_COUNT);
-    let (backlog, fresh_tail) = unsummarized.split_at(backlog_len);
+    let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
+    let fresh_tail_start_store_id = fresh_tail
+        .first()
+        .map(|message| message.store_id)
+        .unwrap_or(i64::MAX);
+    let pinned_anchors = raw_messages
+        .iter()
+        .filter(|message| {
+            message.store_id < fresh_tail_start_store_id && is_policy_anchor_role(&message.role)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let backlog = older_unsummarized
+        .iter()
+        .filter(|message| !is_policy_anchor_role(&message.role))
+        .cloned()
+        .collect::<Vec<_>>();
 
     CompressionWindow {
         pinned_anchors,
-        backlog: backlog.to_vec(),
+        summary_position_store_id: backlog.first().map(|message| message.store_id),
+        compacted_frontier_store_id: older_unsummarized.last().map(|message| message.store_id),
+        backlog,
         fresh_tail: fresh_tail.to_vec(),
     }
 }
@@ -481,11 +498,22 @@ fn replay_without_summary(
 fn replay_with_summary(
     pinned_anchors: &[LcmRawMessage],
     summary: &LcmSummaryNode,
+    summary_position_store_id: Option<i64>,
     fresh_tail: &[LcmRawMessage],
 ) -> Vec<Value> {
     let mut replay_messages = Vec::with_capacity(pinned_anchors.len() + 1 + fresh_tail.len());
-    replay_messages.extend(pinned_anchors.iter().map(raw_replay_message));
-    replay_messages.push(summary_replay_message(summary));
+    let summary_position_store_id = summary_position_store_id.unwrap_or(i64::MAX);
+    let mut inserted_summary = false;
+    for anchor in pinned_anchors {
+        if !inserted_summary && anchor.store_id >= summary_position_store_id {
+            replay_messages.push(summary_replay_message(summary));
+            inserted_summary = true;
+        }
+        replay_messages.push(raw_replay_message(anchor));
+    }
+    if !inserted_summary {
+        replay_messages.push(summary_replay_message(summary));
+    }
     replay_messages.extend(fresh_tail.iter().map(raw_replay_message));
     replay_messages
 }

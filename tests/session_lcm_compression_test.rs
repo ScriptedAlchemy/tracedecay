@@ -392,6 +392,87 @@ async fn compression_preserves_leading_system_developer_tool_anchor_outside_summ
 }
 
 #[tokio::test]
+async fn compression_preserves_interleaved_policy_anchor_outside_summary() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("user", "old user request before policy"),
+            ("developer", "interleaved developer policy anchor"),
+            ("assistant", "old assistant response after policy"),
+            ("user", "old user follow-up after policy"),
+            ("user", "fresh user request"),
+            ("assistant", "fresh assistant response"),
+        ],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "old exchange summary".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 1);
+    let replay = response
+        .replay_messages
+        .iter()
+        .map(|message| {
+            (
+                message["role"].as_str().unwrap().to_string(),
+                message["content"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replay,
+        vec![
+            ("system".to_string(), "old exchange summary".to_string()),
+            (
+                "developer".to_string(),
+                "interleaved developer policy anchor".to_string()
+            ),
+            ("user".to_string(), "fresh user request".to_string()),
+            (
+                "assistant".to_string(),
+                "fresh assistant response".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[3])
+    );
+
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &response.summary_nodes[0].node_id)
+        .await
+        .unwrap();
+    let summarized_contents = expanded
+        .sources
+        .iter()
+        .map(|source| source.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summarized_contents,
+        vec![
+            "old user request before policy",
+            "old assistant response after policy",
+            "old user follow-up after policy"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn repeated_active_ingest_preserves_existing_message_ordinals() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
