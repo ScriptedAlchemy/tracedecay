@@ -3,10 +3,13 @@
 //! Each test exercises a real `TokenSave` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
-use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
+
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::db::Database;
+use tokensave::global_db::GlobalDb;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
 use tokensave::sessions::cursor::open_project_session_db;
 use tokensave::sessions::lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt};
@@ -3730,6 +3733,58 @@ async fn seed_lcm_session_message(
     );
 }
 
+async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
+    GlobalDb::open_at(&hermes_home.join(".tokensave/sessions.db"))
+        .await
+        .expect("profile-local session db should open")
+}
+
+async fn seed_lcm_session_message_in_db(
+    db: &GlobalDb,
+    project_path: &Path,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: project_path.to_string_lossy().to_string(),
+            project_path: project_path.to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
 #[tokio::test]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let (cg, _dir) = setup_project().await;
@@ -4077,6 +4132,191 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
         profile_payload.get("lcm").is_none(),
         "hermes_profile requests must not return project-local LCM counts"
     );
+}
+
+#[tokio::test]
+async fn lcm_status_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-status",
+        "lcm-profile-status-project",
+        "project-local distractor status",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-1",
+        "profile-local status seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-2",
+        "profile-local status seed two",
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-status",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert!(hermes_home.path().join(".tokensave/sessions.db").exists());
+}
+
+#[tokio::test]
+async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-read",
+        "lcm-profile-read-project",
+        "project-local distractor profile query",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-read",
+        "lcm-profile-read-profile",
+        "profile-local pear evidence",
+        1,
+    )
+    .await;
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        loaded_payload["messages"][0]["content"],
+        "profile-local pear evidence"
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
+    assert!(grep_payload["hits"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-missing-home",
+        "lcm-profile-missing-home-project",
+        "project-local must not leak without hermes home",
+        1,
+    )
+    .await;
+
+    let status = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "unavailable");
+    assert_eq!(status_payload["storage_scope"], "hermes_profile");
+    assert!(status_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("hermes_home"));
+    assert!(status_payload.get("lcm").is_none());
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile",
+            "hermes_home": "relative-hermes-home"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "unavailable");
+    assert_eq!(loaded_payload["storage_scope"], "hermes_profile");
+    assert!(loaded_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("absolute hermes_home"));
+    assert!(loaded_payload.get("messages").is_none());
 }
 
 #[tokio::test]

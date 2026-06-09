@@ -25,6 +25,16 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
     GlobalDb::open_at(&project_session_db_path(project_root)).await
 }
 
+pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
+    hermes_home
+        .join(".tokensave")
+        .join(PROJECT_SESSION_DB_FILENAME)
+}
+
+pub async fn open_hermes_profile_session_db(hermes_home: &Path) -> Option<GlobalDb> {
+    GlobalDb::open_at(&hermes_profile_session_db_path(hermes_home)).await
+}
+
 /// A Cursor hook event scoped to one transcript file. Cursor is hook-driven —
 /// the transcript path, session id, and project all come from the event payload
 /// rather than from a directory scan — so the source wraps the parsed event and

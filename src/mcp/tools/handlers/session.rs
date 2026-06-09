@@ -1,6 +1,9 @@
+use std::path::{Component, PathBuf};
+
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
+use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
     LcmCompressionRequest, LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest,
@@ -144,14 +147,112 @@ fn lcm_unavailable() -> ToolResult {
     }))
 }
 
-fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
+fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> ToolResult {
     tool_json(&json!({
         "status": "unavailable",
         "storage_scope": storage_scope,
-        "message": format!(
+        "message": message.into(),
+    }))
+}
+
+fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
+    lcm_scoped_unavailable(
+        storage_scope,
+        format!(
             "{storage_scope} LCM status storage is not available from the project-local handler"
         ),
-    }))
+    )
+}
+
+struct LcmStorage {
+    db: GlobalDb,
+    scope: &'static str,
+}
+
+enum LcmStorageResolution {
+    Available(LcmStorage),
+    Unavailable(ToolResult),
+}
+
+fn invalid_hermes_profile_home(message: impl Into<String>) -> ToolResult {
+    lcm_scoped_unavailable("hermes_profile", message)
+}
+
+fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult> {
+    let Some(hermes_home) = string_arg(args, "hermes_home") else {
+        return Err(invalid_hermes_profile_home(
+            "hermes_profile LCM storage requires an explicit absolute hermes_home",
+        ));
+    };
+    let path = PathBuf::from(hermes_home);
+    if !path.is_absolute() {
+        return Err(invalid_hermes_profile_home(
+            "hermes_profile LCM storage requires an absolute hermes_home",
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(invalid_hermes_profile_home(
+            "hermes_profile LCM storage requires a normalized absolute hermes_home",
+        ));
+    }
+    let Ok(canonical) = std::fs::canonicalize(&path) else {
+        return Err(invalid_hermes_profile_home(format!(
+            "hermes_home does not exist or is not a directory: {}",
+            path.display()
+        )));
+    };
+    if !canonical.is_dir() {
+        return Err(invalid_hermes_profile_home(format!(
+            "hermes_home does not exist or is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution {
+    let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
+    match storage_scope {
+        "project_local" => {
+            let Some(db) =
+                crate::sessions::cursor::open_project_session_db(cg.project_root()).await
+            else {
+                return LcmStorageResolution::Unavailable(lcm_unavailable());
+            };
+            LcmStorageResolution::Available(LcmStorage {
+                db,
+                scope: "project_local",
+            })
+        }
+        "hermes_profile" => {
+            let hermes_home = match hermes_profile_home(args) {
+                Ok(hermes_home) => hermes_home,
+                Err(result) => return LcmStorageResolution::Unavailable(result),
+            };
+            let db_path = crate::sessions::cursor::hermes_profile_session_db_path(&hermes_home);
+            if !db_path.starts_with(&hermes_home) {
+                return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                    "hermes_profile LCM storage path must stay inside hermes_home",
+                ));
+            }
+            let Some(db) =
+                crate::sessions::cursor::open_hermes_profile_session_db(&hermes_home).await
+            else {
+                return LcmStorageResolution::Unavailable(lcm_scoped_unavailable(
+                    "hermes_profile",
+                    "could not open hermes_profile tokensave session database",
+                ));
+            };
+            LcmStorageResolution::Available(LcmStorage {
+                db,
+                scope: "hermes_profile",
+            })
+        }
+        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
+    }
 }
 
 fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
@@ -299,18 +400,16 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
 pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
-    if let Some(storage_scope) = string_arg(&args, "storage_scope") {
-        if storage_scope != "project_local" {
-            return Ok(lcm_storage_scope_unavailable(storage_scope));
-        }
-    }
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let status = db
+    let mut status = storage
+        .db
         .lcm_status(provider, session_id)
         .await
         .map_err(lcm_error)?;
+    status.storage_scope = Some(storage.scope.to_string());
     Ok(tool_json(&json!({
         "status": "ok",
         "provider": provider,
@@ -322,10 +421,12 @@ pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<Too
 pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let page = db
+    let page = storage
+        .db
         .lcm_load_session(LcmLoadSessionRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
@@ -350,10 +451,12 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
 pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let query = required_string_arg(&args, "query")?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let hits = db
+    let hits = storage
+        .db
         .lcm_grep(LcmGrepRequest {
             provider: provider.to_string(),
             query: query.to_string(),
@@ -379,10 +482,12 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
 pub(super) async fn handle_lcm_describe(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let description = db
+    let description = storage
+        .db
         .lcm_describe(provider, session_id)
         .await
         .map_err(lcm_error)?;
@@ -398,10 +503,12 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let expansion = db
+    let expansion = storage
+        .db
         .lcm_expand(LcmExpandRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
@@ -428,10 +535,12 @@ pub(super) async fn handle_lcm_expand_query(_cg: &TokenSave, _args: Value) -> Re
 pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let response = db
+    let response = storage
+        .db
         .lcm_preflight(LcmPreflightRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
@@ -453,10 +562,12 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
 pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
-        return Ok(lcm_unavailable());
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let response = db
+    let response = storage
+        .db
         .lcm_compress(LcmCompressionRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
