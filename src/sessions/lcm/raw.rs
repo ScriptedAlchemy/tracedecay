@@ -583,9 +583,7 @@ fn find_next_private_key_block(
     while let Some(relative) = lower[search..].find("-----begin ") {
         let block_start = search + relative;
         let header_name_start = block_start + "-----begin ".len();
-        let Some(header_end_relative) = lower[header_name_start..].find("-----") else {
-            return None;
-        };
+        let header_end_relative = lower[header_name_start..].find("-----")?;
         let header_end = header_name_start + header_end_relative + "-----".len();
         if !lower[block_start..header_end].contains("private key") {
             search = header_name_start.min(text.len());
@@ -596,9 +594,7 @@ fn find_next_private_key_block(
         while let Some(end_relative) = lower[end_search..].find("-----end ") {
             let footer_start = end_search + end_relative;
             let footer_name_start = footer_start + "-----end ".len();
-            let Some(footer_end_relative) = lower[footer_name_start..].find("-----") else {
-                return None;
-            };
+            let footer_end_relative = lower[footer_name_start..].find("-----")?;
             let block_end = footer_name_start + footer_end_relative + "-----".len();
             if lower[footer_start..block_end].contains("private key") {
                 return Some((block_start, block_end));

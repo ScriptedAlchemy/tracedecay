@@ -96,11 +96,11 @@ fn test_tool_definitions_count() {
     // `tokensave_ast_grep_rewrite` is registered conditionally on whether
     // the external `ast-grep` binary is on PATH — hide-when-missing so
     // agents never receive a tool that will instantly fail.
-    // LCM comparison support registers eight additional MCP tools.
+    // LCM comparison support registers nine additional MCP tools.
     let expected = if tokensave::mcp::tools::ast_grep_available() {
-        85
+        86
     } else {
-        84
+        85
     };
     assert_eq!(tools.len(), expected);
 }
@@ -118,6 +118,7 @@ fn test_write_and_exec_tools_are_not_read_only() {
         "tokensave_insert_at_symbol",
         "tokensave_run_affected_tests",
         "tokensave_ast_grep_rewrite",
+        "tokensave_lcm_doctor",
     ];
     let tools = get_tool_definitions();
     for name in write_or_exec {

@@ -245,9 +245,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            85
+            86
         } else {
-            84
+            85
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -324,6 +324,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_memory_status"));
         assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_lcm_status"));
+        assert!(tool_names.contains(&"tokensave_lcm_doctor"));
         assert!(tool_names.contains(&"tokensave_lcm_load_session"));
         assert!(tool_names.contains(&"tokensave_lcm_grep"));
         assert!(tool_names.contains(&"tokensave_lcm_describe"));
@@ -374,6 +375,7 @@ mod tests {
             "tokensave_fact_store",
             "tokensave_fact_feedback",
             "tokensave_memory_status",
+            "tokensave_lcm_doctor",
             "tokensave_lcm_preflight",
             "tokensave_lcm_compress",
         ];

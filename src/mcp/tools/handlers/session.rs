@@ -631,7 +631,7 @@ struct LcmStorage {
 }
 
 enum LcmStorageResolution {
-    Available(LcmStorage),
+    Available(Box<LcmStorage>),
     Unavailable(ToolResult),
 }
 
@@ -695,10 +695,10 @@ async fn open_lcm_storage_with_mode(
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
             };
-            LcmStorageResolution::Available(LcmStorage {
+            LcmStorageResolution::Available(Box::new(LcmStorage {
                 db,
                 scope: "project_local",
-            })
+            }))
         }
         "hermes_profile" => {
             let hermes_home = match hermes_profile_home(args) {
@@ -737,10 +737,10 @@ async fn open_lcm_storage_with_mode(
                     "could not open hermes_profile tokensave session database",
                 ));
             };
-            LcmStorageResolution::Available(LcmStorage {
+            LcmStorageResolution::Available(Box::new(LcmStorage {
                 db,
                 scope: "hermes_profile",
-            })
+            }))
         }
         other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
     }
@@ -1045,9 +1045,10 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
         bounded_usize_arg(&args, "max_results", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(5);
     let max_tokens =
         bounded_usize_arg(&args, "max_tokens", 1, MAX_LCM_CONTENT_LIMIT)?.unwrap_or(2000);
-    let default_context_limit = max_tokens
-        .max(DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT)
-        .min(MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT);
+    let default_context_limit = max_tokens.clamp(
+        DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
+        MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
+    );
     let context_max_tokens = bounded_usize_arg(
         &args,
         "context_max_tokens",
