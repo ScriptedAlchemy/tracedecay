@@ -6,9 +6,13 @@ use sha2::{Digest, Sha256};
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    payload, security, LcmError, LcmStorageKind, DERIVED_TRUNCATION_MARKER,
+    payload, security, LcmError, LcmPayloadRef, LcmStorageKind, DERIVED_TRUNCATION_MARKER,
     MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
+
+pub(crate) struct RawMessageUpsert {
+    pub projection_text: String,
+}
 
 pub fn derived_text_for_index(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_TEXT_CHARS)
@@ -85,14 +89,27 @@ pub(crate) async fn upsert_raw_message(conn: &Connection, message: &SessionMessa
     .is_ok()
 }
 
+fn externalized_payload_metadata(payload_ref: &LcmPayloadRef) -> String {
+    serde_json::json!({
+        "external_payload": true,
+        "payload_ref": payload_ref.payload_ref,
+        "kind": payload_ref.kind,
+        "byte_count": payload_ref.byte_count,
+        "char_count": payload_ref.char_count,
+        "sha256": payload_ref.content_hash,
+    })
+    .to_string()
+}
+
 pub(crate) async fn upsert_raw_message_with_payload(
     conn: &Connection,
     storage_root: &Path,
     message: &SessionMessageRecord,
-) -> Result<(), LcmError> {
+) -> Result<RawMessageUpsert, LcmError> {
     if !security::should_externalize(&message.role, message.kind.as_deref(), &message.text) {
+        let projection_text = derived_text_for_index(&message.text);
         return if upsert_raw_message(conn, message).await {
-            Ok(())
+            Ok(RawMessageUpsert { projection_text })
         } else {
             Err(LcmError::Db(
                 "failed to upsert inline raw message".to_string(),
@@ -113,6 +130,7 @@ pub(crate) async fn upsert_raw_message_with_payload(
     payload::upsert_payload_metadata(conn, &payload_ref).await?;
 
     let placeholder = externalized_payload_placeholder(&payload_ref);
+    let metadata_json = externalized_payload_metadata(&payload_ref);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -146,12 +164,14 @@ pub(crate) async fn upsert_raw_message_with_payload(
             payload_ref.payload_ref.as_str(),
             placeholder.as_str(),
             placeholder.as_str(),
-            opt_text(message.metadata_json.as_deref()),
+            metadata_json.as_str(),
         ],
     )
     .await
     .map_err(|err| LcmError::Db(err.to_string()))?;
-    Ok(())
+    Ok(RawMessageUpsert {
+        projection_text: placeholder,
+    })
 }
 
 pub(crate) fn sha256_hex(content: &str) -> String {

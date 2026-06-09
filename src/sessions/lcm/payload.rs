@@ -24,7 +24,9 @@ impl<'db> LcmStore<'db> {
     }
 
     pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
-        raw::upsert_raw_message_with_payload(self.conn, &self.storage_root, message).await
+        raw::upsert_raw_message_with_payload(self.conn, &self.storage_root, message)
+            .await
+            .map(|_| ())
     }
 
     pub async fn lcm_expand_payload(
@@ -76,7 +78,7 @@ pub(crate) fn write_external_payload(
     message_id: &str,
     kind: &str,
     content: &str,
-    metadata_json: Option<String>,
+    _metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
     let content_hash = sha256_hex(content.as_bytes());
     let owner_hash =
@@ -84,8 +86,7 @@ pub(crate) fn write_external_payload(
     let payload_ref = format!("payload_{owner_hash}.payload");
     validate_payload_ref(&payload_ref)?;
 
-    let dir = payload_dir(storage_root);
-    create_private_dir(&dir)?;
+    let dir = prepare_payload_dir(storage_root)?;
     let path = dir.join(&payload_ref);
     ensure_contained(&dir, &path)?;
     write_private_file(&path, content.as_bytes())?;
@@ -100,7 +101,7 @@ pub(crate) fn write_external_payload(
         byte_count: content.len() as u64,
         char_count: content.chars().count() as u64,
         created_at: unixepoch(),
-        metadata_json,
+        metadata_json: None,
     })
 }
 
@@ -156,8 +157,9 @@ async fn expand_payload(
     if payload.provider != provider || payload.session_id != session_id {
         return Err(LcmError::PayloadNotOwnedBySession);
     }
+    ensure_current_raw_payload_ref(conn, &payload).await?;
 
-    let dir = payload_dir(storage_root);
+    let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
     let content = read_payload_file(&path)?;
@@ -181,6 +183,41 @@ async fn expand_payload(
         byte_count: payload.byte_count,
         content_hash: payload.content_hash,
     })
+}
+
+async fn ensure_current_raw_payload_ref(
+    conn: &Connection,
+    payload: &LcmPayloadRef,
+) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1
+             FROM lcm_raw_messages
+             WHERE provider = ?1
+               AND session_id = ?2
+               AND message_id = ?3
+               AND storage_kind = 'external'
+               AND payload_ref = ?4
+             LIMIT 1",
+            params![
+                payload.provider.as_str(),
+                payload.session_id.as_str(),
+                payload.message_id.as_str(),
+                payload.payload_ref.as_str(),
+            ],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    if rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(LcmError::PayloadNotFound)
+    }
 }
 
 async fn load_payload_metadata(
@@ -218,20 +255,62 @@ async fn load_payload_metadata(
     })
 }
 
-fn create_private_dir(dir: &Path) -> Result<(), LcmError> {
-    fs::create_dir_all(dir).map_err(|err| LcmError::Io(err.to_string()))?;
+fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    let root = canonical_storage_root(storage_root)?;
+    let dir = root.join("lcm-payloads");
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) => ensure_actual_private_dir(&dir, metadata)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
+            set_private_dir_permissions(&dir)?;
+        }
+        Err(err) => return Err(LcmError::Io(err.to_string())),
+    }
+    ensure_payload_dir_under_root(&root, &dir)?;
+    Ok(dir)
+}
+
+fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    let root = canonical_storage_root(storage_root)?;
+    let dir = root.join("lcm-payloads");
+    let metadata = fs::symlink_metadata(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
+    ensure_actual_private_dir(&dir, metadata)?;
+    ensure_payload_dir_under_root(&root, &dir)?;
+    Ok(dir)
+}
+
+fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    let metadata =
+        fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
+    storage_root
+        .canonicalize()
+        .map_err(|err| LcmError::Io(err.to_string()))
+}
+
+fn ensure_actual_private_dir(dir: &Path, metadata: fs::Metadata) -> Result<(), LcmError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LcmError::InvalidPayloadRef);
+    }
     set_private_dir_permissions(dir)?;
     Ok(())
 }
 
+fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError> {
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    if canonical_dir.parent() == Some(root) {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
 fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
-    let root = root
-        .canonicalize()
-        .map_err(|err| LcmError::Io(err.to_string()))?;
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|err| LcmError::Io(err.to_string()))?;
     if parent == root {
         Ok(())
     } else {
@@ -252,6 +331,8 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), LcmError> {
         Err(err) => return Err(LcmError::Io(err.to_string())),
     };
     file.write_all(content)
+        .map_err(|err| LcmError::Io(err.to_string()))?;
+    file.sync_all()
         .map_err(|err| LcmError::Io(err.to_string()))?;
     Ok(())
 }

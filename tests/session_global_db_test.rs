@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
+use tokensave::sessions::lcm::LcmStorageKind;
 use tokensave::sessions::{SessionMessageRecord, SessionRecord, SessionSearchScope};
 
 fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
@@ -45,6 +46,21 @@ async fn raw_snippet_and_index(
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     (row.get(0).unwrap(), row.get(1).unwrap())
+}
+
+async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_raw_messages_fts
+             WHERE lcm_raw_messages_fts MATCH ?1",
+            libsql::params![query],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
 fn sha256_hex(content: &str) -> String {
@@ -273,6 +289,71 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
     assert!(raw.content.ends_with("::lossless-tail"));
     assert!(!raw.legacy_source);
     assert!(!raw.legacy_truncated);
+}
+
+#[tokio::test]
+async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_or_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "session-1", "project-a");
+    assert!(db.upsert_session(&session).await);
+
+    let body_secret = "globaldbbodysecretnotindexed";
+    let metadata_secret = "globaldbmetadatasecretnotindexed";
+    let payload = format!("tool output {body_secret}\n{}", "T".repeat(900_000));
+    let mut message = sample_message("cursor", "tool-large", "session-1", &payload);
+    message.role = "tool".to_string();
+    message.kind = Some("tool_result".to_string());
+    message.metadata_json = Some(format!(r#"{{"preview":"{metadata_secret}"}}"#));
+    assert!(db.upsert_session_message(&message).await);
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "tool-large")
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.storage_kind, LcmStorageKind::External);
+    assert!(raw.content.is_empty());
+    assert!(!raw.content.contains(body_secret));
+    assert!(!raw
+        .metadata_json
+        .as_deref()
+        .unwrap_or("")
+        .contains(metadata_secret));
+    let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
+
+    let fetched = db
+        .get_session_message("cursor", "tool-large")
+        .await
+        .expect("projection should exist");
+    assert!(!fetched.text.contains(body_secret));
+    assert!(fetched.text.contains("[externalized payload: tool_result"));
+
+    let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "tool-large").await;
+    assert!(!snippet_text.contains(body_secret));
+    assert!(!index_text.contains(body_secret));
+    assert!(!snippet_text.contains(metadata_secret));
+    assert!(!index_text.contains(metadata_secret));
+    assert_eq!(lcm_fts_count(&db_path, body_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
+    assert!(db
+        .search_session_messages("cursor", Some("project-a"), body_secret, 10)
+        .await
+        .is_empty());
+
+    let expanded = db
+        .lcm_store(&storage_root)
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            payload_ref,
+            0,
+            payload.chars().count(),
+        )
+        .await
+        .expect("payload should expand");
+    assert_eq!(expanded.content, payload);
 }
 
 #[tokio::test]

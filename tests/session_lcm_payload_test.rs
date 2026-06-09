@@ -50,6 +50,25 @@ async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn raw_metadata_json(
+    db_path: &std::path::Path,
+    provider: &str,
+    message_id: &str,
+) -> Option<String> {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2",
+            libsql::params![provider, message_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 fn sha256_hex(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
@@ -163,8 +182,10 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     );
 
     let unique_secret = "uniquebodysecretdonotindex";
+    let metadata_secret = "uniquemetadatasecretdonotindex";
     let payload = format!("tool output {unique_secret}\n{}", "B".repeat(900_000));
-    let message = raw_message("cursor", "tool-secret", "session-1", "tool", &payload);
+    let mut message = raw_message("cursor", "tool-secret", "session-1", "tool", &payload);
+    message.metadata_json = Some(format!(r#"{{"payload_preview":"{metadata_secret}"}}"#));
     let store = db.lcm_store(&storage_root);
     store
         .ingest_raw_message(&message)
@@ -198,8 +219,14 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     assert!(!snippet_text.contains(unique_secret));
     assert!(!index_text.contains(unique_secret));
 
+    let raw_metadata = raw_metadata_json(&db_path, "cursor", "tool-secret").await;
+    assert!(!raw_metadata
+        .as_deref()
+        .unwrap_or("")
+        .contains(metadata_secret));
     assert_eq!(lcm_fts_count(&db_path, "externalized").await, 1);
     assert_eq!(lcm_fts_count(&db_path, unique_secret).await, 0);
+    assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
 }
 
 #[test]
@@ -253,6 +280,68 @@ async fn denies_cross_session_payload_expansion() {
     assert!(matches!(denied, Err(LcmError::PayloadNotOwnedBySession)));
 }
 
+#[tokio::test]
+async fn denies_expansion_after_message_updates_to_new_payload_ref() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let first_payload = format!("first secret tool output\n{}", "F".repeat(300_000));
+    let mut message = raw_message(
+        "cursor",
+        "message-update",
+        "session-1",
+        "tool",
+        &first_payload,
+    );
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("first payload should ingest");
+    let first_ref = db
+        .lcm_load_raw_message("cursor", "message-update")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("first payload ref");
+
+    let second_payload = format!("second secret tool output\n{}", "G".repeat(300_000));
+    message.text = second_payload.clone();
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("second payload should ingest");
+    let second_ref = db
+        .lcm_load_raw_message("cursor", "message-update")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("second payload ref");
+    assert_ne!(first_ref, second_ref);
+
+    let stale = store
+        .lcm_expand_payload("cursor", "session-1", &first_ref, 0, first_payload.len())
+        .await;
+    assert!(matches!(stale, Err(LcmError::PayloadNotFound)));
+
+    let current = store
+        .lcm_expand_payload(
+            "cursor",
+            "session-1",
+            &second_ref,
+            0,
+            second_payload.chars().count(),
+        )
+        .await
+        .expect("current payload should expand");
+    assert_eq!(current.content, second_payload);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn external_payload_write_rejects_preexisting_symlink_ref() {
@@ -285,6 +374,39 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
     );
     assert!(db
         .lcm_load_raw_message("cursor", "tool-symlink")
+        .await
+        .is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_payload_write_rejects_symlinked_payload_directory() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    std::fs::create_dir_all(&storage_root).unwrap();
+    let outside_dir = tmp.path().join("outside-payloads");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let payload_dir = tokensave::sessions::lcm::payload::payload_dir(&storage_root);
+    symlink(&outside_dir, &payload_dir).unwrap();
+
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let payload = format!("tool output\n{}", "D".repeat(900_000));
+    let payload_ref = expected_payload_ref("cursor", "session-1", "tool-dir-symlink", &payload);
+    let message = raw_message("cursor", "tool-dir-symlink", "session-1", "tool", &payload);
+    let store = db.lcm_store(&storage_root);
+    let result = store.ingest_raw_message(&message).await;
+
+    assert!(result.is_err());
+    assert!(!outside_dir.join(payload_ref).exists());
+    assert!(db
+        .lcm_load_raw_message("cursor", "tool-dir-symlink")
         .await
         .is_none());
 }

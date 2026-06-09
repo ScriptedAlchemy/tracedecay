@@ -31,6 +31,7 @@ pub struct SavingsDay {
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
+    storage_root: PathBuf,
     _db: LibsqlDatabase,
 }
 
@@ -159,6 +160,10 @@ impl GlobalDb {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
 
         let db = Builder::new_local(db_path).build().await.ok()?;
         let conn = db.connect().ok()?;
@@ -285,7 +290,11 @@ impl GlobalDb {
         ensure_session_parent_columns(&conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&conn).await?;
 
-        Some(Self { conn, _db: db })
+        Some(Self {
+            conn,
+            storage_root,
+            _db: db,
+        })
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
@@ -538,13 +547,23 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
-        let text = crate::sessions::lcm::derived_text_for_index(&message.text);
         if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
             return false;
         }
 
-        let raw_ok = crate::sessions::lcm::raw::upsert_raw_message(&self.conn, message).await;
-        let projection_ok = raw_ok && self.upsert_session_message_projection(message, &text).await;
+        let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
+            &self.conn,
+            &self.storage_root,
+            message,
+        )
+        .await;
+        let projection_ok = match raw_result {
+            Ok(raw) => {
+                self.upsert_session_message_projection(message, &raw.projection_text)
+                    .await
+            }
+            Err(_) => false,
+        };
 
         if projection_ok {
             match self.conn.execute("COMMIT", ()).await {
