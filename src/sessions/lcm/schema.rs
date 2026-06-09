@@ -54,6 +54,38 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner
             ON lcm_external_payloads(provider, session_id);
+        CREATE TABLE IF NOT EXISTS lcm_summary_nodes (
+            node_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            depth INTEGER NOT NULL,
+            summary_text TEXT NOT NULL,
+            summary_hash TEXT NOT NULL,
+            summary_token_count INTEGER NOT NULL,
+            source_token_count INTEGER NOT NULL,
+            source_time_start INTEGER,
+            source_time_end INTEGER,
+            expand_hint TEXT,
+            metadata_json TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            FOREIGN KEY(provider, session_id)
+                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS lcm_summary_sources (
+            node_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
+            source_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            PRIMARY KEY(node_id, ordinal),
+            FOREIGN KEY(node_id) REFERENCES lcm_summary_nodes(node_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_session_depth_time
+            ON lcm_summary_nodes(
+                provider, session_id, depth, source_time_start, source_time_end, created_at
+            );
+        CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
+            ON lcm_summary_sources(source_kind, source_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
             index_text, role, metadata_json,
             content='lcm_raw_messages',
@@ -79,6 +111,32 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
                 VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
                 INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
                 VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
+            END;
+        CREATE VIRTUAL TABLE IF NOT EXISTS lcm_summary_nodes_fts USING fts5(
+            summary_text, expand_hint, metadata_json,
+            content='lcm_summary_nodes',
+            content_rowid='rowid'
+        );
+        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_insert
+            AFTER INSERT ON lcm_summary_nodes BEGIN
+                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
+                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
+            END;
+        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_delete
+            AFTER DELETE ON lcm_summary_nodes BEGIN
+                INSERT INTO lcm_summary_nodes_fts(
+                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
+                )
+                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
+            END;
+        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_update
+            AFTER UPDATE ON lcm_summary_nodes BEGIN
+                INSERT INTO lcm_summary_nodes_fts(
+                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
+                )
+                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
+                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
+                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
             END;",
     )
     .await

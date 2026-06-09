@@ -48,6 +48,62 @@ pub struct LcmPayloadExpansion {
     pub content_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LcmSourceRef {
+    RawMessage { store_id: i64 },
+    SummaryNode { node_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryNodeDraft {
+    pub provider: String,
+    pub conversation_id: String,
+    pub session_id: String,
+    pub depth: i64,
+    pub summary_text: String,
+    pub source_refs: Vec<LcmSourceRef>,
+    pub source_token_count: i64,
+    pub summary_token_count: i64,
+    pub source_time_start: Option<i64>,
+    pub source_time_end: Option<i64>,
+    pub expand_hint: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryNode {
+    pub node_id: String,
+    pub provider: String,
+    pub conversation_id: String,
+    pub session_id: String,
+    pub depth: i64,
+    pub summary_text: String,
+    pub summary_hash: String,
+    pub source_refs: Vec<LcmSourceRef>,
+    pub summary_token_count: i64,
+    pub source_token_count: i64,
+    pub source_time_start: Option<i64>,
+    pub source_time_end: Option<i64>,
+    pub expand_hint: Option<String>,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryExpansion {
+    pub summary: LcmSummaryNode,
+    pub sources: Vec<LcmExpandedSummarySource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmExpandedSummarySource {
+    pub source_ref: LcmSourceRef,
+    pub content: String,
+    pub raw_message: Option<LcmRawMessage>,
+    pub summary_node: Option<Box<LcmSummaryNode>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcmError {
     InvalidPayloadRef,
@@ -55,6 +111,8 @@ pub enum LcmError {
     PayloadNotOwnedBySession,
     PayloadMissing,
     PayloadIntegrityMismatch,
+    SummaryNodeNotFound,
+    SummarySourceNotOwnedBySession,
     Db(String),
     Io(String),
 }
@@ -67,6 +125,10 @@ impl std::fmt::Display for LcmError {
             Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
             Self::PayloadMissing => write!(f, "payload file missing"),
             Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
+            Self::SummaryNodeNotFound => write!(f, "summary node not found"),
+            Self::SummarySourceNotOwnedBySession => {
+                write!(f, "summary source not owned by session")
+            }
             Self::Db(message) => write!(f, "payload database error: {message}"),
             Self::Io(message) => write!(f, "payload IO error: {message}"),
         }

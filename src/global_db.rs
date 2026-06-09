@@ -671,6 +671,25 @@ impl GlobalDb {
         )
     }
 
+    /// Inserts or updates an LCM summary node and its ordered source lineage.
+    pub async fn lcm_insert_summary_node(
+        &self,
+        draft: crate::sessions::lcm::LcmSummaryNodeDraft,
+    ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::insert_summary_node(&self.conn, draft).await
+    }
+
+    /// Expands one summary node to its direct raw-message or summary-node sources.
+    pub async fn lcm_expand_summary_node(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmSummaryExpansion, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::expand_summary_node(&self.conn, provider, session_id, node_id)
+            .await
+    }
+
     /// Searches message text for a provider, optionally constrained to one project.
     pub async fn search_session_messages(
         &self,
