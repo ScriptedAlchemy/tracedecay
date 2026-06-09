@@ -1810,34 +1810,33 @@ async fn count_legacy_truncated(
     .await
 }
 
+/// SQL pushdown of the former Rust-side metadata scan. Semantics are pinned
+/// to the old `serde_json` reader, which counted a row only when
+/// `metadata_json.ingest_protection.lossy` was the JSON *boolean* `true`
+/// (`Value::as_bool`): `json_type(...) = 'true'` matches exactly — a numeric
+/// `1` reports `'integer'` and stays not-lossy (the Rust writer in
+/// `raw::add_ingest_protection_metadata` only ever stores `json!(true)`),
+/// invalid JSON is screened out by `json_valid` (`SQLite` `AND` short-circuits
+/// left-to-right, so `json_type` never raises on malformed text), and a
+/// missing key or non-object metadata yields `NULL`, which is not `'true'`.
 async fn count_lossy_ingest_records(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT metadata_json
+    util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
              FROM lcm_raw_messages
              WHERE provider = ?1
                AND (?2 IS NULL OR session_id = ?2)
-               AND metadata_json IS NOT NULL",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    let mut count = 0_i64;
-    while let Some(row) = rows.next().await? {
-        let metadata: String = row.get(0)?;
-        if serde_json::from_str::<serde_json::Value>(&metadata)
-            .ok()
-            .and_then(|value| value.get("ingest_protection").cloned())
-            .and_then(|value| value.get("lossy").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false)
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
+               AND metadata_json IS NOT NULL
+               AND json_valid(metadata_json)
+               AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'",
+        params![provider, util::opt_text(session_id)],
+        "lossy ingest count query returned no rows",
+    )
+    .await
 }
 
 fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&str> {

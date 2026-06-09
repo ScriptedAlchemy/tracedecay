@@ -1760,3 +1760,57 @@ async fn content_slices_use_char_offsets_for_multibyte_content() {
     assert_eq!(beyond.content_range.returned_chars, 0);
     assert_eq!(beyond.content_range.total_chars, 9);
 }
+
+// Pins the SQL pushdown of `count_lossy_ingest_records` to the previous
+// serde_json semantics: only a JSON boolean `true` under
+// `$.ingest_protection.lossy` counts; numeric 1, false, missing keys,
+// non-object metadata, invalid JSON, and NULL metadata are all not-lossy.
+#[tokio::test]
+async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    insert_session(&db, "cursor", "session-lossy").await;
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let variants: &[(&str, Option<&str>)] = &[
+        ("lossy-true", Some(r#"{"ingest_protection":{"lossy":true}}"#)),
+        ("lossy-false", Some(r#"{"ingest_protection":{"lossy":false}}"#)),
+        ("lossy-integer", Some(r#"{"ingest_protection":{"lossy":1}}"#)),
+        ("missing-key", Some(r#"{"ingest_protection":{}}"#)),
+        ("missing-section", Some(r#"{"other":true}"#)),
+        ("invalid-json", Some("{not json")),
+        ("non-object", Some(r#"[{"ingest_protection":{"lossy":true}}]"#)),
+        ("null-metadata", None),
+    ];
+    for (idx, (message_id, metadata)) in variants.iter().enumerate() {
+        let metadata_value = match metadata {
+            Some(text) => libsql::Value::Text((*text).to_string()),
+            None => libsql::Value::Null,
+        };
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref, snippet_text,
+                index_text, legacy_source, legacy_truncated, metadata_json
+             )
+             VALUES ('cursor', ?1, 'session-lossy', 'assistant', ?2, ?2,
+                     'body', 'hash', 'inline', NULL, 'body', 'body', 0, 0, ?3)",
+            libsql::params![*message_id, (idx + 1) as i64, metadata_value],
+        )
+        .await
+        .unwrap();
+    }
+
+    let status = db
+        .lcm_status("cursor", Some("session-lossy"))
+        .await
+        .expect("status should load");
+    assert_eq!(
+        status.redaction.lossy_records, 1,
+        "only the JSON boolean true row counts as lossy"
+    );
+    assert!(status.redaction.enabled);
+    assert_eq!(status.redaction.legacy_truncated_count, 0);
+}
