@@ -3560,3 +3560,151 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
         .await
         .is_err());
 }
+
+// The carry-over runs in a single transaction; a rejected carry-over must
+// leave the source session fully usable (rows, payload ownership, lifecycle
+// frontier, and maintenance debt untouched) and write nothing for the target,
+// so a later boundary to a genuinely empty session can still succeed.
+#[tokio::test]
+async fn failed_carry_over_leaves_source_session_state_intact() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-old",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+    let payload_body = format!("tool output\n{}", "Y".repeat(300_000));
+    let mut external_message = raw_message_with_role(
+        "cursor",
+        "session-old-tool-1",
+        "session-old",
+        "tool",
+        7,
+        &payload_body,
+    );
+    external_message.kind = Some("tool_result".to_string());
+    let storage_root = tmp.path().join(".tokensave");
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&external_message)
+        .await
+        .unwrap();
+    let payload_ref = db
+        .lcm_load_raw_message("cursor", "session-old-tool-1")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("payload should externalize");
+
+    let first = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-old",
+            LcmSummarizerMode::Fake {
+                summary_text: "first chunk summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(!first.frontier.maintenance_debt.is_empty());
+    let state_before = db
+        .lcm_lifecycle_state("cursor", "session-old")
+        .await
+        .unwrap();
+
+    // The target session already has rows, so the carry-over is rejected.
+    insert_raw_messages(&db, "cursor", "session-busy", &["already-there"]).await;
+    let err = db
+        .lcm_session_boundary(boundary_request(
+            "session-busy",
+            "session-old",
+            Some("session-old"),
+        ))
+        .await
+        .expect_err("carry-over into a non-empty session must fail");
+    assert!(
+        matches!(err, tokensave::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
+    );
+
+    // Source rows, payload ownership, and lifecycle state are untouched.
+    let old_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-old".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(old_page.messages.len(), 7);
+    assert_eq!(old_page.messages[0].store_id, store_ids[0]);
+    let state_after = db
+        .lcm_lifecycle_state("cursor", "session-old")
+        .await
+        .unwrap();
+    assert_eq!(state_after.current_session_id, "session-old");
+    assert_eq!(
+        state_after.current_frontier_store_id,
+        state_before.current_frontier_store_id
+    );
+    assert_eq!(state_after.maintenance_debt, state_before.maintenance_debt);
+    let payload_expansion = db
+        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-old".into(),
+            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload {
+                payload_ref: payload_ref.clone(),
+            },
+            content_slice: None,
+            source_offset: 0,
+            source_limit: None,
+        })
+        .await
+        .expect("payload must remain owned by the source session");
+    assert!(payload_expansion.content.starts_with("tool output"));
+
+    // Nothing was written for the rejected target: no lifecycle rebind and
+    // no boundary-skip cooldown.
+    assert!(db
+        .lcm_lifecycle_state("cursor", "session-busy")
+        .await
+        .is_err());
+
+    // The same source session can still carry over to an empty session.
+    insert_session(&db, "cursor", "session-empty").await;
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-empty",
+            "session-old",
+            Some("session-old"),
+        ))
+        .await
+        .unwrap();
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_carried_over");
+    let rebound = db
+        .lcm_lifecycle_state("cursor", "session-empty")
+        .await
+        .unwrap();
+    assert_eq!(rebound.current_session_id, "session-empty");
+    assert_eq!(
+        rebound.maintenance_debt, state_before.maintenance_debt,
+        "outstanding debt must survive the eventual carry-over"
+    );
+}
