@@ -1157,6 +1157,199 @@ async fn preflight_requests_compression_for_maintenance_debt() {
 }
 
 #[tokio::test]
+async fn compress_noops_for_sub_threshold_backlog_in_threshold_mode() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "should not be written".into(),
+            },
+            Some(10),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "backlog_below_leaf_chunk_threshold");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert!(response.summary_nodes.is_empty());
+    assert!(response.summary_request.is_none());
+    let replay = response
+        .replay_messages
+        .iter()
+        .map(|message| message["content"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(replay, vec!["old-1", "old-2", "fresh-1", "fresh-2"]);
+    assert_eq!(response.frontier.current_frontier_store_id, None);
+    assert!(response.frontier.maintenance_debt.is_empty());
+}
+
+#[tokio::test]
+async fn compress_noop_guard_fires_before_auxiliary_summary_request() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::HermesAuxiliary,
+            Some(10),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "backlog_below_leaf_chunk_threshold");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert!(response.summary_request.is_none());
+}
+
+#[tokio::test]
+async fn compress_proceeds_at_exact_leaf_chunk_threshold() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    // Backlog tokens == leaf_chunk_tokens: hermes-lcm only no-ops on a strict
+    // `<` comparison, so the boundary case must still compress.
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["alpha beta", "gamma delta", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "boundary summary".into(),
+            },
+            Some(4),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 1);
+}
+
+#[tokio::test]
+async fn forced_overflow_compresses_sub_threshold_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "forced summary".into(),
+            },
+            Some(10),
+            None,
+            Some(100),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.reason, "forced_overflow_recovery");
+    assert!(response.summary_nodes_created >= 1);
+}
+
+#[tokio::test]
+async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "old-1 token",
+            "old-2 token",
+            "old-3 token",
+            "old-4 token",
+            "fresh-1",
+            "fresh-2",
+        ],
+    )
+    .await;
+    let first = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "first chunk summary".into(),
+            },
+            Some(4),
+            Some(2),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.frontier.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[2],
+            to_store_id: store_ids[3],
+        }]
+    );
+
+    // Remaining backlog is 4 tokens, below the 50-token leaf chunk threshold,
+    // but outstanding maintenance debt must keep compression flowing.
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "debt catch-up summary".into(),
+            },
+            Some(50),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert!(response.frontier.maintenance_debt.is_empty());
+}
+
+#[tokio::test]
 async fn fake_summarizer_compacts_backlog_and_preserves_fresh_tail() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

@@ -303,6 +303,39 @@ async fn compress_in_transaction(
         ));
     }
 
+    // Mirrors hermes-lcm `compress()`: a threshold-style request no-ops when
+    // the raw backlog outside the fresh tail is strictly below the working
+    // leaf chunk threshold. Forced overflow recovery and outstanding
+    // maintenance debt bypass the guard, matching Hermes' `force_overflow`
+    // and deferred-maintenance escape hatches.
+    if !should_force_overflow_recovery(&request)
+        && !frontier_has_maintenance_debt(&existing_frontier)
+    {
+        let leaf_chunk_tokens = effective_leaf_chunk_tokens(
+            request.leaf_chunk_tokens,
+            request.dynamic_leaf_chunk_enabled,
+            request.dynamic_leaf_chunk_max,
+            source_token_count(&window.backlog),
+        );
+        if !has_eligible_backlog(&window.backlog, leaf_chunk_tokens) {
+            let replay_messages = replay_with_summaries(
+                &window.pinned_anchors,
+                &[],
+                &window.backlog,
+                &window.fresh_tail,
+            );
+            return Ok(compression_response(
+                "ok",
+                "backlog_below_leaf_chunk_threshold",
+                Vec::new(),
+                replay_messages,
+                existing_frontier,
+                None,
+                request.max_assembly_tokens,
+            ));
+        }
+    }
+
     let plan = compression_plan(&request, &window);
 
     if matches!(request.summarizer, LcmSummarizerMode::HermesAuxiliary) {
