@@ -743,6 +743,9 @@ def error_payload(message: str, result=None) -> str:
 def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
     try:
         tool_args = args or {{}}
+        if "messages" in kwargs and "messages" not in tool_args:
+            tool_args = dict(tool_args)
+            tool_args["messages"] = kwargs["messages"]
         payload = json.dumps(tool_args)
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
         argv = [TOKENSAVE_BIN, "tool"]
@@ -850,6 +853,167 @@ LCM_TOOL_ALIASES = {
 }
 LCM_NATIVE_TOOL_NAMES = tuple(LCM_TOOL_ALIASES.keys())
 LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
+LCM_DIRECT_TO_NATIVE = {tokensave_name: native_name for native_name, tokensave_name in LCM_TOOL_ALIASES.items()}
+
+LCM_NATIVE_SCHEMAS = [
+    {
+        "name": "lcm_grep",
+        "description": (
+            "Search the plugin-local LCM database for past conversation content. "
+            "Default scope is the active session and returns raw messages and summary nodes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "limit": {"type": "integer", "description": "Max results to return.", "default": 10},
+                "sort": {
+                    "type": "string",
+                    "enum": ["recency", "relevance", "hybrid"],
+                    "description": "How to order matches.",
+                    "default": "recency",
+                },
+                "session_scope": {
+                    "type": "string",
+                    "enum": ["current", "all", "session"],
+                    "description": "Search scope across the local LCM database.",
+                    "default": "current",
+                },
+                "session_id": {"type": "string", "description": "Session id when session_scope='session'."},
+                "source": {"type": "string", "description": "Optional source/platform filter."},
+                "role": {
+                    "type": "string",
+                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "description": "Optional raw-message role filter.",
+                },
+                "time_from": {
+                    "anyOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Optional inclusive minimum raw-message timestamp.",
+                },
+                "time_to": {
+                    "anyOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Optional inclusive maximum raw-message timestamp.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "lcm_load_session",
+        "description": "Load an ordered raw-message transcript page for one explicit session_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Explicit LCM session id to load."},
+                "limit": {"type": "integer", "description": "Maximum raw messages to return.", "default": 100},
+                "max_content_chars": {
+                    "type": "integer",
+                    "description": "Maximum content characters to include per message.",
+                    "default": 4000,
+                },
+                "after_store_id": {
+                    "type": "integer",
+                    "description": "Exclusive cursor for pagination.",
+                    "default": 0,
+                },
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional role filter.",
+                },
+                "time_from": {
+                    "type": "number",
+                    "description": "Optional inclusive minimum message timestamp.",
+                },
+                "time_to": {
+                    "type": "number",
+                    "description": "Optional inclusive maximum message timestamp.",
+                },
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "lcm_describe",
+        "description": "Inspect a current-session summary node, externalized payload, or top-level DAG overview.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "integer", "description": "Summary node ID to inspect."},
+                "externalized_ref": {
+                    "type": "string",
+                    "description": "Externalized payload ref filename to inspect.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "lcm_expand",
+        "description": "Recover detail behind a summary node, externalized payload, or raw message.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "integer", "description": "Summary node ID to expand."},
+                "externalized_ref": {
+                    "type": "string",
+                    "description": "Externalized payload ref filename to expand.",
+                },
+                "store_id": {"type": "integer", "description": "Raw message store_id to fetch."},
+                "max_tokens": {"type": "integer", "description": "Token budget for returned content.", "default": 4000},
+                "source_offset": {
+                    "type": "integer",
+                    "description": "Source pagination offset for node_id mode.",
+                    "default": 0,
+                },
+                "source_limit": {
+                    "type": "integer",
+                    "description": "Maximum immediate sources to return from source_offset.",
+                },
+                "content_offset": {
+                    "type": "integer",
+                    "description": "Character offset used to continue oversized content.",
+                    "default": 0,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "lcm_expand_query",
+        "description": "Answer a natural-language question using expanded LCM context from the current session.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "The question or task to answer from expanded LCM context."},
+                "query": {"type": "string", "description": "Optional search query used to find candidate summaries."},
+                "node_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional explicit summary node IDs.",
+                },
+                "max_results": {"type": "integer", "description": "Max candidate summaries.", "default": 5},
+                "max_tokens": {"type": "integer", "description": "Max answer tokens.", "default": 2000},
+                "context_max_tokens": {
+                    "type": "integer",
+                    "description": "Expanded context budget for the auxiliary LLM.",
+                    "default": 32000,
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "lcm_status",
+        "description": "Get a quick health overview of the LCM engine for the current session.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "lcm_doctor",
+        "description": "Run diagnostics on the LCM database and configuration.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
 
 def _make_wrapped_lcm_handler(tool_name: str, engine):
     def _wrapped(args: dict, **kwargs) -> str:
@@ -971,10 +1135,7 @@ def _clone_schema(tokensave_name: str, public_name: str = None) -> dict:
     }
 
 def _lcm_tool_schemas() -> list:
-    return [
-        _clone_schema(tokensave_name, public_name=public_name)
-        for public_name, tokensave_name in LCM_TOOL_ALIASES.items()
-    ]
+    return json.loads(json.dumps(LCM_NATIVE_SCHEMAS))
 
 def _decode_tool_args(arguments):
     if arguments is None:
@@ -1014,6 +1175,35 @@ def _storage_args(project_root=None, hermes_home=None):
     else:
         args["storage_scope"] = "hermes_profile"
     return args
+
+def _configured_hermes_home(config):
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        return config.get("hermes_home") or config.get("home")
+    for attr in ("hermes_home", "home"):
+        value = getattr(config, attr, None)
+        if value:
+            return value
+    return None
+
+def _resolve_hermes_home(config=None, hermes_home=None):
+    for candidate in (
+        hermes_home,
+        _configured_hermes_home(config),
+        os.environ.get("HERMES_HOME"),
+    ):
+        if candidate:
+            return str(candidate)
+    try:
+        from hermes_cli.config import get_hermes_home
+        resolved = get_hermes_home()
+        if resolved:
+            return str(resolved)
+    except Exception:
+        pass
+    fallback = os.path.expanduser("~/.hermes")
+    return fallback if fallback and os.path.isdir(fallback) else None
 
 REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
 FALLBACK_MARKER = "[deterministic compression fallback]"
@@ -1301,10 +1491,86 @@ def _handle_lcm_expand_query(args, **kwargs) -> str:
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
+def _copy_without_none(source: dict) -> dict:
+    return {key: value for key, value in source.items() if value is not None}
+
+def _tokens_from_native_max(max_tokens):
+    if max_tokens is None:
+        return None
+    try:
+        return max(1, min(8192, int(max_tokens) * 4))
+    except Exception:
+        return None
+
+def _first_role(roles):
+    if isinstance(roles, list) and roles:
+        return roles[0]
+    if isinstance(roles, str):
+        return roles
+    return None
+
+def _native_expand_target(args: dict):
+    provided = [key for key in ("node_id", "store_id", "externalized_ref") if args.get(key) is not None]
+    if len(provided) > 1:
+        return None, "lcm_expand expects exactly one of node_id, store_id, or externalized_ref"
+    if not provided:
+        return None, None
+    key = provided[0]
+    if key == "node_id":
+        return {"kind": "summary_node", "node_id": str(args[key])}, None
+    if key == "store_id":
+        return {"kind": "raw_message", "store_id": args[key]}, None
+    return {"kind": "external_payload", "payload_ref": args[key]}, None
+
+def _translate_lcm_args(native_name: str, args: dict) -> dict:
+    translated = dict(args or {})
+    if native_name == "lcm_grep":
+        if "session_scope" in translated:
+            translated["scope"] = translated.pop("session_scope")
+        for unsupported in ("sort", "source", "role", "time_from", "time_to"):
+            translated.pop(unsupported, None)
+        return translated
+    if native_name == "lcm_load_session":
+        if "max_content_chars" in translated:
+            translated["content_limit"] = translated.pop("max_content_chars")
+        if "roles" in translated:
+            role = _first_role(translated.pop("roles"))
+            if role is not None:
+                translated["role"] = role
+        if "time_from" in translated:
+            translated["start_time"] = translated.pop("time_from")
+        if "time_to" in translated:
+            translated["end_time"] = translated.pop("time_to")
+        return translated
+    if native_name == "lcm_describe":
+        # TokenSave currently exposes session-level describe; node/externalized
+        # inspection is represented in the native schema for Hermes parity but
+        # ignored until the Rust read handler grows those narrower modes.
+        translated.pop("node_id", None)
+        translated.pop("externalized_ref", None)
+        return translated
+    if native_name == "lcm_expand":
+        if "target" not in translated:
+            target, error = _native_expand_target(translated)
+            if error is not None:
+                return {"error": error}
+            if target is not None:
+                translated["target"] = target
+        for public_key in ("node_id", "store_id", "externalized_ref"):
+            translated.pop(public_key, None)
+        content_limit = _tokens_from_native_max(translated.pop("max_tokens", None))
+        if content_limit is not None and "content_limit" not in translated:
+            translated["content_limit"] = content_limit
+        translated.pop("source_offset", None)
+        translated.pop("source_limit", None)
+        return translated
+    return translated
+
 class TokenSaveContextEngine(ContextEngine):
-    def __init__(self):
+    def __init__(self, config=None, hermes_home=None):
         self.active_session_id = None
-        self.hermes_home = None
+        self.config = config
+        self.hermes_home = _resolve_hermes_home(config, hermes_home)
         self.project_root = None
         self.agent = None
         self._route_failures = {}
@@ -1312,17 +1578,24 @@ class TokenSaveContextEngine(ContextEngine):
 
     @property
     def name(self) -> str:
-        return "tokensave-lcm"
+        return "lcm"
 
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         if session_id is not None:
             self.active_session_id = session_id
+        if kwargs.get("config") is not None:
+            self.config = kwargs.get("config")
         next_agent = kwargs.get("agent")
         if next_agent is not None:
             self.agent = next_agent
-        next_hermes_home = hermes_home or kwargs.get("hermes_home")
-        if next_hermes_home:
-            self.hermes_home = next_hermes_home
+        explicit_hermes_home = hermes_home or kwargs.get("hermes_home")
+        if explicit_hermes_home or kwargs.get("config") is not None or self.hermes_home is None:
+            next_hermes_home = _resolve_hermes_home(
+                kwargs.get("config", self.config),
+                explicit_hermes_home,
+            )
+            if next_hermes_home:
+                self.hermes_home = next_hermes_home
         next_project_root = project_root or kwargs.get("project_root") or kwargs.get("cwd")
         if next_project_root:
             self.project_root = next_project_root
@@ -1365,15 +1638,49 @@ class TokenSaveContextEngine(ContextEngine):
             "cooldown_routes": sorted(self._cooldown_until.keys()),
         }
 
+    def _current_turn_preflight(self, messages, **kwargs):
+        if not messages or not self.active_session_id:
+            return
+        args = _storage_args(self.project_root, self.hermes_home)
+        args.update({
+            "session_id": self.active_session_id,
+            "messages": messages,
+        })
+        for key in (
+            "current_tokens",
+            "ignore_session_patterns",
+            "stateless_session_patterns",
+            "ignore_message_patterns",
+        ):
+            if kwargs.get(key) is not None:
+                args[key] = kwargs[key]
+        try:
+            tools.call_tokensave_tool("tokensave_lcm_preflight", args, **_copy_without_none({
+                "project_root": kwargs.get("project_root"),
+            }))
+        except Exception as exc:
+            logger.warning("LCM current-turn preflight failed: %s", exc)
+
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
-        tokensave_name = LCM_TOOL_ALIASES.get(tool_name)
+        native_name = tool_name
+        tokensave_name = LCM_TOOL_ALIASES.get(native_name)
+        if tokensave_name is None and native_name in LCM_DIRECT_TOOL_NAMES:
+            tokensave_name = native_name
+            native_name = LCM_DIRECT_TO_NATIVE.get(native_name, native_name)
         if tokensave_name is None and tool_name in LCM_DIRECT_TOOL_NAMES:
             tokensave_name = tool_name
         if tokensave_name is None:
             return tools.error_payload(f"unknown LCM tool: {tool_name}")
 
-        tool_args = dict(tool_args)
+        messages = kwargs.get("messages")
+        preflight_kwargs = dict(kwargs)
+        preflight_kwargs.pop("messages", None)
+        self._current_turn_preflight(messages, **preflight_kwargs)
+
+        tool_args = _translate_lcm_args(native_name, dict(tool_args))
+        if tool_args.get("error"):
+            return json.dumps({"error": tool_args["error"]})
         storage_args = _storage_args(self.project_root, self.hermes_home)
         for key, value in storage_args.items():
             tool_args.setdefault(key, value)
@@ -1381,8 +1688,8 @@ class TokenSaveContextEngine(ContextEngine):
             tool_args.setdefault("session_id", self.active_session_id)
 
         if tokensave_name == "tokensave_lcm_expand_query":
-            return _handle_lcm_expand_query(tool_args, agent=self.agent, **kwargs)
-        return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
+            return _handle_lcm_expand_query(tool_args, agent=self.agent, **preflight_kwargs)
+        return tools.call_tokensave_tool(tokensave_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)
@@ -1675,7 +1982,15 @@ def register(ctx):
     if callable(getattr(ctx, "register_memory_provider", None)):
         ctx.register_memory_provider(TokensaveMemoryProvider())
 
-    context_engine = TokenSaveContextEngine()
+    context_config = getattr(ctx, "config", None)
+    context_hermes_home = (
+        getattr(ctx, "hermes_home", None)
+        or getattr(ctx, "_hermes_home", None)
+    )
+    context_engine = TokenSaveContextEngine(
+        config=context_config,
+        hermes_home=context_hermes_home,
+    )
     if callable(getattr(ctx, "register_context_engine", None)):
         ctx.register_context_engine(context_engine)
 

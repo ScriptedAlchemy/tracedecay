@@ -226,7 +226,7 @@ plugin.register(ctx)
 assert ctx.tools == []
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert engine.name == "tokensave-lcm"
+assert engine.name == "lcm"
 assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
 "#,
         "generated plugin should skip direct tools when host does not forward messages",
@@ -264,9 +264,10 @@ spec.loader.exec_module(plugin)
 engine = plugin.TokenSaveContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
-assert engine.name == "tokensave-lcm"
+assert engine.name == "lcm"
 
 schemas = engine.get_tool_schemas()
+schemas_by_name = {schema["name"]: schema for schema in schemas}
 schema_names = {schema["name"] for schema in schemas}
 expected_native = {
     "lcm_grep",
@@ -282,8 +283,43 @@ assert "tokensave_lcm_preflight" not in schema_names
 assert "tokensave_lcm_compress" not in schema_names
 assert all(name.startswith("lcm_") for name in schema_names)
 
+grep_params = schemas_by_name["lcm_grep"]["parameters"]
+assert "session_scope" in grep_params["properties"]
+assert "scope" not in grep_params["properties"]
+assert grep_params["properties"]["session_scope"]["enum"] == ["current", "all", "session"]
+assert grep_params["required"] == ["query"]
+
+load_params = schemas_by_name["lcm_load_session"]["parameters"]
+assert "max_content_chars" in load_params["properties"]
+assert "roles" in load_params["properties"]
+assert "time_from" in load_params["properties"]
+assert "time_to" in load_params["properties"]
+assert "role" not in load_params["properties"]
+assert "start_time" not in load_params["properties"]
+assert "end_time" not in load_params["properties"]
+assert "content_limit" not in load_params["properties"]
+assert load_params["required"] == ["session_id"]
+
+describe_params = schemas_by_name["lcm_describe"]["parameters"]
+assert "node_id" in describe_params["properties"]
+assert "externalized_ref" in describe_params["properties"]
+assert "session_id" not in describe_params["properties"]
+assert describe_params.get("required") == []
+
+expand_params = schemas_by_name["lcm_expand"]["parameters"]
+assert "node_id" in expand_params["properties"]
+assert "store_id" in expand_params["properties"]
+assert "externalized_ref" in expand_params["properties"]
+assert "target" not in expand_params["properties"]
+assert expand_params.get("required") == []
+
+status_params = schemas_by_name["lcm_status"]["parameters"]
+doctor_params = schemas_by_name["lcm_doctor"]["parameters"]
+assert status_params["properties"] == {}
+assert doctor_params["properties"] == {}
+
 status = engine.get_status()
-assert status["engine"] == "tokensave-lcm"
+assert status["engine"] == "lcm"
 assert status["session_id"] == "session-1"
 assert status["storage_scope"] == "project_local"
 assert status["context_engine_tool_names"] == sorted(schema_names)
@@ -298,23 +334,213 @@ plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
 
 native_result = engine.handle_tool_call(
     "lcm_grep",
+    {"query": "orchard", "session_scope": "current"},
+    messages=[{"role": "user", "content": "current turn"}],
+)
+load_result = engine.handle_tool_call(
+    "lcm_load_session",
+    {"session_id": "session-1", "max_content_chars": 123, "roles": ["user"], "time_from": 1, "time_to": 2},
+    messages=[{"role": "assistant", "content": "load turn"}],
+)
+expand_result = engine.handle_tool_call("lcm_expand", {"store_id": 42, "max_tokens": 77})
+direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct", "session_scope": "all"})
+
+assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
+assert json.loads(load_result) == {"ok": True, "tool": "tokensave_lcm_load_session"}
+assert json.loads(expand_result) == {"ok": True, "tool": "tokensave_lcm_expand"}
+assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
+assert calls[0][0] == "tokensave_lcm_preflight"
+assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
+assert calls[0][1]["session_id"] == "session-1"
+assert calls[0][1]["storage_scope"] == "project_local"
+assert calls[1][0] == "tokensave_lcm_grep"
+assert calls[1][1]["query"] == "orchard"
+assert calls[1][1]["scope"] == "current"
+assert "session_scope" not in calls[1][1]
+assert "messages" not in calls[1][1]
+assert calls[1][1]["storage_scope"] == "project_local"
+assert calls[1][1]["project_root"] == "/tmp/project"
+assert calls[1][1]["session_id"] == "session-1"
+assert calls[1][2] == {}
+assert calls[2][0] == "tokensave_lcm_preflight"
+assert calls[2][1]["messages"] == [{"role": "assistant", "content": "load turn"}]
+assert calls[3][0] == "tokensave_lcm_load_session"
+assert calls[3][1]["content_limit"] == 123
+assert calls[3][1]["role"] == "user"
+assert calls[3][1]["start_time"] == 1
+assert calls[3][1]["end_time"] == 2
+assert "max_content_chars" not in calls[3][1]
+assert "roles" not in calls[3][1]
+assert "time_from" not in calls[3][1]
+assert "time_to" not in calls[3][1]
+assert calls[4][0] == "tokensave_lcm_expand"
+assert calls[4][1]["target"] == {"kind": "raw_message", "store_id": 42}
+assert calls[4][1]["content_limit"] == 308
+assert "store_id" not in calls[4][1]
+assert "max_tokens" not in calls[4][1]
+assert calls[5][0] == "tokensave_lcm_grep"
+assert calls[5][1]["query"] == "direct"
+assert calls[5][1]["scope"] == "all"
+assert "session_scope" not in calls[5][1]
+assert calls[5][1]["storage_scope"] == "project_local"
+assert calls[5][1]["project_root"] == "/tmp/project"
+assert calls[5][1]["session_id"] == "session-1"
+"#,
+        "generated context engine should expose Hermes-style native LCM surface",
+    );
+}
+
+#[test]
+fn generated_context_engine_uses_env_hermes_home_for_profile_storage() {
+    run_generated_plugin_script(
+        "check_context_engine_env_home.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_env_home"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+os.environ["HERMES_HOME"] = "/tmp/hermes-from-env"
+
+calls = []
+
+def fake_call_tokensave_tool(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
+
+plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-1")
+assert engine.hermes_home == "/tmp/hermes-from-env"
+status = engine.get_status()
+assert status["storage_scope"] == "hermes_profile"
+assert status["hermes_home"] == "/tmp/hermes-from-env"
+
+engine.handle_tool_call(
+    "lcm_grep",
+    {"query": "orchard"},
+    messages=[{"role": "user", "content": "profile current turn"}],
+)
+
+assert calls[0][0] == "tokensave_lcm_preflight"
+assert calls[0][1]["storage_scope"] == "hermes_profile"
+assert calls[0][1]["hermes_home"] == "/tmp/hermes-from-env"
+assert calls[0][1]["messages"] == [{"role": "user", "content": "profile current turn"}]
+assert calls[1][0] == "tokensave_lcm_grep"
+assert calls[1][1]["storage_scope"] == "hermes_profile"
+assert calls[1][1]["hermes_home"] == "/tmp/hermes-from-env"
+"#,
+        "generated context engine should resolve HERMES_HOME for profile storage",
+    );
+}
+
+#[test]
+fn generated_tools_bridge_preserves_message_kwargs_in_json_args() {
+    run_generated_plugin_script(
+        "check_tools_message_kwargs.py",
+        r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+tools_path = plugin_dir / "tools.py"
+spec = importlib.util.spec_from_file_location("tokensave_hermes_tools_kwargs", tools_path)
+tools = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tools)
+
+calls = []
+
+class Result:
+    returncode = 0
+    stderr = ""
+    stdout = json.dumps({"content": [{"type": "text", "text": "{}"}]})
+
+def fake_run(argv, **kwargs):
+    calls.append(argv)
+    return Result()
+
+tools.subprocess.run = fake_run
+tools.call_tokensave_tool(
+    "tokensave_lcm_grep",
     {"query": "orchard"},
     messages=[{"role": "user", "content": "current turn"}],
 )
-direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct"})
 
-assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
-assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
-assert calls[0][0] == "tokensave_lcm_grep"
-assert calls[0][1]["query"] == "orchard"
-assert calls[0][1]["storage_scope"] == "project_local"
-assert calls[0][1]["project_root"] == "/tmp/project"
-assert calls[0][1]["session_id"] == "session-1"
-assert calls[0][2]["messages"] == [{"role": "user", "content": "current turn"}]
-assert calls[1][0] == "tokensave_lcm_grep"
-assert calls[1][1]["query"] == "direct"
+args = json.loads(calls[0][calls[0].index("--args") + 1])
+assert args["query"] == "orchard"
+assert args["messages"] == [{"role": "user", "content": "current turn"}]
 "#,
-        "generated context engine should expose Hermes-style native LCM surface",
+        "generated subprocess bridge should preserve messages kwargs in JSON args",
+    );
+}
+
+#[test]
+fn generated_context_engine_resolves_configured_hermes_home_on_registration() {
+    run_generated_plugin_script(
+        "check_context_engine_config_home.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_config_home"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class Ctx:
+    def __init__(self):
+        self.config = {"hermes_home": "/tmp/hermes-from-config"}
+        self.context_engines = []
+    def register_hook(self, name, handler):
+        pass
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = Ctx()
+plugin.register(ctx)
+
+assert len(ctx.context_engines) == 1
+engine = ctx.context_engines[0]
+assert engine.name == "lcm"
+assert engine.hermes_home == "/tmp/hermes-from-config"
+"#,
+        "generated registration should resolve configured hermes_home",
     );
 }
 
