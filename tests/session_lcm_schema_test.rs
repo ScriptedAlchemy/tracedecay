@@ -114,6 +114,33 @@ async fn schema_version(db_path: &Path) -> i64 {
     row.get(0).unwrap()
 }
 
+async fn migration_applied_at(db_path: &Path) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    row.get(0).unwrap()
+}
+
+async fn set_migration_applied_at(db_path: &Path, applied_at: i64) {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "UPDATE session_schema_migrations
+         SET applied_at = ?1
+         WHERE name = 'lcm'",
+        libsql::params![applied_at],
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let tmp = TempDir::new().unwrap();
@@ -197,4 +224,28 @@ async fn lcm_schema_migration_is_idempotent() {
         fts_legacy_message_ids(&db_path).await,
         vec!["legacy-message".to_string()]
     );
+}
+
+#[tokio::test]
+async fn lcm_schema_current_version_reopen_skips_migration_update() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    create_legacy_sessions_db(&db_path).await;
+
+    let db = GlobalDb::open_at(&db_path).await.expect("global db open");
+    assert_eq!(
+        db.lcm_schema_version().await.unwrap(),
+        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+    );
+    drop(db);
+
+    set_migration_applied_at(&db_path, 123).await;
+    assert_eq!(migration_applied_at(&db_path).await, 123);
+
+    let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
+    assert_eq!(
+        reopened.lcm_schema_version().await.unwrap(),
+        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+    );
+    assert_eq!(migration_applied_at(&db_path).await, 123);
 }

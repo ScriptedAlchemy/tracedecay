@@ -8,6 +8,10 @@ const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
 
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
+    if schema_version(conn).await == Some(LCM_SCHEMA_VERSION) {
+        return Some(());
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
             name TEXT PRIMARY KEY,
@@ -244,6 +248,22 @@ pub(crate) async fn load_raw_message(
 }
 
 async fn carry_forward_legacy_messages(conn: &Connection) -> Option<()> {
+    conn.execute("BEGIN IMMEDIATE", ()).await.ok()?;
+    let carry_forward = carry_forward_legacy_messages_in_transaction(conn).await;
+    if let Some(()) = carry_forward {
+        if conn.execute("COMMIT", ()).await.is_ok() {
+            Some(())
+        } else {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            None
+        }
+    } else {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        None
+    }
+}
+
+async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Option<()> {
     let mut rows = conn
         .query(
             "SELECT provider, message_id, session_id, role, timestamp, ordinal,
