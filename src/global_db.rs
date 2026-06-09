@@ -307,6 +307,7 @@ impl GlobalDb {
         .await
         .ok()?;
         ensure_session_parent_columns(&conn).await?;
+        crate::sessions::lcm::schema::ensure_lcm_schema(&conn).await?;
 
         Some(Self { conn, _db: db })
     }
@@ -617,6 +618,20 @@ impl GlobalDb {
             .await
             .ok()?;
         row_to_message(&rows.next().await.ok()??, 0)
+    }
+
+    /// Returns the current LCM schema version recorded for this session DB.
+    pub async fn lcm_schema_version(&self) -> Option<i64> {
+        crate::sessions::lcm::schema::schema_version(&self.conn).await
+    }
+
+    /// Loads a raw LCM message by provider and provider-local message ID.
+    pub async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<crate::sessions::lcm::LcmRawMessage> {
+        crate::sessions::lcm::schema::load_raw_message(&self.conn, provider, message_id).await
     }
 
     /// Searches message text for a provider, optionally constrained to one project.
