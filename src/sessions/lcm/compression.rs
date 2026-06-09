@@ -750,8 +750,28 @@ fn has_eligible_backlog(
     leaf_chunk_tokens: Option<i64>,
     max_source_messages: Option<usize>,
 ) -> bool {
-    !backlog.is_empty()
-        && bounded_leaf_chunk_len(backlog, leaf_chunk_tokens, max_source_messages) > 0
+    if backlog.is_empty() {
+        return false;
+    }
+
+    let max_messages = max_source_messages
+        .filter(|limit| *limit > 0)
+        .unwrap_or(backlog.len())
+        .min(backlog.len());
+    if max_messages == 0 {
+        return false;
+    }
+
+    let Some(token_limit) = leaf_chunk_tokens.filter(|limit| *limit > 0) else {
+        return true;
+    };
+
+    backlog
+        .iter()
+        .take(max_messages)
+        .map(|message| estimate_tokens(&message.content))
+        .sum::<i64>()
+        >= token_limit
 }
 
 fn effective_leaf_chunk_tokens(

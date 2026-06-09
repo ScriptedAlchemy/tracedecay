@@ -1039,6 +1039,24 @@ async fn preflight_requests_compression_for_over_threshold_eligible_backlog() {
 }
 
 #[tokio::test]
+async fn preflight_skips_threshold_when_backlog_below_leaf_chunk_threshold() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(&db, "cursor", "session-1", &["tiny", "fresh-1", "fresh-2"]).await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
+    request.threshold_tokens = Some(100);
+    request.leaf_chunk_tokens = Some(10);
+    request.max_source_messages = Some(2);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "threshold_no_eligible_backlog");
+}
+
+#[tokio::test]
 async fn preflight_requests_compression_for_forced_overflow_without_replay_change() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
