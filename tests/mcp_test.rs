@@ -179,6 +179,27 @@ fn test_notification_without_id() {
 }
 
 #[test]
+fn test_serialize_request_omits_absent_id_but_preserves_null_id() {
+    let notification = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: None,
+        method: "initialized".to_string(),
+        params: None,
+    };
+    let serialized = serde_json::to_value(&notification).unwrap();
+    assert!(serialized.get("id").is_none());
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(serde_json::Value::Null),
+        method: "ping".to_string(),
+        params: None,
+    };
+    let serialized = serde_json::to_value(&request).unwrap();
+    assert!(serialized["id"].is_null());
+}
+
+#[test]
 fn test_request_with_string_id() {
     let msg = json!({
         "jsonrpc": "2.0",

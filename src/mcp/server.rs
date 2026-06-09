@@ -243,10 +243,14 @@ fn tool_result_has_semantic_error(value: &Value) -> bool {
                 let Some(text) = item.get("text").and_then(Value::as_str) else {
                     return false;
                 };
-                if plain_text_tool_failure(text) {
+                let trimmed = text.trim_start();
+                if plain_text_tool_failure(trimmed) {
                     return true;
                 }
-                let Ok(payload) = serde_json::from_str::<Value>(text) else {
+                if !trimmed.starts_with('{') {
+                    return false;
+                }
+                let Ok(payload) = serde_json::from_str::<Value>(trimmed) else {
                     return false;
                 };
                 payload.get("success").and_then(Value::as_bool) == Some(false)
@@ -263,8 +267,7 @@ fn tool_result_has_semantic_error(value: &Value) -> bool {
 }
 
 fn plain_text_tool_failure(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with("git error:") || trimmed.starts_with("git diff failed:")
+    text.starts_with("git error:") || text.starts_with("git diff failed:")
 }
 
 fn mark_semantic_tool_error(value: &mut Value) {
@@ -932,11 +935,11 @@ impl McpServer {
         let result = match request.method.as_str() {
             "initialize" => Some(Self::handle_initialize(id)),
             "initialized" => {
-                // Notification - no response required
+                // Some clients send this notification with an id; keep it a no-op.
                 None
             }
             "notifications/initialized" => {
-                // Alternative notification path - no response required
+                // Alternate initialized request path; also a compatibility no-op.
                 None
             }
             "tools/list" => Some(self.handle_tools_list(id).await),
@@ -1252,10 +1255,6 @@ impl McpServer {
 
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     async fn handle_tools_call(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
-        debug_assert!(
-            !id.is_null(),
-            "handle_tools_call called with null request id"
-        );
         let Some(params) = params else {
             return JsonRpcResponse::error(
                 id,

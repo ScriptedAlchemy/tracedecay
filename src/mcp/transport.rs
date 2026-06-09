@@ -21,7 +21,11 @@ pub struct JsonRpcRequest {
     pub jsonrpc: String,
     /// Request identifier. May be a number, string, or null.
     /// Absent for notifications.
-    #[serde(default, deserialize_with = "deserialize_request_id")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_request_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub id: Option<serde_json::Value>,
     /// The RPC method name.
     pub method: String,

@@ -83,6 +83,14 @@ fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
 
+fn response_with_id(responses: &[String], id: Value) -> Value {
+    responses
+        .iter()
+        .map(|r| parse_response(r))
+        .find(|resp| resp.get("id") == Some(&id))
+        .unwrap_or_else(|| panic!("response with id {id}"))
+}
+
 struct ReadErrorTransport;
 
 impl McpTransport for ReadErrorTransport {
@@ -186,13 +194,7 @@ async fn test_explicit_null_id_is_still_a_request() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
         server,
-        vec![serde_json::to_string(&json!({
-            "jsonrpc": "2.0",
-            "id": null,
-            "method": "ping",
-            "params": {}
-        }))
-        .unwrap()],
+        vec![jsonrpc_request(json!(null), "ping", json!({}))],
     )
     .await;
 
@@ -204,6 +206,35 @@ async fn test_explicit_null_id_is_still_a_request() {
     let resp = parse_response(&responses[0]);
     assert!(resp["id"].is_null(), "response should preserve null id");
     assert!(resp["error"].is_null(), "ping request should succeed");
+}
+
+#[tokio::test]
+async fn test_tools_call_explicit_null_id_is_still_a_request() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(null),
+            "tools/call",
+            json!({
+                "name": "tokensave_status",
+                "arguments": {}
+            }),
+        )],
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "explicit id=null is a tools/call request id and should receive a response"
+    );
+    let resp = response_with_id(&responses, json!(null));
+    assert!(resp["error"].is_null(), "tools/call request should succeed");
+    assert!(
+        resp["result"].is_object(),
+        "tools/call should return a result"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -352,12 +383,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
     )
     .await;
 
-    let resp = parse_response(
-        responses
-            .iter()
-            .find(|r| parse_response(r)["id"] == 33)
-            .expect("response with id 33"),
-    );
+    let resp = response_with_id(&responses, json!(33));
     assert!(
         resp["error"].is_null(),
         "semantic tool failures should not become JSON-RPC errors"
@@ -392,12 +418,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
     )
     .await;
 
-    let resp = parse_response(
-        responses
-            .iter()
-            .find(|r| parse_response(r)["id"] == 34)
-            .expect("response with id 34"),
-    );
+    let resp = response_with_id(&responses, json!(34));
     assert!(
         resp["error"].is_null(),
         "plain-text semantic failures should not become JSON-RPC errors"
