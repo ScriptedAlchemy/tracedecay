@@ -1767,32 +1767,40 @@ fn def_lcm_load_session() -> ToolDefinition {
                     "description": "Provider-local session id."
                 },
                 "after_store_id": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Return rows after this raw store id."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Maximum rows, clamped to 100."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum rows."
                 },
                 "role": {
                     "type": "string",
                     "description": "Optional role filter."
                 },
                 "start_time": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Optional inclusive minimum message timestamp."
                 },
                 "end_time": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Optional inclusive maximum message timestamp."
                 },
                 "content_offset": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Character offset for each returned content slice."
                 },
                 "content_limit": {
-                    "type": "number",
-                    "description": "Maximum characters returned per message, clamped by the handler."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8192,
+                    "description": "Maximum characters returned per message."
                 }
             },
             "required": ["session_id"]
@@ -1830,8 +1838,10 @@ fn def_lcm_grep() -> ToolDefinition {
                     "description": "Include summary node text after raw-message matches (default: true)."
                 },
                 "limit": {
-                    "type": "number",
-                    "description": "Maximum hits, clamped to 100."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum hits."
                 }
             },
             "required": ["query"]
@@ -1886,7 +1896,8 @@ fn def_lcm_expand() -> ToolDefinition {
                             "enum": ["raw_message", "summary_node", "external_payload"]
                         },
                         "store_id": {
-                            "type": "number",
+                            "type": "integer",
+                            "minimum": 0,
                             "description": "Raw-message store id when kind=raw_message."
                         },
                         "node_id": {
@@ -1901,12 +1912,15 @@ fn def_lcm_expand() -> ToolDefinition {
                     "required": ["kind"]
                 },
                 "content_offset": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
                     "description": "Character offset for returned content."
                 },
                 "content_limit": {
-                    "type": "number",
-                    "description": "Maximum characters returned, clamped by the handler."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8192,
+                    "description": "Maximum characters returned."
                 }
             },
             "required": ["session_id", "target"]
@@ -1944,11 +1958,14 @@ fn def_lcm_expand_query() -> ToolDefinition {
                     "description": "Optional summary node ids to expand."
                 },
                 "max_results": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
                     "description": "Maximum candidate results."
                 },
                 "max_tokens": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 1,
                     "description": "Desired synthesized answer token budget."
                 }
             }

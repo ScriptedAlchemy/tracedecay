@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
-use crate::mcp::tools::ToolResult;
+use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
     LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmLoadSessionRequest,
     LcmScope,
@@ -9,16 +9,41 @@ use crate::sessions::lcm::{
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
 
-use super::truncate_response;
-
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const MAX_LCM_CONTENT_LIMIT: usize = 8192;
+const MAX_LCM_RESULT_LIMIT: usize = 100;
 
 fn tool_json(value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
+        formatted
+    } else {
+        truncated_json_envelope(&formatted)
+    };
     ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": truncate_response(&formatted) }] }),
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
+    }
+}
+
+fn truncated_json_envelope(formatted: &str) -> String {
+    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
+    loop {
+        while end > 0 && !formatted.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = &formatted[..end];
+        let envelope = json!({
+            "truncated": true,
+            "original_chars": formatted.len(),
+            "preview_chars": preview.len(),
+            "preview": preview,
+        });
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            return text;
+        }
+        end = end.saturating_sub(1024);
     }
 }
 
@@ -35,27 +60,56 @@ fn required_string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
     })
 }
 
-fn usize_arg(args: &Value, name: &str) -> Option<usize> {
-    args.get(name)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
+fn argument_error(message: impl Into<String>) -> TokenSaveError {
+    TokenSaveError::Config {
+        message: message.into(),
+    }
 }
 
-fn i64_arg(args: &Value, name: &str) -> Option<i64> {
-    args.get(name).and_then(Value::as_i64)
+fn bounded_usize_arg(args: &Value, name: &str, min: usize, max: usize) -> Result<Option<usize>> {
+    let Some(value) = args.get(name) else {
+        return Ok(None);
+    };
+    let Some(integer) = value.as_i64() else {
+        return Err(argument_error(format!("{name} must be an integer")));
+    };
+    if integer < 0 {
+        return Err(argument_error(format!("{name} must be >= {min}")));
+    }
+    let integer =
+        usize::try_from(integer).map_err(|_| argument_error(format!("{name} must be <= {max}")))?;
+    if integer < min {
+        return Err(argument_error(format!("{name} must be >= {min}")));
+    }
+    if integer > max {
+        return Err(argument_error(format!("{name} must be <= {max}")));
+    }
+    Ok(Some(integer))
+}
+
+fn non_negative_i64_arg(args: &Value, name: &str) -> Result<Option<i64>> {
+    let Some(value) = args.get(name) else {
+        return Ok(None);
+    };
+    let Some(integer) = value.as_i64() else {
+        return Err(argument_error(format!("{name} must be an integer")));
+    };
+    if integer < 0 {
+        return Err(argument_error(format!("{name} must be >= 0")));
+    }
+    Ok(Some(integer))
 }
 
 fn provider_arg(args: &Value) -> &str {
     string_arg(args, "provider").unwrap_or("cursor")
 }
 
-fn lcm_content_slice(args: &Value) -> LcmContentSlice {
-    LcmContentSlice {
-        offset: usize_arg(args, "content_offset").unwrap_or(0),
-        limit: usize_arg(args, "content_limit")
-            .unwrap_or(DEFAULT_LCM_CONTENT_LIMIT)
-            .clamp(1, MAX_LCM_CONTENT_LIMIT),
-    }
+fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {
+    Ok(LcmContentSlice {
+        offset: bounded_usize_arg(args, "content_offset", 0, usize::MAX)?.unwrap_or(0),
+        limit: bounded_usize_arg(args, "content_limit", 1, MAX_LCM_CONTENT_LIMIT)?
+            .unwrap_or(DEFAULT_LCM_CONTENT_LIMIT),
+    })
 }
 
 fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
@@ -71,11 +125,22 @@ fn lcm_unavailable() -> ToolResult {
     }))
 }
 
-fn parse_lcm_scope(args: &Value) -> LcmScope {
-    match string_arg(args, "scope").unwrap_or("all") {
-        "current" => LcmScope::Current,
-        "session" => LcmScope::Session,
-        _ => LcmScope::All,
+fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
+    let Some(value) = args.get("scope") else {
+        return Ok(LcmScope::All);
+    };
+    let Some(scope) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(argument_error("scope must be one of current, session, all"));
+    };
+    match scope {
+        "current" => Ok(LcmScope::Current),
+        "session" => Ok(LcmScope::Session),
+        "all" => Ok(LcmScope::All),
+        _ => Err(argument_error("scope must be one of current, session, all")),
     }
 }
 
@@ -85,8 +150,11 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
     })?;
     match string_arg(target, "kind").unwrap_or_default() {
         "raw_message" => {
-            let store_id = i64_arg(target, "store_id").ok_or_else(|| TokenSaveError::Config {
-                message: "target.store_id is required when target.kind is raw_message".to_string(),
+            let store_id = non_negative_i64_arg(target, "store_id")?.ok_or_else(|| {
+                TokenSaveError::Config {
+                    message: "target.store_id is required when target.kind is raw_message"
+                        .to_string(),
+                }
             })?;
             Ok(LcmExpandTarget::RawMessage { store_id })
         }
@@ -227,12 +295,12 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
         .lcm_load_session(LcmLoadSessionRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
-            after_store_id: i64_arg(&args, "after_store_id"),
-            limit: usize_arg(&args, "limit").unwrap_or(50),
+            after_store_id: non_negative_i64_arg(&args, "after_store_id")?,
+            limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(50),
             role: string_arg(&args, "role").map(str::to_string),
-            start_time: i64_arg(&args, "start_time"),
-            end_time: i64_arg(&args, "end_time"),
-            content_slice: Some(lcm_content_slice(&args)),
+            start_time: non_negative_i64_arg(&args, "start_time")?,
+            end_time: non_negative_i64_arg(&args, "end_time")?,
+            content_slice: Some(lcm_content_slice(&args)?),
         })
         .await
         .map_err(lcm_error)?;
@@ -255,13 +323,13 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
         .lcm_grep(LcmGrepRequest {
             provider: provider.to_string(),
             query: query.to_string(),
-            scope: parse_lcm_scope(&args),
+            scope: parse_lcm_scope(&args)?,
             session_id: string_arg(&args, "session_id").map(str::to_string),
             include_summaries: args
                 .get("include_summaries")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
-            limit: usize_arg(&args, "limit").unwrap_or(10),
+            limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(10),
         })
         .await
         .map_err(lcm_error)?;
@@ -304,7 +372,7 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
             provider: provider.to_string(),
             session_id: session_id.to_string(),
             target,
-            content_slice: Some(lcm_content_slice(&args)),
+            content_slice: Some(lcm_content_slice(&args)?),
         })
         .await
         .map_err(lcm_error)?;

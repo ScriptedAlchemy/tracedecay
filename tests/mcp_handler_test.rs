@@ -139,6 +139,23 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     assert!(load.input_schema["properties"]
         .get("content_limit")
         .is_some());
+    assert_eq!(
+        load.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        load.input_schema["properties"]["content_limit"]["maximum"],
+        json!(8192)
+    );
+
+    let grep = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_grep")
+        .expect("tokensave_lcm_grep definition");
+    assert_eq!(
+        grep.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
 
     let expand = tools
         .iter()
@@ -149,6 +166,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         json!(["session_id", "target"])
     );
     assert!(expand.input_schema["properties"].get("target").is_some());
+    assert_eq!(
+        expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
+        json!("integer")
+    );
 }
 
 /// Searches for `name` via the search handler and returns the first matching
@@ -3660,22 +3681,26 @@ async fn message_search_reads_project_local_session_db() {
     );
 }
 
-#[tokio::test]
-async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
-    let (cg, _dir) = setup_project().await;
+async fn seed_lcm_session_message(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
     assert!(
         db.upsert_session(&SessionRecord {
             provider: "cursor".to_string(),
-            session_id: "lcm-session".to_string(),
+            session_id: session_id.to_string(),
             project_key: cg.project_root().to_string_lossy().to_string(),
             project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some("LCM session".to_string()),
-            started_at: Some(1),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
             ended_at: None,
-            transcript_path: Some("lcm-session.jsonl".to_string()),
+            transcript_path: Some(format!("{session_id}.jsonl")),
             metadata_json: None,
             parent_session_id: None,
             is_subagent: false,
@@ -3684,25 +3709,34 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         })
         .await
     );
-    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
     assert!(
         db.upsert_session_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
-            message_id: "lcm-message".to_string(),
-            session_id: "lcm-session".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
             role: "assistant".to_string(),
-            timestamp: Some(2),
-            ordinal: 1,
-            text: full_text,
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
             kind: Some("message".to_string()),
             model: Some("test-model".to_string()),
             tool_names: None,
-            source_path: Some("lcm-session.jsonl".to_string()),
+            source_path: Some(format!("{session_id}.jsonl")),
             source_offset: Some(0),
             metadata_json: None,
         })
         .await
     );
+}
+
+#[tokio::test]
+async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
+    seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
     let raw = db
         .lcm_load_raw_message("cursor", "lcm-message")
         .await
@@ -3840,6 +3874,155 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
         assert_eq!(payload["status"], "not_implemented", "{tool_name}");
     }
+}
+
+#[tokio::test]
+async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-a",
+        "lcm-scope-message-a",
+        "fail closed unique-cross-session-token alpha",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-b",
+        "lcm-scope-message-b",
+        "fail closed unique-cross-session-token beta",
+        2,
+    )
+    .await;
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tokensave_lcm_grep",
+            json!({
+                "provider": "cursor",
+                "query": "unique-cross-session-token",
+                "scope": "everything",
+                "limit": 10
+            }),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("scope"),
+        "invalid scope should report an argument error, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-numeric",
+        "lcm-numeric-message",
+        "numeric validation test body",
+        1,
+    )
+    .await;
+
+    for (case, args) in [
+        (
+            "fractional limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": 1.5}),
+        ),
+        (
+            "negative limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": -1}),
+        ),
+        (
+            "string limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": "1"}),
+        ),
+    ] {
+        let err = expect_tool_error(
+            handle_tool_call(&cg, "tokensave_lcm_load_session", args, None, None).await,
+        );
+        assert!(
+            err.contains("limit"),
+            "{case} should report an argument error mentioning limit, got {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lcm_load_session_accepts_valid_integer_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-valid-integers",
+        "lcm-valid-integers-message",
+        "valid integer argument body",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-valid-integers",
+            "limit": 1,
+            "content_offset": 0,
+            "content_limit": 8,
+            "start_time": 1,
+            "end_time": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["messages"][0]["content"].as_str().unwrap(),
+        "valid in"
+    );
+}
+
+#[tokio::test]
+async fn lcm_large_json_response_stays_parseable_after_truncation() {
+    let (cg, _dir) = setup_project().await;
+    for index in 0..4 {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-large-json",
+            &format!("lcm-large-json-message-{index}"),
+            format!("large json response {index} {}", "payload ".repeat(2000)),
+            index + 1,
+        )
+        .await;
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-json",
+            "limit": 4,
+            "content_limit": 8192
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value))
+        .expect("truncated LCM tool text should remain valid JSON");
+    assert_eq!(payload["truncated"], true);
+    assert!(payload["preview"].as_str().unwrap().len() <= 15_000);
 }
 
 #[tokio::test]
