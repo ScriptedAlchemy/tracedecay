@@ -83,6 +83,23 @@ async fn vibe_messages_populate_searchable_session_messages() {
     assert!(results
         .iter()
         .all(|hit| hit.message.model.as_deref() == Some("mistral-medium-3.5")));
+
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .expect("assistant tool-call message should be searchable");
+    let expected_content = serde_json::json!([
+        {"text": "The billing pipeline regression is fixed."},
+        {"tool_call": {"name": "read_file"}}
+    ]);
+    let raw = db
+        .lcm_load_raw_message("vibe", &assistant.message.message_id)
+        .await
+        .expect("structured Vibe content should be in raw LCM storage");
+    assert_eq!(
+        raw.content,
+        serde_json::to_string(&expected_content).unwrap()
+    );
 }
 
 #[tokio::test]

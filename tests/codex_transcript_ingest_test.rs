@@ -39,7 +39,19 @@ fn write_codex_rollout(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
             "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "The billing pipeline regression is fixed."}
+            "payload": {
+                "type": "agent_message",
+                "message": "The billing pipeline regression is fixed.",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": {"path": "src/lib.rs"}
+                        }
+                    }
+                ]
+            }
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.500Z",
@@ -123,6 +135,18 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     assert!(results
         .iter()
         .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5")));
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("assistant message should be searchable");
+    assert_eq!(assistant.message.tool_names.as_deref(), Some("apply_patch"));
+    let raw = db
+        .lcm_load_raw_message("codex", &assistant.message.message_id)
+        .await
+        .expect("Codex tool_calls should be in raw LCM metadata");
+    let metadata: serde_json::Value =
+        serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["tool_calls"][0]["function"]["name"], "apply_patch");
 }
 
 #[tokio::test]

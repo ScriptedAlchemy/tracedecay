@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::global_db::GlobalDb;
 use crate::sessions::source::{
-    ingest_source, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
-    StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, content_storage_text_and_tools, ingest_source, stream_new_jsonl,
+    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -329,7 +329,15 @@ fn event_message(
         .filter(|role| !role.is_empty())?;
     let message = record.get("message").unwrap_or(record);
     let content = message.get("content").unwrap_or(message);
-    let (text, tool_names) = content_text_and_tools(content);
+    if content_is_only_subagent_dispatch(content) {
+        return None;
+    }
+    let (text, tool_names) = content_storage_text_and_tools(
+        content,
+        message
+            .get("tool_calls")
+            .or_else(|| record.get("tool_calls")),
+    );
     if text.trim().is_empty() {
         return None;
     }
@@ -363,7 +371,7 @@ fn event_message(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(transcript_path.to_string_lossy().to_string()),
         source_offset: Some(source_offset),
-        metadata_json: serde_json::to_string(&message_metadata(record)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(record, message)).ok(),
     })
 }
 
@@ -439,6 +447,20 @@ fn is_subagent_dispatch_tool(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
 }
 
+fn content_is_only_subagent_dispatch(content: &Value) -> bool {
+    let Some(items) = content.as_array() else {
+        return false;
+    };
+    !items.is_empty()
+        && items.iter().all(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool_use")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_subagent_dispatch_tool)
+        })
+}
+
 fn dispatch_text(item: &Value) -> Option<String> {
     let input = item.get("input").unwrap_or(item);
     let mut parts = Vec::new();
@@ -453,41 +475,6 @@ fn dispatch_text(item: &Value) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), Vec::new());
-    }
-    let Some(items) = content.as_array() else {
-        return (
-            content
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            Vec::new(),
-        );
-    };
-
-    let mut texts = Vec::new();
-    let mut tools = Vec::new();
-    for item in items {
-        match item.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-            Some("tool_use") => {
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (texts.join("\n\n"), tools)
 }
 
 fn content_kind(content: &Value) -> Option<&'static str> {
@@ -578,9 +565,16 @@ fn session_metadata(event: &Value) -> Value {
     })
 }
 
-fn message_metadata(record: &Value) -> Value {
-    serde_json::json!({
-        "source": "cursor_transcript",
-        "raw_type": record.get("type").cloned(),
-    })
+fn message_metadata(record: &Value, message: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("cursor_transcript".to_string()),
+    );
+    metadata.insert(
+        "raw_type".to_string(),
+        record.get("type").cloned().unwrap_or(Value::Null),
+    );
+    append_tool_calls_metadata(&mut metadata, message);
+    Value::Object(metadata)
 }

@@ -118,6 +118,19 @@ async fn claude_transcript_populates_searchable_messages() {
     assert!(results
         .iter()
         .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8")));
+
+    let expected_content = serde_json::json!([
+        {"type": "text", "text": "The billing pipeline regression is fixed."},
+        {"type": "tool_use", "name": "tokensave_context", "input": {}}
+    ]);
+    let raw = db
+        .lcm_load_raw_message("claude", "msg_claude_1")
+        .await
+        .expect("structured Claude content should be in raw LCM storage");
+    assert_eq!(
+        raw.content,
+        serde_json::to_string(&expected_content).unwrap()
+    );
 }
 
 #[tokio::test]

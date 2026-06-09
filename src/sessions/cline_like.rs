@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::source::{
-    paths_equal, read_changed_file, title_from_messages, ParsedTranscript, SessionDraft,
-    StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, content_storage_text_and_tools, paths_equal, read_changed_file,
+    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -238,7 +238,7 @@ fn message_from_entry(
         _ => return None,
     };
     let content = entry.get("content").unwrap_or(entry);
-    let (text, tool_names) = content_text_and_tools(content);
+    let (text, tool_names) = content_storage_text_and_tools(content, entry.get("tool_calls"));
     if text.trim().is_empty() {
         return None;
     }
@@ -274,49 +274,16 @@ fn message_from_entry(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(index as i64),
-        metadata_json: serde_json::to_string(&serde_json::json!({
-            "source": format!("{provider}_task_history"),
-        }))
-        .ok(),
+        metadata_json: serde_json::to_string(&message_metadata(provider, entry)).ok(),
     })
 }
 
-fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), Vec::new());
-    }
-    let Some(items) = content.as_array() else {
-        return (
-            content
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            Vec::new(),
-        );
-    };
-
-    let mut texts = Vec::new();
-    let mut tools = Vec::new();
-    for item in items {
-        match item.get("type").and_then(Value::as_str) {
-            Some("text") | None => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-            Some("tool_use") => {
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
-            }
-            Some("tool_result") => {
-                if let Some(text) = item.get("content").and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (texts.join("\n\n"), tools)
+fn message_metadata(provider: &str, entry: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String(format!("{provider}_task_history")),
+    );
+    append_tool_calls_metadata(&mut metadata, entry);
+    Value::Object(metadata)
 }

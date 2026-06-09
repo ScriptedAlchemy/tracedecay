@@ -17,8 +17,9 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::source::{
-    collect_files_with_ext, paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript,
-    SessionDraft, StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, collect_files_with_ext, content_storage_text_and_tools,
+    paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
+    StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -191,7 +192,12 @@ fn message_from_line(
         .to_string();
 
     let content = message.get("content").unwrap_or(message);
-    let (text, tool_names) = content_text_and_tools(content);
+    let (text, tool_names) = content_storage_text_and_tools(
+        content,
+        message
+            .get("tool_calls")
+            .or_else(|| record.get("tool_calls")),
+    );
     if text.trim().is_empty() {
         return None;
     }
@@ -225,41 +231,17 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&serde_json::json!({
-            "source": "claude_transcript",
-            "raw_type": kind,
-        }))
-        .ok(),
+        metadata_json: serde_json::to_string(&message_metadata(kind, message)).ok(),
     })
 }
 
-/// Extract the concatenated text and tool-use names from a Claude `content`
-/// field, which is either a plain string (user turns) or an array of typed
-/// blocks (`text`, `tool_use`, `tool_result`, …) for assistant turns.
-fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), Vec::new());
-    }
-    let Some(items) = content.as_array() else {
-        return (String::new(), Vec::new());
-    };
-
-    let mut texts = Vec::new();
-    let mut tools = Vec::new();
-    for item in items {
-        match item.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-            Some("tool_use") => {
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (texts.join("\n\n"), tools)
+fn message_metadata(kind: &str, message: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_transcript".to_string()),
+    );
+    metadata.insert("raw_type".to_string(), Value::String(kind.to_string()));
+    append_tool_calls_metadata(&mut metadata, message);
+    Value::Object(metadata)
 }

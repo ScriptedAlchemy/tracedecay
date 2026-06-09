@@ -26,8 +26,9 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::source::{
-    collect_files_with_ext, paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript,
-    SessionDraft, StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, collect_files_with_ext, content_storage_text_and_tools,
+    paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
+    StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -247,7 +248,8 @@ fn message_from_line(
         "agent_message" => "assistant",
         _ => return None,
     };
-    let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
+    let content = payload.get("message")?;
+    let (text, tool_names) = content_storage_text_and_tools(content, payload.get("tool_calls"));
     if text.trim().is_empty() {
         return None;
     }
@@ -265,15 +267,22 @@ fn message_from_line(
         role: role.to_string(),
         timestamp,
         ordinal: offset,
-        text: text.to_string(),
+        text,
         kind: Some("message".to_string()),
         model: meta.model.clone(),
-        tool_names: None,
+        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&serde_json::json!({
-            "source": "codex_rollout",
-        }))
-        .ok(),
+        metadata_json: serde_json::to_string(&message_metadata(payload)).ok(),
     })
+}
+
+fn message_metadata(payload: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("codex_rollout".to_string()),
+    );
+    append_tool_calls_metadata(&mut metadata, payload);
+    Value::Object(metadata)
 }

@@ -99,6 +99,64 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
 }
 
 #[tokio::test]
+async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    let content = serde_json::json!([
+        {"type": "text", "text": "Inspect this image payload."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abcd"}}
+    ]);
+    let tool_calls = serde_json::json!([
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": {"path": "src/lib.rs"}
+            }
+        }
+    ]);
+    std::fs::write(
+        &transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "role": "assistant",
+                "message": {
+                    "id": "cursor-structured",
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "cursor-structured")
+        .await
+        .expect("raw structured message should exist");
+    assert_eq!(raw.content, serde_json::to_string(&content).unwrap());
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["tool_calls"], tool_calls);
+}
+
+#[tokio::test]
 async fn cursor_transcript_ingest_is_idempotent() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);

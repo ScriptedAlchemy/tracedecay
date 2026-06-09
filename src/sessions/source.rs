@@ -487,12 +487,111 @@ pub(crate) fn preview_title(text: &str) -> String {
     }
 }
 
+/// Return the storage representation used by LCM raw ingest for provider
+/// transcript content. This intentionally matches the active-message path:
+/// strings stay strings, structured content is compact JSON.
+pub(crate) fn message_storage_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    serde_json::to_string(content).unwrap_or_else(|_| content.to_string())
+}
+
+/// Return lossless storage text plus tool names discovered in either structured
+/// content blocks or a sibling `tool_calls` field.
+pub(crate) fn content_storage_text_and_tools(
+    content: &Value,
+    tool_calls: Option<&Value>,
+) -> (String, Vec<String>) {
+    let mut tools = Vec::new();
+    collect_tool_names(content, &mut tools);
+    if let Some(tool_calls) = tool_calls {
+        collect_tool_names(tool_calls, &mut tools);
+    }
+    tools.sort();
+    tools.dedup();
+    (message_storage_text(content), tools)
+}
+
+pub(crate) fn append_tool_calls_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    message: &Value,
+) {
+    if let Some(tool_calls) = message.get("tool_calls") {
+        map.insert("tool_calls".to_string(), tool_calls.clone());
+    }
+}
+
+fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_tool_names(item, tools);
+            }
+        }
+        Value::Object(map) => {
+            if matches!(
+                map.get("type").and_then(Value::as_str),
+                Some("tool_use" | "tool_call" | "function_call")
+            ) {
+                if let Some(name) = map.get("name").and_then(Value::as_str) {
+                    tools.push(name.to_string());
+                }
+            }
+            for key in ["tool_call", "functionCall", "function_call", "function"] {
+                if let Some(name) = map
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .and_then(|nested| nested.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    tools.push(name.to_string());
+                }
+            }
+            if let Some(tool_calls) = map.get("tool_calls") {
+                collect_tool_names(tool_calls, tools);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn title_text_from_stored_content(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| visible_text_from_content(&value))
+        .unwrap_or_else(|| text.to_string())
+}
+
+fn visible_text_from_content(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(visible_text_from_content)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n\n"))
+        }
+        Value::Object(map) => {
+            for key in ["text", "content", "message"] {
+                if let Some(text) = map.get(key).and_then(Value::as_str) {
+                    return Some(text.to_string());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Build a session title from the first user message, if any.
 pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
     messages
         .iter()
         .find(|message| message.role == "user")
-        .map(|message| preview_title(&message.text))
+        .map(|message| preview_title(&title_text_from_stored_content(&message.text)))
 }
 
 #[cfg(test)]

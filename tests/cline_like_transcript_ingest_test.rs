@@ -81,6 +81,22 @@ async fn assert_provider_ingests(
     assert!(results
         .iter()
         .any(|hit| hit.message.tool_names.as_deref() == Some("read_file")));
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .expect("assistant tool-use message should be searchable");
+    let expected_content = serde_json::json!([
+        {"type": "text", "text": "The billing pipeline regression is fixed."},
+        {"type": "tool_use", "name": "read_file"}
+    ]);
+    let raw = db
+        .lcm_load_raw_message(provider, &assistant.message.message_id)
+        .await
+        .expect("structured Cline-like content should be in raw LCM storage");
+    assert_eq!(
+        raw.content,
+        serde_json::to_string(&expected_content).unwrap()
+    );
 
     // ContentHash: unchanged full-rewrite file is a no-op.
     assert_eq!(
