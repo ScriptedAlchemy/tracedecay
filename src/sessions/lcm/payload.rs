@@ -1,14 +1,13 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{params, Connection, Value};
-use sha2::{Digest, Sha256};
+use libsql::{params, Connection};
 
 use crate::sessions::SessionMessageRecord;
+use crate::tokensave::current_timestamp;
 
-use super::{raw, LcmError, LcmPayloadExpansion, LcmPayloadRef};
+use super::{raw, util, LcmError, LcmPayloadExpansion, LcmPayloadRef};
 
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o40_0000;
@@ -124,9 +123,10 @@ pub(crate) fn write_external_payload(
     content: &str,
     metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
-    let content_hash = sha256_hex(content.as_bytes());
-    let owner_hash =
-        sha256_hex(format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes());
+    let content_hash = util::sha256_hex(content.as_bytes());
+    let owner_hash = util::sha256_hex(
+        format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
+    );
     let payload_ref = format!("payload_{owner_hash}.payload");
     validate_payload_ref(&payload_ref)?;
 
@@ -144,7 +144,7 @@ pub(crate) fn write_external_payload(
         content_hash,
         byte_count: content.len() as u64,
         char_count: content.chars().count() as u64,
-        created_at: unixepoch(),
+        created_at: current_timestamp(),
         metadata_json,
     })
 }
@@ -201,11 +201,10 @@ pub(crate) async fn upsert_payload_metadata(
             payload.byte_count as i64,
             payload.char_count as i64,
             payload.created_at,
-            opt_text(payload.metadata_json.as_deref()),
+            util::opt_text(payload.metadata_json.as_deref()),
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -229,7 +228,7 @@ async fn expand_payload(
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
     let content = read_payload_file(&path)?;
-    if sha256_hex(content.as_bytes()) != payload.content_hash {
+    if util::sha256_hex(content.as_bytes()) != payload.content_hash {
         return Err(LcmError::PayloadIntegrityMismatch);
     }
 
@@ -272,14 +271,8 @@ async fn ensure_current_raw_payload_ref(
                 payload.payload_ref.as_str(),
             ],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    if rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .is_some()
-    {
+        .await?;
+    if rows.next().await?.is_some() {
         return Ok(());
     }
 
@@ -297,13 +290,8 @@ async fn ensure_current_raw_payload_ref(
                 payload.message_id.as_str(),
             ],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Err(LcmError::PayloadNotFound);
     };
     for index in 0..4 {
@@ -321,7 +309,7 @@ async fn ensure_current_raw_payload_ref(
     Err(LcmError::PayloadNotFound)
 }
 
-async fn load_payload_metadata(
+pub(crate) async fn load_payload_metadata(
     conn: &Connection,
     payload_ref: &str,
 ) -> Result<LcmPayloadRef, LcmError> {
@@ -333,26 +321,21 @@ async fn load_payload_metadata(
              WHERE payload_ref = ?1",
             params![payload_ref],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or(LcmError::PayloadNotFound)?;
-    let byte_count: i64 = row.get(6).map_err(|err| LcmError::Db(err.to_string()))?;
-    let char_count: i64 = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
+    let row = rows.next().await?.ok_or(LcmError::PayloadNotFound)?;
+    let byte_count: i64 = row.get(6)?;
+    let char_count: i64 = row.get(7)?;
     Ok(LcmPayloadRef {
-        payload_ref: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        message_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        kind: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        content_hash: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+        payload_ref: row.get(0)?,
+        provider: row.get(1)?,
+        session_id: row.get(2)?,
+        message_id: row.get(3)?,
+        kind: row.get(4)?,
+        content_hash: row.get(5)?,
         byte_count: byte_count.max(0) as u64,
         char_count: char_count.max(0) as u64,
-        created_at: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        metadata_json: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+        created_at: row.get(8)?,
+        metadata_json: row.get(9)?,
     })
 }
 
@@ -497,20 +480,4 @@ fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
 #[cfg(not(unix))]
 fn set_private_dir_permissions(_path: &Path) -> Result<(), LcmError> {
     Ok(())
-}
-
-fn sha256_hex(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    hex::encode(hasher.finalize())
-}
-
-fn unixepoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
 }

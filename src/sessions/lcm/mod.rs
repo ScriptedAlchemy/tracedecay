@@ -8,6 +8,9 @@ pub mod raw;
 pub mod schema;
 pub mod security;
 pub mod types;
+pub mod util;
+
+pub const LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT: &str = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
 
 pub use hermes::{LcmCompressionRequest, LcmSummarizerMode};
 pub use raw::derived_text_for_index;

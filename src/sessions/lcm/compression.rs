@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use libsql::{params, Connection, Value as DbValue};
+use libsql::{params, Connection};
 use serde_json::{json, Map, Value};
 
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    dag, payload, raw, security, LcmCompressionRequest, LcmCompressionResponse, LcmError,
+    dag, payload, raw, security, util, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
     LcmPreflightResponse, LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
     LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode, LcmSummaryNodeDraft,
@@ -54,33 +54,19 @@ pub(crate) async fn update_lifecycle(
     conn: &Connection,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-
-    if let Err(err) = upsert_lifecycle_state(conn, &update).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-    if let Err(err) = replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await
-    {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => lifecycle_state(conn, &update.provider, &update.conversation_id).await,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
+    util::with_immediate_tx(conn, async {
+        upsert_lifecycle_state(conn, &update).await?;
+        replace_maintenance_debt(
+            conn,
+            &update.provider,
+            &update.conversation_id,
+            &update.maintenance_debt,
+        )
+        .await?;
+        Ok(())
+    })
+    .await?;
+    lifecycle_state(conn, &update.provider, &update.conversation_id).await
 }
 
 pub(crate) async fn lifecycle_state(
@@ -96,23 +82,16 @@ pub(crate) async fn lifecycle_state(
              WHERE provider = ?1 AND conversation_id = ?2",
             params![provider, conversation_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("lifecycle state not found".to_string()))?;
+        .await?;
+    let row = rows.next().await?.ok_or(LcmError::LifecycleStateNotFound)?;
     let maintenance_debt = load_maintenance_debt(conn, provider, conversation_id).await?;
     Ok(LcmLifecycleState {
-        provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        conversation_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        current_session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        current_frontier_store_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        last_finalized_session_id: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        last_finalized_frontier_store_id: row
-            .get(5)
-            .map_err(|err| LcmError::Db(err.to_string()))?,
+        provider: row.get(0)?,
+        conversation_id: row.get(1)?,
+        current_session_id: row.get(2)?,
+        current_frontier_store_id: row.get(3)?,
+        last_finalized_session_id: row.get(4)?,
+        last_finalized_frontier_store_id: row.get(5)?,
         maintenance_debt,
     })
 }
@@ -153,11 +132,10 @@ pub(crate) async fn record_session_boundary(
         params![
             request.provider.as_str(),
             request.session_id.as_str(),
-            opt_i64(request.boundary_skip_at),
+            util::opt_i64(request.boundary_skip_at),
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(session_boundary_response(
         true,
         "compression_boundary_skip_recorded",
@@ -173,25 +151,11 @@ async fn carry_over_session_boundary(
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-
-    let response = match carry_over_in_transaction(conn, request, old_session_id).await {
-        Ok(response) => response,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-    };
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => Ok(response),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
+    util::with_immediate_tx(
+        conn,
+        carry_over_in_transaction(conn, request, old_session_id),
+    )
+    .await
 }
 
 async fn carry_over_in_transaction(
@@ -207,16 +171,12 @@ async fn carry_over_in_transaction(
              WHERE provider = ?1 AND session_id = ?2",
             params![request.provider.as_str(), request.session_id.as_str()],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let target_row = target_rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("carry-over guard query returned no rows".to_string()))?;
-    let target_message_count: i64 = target_row
-        .get(0)
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let target_message_count: i64 = target_row.get(0)?;
     if target_message_count > 0 {
         return Err(LcmError::Db(format!(
             "compression boundary carry-over requires an empty target session; session {} already has {} raw message(s)",
@@ -270,8 +230,7 @@ async fn carry_over_in_transaction(
         "DELETE FROM lcm_lifecycle_state WHERE provider = ?1 AND conversation_id = ?2",
         params![request.provider.as_str(), old_session_id],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
 
     Ok(session_boundary_response(
         true,
@@ -307,14 +266,12 @@ async fn boundary_cooldown_active(
                 COMPRESSION_BOUNDARY_COOLDOWN_SECONDS
             ],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("boundary cooldown query returned no rows".to_string()))?;
-    let active: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    let active: i64 = row.get(0)?;
     Ok(active != 0)
 }
 
@@ -428,9 +385,7 @@ pub(crate) async fn compress(
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
 
     let ingested = match ingest_active_messages(
         conn,
@@ -500,34 +455,18 @@ async fn ingest_active_messages_in_transaction(
     messages: &[Value],
     ignore_message_patterns: &[String],
 ) -> Result<IngestedActiveMessages, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-
-    let ingested = match ingest_active_messages(
+    util::with_immediate_tx(
         conn,
-        storage_root,
-        provider,
-        session_id,
-        messages,
-        ignore_message_patterns,
+        ingest_active_messages(
+            conn,
+            storage_root,
+            provider,
+            session_id,
+            messages,
+            ignore_message_patterns,
+        ),
     )
     .await
-    {
-        Ok(ingested) => ingested,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-    };
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => Ok(ingested),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
 }
 
 async fn compress_in_transaction(
@@ -846,7 +785,7 @@ pub(crate) async fn maintenance_debt_count(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
+    let session_value = util::opt_text(session_id);
     let mut rows = conn
         .query(
             "SELECT COUNT(*)
@@ -856,12 +795,10 @@ pub(crate) async fn maintenance_debt_count(
              WHERE d.provider = ?1 AND (?2 IS NULL OR s.current_session_id = ?2)",
             params![provider, session_value],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("maintenance debt count returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
@@ -886,13 +823,12 @@ async fn upsert_lifecycle_state(
             update.provider.as_str(),
             update.conversation_id.as_str(),
             update.current_session_id.as_str(),
-            opt_text(update.last_finalized_session_id.as_deref()),
-            opt_i64(update.current_frontier_store_id),
-            opt_i64(update.last_finalized_frontier_store_id),
+            util::opt_text(update.last_finalized_session_id.as_deref()),
+            util::opt_i64(update.current_frontier_store_id),
+            util::opt_i64(update.last_finalized_frontier_store_id),
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -906,8 +842,7 @@ async fn replace_maintenance_debt(
         "DELETE FROM lcm_maintenance_debt WHERE provider = ?1 AND conversation_id = ?2",
         params![provider, conversation_id],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
 
     for debt in debts {
         let (debt_id, debt_kind, from_store_id, to_store_id) = debt_to_db(debt);
@@ -921,12 +856,11 @@ async fn replace_maintenance_debt(
                 conversation_id,
                 debt_id.as_str(),
                 debt_kind,
-                opt_i64(from_store_id),
-                opt_i64(to_store_id),
+                util::opt_i64(from_store_id),
+                util::opt_i64(to_store_id),
             ],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     }
     Ok(())
 }
@@ -944,20 +878,11 @@ async fn load_maintenance_debt(
              ORDER BY created_at, debt_id",
             params![provider, conversation_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut debts = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let debt_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        debts.push(debt_from_db(
-            &debt_kind,
-            row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-            row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        )?);
+    while let Some(row) = rows.next().await? {
+        let debt_kind: String = row.get(0)?;
+        debts.push(debt_from_db(&debt_kind, row.get(1)?, row.get(2)?)?);
     }
     Ok(debts)
 }
@@ -970,17 +895,15 @@ async fn lifecycle_state_or_default(
 ) -> Result<LcmLifecycleState, LcmError> {
     match lifecycle_state(conn, provider, conversation_id).await {
         Ok(state) => Ok(state),
-        Err(LcmError::Db(message)) if message == "lifecycle state not found" => {
-            Ok(LcmLifecycleState {
-                provider: provider.to_string(),
-                conversation_id: conversation_id.to_string(),
-                current_session_id: session_id.to_string(),
-                current_frontier_store_id: None,
-                last_finalized_session_id: None,
-                last_finalized_frontier_store_id: None,
-                maintenance_debt: Vec::new(),
-            })
-        }
+        Err(LcmError::LifecycleStateNotFound) => Ok(LcmLifecycleState {
+            provider: provider.to_string(),
+            conversation_id: conversation_id.to_string(),
+            current_session_id: session_id.to_string(),
+            current_frontier_store_id: None,
+            last_finalized_session_id: None,
+            last_finalized_frontier_store_id: None,
+            maintenance_debt: Vec::new(),
+        }),
         Err(err) => Err(err),
     }
 }
@@ -1760,28 +1683,24 @@ async fn load_condensation_candidates(
             ],
         )
         .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        ?;
     let mut nodes = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    while let Some(row) = rows.next().await? {
         nodes.push(LcmSummaryNode {
-            node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-            provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-            conversation_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-            session_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-            depth: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-            summary_text: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-            summary_hash: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-            summary_token_count: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
-            source_token_count: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-            source_time_start: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
-            source_time_end: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-            expand_hint: row.get(11).map_err(|err| LcmError::Db(err.to_string()))?,
-            metadata_json: row.get(12).map_err(|err| LcmError::Db(err.to_string()))?,
-            created_at: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+            node_id: row.get(0)?,
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
             source_refs: Vec::new(),
         });
     }
@@ -2016,8 +1935,7 @@ async fn update_active_replay_metadata(
          WHERE provider = ?1 AND message_id = ?2",
         params![provider, message_id, metadata_json],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -2039,8 +1957,7 @@ async fn ensure_session(
             "LCM active context",
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -2056,19 +1973,17 @@ async fn existing_active_message_state(
              WHERE provider = ?1 AND message_id = ?2",
             params![provider, message_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     rows.next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .map(|row| {
             Ok(ExistingActiveMessageState {
-                session_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-                role: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-                timestamp: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-                ordinal: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-                content_hash: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-                metadata_json: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
+                session_id: row.get(0)?,
+                role: row.get(1)?,
+                timestamp: row.get(2)?,
+                ordinal: row.get(3)?,
+                content_hash: row.get(4)?,
+                metadata_json: row.get(5)?,
             })
         })
         .transpose()
@@ -2086,12 +2001,10 @@ async fn next_ordinal(
              WHERE provider = ?1 AND session_id = ?2",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("ordinal query returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
@@ -2111,45 +2024,12 @@ async fn load_raw_messages_for_session(
              ORDER BY store_id",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut messages = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        messages.push(raw_message_from_row(&row)?);
+    while let Some(row) = rows.next().await? {
+        messages.push(raw::raw_message_from_row(&row)?);
     }
     Ok(messages)
-}
-
-fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, LcmError> {
-    let storage_kind_text: String = row.get(9).map_err(|err| LcmError::Db(err.to_string()))?;
-    let content: Option<String> = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
-    let snippet_text: String = row.get(11).map_err(|err| LcmError::Db(err.to_string()))?;
-    let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
-        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
-    let content = match storage_kind {
-        LcmStorageKind::Inline => content.unwrap_or_default(),
-        LcmStorageKind::External => content.unwrap_or(snippet_text),
-    };
-    Ok(LcmRawMessage {
-        provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        message_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        store_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        role: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        ordinal: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        timestamp: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        content,
-        content_hash: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        storage_kind,
-        payload_ref: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
-        metadata_json: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
-    })
 }
 
 fn message_content(message: &Value) -> String {
@@ -2336,12 +2216,4 @@ fn debt_from_db(
             "invalid maintenance debt kind: {debt_kind}"
         ))),
     }
-}
-
-fn opt_text(value: Option<&str>) -> DbValue {
-    value.map_or(DbValue::Null, |s| DbValue::Text(s.to_string()))
-}
-
-fn opt_i64(value: Option<i64>) -> DbValue {
-    value.map_or(DbValue::Null, DbValue::Integer)
 }

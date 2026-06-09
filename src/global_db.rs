@@ -723,7 +723,7 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmExpandQueryRequest,
     ) -> Result<crate::sessions::lcm::LcmExpandQueryResponse, crate::sessions::lcm::LcmError> {
-        crate::sessions::lcm::query::expand_query(&self.conn, &self.storage_root, request).await
+        crate::sessions::lcm::query::expand_query(&self.conn, request).await
     }
 
     /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.

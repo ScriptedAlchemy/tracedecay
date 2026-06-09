@@ -1,6 +1,8 @@
-use libsql::{params, Connection, Value};
+use libsql::{params, Connection};
 
 use super::{raw, LcmRawMessage, LcmStorageKind};
+
+use super::util;
 
 pub const LCM_SCHEMA_VERSION: i64 = 2;
 
@@ -301,26 +303,18 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Opti
                 session_id.as_str(),
                 role.as_str(),
                 ordinal,
-                opt_i64(timestamp),
+                util::opt_i64(timestamp),
                 content.as_str(),
                 content_hash.as_str(),
                 LcmStorageKind::Inline.as_str(),
                 snippet_text.as_str(),
                 index_text.as_str(),
                 i64::from(legacy_truncated),
-                opt_text(metadata_json.as_deref()),
+                util::opt_text(metadata_json.as_deref()),
             ],
         )
         .await
         .ok()?;
     }
     Some(())
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-fn opt_i64(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
 }

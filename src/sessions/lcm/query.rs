@@ -6,18 +6,18 @@ use libsql::{params, Connection, Value};
 
 use super::types::{LcmLifecycleStatus, LcmPayloadStatus, LcmRedactionStatus};
 use super::{
-    compression, dag, payload, raw, schema, LcmConfigStatus, LcmContentRange, LcmContentSlice,
-    LcmDagDepthStatus, LcmDagStatus, LcmDescribeExternalPayload, LcmDescribeRequest,
-    LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
-    LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
-    LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
+    compression, dag, payload, raw, schema, util, LcmConfigStatus, LcmContentRange,
+    LcmContentSlice, LcmDagDepthStatus, LcmDagStatus, LcmDescribeExternalPayload,
+    LcmDescribeRequest, LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode,
+    LcmDescribeTarget, LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock,
+    LcmExpandQueryMatch, LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination,
     LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmGrepSort,
     LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage,
     LcmRawMessageOverview, LcmScope, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
     LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview,
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
-    LCM_DEFAULT_SUMMARY_FAN_IN, LCM_SCHEMA_VERSION,
+    LCM_DEFAULT_SUMMARY_FAN_IN, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LCM_SCHEMA_VERSION,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -66,8 +66,8 @@ pub(crate) async fn load_session(
         role_clause = format!(" AND role IN ({placeholders})");
         values.extend(roles.into_iter().map(Value::Text));
     }
-    let start_time = opt_i64(request.start_time);
-    let end_time = opt_i64(request.end_time);
+    let start_time = util::opt_i64(request.start_time);
+    let end_time = util::opt_i64(request.end_time);
     values.push(start_time.clone());
     values.push(start_time);
     values.push(end_time.clone());
@@ -87,18 +87,11 @@ pub(crate) async fn load_session(
          ORDER BY store_id
          LIMIT ?"
     );
-    let mut rows = conn
-        .query(&sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut rows = conn.query(&sql, values).await?;
 
     let mut messages = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let raw = raw_message_from_row(&row)?;
+    while let Some(row) = rows.next().await? {
+        let raw = raw::raw_message_from_row(&row)?;
         messages.push(load_message_from_raw(raw, request.content_slice));
     }
 
@@ -151,7 +144,7 @@ pub(crate) async fn expand(
 ) -> Result<LcmExpandResponse, LcmError> {
     match request.target {
         LcmExpandTarget::RawMessage { store_id } => {
-            let raw = load_raw_message_by_store_id(conn, store_id).await?;
+            let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
             // Raw store_id expansion works across sessions like hermes-lcm
             // `lcm_expand` store_id mode (grep scope=all -> expand the hit),
             // but stays provider-scoped: providers are a TokenSave concept
@@ -249,7 +242,6 @@ pub(crate) async fn expand(
 
 pub(crate) async fn expand_query(
     conn: &Connection,
-    _storage_root: &Path,
     request: LcmExpandQueryRequest,
 ) -> Result<LcmExpandQueryResponse, LcmError> {
     let max_results = clamp_limit(request.max_results);
@@ -364,7 +356,7 @@ pub(crate) async fn expand_query(
         assembler.add_summary_expansion(expansion);
     }
     for store_id in selected_raw_store_ids {
-        let raw = load_raw_message_by_store_id(conn, store_id).await?;
+        let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
         if raw.provider == request.provider && raw.session_id == request.session_id {
             assembler.add_raw_message(raw, None);
         }
@@ -463,7 +455,8 @@ pub(crate) async fn status(
             .await?;
     let maintenance_debt_count =
         compression::maintenance_debt_count(conn, provider, session_id).await?;
-    let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
+    let lifecycle_state_count =
+        count_lifecycle_states_for_current_session(conn, provider, session_id).await?;
     let frontier_count = count_frontier_rows(conn, provider, session_id).await?;
     let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
     let legacy_truncated_count = count_legacy_truncated(conn, provider, session_id).await?;
@@ -688,20 +681,15 @@ async fn store_status(
             "SELECT content, snippet_text
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut messages = 0_i64;
     let mut estimated_tokens = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    while let Some(row) = rows.next().await? {
         messages += 1;
-        let content: Option<String> = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let snippet: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        let content: Option<String> = row.get(0)?;
+        let snippet: String = row.get(1)?;
         // Externalized rows count their inline placeholder, matching what the
         // engine replays into active context.
         let text = content.unwrap_or(snippet);
@@ -725,23 +713,18 @@ async fn dag_status(
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
              GROUP BY depth
              ORDER BY depth",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut depths = std::collections::BTreeMap::new();
     let mut total_nodes = 0_i64;
     let mut total_tokens = 0_i64;
     let mut total_source_tokens = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let depth: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let count: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let tokens: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_tokens: i64 = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let depth: i64 = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        let tokens: i64 = row.get(2)?;
+        let source_tokens: i64 = row.get(3)?;
         total_nodes += count;
         total_tokens += tokens;
         total_source_tokens += source_tokens;
@@ -948,7 +931,7 @@ fn expand_query_synthesis_prompt(
     context_blocks: &[LcmExpandQueryContextBlock],
     context_truncated: bool,
 ) -> LcmExpandQuerySynthesisPrompt {
-    let system = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.".to_string();
+    let system = LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT.to_string();
     let context_json = serde_json::to_string_pretty(context_blocks).unwrap_or_else(|_| "[]".into());
     let truncation_note = if context_truncated {
         "\n\nNOTE: Some LCM context was truncated; pagination metadata is included in the tool response."
@@ -1021,25 +1004,18 @@ async fn raw_grep_hits(
          ORDER BY {order_by}
          LIMIT ?"
     );
-    let mut rows = conn
-        .query(&sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut rows = conn.query(&sql, values).await?;
 
     let mut hits = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let snippet: String = row.get(4).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let snippet: String = row.get(4)?;
         hits.push(LcmGrepHit {
             kind: "raw_message".to_string(),
-            provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-            session_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-            message_id: Some(row.get(2).map_err(|err| LcmError::Db(err.to_string()))?),
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: Some(row.get(2)?),
             node_id: None,
-            store_id: Some(row.get(3).map_err(|err| LcmError::Db(err.to_string()))?),
+            store_id: Some(row.get(3)?),
             snippet: raw::derived_text_for_snippet(&snippet),
         });
     }
@@ -1100,24 +1076,17 @@ async fn summary_grep_hits(
          ORDER BY {order_by}, n.node_id
          LIMIT ?"
     );
-    let mut rows = conn
-        .query(&sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut rows = conn.query(&sql, values).await?;
 
     let mut hits = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let summary_text: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let summary_text: String = row.get(3)?;
         hits.push(LcmGrepHit {
             kind: "summary_node".to_string(),
-            provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-            session_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
             message_id: None,
-            node_id: Some(row.get(2).map_err(|err| LcmError::Db(err.to_string()))?),
+            node_id: Some(row.get(2)?),
             store_id: None,
             snippet: raw::derived_text_for_snippet(&summary_text),
         });
@@ -1139,26 +1108,21 @@ async fn raw_message_overviews(
              LIMIT 20",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
     let mut overviews = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let storage_kind_text: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
-        let content_preview: String = row.get(5).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let storage_kind_text: String = row.get(3)?;
+        let content_preview: String = row.get(5)?;
         let (_, content_range) = slice_content(&content_preview, None);
         overviews.push(LcmRawMessageOverview {
-            message_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-            store_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-            role: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+            message_id: row.get(0)?,
+            store_id: row.get(1)?,
+            role: row.get(2)?,
             storage_kind: LcmStorageKind::from_db(&storage_kind_text).ok_or_else(|| {
                 LcmError::Db(format!("invalid storage_kind: {storage_kind_text}"))
             })?,
-            payload_ref: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+            payload_ref: row.get(4)?,
             content_preview,
             content_range,
         });
@@ -1183,24 +1147,19 @@ async fn summary_overviews(
              LIMIT 20",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
     let mut overviews = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let summary_text: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_count: i64 = row.get(5).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let summary_text: String = row.get(3)?;
+        let source_count: i64 = row.get(5)?;
         overviews.push(LcmSummaryNodeOverview {
-            node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-            conversation_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-            depth: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
+            node_id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            depth: row.get(2)?,
             summary_preview: raw::derived_text_for_snippet(&summary_text),
             source_count: source_count.max(0) as usize,
-            created_at: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
+            created_at: row.get(4)?,
         });
     }
     Ok(overviews)
@@ -1221,25 +1180,20 @@ async fn describe_summary_node(
              WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
             params![provider, session_id, node_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or(LcmError::SummaryNodeNotFound)?;
+        .await?;
+    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
     let children = describe_summary_sources(conn, provider, session_id, node_id).await?;
     Ok(LcmDescribeSummaryNode {
-        node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        conversation_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        depth: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        summary_token_count: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_token_count: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_time_start: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_time_end: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        expand_hint: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
-        metadata_json: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        created_at: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+        node_id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        depth: row.get(2)?,
+        summary_token_count: row.get(3)?,
+        source_token_count: row.get(4)?,
+        source_time_start: row.get(5)?,
+        source_time_end: row.get(6)?,
+        expand_hint: row.get(7)?,
+        metadata_json: row.get(8)?,
+        created_at: row.get(9)?,
         source_count: children.len(),
         children,
     })
@@ -1259,16 +1213,11 @@ async fn describe_summary_sources(
              ORDER BY ordinal",
             params![node_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut out = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let source_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let source_kind: String = row.get(0)?;
+        let source_id: String = row.get(1)?;
         match source_kind.as_str() {
             "raw_message" => {
                 let store_id = source_id
@@ -1281,28 +1230,17 @@ async fn describe_summary_sources(
                          WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
                         params![provider, session_id, store_id],
                     )
-                    .await
-                    .map_err(|err| LcmError::Db(err.to_string()))?;
-                let Some(raw_row) = raw_rows
-                    .next()
-                    .await
-                    .map_err(|err| LcmError::Db(err.to_string()))?
-                else {
+                    .await?;
+                let Some(raw_row) = raw_rows.next().await? else {
                     continue;
                 };
-                let storage_kind_text: String = raw_row
-                    .get(1)
-                    .map_err(|err| LcmError::Db(err.to_string()))?;
+                let storage_kind_text: String = raw_row.get(1)?;
                 out.push(LcmDescribeSourceOverview {
                     source_kind,
                     source_ref: LcmSourceRef::RawMessage { store_id },
                     store_id: Some(store_id),
                     node_id: None,
-                    role: Some(
-                        raw_row
-                            .get(0)
-                            .map_err(|err| LcmError::Db(err.to_string()))?,
-                    ),
+                    role: Some(raw_row.get(0)?),
                     storage_kind: LcmStorageKind::from_db(&storage_kind_text),
                     summary_token_count: None,
                     source_token_count: None,
@@ -1317,13 +1255,8 @@ async fn describe_summary_sources(
                          WHERE provider = ?1 AND session_id = ?2 AND node_id = ?3",
                         params![provider, session_id, source_id.as_str()],
                     )
-                    .await
-                    .map_err(|err| LcmError::Db(err.to_string()))?;
-                let Some(summary_row) = summary_rows
-                    .next()
-                    .await
-                    .map_err(|err| LcmError::Db(err.to_string()))?
-                else {
+                    .await?;
+                let Some(summary_row) = summary_rows.next().await? else {
                     continue;
                 };
                 out.push(LcmDescribeSourceOverview {
@@ -1335,19 +1268,9 @@ async fn describe_summary_sources(
                     node_id: Some(source_id),
                     role: None,
                     storage_kind: None,
-                    summary_token_count: Some(
-                        summary_row
-                            .get(0)
-                            .map_err(|err| LcmError::Db(err.to_string()))?,
-                    ),
-                    source_token_count: Some(
-                        summary_row
-                            .get(1)
-                            .map_err(|err| LcmError::Db(err.to_string()))?,
-                    ),
-                    expand_hint: summary_row
-                        .get(2)
-                        .map_err(|err| LcmError::Db(err.to_string()))?,
+                    summary_token_count: Some(summary_row.get(0)?),
+                    source_token_count: Some(summary_row.get(1)?),
+                    expand_hint: summary_row.get(2)?,
                 });
             }
             _ => {}
@@ -1363,40 +1286,26 @@ async fn describe_external_payload(
     payload_ref: &str,
 ) -> Result<LcmDescribeExternalPayload, LcmError> {
     payload::validate_payload_ref(payload_ref)?;
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
-                    byte_count, char_count, created_at, metadata_json
-             FROM lcm_external_payloads
-             WHERE payload_ref = ?1 AND provider = ?2 AND session_id = ?3",
-            params![payload_ref, provider, session_id],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or(LcmError::PayloadNotFound)?;
-    let byte_count: i64 = row.get(6).map_err(|err| LcmError::Db(err.to_string()))?;
-    let char_count: i64 = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
-    let message_id: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+    let payload = payload::load_payload_metadata(conn, payload_ref).await?;
+    if payload.provider != provider || payload.session_id != session_id {
+        return Err(LcmError::PayloadNotFound);
+    }
     Ok(LcmDescribeExternalPayload {
-        payload_ref: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        message_id: message_id.clone(),
-        kind: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        content_hash: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        byte_count: byte_count.max(0) as u64,
-        char_count: char_count.max(0) as u64,
-        created_at: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        metadata_json: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
+        payload_ref: payload.payload_ref,
+        provider: payload.provider,
+        session_id: payload.session_id.clone(),
+        message_id: payload.message_id.clone(),
+        kind: payload.kind,
+        content_hash: payload.content_hash,
+        byte_count: payload.byte_count,
+        char_count: payload.char_count,
+        created_at: payload.created_at,
+        metadata_json: payload.metadata_json,
         content_preview: external_payload_placeholder_preview(
             conn,
             provider,
             session_id,
-            &message_id,
+            &payload.message_id,
             payload_ref,
         )
         .await?,
@@ -1421,14 +1330,9 @@ async fn external_payload_placeholder_preview(
              LIMIT 1",
             params![provider, session_id, message_id, payload_ref],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        return row.get(0).map_err(|err| LcmError::Db(err.to_string()));
+        .await?;
+    if let Some(row) = rows.next().await? {
+        return Ok(row.get(0)?);
     }
     Ok(format!("[externalized payload ref={payload_ref}]"))
 }
@@ -1445,19 +1349,11 @@ async fn raw_store_bounds(
              WHERE provider = ?1 AND session_id = ?2",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok((None, None));
     };
-    Ok((
-        row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-    ))
+    Ok((row.get(0)?, row.get(1)?))
 }
 
 async fn count_raw_messages(
@@ -1465,7 +1361,7 @@ async fn count_raw_messages(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    count_by_provider_session(conn, "lcm_raw_messages", provider, session_id).await
+    util::count_by_provider_session(conn, "lcm_raw_messages", provider, session_id).await
 }
 
 async fn count_summary_nodes(
@@ -1473,7 +1369,7 @@ async fn count_summary_nodes(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    count_by_provider_session(conn, "lcm_summary_nodes", provider, session_id).await
+    util::count_by_provider_session(conn, "lcm_summary_nodes", provider, session_id).await
 }
 
 async fn count_external_payloads(
@@ -1481,29 +1377,23 @@ async fn count_external_payloads(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    count_by_provider_session(conn, "lcm_external_payloads", provider, session_id).await
+    util::count_by_provider_session(conn, "lcm_external_payloads", provider, session_id).await
 }
 
-async fn count_by_provider_session(
+async fn count_lifecycle_states_for_current_session(
     conn: &Connection,
-    table: &str,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
-    let sql = format!(
-        "SELECT COUNT(*) FROM {table} WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)"
-    );
-    let mut rows = conn
-        .query(&sql, params![provider, session_value])
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("count query returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+    util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
+             FROM lcm_lifecycle_state
+             WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)",
+        params![provider, util::opt_text(session_id)],
+        "lifecycle count query returned no rows",
+    )
+    .await
 }
 
 fn count_missing_payloads_for_refs(storage_root: &Path, payload_refs: &BTreeSet<String>) -> i64 {
@@ -1549,15 +1439,10 @@ async fn count_unreferenced_payloads(
 ) -> Result<i64, LcmError> {
     let mut rows = conn
         .query("SELECT payload_ref FROM lcm_external_payloads", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut referenced = BTreeSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
         referenced.insert(payload_ref);
     }
 
@@ -1596,16 +1481,11 @@ async fn metadata_refs_for_scope(
             "SELECT payload_ref
              FROM lcm_external_payloads
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        refs.insert(row.get(0).map_err(|err| LcmError::Db(err.to_string()))?);
+        .await?;
+    while let Some(row) = rows.next().await? {
+        refs.insert(row.get(0)?);
     }
     Ok(refs)
 }
@@ -1631,7 +1511,7 @@ async fn placeholder_refs_for_scope(
            AND (? IS NULL OR session_id = ?)
            AND ({placeholder_predicates})"
     );
-    let session_value = opt_text(session_id);
+    let session_value = util::opt_text(session_id);
     let mut values = vec![
         Value::Text(provider.to_string()),
         session_value.clone(),
@@ -1643,15 +1523,8 @@ async fn placeholder_refs_for_scope(
         }
     }
     let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(&sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    let mut rows = conn.query(&sql, values).await?;
+    while let Some(row) = rows.next().await? {
         for index in 0..4 {
             let value: Option<String> = row.get(index).unwrap_or(None);
             if let Some(value) = value {
@@ -1676,35 +1549,12 @@ fn payload_root_contained(storage_root: &Path) -> bool {
     canonical_dir.parent() == Some(root.as_path())
 }
 
-async fn count_lifecycle_states(
-    conn: &Connection,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_lifecycle_state
-             WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)",
-            params![provider, session_value],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("lifecycle count query returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
-}
-
 async fn load_lifecycle_metadata(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmLifecycleMetadata, LcmError> {
-    let session_value = opt_text(session_id);
+    let session_value = util::opt_text(session_id);
     let mut rows = conn
         .query(
             "SELECT current_session_id, current_frontier_store_id,
@@ -1715,13 +1565,8 @@ async fn load_lifecycle_metadata(
              LIMIT 1",
             params![provider, session_value],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    else {
+        .await?;
+    let Some(row) = rows.next().await? else {
         return Ok(LcmLifecycleMetadata {
             current_session_id: None,
             current_frontier_store_id: None,
@@ -1730,12 +1575,10 @@ async fn load_lifecycle_metadata(
         });
     };
     Ok(LcmLifecycleMetadata {
-        current_session_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        current_frontier_store_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        last_finalized_session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        last_finalized_frontier_store_id: row
-            .get(3)
-            .map_err(|err| LcmError::Db(err.to_string()))?,
+        current_session_id: row.get(0)?,
+        current_frontier_store_id: row.get(1)?,
+        last_finalized_session_id: row.get(2)?,
+        last_finalized_frontier_store_id: row.get(3)?,
     })
 }
 
@@ -1744,24 +1587,17 @@ async fn count_frontier_rows(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
+    util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
              FROM lcm_lifecycle_state
              WHERE provider = ?1
                AND (?2 IS NULL OR current_session_id = ?2)
                AND current_frontier_store_id IS NOT NULL",
-            params![provider, session_value],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("frontier count query returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+        params![provider, util::opt_text(session_id)],
+        "frontier count query returned no rows",
+    )
+    .await
 }
 
 async fn count_legacy_truncated(
@@ -1769,24 +1605,17 @@ async fn count_legacy_truncated(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let session_value = opt_text(session_id);
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
+    util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
              FROM lcm_raw_messages
              WHERE provider = ?1
                AND (?2 IS NULL OR session_id = ?2)
                AND legacy_truncated != 0",
-            params![provider, session_value],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("legacy truncated count query returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+        params![provider, util::opt_text(session_id)],
+        "legacy truncated count query returned no rows",
+    )
+    .await
 }
 
 async fn count_lossy_ingest_records(
@@ -1801,17 +1630,12 @@ async fn count_lossy_ingest_records(
              WHERE provider = ?1
                AND (?2 IS NULL OR session_id = ?2)
                AND metadata_json IS NOT NULL",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut count = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let metadata: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let metadata: String = row.get(0)?;
         if serde_json::from_str::<serde_json::Value>(&metadata)
             .ok()
             .and_then(|value| value.get("ingest_protection").cloned())
@@ -1822,57 +1646,6 @@ async fn count_lossy_ingest_records(
         }
     }
     Ok(count)
-}
-
-async fn load_raw_message_by_store_id(
-    conn: &Connection,
-    store_id: i64,
-) -> Result<LcmRawMessage, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json
-             FROM lcm_raw_messages
-             WHERE store_id = ?1",
-            params![store_id],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
-}
-
-fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, LcmError> {
-    let storage_kind_text: String = row.get(9).map_err(|err| LcmError::Db(err.to_string()))?;
-    let content: Option<String> = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
-    let snippet_text: String = row.get(11).map_err(|err| LcmError::Db(err.to_string()))?;
-    let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
-        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
-    let content = match storage_kind {
-        LcmStorageKind::Inline => content.unwrap_or_default(),
-        LcmStorageKind::External => content.unwrap_or(snippet_text),
-    };
-    Ok(LcmRawMessage {
-        provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        message_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        store_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        role: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        ordinal: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        timestamp: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        content,
-        content_hash: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        storage_kind,
-        payload_ref: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
-        metadata_json: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
-    })
 }
 
 fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&str> {
@@ -1940,12 +1713,4 @@ fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
                 .cmp(&left.store_id.unwrap_or(i64::MIN))
         });
     }
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-fn opt_i64(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
 }

@@ -1,15 +1,64 @@
 use std::path::Path;
 
-use libsql::{params, Connection, Value};
+use libsql::{params, Connection};
 use serde_json::{json, Map, Value as JsonValue};
-use sha2::{Digest, Sha256};
 
 use crate::sessions::SessionMessageRecord;
 
 use super::{
-    payload, security, LcmError, LcmPayloadRef, LcmStorageKind, DERIVED_TRUNCATION_MARKER,
-    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+    payload, security, util, LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind,
+    DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
+
+pub(crate) const RAW_MESSAGE_SELECT_COLUMNS: &str =
+    "provider, message_id, session_id, store_id, role, ordinal,
+                    timestamp, content, content_hash, storage_kind, payload_ref,
+                    snippet_text, legacy_source, legacy_truncated, metadata_json";
+
+pub(crate) fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, LcmError> {
+    let storage_kind_text: String = row.get(9)?;
+    let content: Option<String> = row.get(7)?;
+    let snippet_text: String = row.get(11)?;
+    let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
+        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
+    let content = match storage_kind {
+        LcmStorageKind::Inline => content.unwrap_or_default(),
+        LcmStorageKind::External => content.unwrap_or(snippet_text),
+    };
+    Ok(LcmRawMessage {
+        provider: row.get(0)?,
+        message_id: row.get(1)?,
+        session_id: row.get(2)?,
+        store_id: row.get(3)?,
+        role: row.get(4)?,
+        ordinal: row.get(5)?,
+        timestamp: row.get(6)?,
+        content,
+        content_hash: row.get(8)?,
+        storage_kind,
+        payload_ref: row.get(10)?,
+        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
+        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
+        metadata_json: row.get(14)?,
+    })
+}
+
+pub(crate) async fn load_raw_message_by_store_id(
+    conn: &Connection,
+    store_id: i64,
+) -> Result<LcmRawMessage, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE store_id = ?1"
+    );
+    let mut rows = conn.query(&sql, params![store_id]).await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    raw_message_from_row(&row)
+}
 
 pub(crate) struct RawMessageUpsert {
     pub projection_text: String,
@@ -105,13 +154,13 @@ async fn upsert_inline_raw_message(
             message.session_id.as_str(),
             message.role.as_str(),
             message.ordinal,
-            opt_i64(message.timestamp),
+            util::opt_i64(message.timestamp),
             text,
             content_hash.as_str(),
             LcmStorageKind::Inline.as_str(),
             snippet.as_str(),
             index.as_str(),
-            opt_text(metadata_json),
+            util::opt_text(metadata_json),
         ],
     )
     .await
@@ -228,7 +277,7 @@ pub(crate) async fn upsert_raw_message_with_payload(
             message.session_id.as_str(),
             message.role.as_str(),
             message.ordinal,
-            opt_i64(message.timestamp),
+            util::opt_i64(message.timestamp),
             payload_ref.content_hash.as_str(),
             LcmStorageKind::External.as_str(),
             payload_ref.payload_ref.as_str(),
@@ -237,8 +286,7 @@ pub(crate) async fn upsert_raw_message_with_payload(
             metadata_json.as_str(),
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(RawMessageUpsert {
         projection_text: placeholder,
         projection_metadata_json: Some(metadata_json),
@@ -689,6 +737,37 @@ fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {
     config
 }
 
+fn redact_api_keys(text: &str) -> String {
+    redact_assignments(
+        text,
+        &[
+            "api_key",
+            "api-key",
+            "api token",
+            "api_token",
+            "access_token",
+            "access-token",
+            "secret_key",
+            "secret-key",
+            "client_secret",
+            "client-secret",
+        ],
+        "api_key",
+        12,
+    )
+}
+
+fn redact_password_assignments(text: &str) -> String {
+    redact_assignments(
+        text,
+        &["password", "passwd", "pwd", "passphrase"],
+        "password_assignment",
+        6,
+    )
+}
+
+type TextRedactor = fn(&str) -> String;
+
 fn redact_sensitive_text(text: &str, config: &IngestConfig) -> RedactionOutcome {
     if !config.sensitive_patterns_enabled {
         return RedactionOutcome {
@@ -699,69 +778,23 @@ fn redact_sensitive_text(text: &str, config: &IngestConfig) -> RedactionOutcome 
     }
     let mut protected = text.to_string();
     let mut patterns = Vec::new();
-    if config
-        .sensitive_patterns
-        .iter()
-        .any(|pattern| pattern == "api_key" || pattern == "all" || pattern == "default")
-    {
-        let next = redact_assignments(
-            &protected,
-            &[
-                "api_key",
-                "api-key",
-                "api token",
-                "api_token",
-                "access_token",
-                "access-token",
-                "secret_key",
-                "secret-key",
-                "client_secret",
-                "client-secret",
-            ],
-            "api_key",
-            12,
-        );
-        if next != protected {
-            protected = next;
-            patterns.push("api_key".to_string());
-        }
-    }
-    if config
-        .sensitive_patterns
-        .iter()
-        .any(|pattern| pattern == "bearer_token" || pattern == "all" || pattern == "default")
-    {
-        let next = redact_bearer_tokens(&protected);
-        if next != protected {
-            protected = next;
-            patterns.push("bearer_token".to_string());
-        }
-    }
-    if config
-        .sensitive_patterns
-        .iter()
-        .any(|pattern| pattern == "password_assignment" || pattern == "all" || pattern == "default")
-    {
-        let next = redact_assignments(
-            &protected,
-            &["password", "passwd", "pwd", "passphrase"],
-            "password_assignment",
-            6,
-        );
-        if next != protected {
-            protected = next;
-            patterns.push("password_assignment".to_string());
-        }
-    }
-    if config
-        .sensitive_patterns
-        .iter()
-        .any(|pattern| pattern == "private_key" || pattern == "all" || pattern == "default")
-    {
-        let next = redact_private_keys(&protected);
-        if next != protected {
-            protected = next;
-            patterns.push("private_key".to_string());
+    let redactors: [(&str, TextRedactor); 4] = [
+        ("api_key", redact_api_keys),
+        ("bearer_token", redact_bearer_tokens),
+        ("password_assignment", redact_password_assignments),
+        ("private_key", redact_private_keys),
+    ];
+    for (name, redactor) in redactors {
+        if config
+            .sensitive_patterns
+            .iter()
+            .any(|pattern| pattern == name || pattern == "all" || pattern == "default")
+        {
+            let next = redactor(&protected);
+            if next != protected {
+                protected = next;
+                patterns.push(name.to_string());
+            }
         }
     }
     patterns.sort();
@@ -995,15 +1028,5 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
 }
 
 pub(crate) fn sha256_hex(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-fn opt_i64(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
+    util::sha256_hex(content.as_bytes())
 }

@@ -6,28 +6,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{params, Connection, Value as SqlValue};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
-use super::{payload, schema, security, LcmCleanConfig, LcmError, LCM_SCHEMA_VERSION};
+use crate::tokensave::current_timestamp;
+
+use super::{payload, schema, security, util, LcmCleanConfig, LcmError, LCM_SCHEMA_VERSION};
 
 const MAX_SAMPLES: usize = 20;
 const RETENTION_OLD_DAYS: f64 = 30.0;
 const RETENTION_HEAVY_CHARS: i64 = 128 * 1024;
 const SQLITE_IN_BATCH_SIZE: usize = 500;
 
-fn opt_text(value: Option<&str>) -> SqlValue {
-    value.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()))
-}
-
 fn sql_placeholders(len: usize) -> String {
     std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
-}
-
-fn unixepoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
 }
 
 pub(crate) struct DoctorRequest<'a> {
@@ -111,11 +101,12 @@ async fn gather_diagnostics(
 ) -> Result<Value, LcmError> {
     let schema_version = schema::schema_version(conn).await;
     let raw_message_count =
-        count_provider_session(conn, "lcm_raw_messages", provider, session_id).await?;
+        util::count_by_provider_session(conn, "lcm_raw_messages", provider, session_id).await?;
     let summary_node_count =
-        count_provider_session(conn, "lcm_summary_nodes", provider, session_id).await?;
+        util::count_by_provider_session(conn, "lcm_summary_nodes", provider, session_id).await?;
     let external_payload_count =
-        count_provider_session(conn, "lcm_external_payloads", provider, session_id).await?;
+        util::count_by_provider_session(conn, "lcm_external_payloads", provider, session_id)
+            .await?;
     let payloads = payload_diagnostics(conn, storage_root, provider, session_id).await?;
     let fts = fts_diagnostics(conn, provider, session_id).await?;
     let summaries = summary_integrity(conn, provider, session_id).await?;
@@ -182,8 +173,7 @@ async fn plan_and_apply_repairs(
                 "INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts) VALUES('rebuild')",
                 (),
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
             applied.push(action);
         }
     }
@@ -200,8 +190,7 @@ async fn plan_and_apply_repairs(
                 "INSERT INTO lcm_summary_nodes_fts(lcm_summary_nodes_fts) VALUES('rebuild')",
                 (),
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
             applied.push(action);
         }
     }
@@ -292,27 +281,6 @@ fn issue_count(diagnostics: &Value) -> i64 {
             .unwrap_or(0)
 }
 
-async fn count_provider_session(
-    conn: &Connection,
-    table: &str,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let sql = format!(
-        "SELECT COUNT(*) FROM {table} WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)"
-    );
-    let mut rows = conn
-        .query(&sql, params![provider, opt_text(session_id)])
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("count query returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
-}
-
 async fn table_or_trigger_count(
     conn: &Connection,
     names: &[&str],
@@ -325,14 +293,12 @@ async fn table_or_trigger_count(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
                 params![object_type, *name],
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
         let row = rows
             .next()
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?
+            .await?
             .ok_or_else(|| LcmError::Db("sqlite_master query returned no rows".to_string()))?;
-        let count: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let count: i64 = row.get(0)?;
         if count > 0 {
             found += 1;
         }
@@ -355,16 +321,11 @@ async fn payload_diagnostics(
             "SELECT payload_ref
              FROM lcm_external_payloads
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
         metadata_refs.insert(payload_ref.clone());
         if payload::validate_payload_ref(&payload_ref).is_err() || !dir.join(&payload_ref).is_file()
         {
@@ -432,17 +393,12 @@ async fn placeholder_ref_diagnostics(
             "SELECT store_id, message_id, content, snippet_text, index_text, metadata_json
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let message_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let message_id: String = row.get(1)?;
         for index in 2..6 {
             let value: Option<String> = row.get(index).unwrap_or(None);
             let field = match index {
@@ -505,14 +461,9 @@ async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>
     let mut refs = BTreeSet::new();
     let mut rows = conn
         .query("SELECT payload_ref FROM lcm_external_payloads", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
         refs.insert(payload_ref);
     }
     Ok(refs)
@@ -530,17 +481,12 @@ async fn count_unreferenced_payload_metadata(
              FROM lcm_external_payloads
              WHERE provider = ?1
                AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut unreferenced = 0_i64;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let payload_ref: String = row.get(0)?;
         if !referenced_refs.contains(&payload_ref) {
             unreferenced += 1;
         }
@@ -559,16 +505,11 @@ async fn referenced_payload_refs(
             "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let storage_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let storage_kind: String = row.get(0)?;
         let payload_ref: Option<String> = row.get(1).unwrap_or(None);
         if storage_kind == "external" {
             if let Some(payload_ref) = payload_ref {
@@ -670,14 +611,9 @@ async fn fts_probe_needs_rebuild(
          LIMIT 20"
     );
     let mut rows = conn
-        .query(&sql, params![provider, opt_text(session_id)])
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+        .query(&sql, params![provider, util::opt_text(session_id)])
+        .await?;
+    while let Some(row) = rows.next().await? {
         let text: String = row.get(0).unwrap_or_default();
         let Some(term) = first_fts_term(&text) else {
             continue;
@@ -691,17 +627,19 @@ async fn fts_probe_needs_rebuild(
                AND (?3 IS NULL OR content.session_id = ?3)"
         );
         let Ok(mut match_rows) = conn
-            .query(&match_sql, params![term, provider, opt_text(session_id)])
+            .query(
+                &match_sql,
+                params![term, provider, util::opt_text(session_id)],
+            )
             .await
         else {
             return Ok(true);
         };
         let row = match_rows
             .next()
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?
+            .await?
             .ok_or_else(|| LcmError::Db("FTS probe returned no rows".to_string()))?;
-        let count: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let count: i64 = row.get(0)?;
         return Ok(count == 0);
     }
     Ok(false)
@@ -779,14 +717,12 @@ async fn count_broken_summary_sources(
                         AND (?2 IS NULL OR child.session_id = ?2))
                 )
              )",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("summary source count returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
@@ -801,19 +737,14 @@ async fn count_summary_hash_mismatches(
             "SELECT summary_text, summary_hash
              FROM lcm_summary_nodes
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut mismatches = 0;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    while let Some(row) = rows.next().await? {
         let text: String = row.get(0).unwrap_or_default();
         let hash: String = row.get(1).unwrap_or_default();
-        if sha256_hex(text.as_bytes()) != hash {
+        if util::sha256_hex(text.as_bytes()) != hash {
             mismatches += 1;
         }
     }
@@ -825,7 +756,8 @@ async fn lifecycle_integrity(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
-    let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
+    let lifecycle_state_count =
+        count_lifecycle_states_for_session_scope(conn, provider, session_id).await?;
     let invalid_frontiers = count_invalid_frontiers(conn, provider, session_id).await?;
     let orphan_debt = count_orphan_debt(conn, provider, session_id).await?;
     Ok(json!({
@@ -835,27 +767,21 @@ async fn lifecycle_integrity(
     }))
 }
 
-async fn count_lifecycle_states(
+async fn count_lifecycle_states_for_session_scope(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
+    util::fetch_i64(
+        conn,
+        "SELECT COUNT(*)
              FROM lcm_lifecycle_state
              WHERE provider = ?1
                AND (?2 IS NULL OR current_session_id = ?2 OR last_finalized_session_id = ?2)",
-            params![provider, opt_text(session_id)],
-        )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or_else(|| LcmError::Db("lifecycle count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+        params![provider, util::opt_text(session_id)],
+        "lifecycle count returned no rows",
+    )
+    .await
 }
 
 async fn count_invalid_frontiers(
@@ -875,14 +801,12 @@ async fn count_invalid_frontiers(
                AND (?2 IS NULL OR state.current_session_id = ?2)
                AND state.current_frontier_store_id IS NOT NULL
                AND raw.store_id IS NULL",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("frontier count returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
@@ -902,14 +826,12 @@ async fn count_orphan_debt(
              WHERE debt.provider = ?1
                AND (?2 IS NULL OR debt.conversation_id = ?2)
                AND state.conversation_id IS NULL",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("debt count returned no rows".to_string()))?;
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
@@ -919,7 +841,7 @@ async fn retention_candidates(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
-    let now = unixepoch();
+    let now = current_timestamp();
     let mut rows = conn
         .query(
             "SELECT raw.session_id,
@@ -946,21 +868,16 @@ async fn retention_candidates(
              ) summary_counts ON summary_counts.session_id = raw.session_id
              ORDER BY raw.retained_chars DESC, raw.last_message_at ASC
              LIMIT 100",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut candidates = Vec::new();
     let mut analyzed = 0;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    while let Some(row) = rows.next().await? {
         analyzed += 1;
-        let session_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let message_count: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let retained_chars: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+        let session_id: String = row.get(0)?;
+        let message_count: i64 = row.get(1)?;
+        let retained_chars: i64 = row.get(2)?;
         let first_message_at: i64 = row.get(3).unwrap_or_default();
         let last_message_at: i64 = row.get(4).unwrap_or_default();
         let summary_node_count: i64 = row.get(5).unwrap_or_default();
@@ -1029,10 +946,9 @@ async fn cleanup_candidates(
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
              ORDER BY session_id, store_id
              LIMIT 5000",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
     let mut sessions = BTreeMap::<String, CleanupSessionCandidate>::new();
     let mut message_candidates = Vec::new();
@@ -1043,15 +959,11 @@ async fn cleanup_candidates(
     let mut heartbeat_message_count = 0_i64;
     let mut protected_noise_count = 0_i64;
 
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let message_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let row_session_id: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
-        let role: String = row.get(3).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let message_id: String = row.get(1)?;
+        let row_session_id: String = row.get(2)?;
+        let role: String = row.get(3)?;
         let content: String = row.get(4).unwrap_or_default();
 
         let ignored =
@@ -1183,18 +1095,14 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE);", ()).await?;
     let row = rows
         .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
+        .await?
         .ok_or_else(|| LcmError::Db("WAL checkpoint returned no status row".to_string()))?;
-    let busy: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-    let log_frames: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-    let checkpointed_frames: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+    let busy: i64 = row.get(0)?;
+    let log_frames: i64 = row.get(1)?;
+    let checkpointed_frames: i64 = row.get(2)?;
     if busy != 0 || checkpointed_frames < log_frames {
         return Err(LcmError::Db(format!(
             "WAL checkpoint incomplete before clean backup: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
@@ -1233,9 +1141,7 @@ where
     Fut: Future<Output = Result<Value, LcmError>>,
 {
     checkpoint_wal_for_backup(conn).await?;
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
     let result = async {
         let (session_ids, message_store_ids) =
             collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
@@ -1287,20 +1193,15 @@ async fn collect_clean_delete_targets(
              FROM lcm_raw_messages
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
              ORDER BY session_id, store_id",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
     let mut session_ids = BTreeSet::<String>::new();
     let mut message_store_ids = Vec::<i64>::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let row_session_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let row_session_id: String = row.get(1)?;
         let content: String = row.get(2).unwrap_or_default();
 
         let filtered_session =
@@ -1349,8 +1250,7 @@ async fn delete_clean_candidates_in_transaction(
             ),
             summary_values,
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
         let mut payload_values = vec![SqlValue::Text(provider.to_string())];
         payload_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
@@ -1361,8 +1261,7 @@ async fn delete_clean_candidates_in_transaction(
             ),
             payload_values,
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
 
         let mut raw_values = vec![SqlValue::Text(provider.to_string())];
         raw_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
@@ -1374,8 +1273,7 @@ async fn delete_clean_candidates_in_transaction(
                 ),
                 raw_values,
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
         deleted_messages += changed as i64;
 
         let mut lifecycle_values = vec![SqlValue::Text(provider.to_string())];
@@ -1394,8 +1292,7 @@ async fn delete_clean_candidates_in_transaction(
             ),
             lifecycle_values,
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     }
 
     let message_ids = message_ids_for_store_ids(conn, message_store_ids).await?;
@@ -1414,8 +1311,7 @@ async fn delete_clean_candidates_in_transaction(
             ),
             values,
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     }
     for store_id_chunk in message_store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
         if store_id_chunk.is_empty() {
@@ -1430,8 +1326,7 @@ async fn delete_clean_candidates_in_transaction(
                     .map(|store_id| SqlValue::Integer(*store_id))
                     .collect::<Vec<_>>(),
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
         deleted_messages += changed as i64;
     }
 
@@ -1452,18 +1347,13 @@ async fn summary_counts_by_session(
              FROM lcm_summary_nodes
              WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
              GROUP BY session_id",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut counts = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let session_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let count: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let session_id: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
         counts.insert(session_id, count);
     }
     Ok(counts)
@@ -1483,17 +1373,12 @@ async fn raw_store_ids_with_summary_sources(
               AND raw.store_id = CAST(src.source_id AS INTEGER)
              WHERE raw.provider = ?1
                AND (?2 IS NULL OR raw.session_id = ?2)",
-            params![provider, opt_text(session_id)],
+            params![provider, util::opt_text(session_id)],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut store_ids = BTreeSet::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
         store_ids.insert(store_id);
     }
     Ok(store_ids)
@@ -1519,28 +1404,18 @@ async fn message_ids_for_store_ids(
                     .map(|store_id| SqlValue::Integer(*store_id))
                     .collect::<Vec<_>>(),
             )
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|err| LcmError::Db(err.to_string()))?
-        {
-            let message_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let message_id: String = row.get(0)?;
             message_ids.insert(message_id);
         }
     }
     Ok(message_ids)
 }
-
-fn sha256_hex(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    hex::encode(hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use std::path::Path;
     use std::time::Duration;
 

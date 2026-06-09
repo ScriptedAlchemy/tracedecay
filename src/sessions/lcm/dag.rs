@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use libsql::{params, Connection, Value};
 
 use super::{
-    raw, LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmStorageKind,
+    raw, util, LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef,
     LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
 };
 
@@ -11,25 +11,7 @@ pub(crate) async fn insert_summary_node(
     conn: &Connection,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-
-    let summary = match insert_summary_node_in_transaction(conn, draft).await {
-        Ok(summary) => summary,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-    };
-
-    match conn.execute("COMMIT", ()).await {
-        Ok(_) => Ok(summary),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(LcmError::Db(err.to_string()))
-        }
-    }
+    util::with_immediate_tx(conn, insert_summary_node_in_transaction(conn, draft)).await
 }
 
 pub(crate) async fn insert_summary_node_in_transaction(
@@ -178,33 +160,28 @@ pub(crate) async fn load_uncondensed_summary_nodes(
                       u.created_at, u.node_id",
             params![provider, session_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut nodes = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
+    while let Some(row) = rows.next().await? {
         nodes.push(LcmUncondensedSummaryNode {
             node: LcmSummaryNode {
-                node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-                provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-                conversation_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-                session_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-                depth: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_text: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_hash: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_token_count: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_token_count: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_time_start: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_time_end: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-                expand_hint: row.get(11).map_err(|err| LcmError::Db(err.to_string()))?,
-                metadata_json: row.get(12).map_err(|err| LcmError::Db(err.to_string()))?,
-                created_at: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+                node_id: row.get(0)?,
+                provider: row.get(1)?,
+                conversation_id: row.get(2)?,
+                session_id: row.get(3)?,
+                depth: row.get(4)?,
+                summary_text: row.get(5)?,
+                summary_hash: row.get(6)?,
+                summary_token_count: row.get(7)?,
+                source_token_count: row.get(8)?,
+                source_time_start: row.get(9)?,
+                source_time_end: row.get(10)?,
+                expand_hint: row.get(11)?,
+                metadata_json: row.get(12)?,
+                created_at: row.get(13)?,
                 source_refs: Vec::new(),
             },
-            first_source_store_id: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
+            first_source_store_id: row.get(14)?,
         });
     }
     Ok(nodes)
@@ -285,14 +262,13 @@ async fn upsert_summary_node(
             summary_hash,
             draft.summary_token_count,
             draft.source_token_count,
-            opt_i64(draft.source_time_start),
-            opt_i64(draft.source_time_end),
-            opt_text(draft.expand_hint.as_deref()),
-            opt_text(draft.metadata_json.as_deref()),
+            util::opt_i64(draft.source_time_start),
+            util::opt_i64(draft.source_time_end),
+            util::opt_text(draft.expand_hint.as_deref()),
+            util::opt_text(draft.metadata_json.as_deref()),
         ],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -348,8 +324,7 @@ async fn replace_summary_sources(
         "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
         params![node_id],
     )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))?;
+    .await?;
 
     if source_refs.is_empty() {
         return Ok(());
@@ -370,9 +345,7 @@ async fn replace_summary_sources(
         values.push(Value::Text(source_id));
         values.push(Value::Integer(ordinal as i64));
     }
-    conn.execute(&sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    conn.execute(&sql, values).await?;
     Ok(())
 }
 
@@ -403,29 +376,24 @@ async fn load_summary_node_by_id(
              WHERE node_id = ?1",
             params![node_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-        .ok_or(LcmError::SummaryNodeNotFound)?;
+        .await?;
+    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
     let source_refs = load_summary_source_refs(conn, node_id).await?;
     Ok(LcmSummaryNode {
-        node_id: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        conversation_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        depth: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        summary_text: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        summary_hash: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        summary_token_count: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_token_count: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_time_start: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
-        source_time_end: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-        expand_hint: row.get(11).map_err(|err| LcmError::Db(err.to_string()))?,
-        metadata_json: row.get(12).map_err(|err| LcmError::Db(err.to_string()))?,
-        created_at: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+        node_id: row.get(0)?,
+        provider: row.get(1)?,
+        conversation_id: row.get(2)?,
+        session_id: row.get(3)?,
+        depth: row.get(4)?,
+        summary_text: row.get(5)?,
+        summary_hash: row.get(6)?,
+        summary_token_count: row.get(7)?,
+        source_token_count: row.get(8)?,
+        source_time_start: row.get(9)?,
+        source_time_end: row.get(10)?,
+        expand_hint: row.get(11)?,
+        metadata_json: row.get(12)?,
+        created_at: row.get(13)?,
         source_refs,
     })
 }
@@ -442,16 +410,11 @@ async fn load_summary_source_refs(
              ORDER BY ordinal",
             params![node_id],
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut source_refs = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let source_kind: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let source_kind: String = row.get(0)?;
+        let source_id: String = row.get(1)?;
         source_refs.push(source_ref_from_db(&source_kind, &source_id)?);
     }
     Ok(source_refs)
@@ -488,15 +451,10 @@ async fn load_raw_messages_by_store_ids(
                 .map(|store_id| Value::Integer(*store_id))
                 .collect::<Vec<_>>(),
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut out = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let raw = raw_message_from_row(&row)?;
+    while let Some(row) = rows.next().await? {
+        let raw = raw::raw_message_from_row(&row)?;
         out.insert(raw.store_id, raw);
     }
     Ok(out)
@@ -529,34 +487,27 @@ async fn load_summary_nodes_by_ids(
         .iter()
         .map(|node_id| Value::Text(node_id.clone()))
         .collect::<Vec<_>>();
-    let mut node_rows = conn
-        .query(&node_sql, values.clone())
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut node_rows = conn.query(&node_sql, values.clone()).await?;
     let mut nodes = BTreeMap::new();
-    while let Some(row) = node_rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let node_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = node_rows.next().await? {
+        let node_id: String = row.get(0)?;
         nodes.insert(
             node_id.clone(),
             LcmSummaryNode {
                 node_id,
-                provider: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-                conversation_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-                session_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-                depth: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_text: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_hash: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-                summary_token_count: row.get(7).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_token_count: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_time_start: row.get(9).map_err(|err| LcmError::Db(err.to_string()))?,
-                source_time_end: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-                expand_hint: row.get(11).map_err(|err| LcmError::Db(err.to_string()))?,
-                metadata_json: row.get(12).map_err(|err| LcmError::Db(err.to_string()))?,
-                created_at: row.get(13).map_err(|err| LcmError::Db(err.to_string()))?,
+                provider: row.get(1)?,
+                conversation_id: row.get(2)?,
+                session_id: row.get(3)?,
+                depth: row.get(4)?,
+                summary_text: row.get(5)?,
+                summary_hash: row.get(6)?,
+                summary_token_count: row.get(7)?,
+                source_token_count: row.get(8)?,
+                source_time_start: row.get(9)?,
+                source_time_end: row.get(10)?,
+                expand_hint: row.get(11)?,
+                metadata_json: row.get(12)?,
+                created_at: row.get(13)?,
                 source_refs: Vec::new(),
             },
         );
@@ -567,18 +518,11 @@ async fn load_summary_nodes_by_ids(
          WHERE node_id IN ({placeholders})
          ORDER BY node_id, ordinal"
     );
-    let mut source_rows = conn
-        .query(&source_sql, values)
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
-    while let Some(row) = source_rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let node_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_kind: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let source_id: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut source_rows = conn.query(&source_sql, values).await?;
+    while let Some(row) = source_rows.next().await? {
+        let node_id: String = row.get(0)?;
+        let source_kind: String = row.get(1)?;
+        let source_id: String = row.get(2)?;
         if let Some(node) = nodes.get_mut(&node_id) {
             node.source_refs
                 .push(source_ref_from_db(&source_kind, &source_id)?);
@@ -616,17 +560,12 @@ async fn load_raw_message_owners_by_store_ids(
                 .map(|store_id| Value::Integer(*store_id))
                 .collect::<Vec<_>>(),
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut out = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let provider: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let session_id: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let provider: String = row.get(1)?;
+        let session_id: String = row.get(2)?;
         out.insert(store_id, (provider, session_id));
     }
     Ok(out)
@@ -661,48 +600,15 @@ async fn load_summary_node_owners_by_ids(
                 .map(|node_id| Value::Text(node_id.clone()))
                 .collect::<Vec<_>>(),
         )
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?;
+        .await?;
     let mut out = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|err| LcmError::Db(err.to_string()))?
-    {
-        let node_id: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
-        let provider: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
-        let session_id: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+    while let Some(row) = rows.next().await? {
+        let node_id: String = row.get(0)?;
+        let provider: String = row.get(1)?;
+        let session_id: String = row.get(2)?;
         out.insert(node_id, (provider, session_id));
     }
     Ok(out)
-}
-
-fn raw_message_from_row(row: &libsql::Row) -> Result<LcmRawMessage, LcmError> {
-    let storage_kind_text: String = row.get(9).map_err(|err| LcmError::Db(err.to_string()))?;
-    let content: Option<String> = row.get(7).map_err(|err| LcmError::Db(err.to_string()))?;
-    let snippet_text: String = row.get(11).map_err(|err| LcmError::Db(err.to_string()))?;
-    let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
-        .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
-    let content = match storage_kind {
-        LcmStorageKind::Inline => content.unwrap_or_default(),
-        LcmStorageKind::External => content.unwrap_or(snippet_text),
-    };
-    Ok(LcmRawMessage {
-        provider: row.get(0).map_err(|err| LcmError::Db(err.to_string()))?,
-        message_id: row.get(1).map_err(|err| LcmError::Db(err.to_string()))?,
-        session_id: row.get(2).map_err(|err| LcmError::Db(err.to_string()))?,
-        store_id: row.get(3).map_err(|err| LcmError::Db(err.to_string()))?,
-        role: row.get(4).map_err(|err| LcmError::Db(err.to_string()))?,
-        ordinal: row.get(5).map_err(|err| LcmError::Db(err.to_string()))?,
-        timestamp: row.get(6).map_err(|err| LcmError::Db(err.to_string()))?,
-        content,
-        content_hash: row.get(8).map_err(|err| LcmError::Db(err.to_string()))?,
-        storage_kind,
-        payload_ref: row.get(10).map_err(|err| LcmError::Db(err.to_string()))?,
-        legacy_source: row.get::<i64>(12).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(13).unwrap_or(0) != 0,
-        metadata_json: row.get(14).map_err(|err| LcmError::Db(err.to_string()))?,
-    })
 }
 
 fn source_ref_to_db(source_ref: &LcmSourceRef) -> (&'static str, String) {
@@ -725,12 +631,4 @@ fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef
             "invalid summary source_kind: {source_kind}"
         ))),
     }
-}
-
-fn opt_text(value: Option<&str>) -> Value {
-    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-fn opt_i64(value: Option<i64>) -> Value {
-    value.map_or(Value::Null, Value::Integer)
 }
