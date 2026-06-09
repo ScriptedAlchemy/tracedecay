@@ -160,6 +160,10 @@ async fn plan_and_apply_repairs(
     let summary_rebuild_needed = diagnostics["fts"]["summaries"]["rebuild_needed"]
         .as_bool()
         .unwrap_or(false);
+    if mode == "repair" && apply && (raw_rebuild_needed || summary_rebuild_needed) {
+        checkpoint_wal_for_backup(conn).await?;
+        backup = backup_database(db_path, storage_root)?;
+    }
 
     if mode == "repair" && raw_rebuild_needed {
         let action = json!({

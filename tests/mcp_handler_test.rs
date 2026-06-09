@@ -4846,6 +4846,11 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
 
     assert_eq!(payload["status"], "repaired");
     assert_eq!(payload["dry_run"], false);
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("repair apply should report backup path");
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
     assert!(payload["repairs"]["applied_actions"]
         .as_array()
         .unwrap()
@@ -5175,7 +5180,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let critical_payload: Value =
         serde_json::from_str(extract_text(&critical_compress.value)).unwrap();
-    assert_eq!(critical_payload["status"], "best_effort");
+    assert_eq!(critical_payload["status"], "ok");
+    assert_eq!(critical_payload["reason"], "forced_overflow_recovery");
     assert_eq!(critical_payload["summary_nodes_created"], 4);
     assert_eq!(critical_payload["compression_attempts"], 4);
     assert_eq!(critical_payload["fallback_used"], false);
