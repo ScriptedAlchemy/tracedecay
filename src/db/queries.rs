@@ -27,6 +27,39 @@ fn build_qmark_placeholders(n: usize) -> String {
     s
 }
 
+impl Database {
+    async fn with_batch_transaction<T>(
+        &self,
+        operation: &str,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.conn()
+            .execute("BEGIN", ())
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("failed to begin: {e}"),
+                operation: operation.to_string(),
+            })?;
+
+        match work.await {
+            Ok(value) => {
+                if let Err(e) = self.conn().execute("COMMIT", ()).await {
+                    let _ = self.conn().execute("ROLLBACK", ()).await;
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to commit: {e}"),
+                        operation: operation.to_string(),
+                    });
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn().execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: map a libsql row to domain types (by column index)
 // ---------------------------------------------------------------------------
@@ -401,72 +434,63 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
+        self.with_batch_transaction("insert_nodes", async {
+            let stmt = self.conn()
+                .prepare(
+                    "INSERT OR REPLACE INTO nodes \
+                     (id,kind,name,qualified_name,file_path,\
+                     start_line,end_line,start_column,end_column,\
+                     docstring,signature,visibility,is_async,\
+                     branches,loops,returns,max_nesting,\
+                     unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
+                )
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_nodes".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare(
-                "INSERT OR REPLACE INTO nodes \
-                 (id,kind,name,qualified_name,file_path,\
-                 start_line,end_line,start_column,end_column,\
-                 docstring,signature,visibility,is_async,\
-                 branches,loops,returns,max_nesting,\
-                 unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
-            )
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
+            for node in nodes {
+                let params = params![
+                    node.id.as_str(),
+                    node.kind.as_str(),
+                    node.name.as_str(),
+                    node.qualified_name.as_str(),
+                    node.file_path.as_str(),
+                    i64::from(node.start_line),
+                    i64::from(node.end_line),
+                    i64::from(node.start_column),
+                    i64::from(node.end_column),
+                    opt_str(node.docstring.as_deref()),
+                    opt_str(node.signature.as_deref()),
+                    node.visibility.as_str(),
+                    i64::from(node.is_async),
+                    i64::from(node.branches),
+                    i64::from(node.loops),
+                    i64::from(node.returns),
+                    i64::from(node.max_nesting),
+                    i64::from(node.unsafe_blocks),
+                    i64::from(node.unchecked_calls),
+                    i64::from(node.assertions),
+                    node.updated_at as i64,
+                    i64::from(node.attrs_start_line),
+                    opt_str(node.parent_id.as_deref()),
+                ];
+                let insert_result = stmt.execute(params).await;
+                if let Err(e) = insert_result {
+                    stmt.reset();
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to insert node: {e}"),
+                        operation: "insert_nodes".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for node in nodes {
-            stmt.execute(params![
-                node.id.as_str(),
-                node.kind.as_str(),
-                node.name.as_str(),
-                node.qualified_name.as_str(),
-                node.file_path.as_str(),
-                i64::from(node.start_line),
-                i64::from(node.end_line),
-                i64::from(node.start_column),
-                i64::from(node.end_column),
-                opt_str(node.docstring.as_deref()),
-                opt_str(node.signature.as_deref()),
-                node.visibility.as_str(),
-                i64::from(node.is_async),
-                i64::from(node.branches),
-                i64::from(node.loops),
-                i64::from(node.returns),
-                i64::from(node.max_nesting),
-                i64::from(node.unsafe_blocks),
-                i64::from(node.unchecked_calls),
-                i64::from(node.assertions),
-                node.updated_at as i64,
-                i64::from(node.attrs_start_line),
-                opt_str(node.parent_id.as_deref()),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert node: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Retrieves a node by its unique ID, returning `None` if not found.
@@ -767,74 +791,69 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
+        self.with_batch_transaction("insert_edges", async {
+            // Conditional INSERT: only insert when both endpoints exist in
+            // `nodes`. This avoids FK violations during incremental sync
+            // when an edge references a node from a not-yet-indexed file.
+            let stmt = self
+                .conn()
+                .prepare(
+                    "INSERT OR IGNORE INTO edges (source, target, kind, line) \
+                     SELECT ?1, ?2, ?3, ?4 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
+                )
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_edges".to_string(),
+                })?;
 
-        // Conditional INSERT: only insert when both endpoints exist in
-        // `nodes`. This avoids FK violations during incremental sync
-        // when an edge references a node from a not-yet-indexed file.
-        let stmt = self
-            .conn()
-            .prepare(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line) \
-                 SELECT ?1, ?2, ?3, ?4 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
-            )
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
+            let parent_stmt = self
+                .conn()
+                .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to prepare parent update: {e}"),
+                    operation: "insert_edges".to_string(),
+                })?;
 
-        let parent_stmt = self
-            .conn()
-            .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare parent update: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-
-        for edge in edges {
-            if edge.kind == EdgeKind::Contains {
-                parent_stmt
-                    .execute(params![edge.source.as_str(), edge.target.as_str()])
+            for edge in edges {
+                if edge.kind == EdgeKind::Contains {
+                    if let Err(e) = parent_stmt
+                        .execute(params![edge.source.as_str(), edge.target.as_str()])
+                        .await
+                    {
+                        parent_stmt.reset();
+                        return Err(TokenSaveError::Database {
+                            message: format!("failed to set parent_id: {e}"),
+                            operation: "insert_edges".to_string(),
+                        });
+                    }
+                    parent_stmt.reset();
+                    continue;
+                }
+                if let Err(e) = stmt
+                    .execute(params![
+                        edge.source.as_str(),
+                        edge.target.as_str(),
+                        edge.kind.as_str(),
+                        edge.line.map(i64::from),
+                    ])
                     .await
-                    .map_err(|e| TokenSaveError::Database {
-                        message: format!("failed to set parent_id: {e}"),
+                {
+                    stmt.reset();
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to insert edge: {e}"),
                         operation: "insert_edges".to_string(),
-                    })?;
-                parent_stmt.reset();
-                continue;
+                    });
+                }
+                stmt.reset();
             }
-            stmt.execute(params![
-                edge.source.as_str(),
-                edge.target.as_str(),
-                edge.kind.as_str(),
-                edge.line.map(i64::from),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert edge: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-            stmt.reset();
-        }
 
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Returns outgoing edges from a source node, optionally filtered by edge kinds.
@@ -1932,47 +1951,39 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
+        self.with_batch_transaction("upsert_files", async {
+            let stmt = self.conn()
+                .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "upsert_files".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
+            for file in files {
+                if let Err(e) = stmt
+                    .execute(params![
+                        file.path.as_str(),
+                        file.content_hash.as_str(),
+                        file.size as i64,
+                        file.modified_at,
+                        file.indexed_at,
+                        i64::from(file.node_count),
+                    ])
+                    .await
+                {
+                    stmt.reset();
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to upsert file: {e}"),
+                        operation: "upsert_files".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for file in files {
-            stmt.execute(params![
-                file.path.as_str(),
-                file.content_hash.as_str(),
-                file.size as i64,
-                file.modified_at,
-                file.indexed_at,
-                i64::from(file.node_count),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to upsert file: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     pub async fn upsert_file(&self, file: &FileRecord) -> Result<()> {
@@ -2094,47 +2105,39 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
+        self.with_batch_transaction("insert_unresolved_refs", async {
+            let stmt = self.conn()
+                .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_unresolved_refs".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
+            for uref in refs {
+                if let Err(e) = stmt
+                    .execute(params![
+                        uref.from_node_id.as_str(),
+                        uref.reference_name.as_str(),
+                        uref.reference_kind.as_str(),
+                        i64::from(uref.line),
+                        i64::from(uref.column),
+                        uref.file_path.as_str(),
+                    ])
+                    .await
+                {
+                    stmt.reset();
+                    return Err(TokenSaveError::Database {
+                        message: format!("failed to insert unresolved ref: {e}"),
+                        operation: "insert_unresolved_refs".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for uref in refs {
-            stmt.execute(params![
-                uref.from_node_id.as_str(),
-                uref.reference_name.as_str(),
-                uref.reference_kind.as_str(),
-                i64::from(uref.line),
-                i64::from(uref.column),
-                uref.file_path.as_str(),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert unresolved ref: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Returns all unresolved references.
