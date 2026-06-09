@@ -253,11 +253,38 @@ pub struct LcmDescribeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmStatus {
     pub schema_version: i64,
+    pub storage_scope: Option<String>,
     pub raw_message_count: i64,
     pub summary_node_count: i64,
     pub external_payload_count: i64,
     pub missing_payload_count: i64,
+    pub unreferenced_payload_count: i64,
     pub maintenance_debt_count: i64,
+    pub payload: LcmPayloadStatus,
+    pub lifecycle: LcmLifecycleStatus,
+    pub redaction: LcmRedactionStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadStatus {
+    pub externalized_count: i64,
+    pub missing_count: i64,
+    pub unreferenced_count: i64,
+    pub root_contained: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmLifecycleStatus {
+    pub lifecycle_state_count: i64,
+    pub frontier_count: i64,
+    pub maintenance_debt_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmRedactionStatus {
+    pub enabled: bool,
+    pub lossy_records: i64,
+    pub legacy_truncated_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -1744,6 +1744,11 @@ fn def_lcm_status() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Optional provider-local session id filter."
+                },
+                "storage_scope": {
+                    "type": "string",
+                    "enum": ["project_local", "hermes_profile"],
+                    "description": "Optional caller storage scope to echo in diagnostics."
                 }
             }
         }),

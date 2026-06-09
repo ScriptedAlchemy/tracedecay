@@ -292,10 +292,13 @@ pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<Too
     let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await else {
         return Ok(lcm_unavailable());
     };
-    let status = db
+    let mut status = db
         .lcm_status(provider, session_id)
         .await
         .map_err(lcm_error)?;
+    if let Some(storage_scope) = string_arg(&args, "storage_scope") {
+        status.storage_scope = Some(storage_scope.to_string());
+    }
     Ok(tool_json(&json!({
         "status": "ok",
         "provider": provider,

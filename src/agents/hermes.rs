@@ -1086,6 +1086,11 @@ class TokenSaveContextEngine(ContextEngine):
         })
         return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
 
+    def status(self, session_id=None, **kwargs):
+        args = _storage_args(self.project_root, self.hermes_home)
+        args["session_id"] = session_id or self.active_session_id
+        return call_tokensave_json("tokensave_lcm_status", args, **kwargs)
+
     def _auxiliary_routes(self, summary_request=None, **kwargs):
         routes = (
             kwargs.get("routes")

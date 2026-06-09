@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 
 use libsql::{params, Connection, Value};
 
+use super::types::{LcmLifecycleStatus, LcmPayloadStatus, LcmRedactionStatus};
 use super::{
     compression, dag, payload, raw, schema, LcmContentRange, LcmContentSlice, LcmDescribeResponse,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmExpandedSummarySource,
@@ -208,17 +211,43 @@ pub(crate) async fn status(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStatus, LcmError> {
+    let external_payload_count = count_external_payloads(conn, provider, session_id).await?;
+    let missing_payload_count =
+        count_missing_payloads(conn, storage_root, provider, session_id).await?;
+    let unreferenced_payload_count = count_unreferenced_payloads(conn, storage_root).await?;
+    let maintenance_debt_count =
+        compression::maintenance_debt_count(conn, provider, session_id).await?;
+    let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
+    let frontier_count = count_frontier_rows(conn, provider, session_id).await?;
+    let legacy_truncated_count = count_legacy_truncated(conn, provider, session_id).await?;
+
     Ok(LcmStatus {
         schema_version: schema::schema_version(conn)
             .await
             .unwrap_or(LCM_SCHEMA_VERSION),
+        storage_scope: Some("project_local".to_string()),
         raw_message_count: count_raw_messages(conn, provider, session_id).await?,
         summary_node_count: count_summary_nodes(conn, provider, session_id).await?,
-        external_payload_count: count_external_payloads(conn, provider, session_id).await?,
-        missing_payload_count: count_missing_payloads(conn, storage_root, provider, session_id)
-            .await?,
-        maintenance_debt_count: compression::maintenance_debt_count(conn, provider, session_id)
-            .await?,
+        external_payload_count,
+        missing_payload_count,
+        unreferenced_payload_count,
+        maintenance_debt_count,
+        payload: LcmPayloadStatus {
+            externalized_count: external_payload_count,
+            missing_count: missing_payload_count,
+            unreferenced_count: unreferenced_payload_count,
+            root_contained: payload_root_contained(storage_root),
+        },
+        lifecycle: LcmLifecycleStatus {
+            lifecycle_state_count,
+            frontier_count,
+            maintenance_debt_count,
+        },
+        redaction: LcmRedactionStatus {
+            enabled: false,
+            lossy_records: legacy_truncated_count,
+            legacy_truncated_count,
+        },
     })
 }
 
@@ -574,6 +603,135 @@ async fn count_missing_payloads(
         }
     }
     Ok(missing)
+}
+
+async fn count_unreferenced_payloads(
+    conn: &Connection,
+    storage_root: &Path,
+) -> Result<i64, LcmError> {
+    let mut rows = conn
+        .query("SELECT payload_ref FROM lcm_external_payloads", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let mut referenced = BTreeSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let payload_ref: String = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        referenced.insert(payload_ref);
+    }
+
+    let dir = payload::payload_dir(storage_root);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+
+    let mut unreferenced = 0_i64;
+    for entry in entries {
+        let entry = entry.map_err(|err| LcmError::Io(err.to_string()))?;
+        let metadata =
+            fs::symlink_metadata(entry.path()).map_err(|err| LcmError::Io(err.to_string()))?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            unreferenced += 1;
+            continue;
+        };
+        if payload::validate_payload_ref(&file_name).is_err() || !referenced.contains(&file_name) {
+            unreferenced += 1;
+        }
+    }
+    Ok(unreferenced)
+}
+
+fn payload_root_contained(storage_root: &Path) -> bool {
+    let dir = payload::payload_dir(storage_root);
+    if !dir.exists() {
+        return true;
+    }
+    let Ok(root) = storage_root.canonicalize() else {
+        return false;
+    };
+    let Ok(canonical_dir) = dir.canonicalize() else {
+        return false;
+    };
+    canonical_dir.parent() == Some(root.as_path())
+}
+
+async fn count_lifecycle_states(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
+    let session_value = opt_text(session_id);
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_lifecycle_state
+             WHERE provider = ?1 AND (?2 IS NULL OR current_session_id = ?2)",
+            params![provider, session_value],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("lifecycle count query returned no rows".to_string()))?;
+    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+}
+
+async fn count_frontier_rows(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
+    let session_value = opt_text(session_id);
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_lifecycle_state
+             WHERE provider = ?1
+               AND (?2 IS NULL OR current_session_id = ?2)
+               AND current_frontier_store_id IS NOT NULL",
+            params![provider, session_value],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("frontier count query returned no rows".to_string()))?;
+    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
+}
+
+async fn count_legacy_truncated(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
+    let session_value = opt_text(session_id);
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_raw_messages
+             WHERE provider = ?1
+               AND (?2 IS NULL OR session_id = ?2)
+               AND legacy_truncated != 0",
+            params![provider, session_value],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("legacy truncated count query returned no rows".to_string()))?;
+    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
 
 async fn load_raw_message_by_store_id(

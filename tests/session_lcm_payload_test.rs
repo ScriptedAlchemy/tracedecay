@@ -3,7 +3,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{LcmError, LcmStorageKind};
+use tokensave::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
 fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
@@ -227,6 +227,60 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
     assert_eq!(lcm_fts_count(&db_path, "externalized").await, 1);
     assert_eq!(lcm_fts_count(&db_path, unique_secret).await, 0);
     assert_eq!(lcm_fts_count(&db_path, metadata_secret).await, 0);
+}
+
+#[tokio::test]
+async fn lcm_status_reports_missing_and_unreferenced_payloads_without_previewing_content() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tokensave");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let secret = format!("SUPER_SECRET_PAYLOAD\n{}", "S".repeat(300_000));
+    let message = raw_message("cursor", "message-1", "session-1", "tool", &secret);
+    let store = db.lcm_store(&storage_root);
+    store
+        .ingest_raw_message(&message)
+        .await
+        .expect("payload should ingest");
+    let payload_ref = db
+        .lcm_load_raw_message("cursor", "message-1")
+        .await
+        .unwrap()
+        .payload_ref
+        .expect("payload ref");
+
+    let payload_dir = tokensave::sessions::lcm::payload::payload_dir(&storage_root);
+    std::fs::remove_file(payload_dir.join(&payload_ref)).unwrap();
+    std::fs::write(payload_dir.join("orphan.payload"), "ORPHAN_PAYLOAD_SECRET").unwrap();
+
+    let status = db
+        .lcm_status("cursor", Some("session-1"))
+        .await
+        .expect("status should load");
+    let status_json = serde_json::to_value(&status).unwrap();
+
+    assert_eq!(status_json["schema_version"], LCM_SCHEMA_VERSION);
+    assert_eq!(status_json["storage_scope"], "project_local");
+    assert_eq!(status_json["raw_message_count"], 1);
+    assert_eq!(status_json["summary_node_count"], 0);
+    assert_eq!(status_json["external_payload_count"], 1);
+    assert_eq!(status_json["missing_payload_count"], 1);
+    assert_eq!(status_json["unreferenced_payload_count"], 1);
+    assert_eq!(status_json["payload"]["externalized_count"], 1);
+    assert_eq!(status_json["payload"]["missing_count"], 1);
+    assert_eq!(status_json["payload"]["unreferenced_count"], 1);
+    assert_eq!(status_json["payload"]["root_contained"], true);
+    assert_eq!(status_json["lifecycle"]["maintenance_debt_count"], 0);
+    assert_eq!(status_json["redaction"]["enabled"], false);
+    assert_eq!(status_json["redaction"]["lossy_records"], 0);
+
+    let rendered = serde_json::to_string(&status).unwrap();
+    assert!(!rendered.contains("SUPER_SECRET_PAYLOAD"));
+    assert!(!rendered.contains("ORPHAN_PAYLOAD_SECRET"));
 }
 
 #[test]

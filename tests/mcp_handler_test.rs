@@ -3906,6 +3906,76 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 }
 
 #[tokio::test]
+async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("LCM status diagnostics".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("lcm-status-session.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+
+    let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
+    db.lcm_store(cg.project_root().join(".tokensave"))
+        .ingest_raw_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "lcm-status-secret-message".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: secret,
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("lcm-status-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+        .expect("external payload should ingest");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-session",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).expect("LCM status response must be JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["payload"]["externalized_count"], 1);
+    assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
+    assert_eq!(payload["lcm"]["payload"]["unreferenced_count"], 0);
+    assert_eq!(payload["lcm"]["redaction"]["enabled"], false);
+    assert!(!text.contains("MCP_STATUS_SECRET_PAYLOAD"));
+}
+
+#[tokio::test]
 async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
     let (cg, _dir) = setup_project().await;
     seed_lcm_session_message(

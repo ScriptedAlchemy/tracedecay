@@ -496,6 +496,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(manifest.contains("kind: standalone"));
     assert!(manifest.contains("provides_tools:"));
     assert!(manifest.contains("tokensave_context"));
+    assert!(manifest.contains("tokensave_lcm_status"));
+    assert!(manifest.contains("tokensave_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
     assert!(manifest.contains("provides_commands:"));
@@ -510,6 +512,9 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("class TokenSaveContextEngine"));
+    assert!(init_py.contains("storage_scope"));
+    assert!(init_py.contains("tokensave_lcm_compress"));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
@@ -570,9 +575,16 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
 
     assert!(init_py.contains("class TokenSaveContextEngine"));
     assert!(init_py.contains("ctx.register_context_engine"));
+    assert!(init_py.contains("storage_scope"));
     assert!(init_py.contains("def call_tokensave_json"));
+    assert!(init_py.contains("tokensave_lcm_status"));
     assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_preflight\""));
     assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_compress\""));
+
+    let manifest =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/plugin.yaml")).unwrap();
+    assert!(manifest.contains("tokensave_lcm_status"));
+    assert!(manifest.contains("tokensave_lcm_compress"));
 }
 
 #[test]
