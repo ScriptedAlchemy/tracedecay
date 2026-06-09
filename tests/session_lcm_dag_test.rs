@@ -3,17 +3,12 @@ use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
     LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
-fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("sessions.db")
-}
-
-async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    GlobalDb::open_at(&isolated_db_path(tmp))
-        .await
-        .expect("session db open")
-}
+mod common;
+use common::{
+    isolated_lcm_db_path as isolated_db_path, lcm_dag_message as raw_message,
+    lcm_dag_session as sample_session, open_lcm_db,
+};
 
 async fn summary_table_counts(db_path: &std::path::Path) -> (i64, i64) {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
@@ -44,48 +39,6 @@ async fn summary_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
-}
-
-fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
-    SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: "/tmp/project".to_string(),
-        project_path: "/tmp/project".to_string(),
-        title: Some("LCM DAG test".to_string()),
-        started_at: Some(1_715_000_000),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-fn raw_message(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    ordinal: i64,
-    text: &str,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(1_715_000_000 + ordinal),
-        ordinal,
-        text: text.to_string(),
-        kind: Some("message".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    }
 }
 
 async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {

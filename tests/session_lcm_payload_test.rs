@@ -3,18 +3,13 @@ use std::path::Path;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
-fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("sessions.db")
-}
-
-async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_db_path(tmp);
-    GlobalDb::open_at(&db_path).await.expect("session db open")
-}
+mod common;
+use common::{
+    isolated_lcm_db_path as isolated_db_path, lcm_payload_message as raw_message,
+    lcm_payload_session as sample_session, open_lcm_db,
+};
 
 async fn raw_snippet_and_index(
     db_path: &std::path::Path,
@@ -94,48 +89,6 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
     let tail = &text[start..];
     let end = tail.find([']', ',', ';']).unwrap_or(tail.len());
     tail[..end].trim().to_string()
-}
-
-fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
-    SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: "/tmp/project".to_string(),
-        project_path: "/tmp/project".to_string(),
-        title: Some("LCM payload test".to_string()),
-        started_at: Some(1_715_000_000),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-fn raw_message(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    role: &str,
-    text: &str,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp: Some(1_715_000_030),
-        ordinal: 1,
-        text: text.to_string(),
-        kind: Some("tool_result".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    }
 }
 
 #[tokio::test]

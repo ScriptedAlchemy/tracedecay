@@ -2,58 +2,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::LcmPreflightRequest;
 use tokensave::sessions::source::{
     ingest_source, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tokensave::sessions::SessionMessageRecord;
 
-async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
-    GlobalDb::open_at(&db_path).await.expect("session db open")
-}
-
-fn sample_session(provider: &str, session_id: &str, project_key: &str) -> SessionRecord {
-    SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: project_key.to_string(),
-        project_path: "/tmp/project".to_string(),
-        title: Some("LCM raw test".to_string()),
-        started_at: Some(1_715_000_000),
-        ended_at: None,
-        transcript_path: Some("/tmp/project/transcript.jsonl".to_string()),
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-fn sample_message(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    text: &str,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(1_715_000_030),
-        ordinal: 1,
-        text: text.to_string(),
-        kind: Some("message".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: None,
-        source_path: Some("/tmp/project/transcript.jsonl".to_string()),
-        source_offset: Some(42),
-        metadata_json: None,
-    }
-}
+mod common;
+use common::{
+    lcm_raw_message as sample_message, lcm_raw_session as sample_session,
+    open_lcm_db as open_isolated_db,
+};
 
 struct FakeTranscriptSource {
     path: PathBuf,

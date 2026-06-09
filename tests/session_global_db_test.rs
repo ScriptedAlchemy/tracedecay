@@ -2,15 +2,18 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::LcmStorageKind;
-use tokensave::sessions::{SessionMessageRecord, SessionRecord, SessionSearchScope};
+use tokensave::sessions::{SessionRecord, SessionSearchScope};
 
-fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("global.db")
-}
+mod common;
+use common::{
+    global_message as sample_message, global_session as sample_session,
+    isolated_global_db_path as isolated_db_path, open_global_db as open_isolated_db,
+};
 
-async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
-    let db_path = isolated_db_path(tmp);
-    GlobalDb::open_at(&db_path).await.expect("global db open")
+fn sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 async fn raw_message_count(db_path: &std::path::Path, provider: &str, message_id: &str) -> i64 {
@@ -61,53 +64,6 @@ async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
-}
-
-fn sha256_hex(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn sample_session(provider: &str, session_id: &str, project_key: &str) -> SessionRecord {
-    SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: project_key.to_string(),
-        project_path: "/tmp/project".to_string(),
-        title: Some("Initial title".to_string()),
-        started_at: Some(1_715_000_000),
-        ended_at: None,
-        transcript_path: Some("/tmp/project/transcript.jsonl".to_string()),
-        metadata_json: Some(r#"{"source":"test"}"#.to_string()),
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-fn sample_message(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    text: &str,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: "assistant".to_string(),
-        timestamp: Some(1_715_000_030),
-        ordinal: 1,
-        text: text.to_string(),
-        kind: Some("message".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: Some("tokensave_context,tokensave_search".to_string()),
-        source_path: Some("/tmp/project/transcript.jsonl".to_string()),
-        source_offset: Some(42),
-        metadata_json: Some(r#"{"finish_reason":"stop"}"#.to_string()),
-    }
 }
 
 #[tokio::test]
