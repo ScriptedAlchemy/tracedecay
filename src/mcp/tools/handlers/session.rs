@@ -9,7 +9,7 @@ use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort,
     LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
-    LcmSummarizerMode,
+    LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
@@ -68,12 +68,19 @@ fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else if needs_synthesis {
-        let compact = compact_lcm_expand_query_payload(value, formatted.len());
+        let compact =
+            compact_lcm_expand_query_payload(value, formatted.len(), CompactTier::Standard);
         let text = serde_json::to_string_pretty(&compact).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS {
             text
         } else {
-            let fallback = minimal_lcm_expand_query_contract(value, formatted.len(), text.len());
+            let fallback = compact_lcm_expand_query_payload(
+                value,
+                formatted.len(),
+                CompactTier::Minimal {
+                    compact_chars: text.len(),
+                },
+            );
             serde_json::to_string_pretty(&fallback).unwrap_or_default()
         }
     } else {
@@ -90,148 +97,125 @@ fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
     }
 }
 
-fn compact_lcm_expand_query_payload(value: &Value, original_chars: usize) -> Value {
-    const MAX_CONTEXT_BLOCKS: usize = 3;
-    const MAX_CONTEXT_BLOCK_CHARS: usize = 600;
-    const MAX_MATCHES: usize = 10;
-    const MAX_MATCH_SNIPPET_CHARS: usize = 160;
-    const MAX_NODE_IDS: usize = 50;
-    const MAX_NODE_ID_CHARS: usize = 160;
-    const MAX_PAGINATION_ITEMS: usize = 50;
-
-    let mut object = Map::new();
-    for key in [
-        "status",
-        "provider",
-        "session_id",
-        "storage_scope",
-        "answer",
-        "needs_synthesis",
-        "max_tokens",
-        "context_max_tokens",
-        "context_budget",
-        "context_truncated",
-    ] {
-        if let Some(field) = value.get(key) {
-            object.insert(key.to_string(), field.clone());
-        }
-    }
-    insert_bounded_text_field(
-        &mut object,
-        value,
-        "prompt",
-        MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
-    );
-    insert_bounded_text_field(
-        &mut object,
-        value,
-        "query",
-        MAX_LCM_EXPAND_QUERY_QUERY_CHARS,
-    );
-    object.insert("mcp_response_truncated".to_string(), json!(true));
-    object.insert("contract_truncated".to_string(), json!(true));
-    object.insert(
-        "mcp_original_response_chars".to_string(),
-        json!(original_chars),
-    );
-    object.insert(
-        "mcp_truncation_reason".to_string(),
-        json!("expand-query response compacted to preserve synthesis contract fields"),
-    );
-
-    let (context_blocks, context_blocks_truncated) = compact_context_blocks(
-        value.get("context_blocks"),
-        MAX_CONTEXT_BLOCKS,
-        MAX_CONTEXT_BLOCK_CHARS,
-    );
-    let (matches, matches_truncated) =
-        compact_matches(value.get("matches"), MAX_MATCHES, MAX_MATCH_SNIPPET_CHARS);
-    let (node_ids, node_ids_truncated) =
-        compact_string_array(value.get("node_ids"), MAX_NODE_IDS, MAX_NODE_ID_CHARS);
-    let (context_pagination, pagination_truncated) =
-        compact_array(value.get("context_pagination"), MAX_PAGINATION_ITEMS);
-
-    object.insert("context_blocks".to_string(), context_blocks.clone());
-    object.insert(
-        "context_blocks_truncated_for_mcp".to_string(),
-        json!(context_blocks_truncated),
-    );
-    object.insert("matches".to_string(), matches);
-    object.insert(
-        "matches_truncated_for_mcp".to_string(),
-        json!(matches_truncated),
-    );
-    object.insert("node_ids".to_string(), node_ids);
-    object.insert(
-        "node_ids_truncated_for_mcp".to_string(),
-        json!(node_ids_truncated),
-    );
-    object.insert("context_pagination".to_string(), context_pagination);
-    object.insert(
-        "context_pagination_truncated_for_mcp".to_string(),
-        json!(pagination_truncated),
-    );
-    object.insert(
-        "synthesis_prompt".to_string(),
-        compact_synthesis_prompt(value, &context_blocks),
-    );
-
-    Value::Object(object)
+#[derive(Copy, Clone)]
+enum CompactTier {
+    Standard,
+    Minimal { compact_chars: usize },
 }
 
-fn minimal_lcm_expand_query_contract(
+fn compact_lcm_expand_query_payload(
     value: &Value,
     original_chars: usize,
-    compact_chars: usize,
+    tier: CompactTier,
 ) -> Value {
-    const MAX_CONTEXT_BLOCKS: usize = 1;
-    const MAX_CONTEXT_BLOCK_CHARS: usize = 240;
-    const MAX_MATCHES: usize = 5;
-    const MAX_MATCH_SNIPPET_CHARS: usize = 80;
-    const MAX_NODE_IDS: usize = 25;
-    const MAX_NODE_ID_CHARS: usize = 120;
-    const MAX_PAGINATION_ITEMS: usize = 10;
-    const MAX_SCALAR_CHARS: usize = 512;
-    const MAX_PROMPT_CHARS: usize = 512;
-    const MAX_QUERY_CHARS: usize = 512;
-    const MAX_SYNTHESIS_SYSTEM_CHARS: usize = 512;
-    const MAX_SYNTHESIS_PROMPT_CHARS: usize = 512;
+    let limits = match tier {
+        CompactTier::Standard => LcmExpandQueryCompactLimits {
+            max_context_blocks: 3,
+            max_context_block_chars: 600,
+            max_matches: 10,
+            max_match_snippet_chars: 160,
+            max_node_ids: 50,
+            max_node_id_chars: 160,
+            max_pagination_items: 50,
+            max_scalar_chars: None,
+            max_prompt_chars: MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
+            max_query_chars: MAX_LCM_EXPAND_QUERY_QUERY_CHARS,
+            max_synthesis_system_chars: MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS,
+            max_synthesis_prompt_chars: MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS,
+            compact_chars: None,
+            truncation_reason:
+                "expand-query response compacted to preserve synthesis contract fields",
+        },
+        CompactTier::Minimal { compact_chars } => LcmExpandQueryCompactLimits {
+            max_context_blocks: 1,
+            max_context_block_chars: 240,
+            max_matches: 5,
+            max_match_snippet_chars: 80,
+            max_node_ids: 25,
+            max_node_id_chars: 120,
+            max_pagination_items: 10,
+            max_scalar_chars: Some(512),
+            max_prompt_chars: 512,
+            max_query_chars: 512,
+            max_synthesis_system_chars: 512,
+            max_synthesis_prompt_chars: 512,
+            compact_chars: Some(compact_chars),
+            truncation_reason: "expand-query response reduced to minimal synthesis contract after compact payload overflow",
+        },
+    };
 
     let mut object = Map::new();
-    for key in [
-        "status",
-        "provider",
-        "session_id",
-        "storage_scope",
-        "answer",
-    ] {
-        insert_bounded_scalar_field(&mut object, value, key, MAX_SCALAR_CHARS);
-    }
-    for key in [
-        "needs_synthesis",
-        "max_tokens",
-        "context_max_tokens",
-        "context_budget",
-        "context_truncated",
-    ] {
-        if let Some(field) = value.get(key) {
-            object.insert(key.to_string(), field.clone());
+    if let Some(max_scalar_chars) = limits.max_scalar_chars {
+        for key in [
+            "status",
+            "provider",
+            "session_id",
+            "storage_scope",
+            "answer",
+        ] {
+            insert_bounded_scalar_field(&mut object, value, key, max_scalar_chars);
         }
+        for key in [
+            "needs_synthesis",
+            "max_tokens",
+            "context_max_tokens",
+            "context_budget",
+            "context_truncated",
+        ] {
+            if let Some(field) = value.get(key) {
+                object.insert(key.to_string(), field.clone());
+            }
+        }
+        insert_bounded_text_field(&mut object, value, "prompt", limits.max_prompt_chars);
+        insert_bounded_text_field(&mut object, value, "query", limits.max_query_chars);
+    } else {
+        for key in [
+            "status",
+            "provider",
+            "session_id",
+            "storage_scope",
+            "answer",
+            "needs_synthesis",
+            "max_tokens",
+            "context_max_tokens",
+            "context_budget",
+            "context_truncated",
+        ] {
+            if let Some(field) = value.get(key) {
+                object.insert(key.to_string(), field.clone());
+            }
+        }
+        insert_bounded_text_field(&mut object, value, "prompt", limits.max_prompt_chars);
+        insert_bounded_text_field(&mut object, value, "query", limits.max_query_chars);
+        object.insert("mcp_response_truncated".to_string(), json!(true));
+        object.insert("contract_truncated".to_string(), json!(true));
+        object.insert(
+            "mcp_original_response_chars".to_string(),
+            json!(original_chars),
+        );
+        object.insert(
+            "mcp_truncation_reason".to_string(),
+            json!(limits.truncation_reason),
+        );
     }
-    insert_bounded_text_field(&mut object, value, "prompt", MAX_PROMPT_CHARS);
-    insert_bounded_text_field(&mut object, value, "query", MAX_QUERY_CHARS);
 
     let (context_blocks, context_blocks_truncated) = compact_context_blocks(
         value.get("context_blocks"),
-        MAX_CONTEXT_BLOCKS,
-        MAX_CONTEXT_BLOCK_CHARS,
+        limits.max_context_blocks,
+        limits.max_context_block_chars,
     );
-    let (matches, matches_truncated) =
-        compact_matches(value.get("matches"), MAX_MATCHES, MAX_MATCH_SNIPPET_CHARS);
-    let (node_ids, node_ids_truncated) =
-        compact_string_array(value.get("node_ids"), MAX_NODE_IDS, MAX_NODE_ID_CHARS);
+    let (matches, matches_truncated) = compact_matches(
+        value.get("matches"),
+        limits.max_matches,
+        limits.max_match_snippet_chars,
+    );
+    let (node_ids, node_ids_truncated) = compact_string_array(
+        value.get("node_ids"),
+        limits.max_node_ids,
+        limits.max_node_id_chars,
+    );
     let (context_pagination, pagination_truncated) =
-        compact_array(value.get("context_pagination"), MAX_PAGINATION_ITEMS);
+        compact_array(value.get("context_pagination"), limits.max_pagination_items);
 
     object.insert("context_blocks".to_string(), context_blocks.clone());
     object.insert(
@@ -258,26 +242,48 @@ fn minimal_lcm_expand_query_contract(
         compact_synthesis_prompt_with_limits(
             value,
             &context_blocks,
-            MAX_SYNTHESIS_SYSTEM_CHARS,
-            MAX_SYNTHESIS_PROMPT_CHARS,
+            limits.max_synthesis_system_chars,
+            limits.max_synthesis_prompt_chars,
         ),
     );
-    object.insert("mcp_response_truncated".to_string(), json!(true));
-    object.insert("contract_truncated".to_string(), json!(true));
-    object.insert(
-        "mcp_original_response_chars".to_string(),
-        json!(original_chars),
-    );
-    object.insert(
-        "mcp_compact_response_chars".to_string(),
-        json!(compact_chars),
-    );
-    object.insert(
-        "mcp_truncation_reason".to_string(),
-        json!("expand-query response reduced to minimal synthesis contract after compact payload overflow"),
-    );
+
+    if limits.max_scalar_chars.is_some() {
+        object.insert("mcp_response_truncated".to_string(), json!(true));
+        object.insert("contract_truncated".to_string(), json!(true));
+        object.insert(
+            "mcp_original_response_chars".to_string(),
+            json!(original_chars),
+        );
+        if let Some(compact_chars) = limits.compact_chars {
+            object.insert(
+                "mcp_compact_response_chars".to_string(),
+                json!(compact_chars),
+            );
+        }
+        object.insert(
+            "mcp_truncation_reason".to_string(),
+            json!(limits.truncation_reason),
+        );
+    }
 
     Value::Object(object)
+}
+
+struct LcmExpandQueryCompactLimits {
+    max_context_blocks: usize,
+    max_context_block_chars: usize,
+    max_matches: usize,
+    max_match_snippet_chars: usize,
+    max_node_ids: usize,
+    max_node_id_chars: usize,
+    max_pagination_items: usize,
+    max_scalar_chars: Option<usize>,
+    max_prompt_chars: usize,
+    max_query_chars: usize,
+    max_synthesis_system_chars: usize,
+    max_synthesis_prompt_chars: usize,
+    compact_chars: Option<usize>,
+    truncation_reason: &'static str,
 }
 
 fn compact_array(value: Option<&Value>, limit: usize) -> (Value, bool) {
@@ -371,22 +377,13 @@ fn compact_context_blocks(
     (Value::Array(blocks), truncated)
 }
 
-fn compact_synthesis_prompt(value: &Value, context_blocks: &Value) -> Value {
-    compact_synthesis_prompt_with_limits(
-        value,
-        context_blocks,
-        MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS,
-        MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS,
-    )
-}
-
 fn compact_synthesis_prompt_with_limits(
     value: &Value,
     context_blocks: &Value,
     system_chars: usize,
     prompt_chars: usize,
 ) -> Value {
-    let default_system = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
+    let default_system = LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT;
     let system = value
         .get("synthesis_prompt")
         .and_then(|prompt| prompt.get("system"))
@@ -894,6 +891,15 @@ async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution 
     open_lcm_storage_with_mode(cg, args, false).await
 }
 
+macro_rules! lcm_open_storage {
+    ($cg:expr, $args:expr) => {
+        match open_lcm_storage($cg, $args).await {
+            LcmStorageResolution::Available(storage) => storage,
+            LcmStorageResolution::Unavailable(result) => return Ok(result),
+        }
+    };
+}
+
 async fn open_lcm_storage_with_mode(
     cg: &TokenSave,
     args: &Value,
@@ -989,29 +995,34 @@ fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
         .map_err(|()| argument_error("sort must be one of recency, relevance, hybrid"))
 }
 
+fn parse_lcm_summary_node_id(target: &Value) -> Result<String> {
+    required_string_arg(target, "node_id")
+        .map(str::to_string)
+        .map_err(|_| TokenSaveError::Config {
+            message: "target.node_id is required when target.kind is summary_node".to_string(),
+        })
+}
+
+fn parse_lcm_external_payload_ref(target: &Value) -> Result<String> {
+    required_string_arg(target, "payload_ref")
+        .map(str::to_string)
+        .map_err(|_| TokenSaveError::Config {
+            message: "target.payload_ref is required when target.kind is external_payload"
+                .to_string(),
+        })
+}
+
 fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
     let Some(target) = args.get("target") else {
         return Ok(LcmDescribeTarget::Session);
     };
     match string_arg(target, "kind").unwrap_or_default() {
-        "summary_node" => {
-            let node_id = required_string_arg(target, "node_id")
-                .map(str::to_string)
-                .map_err(|_| TokenSaveError::Config {
-                    message: "target.node_id is required when target.kind is summary_node"
-                        .to_string(),
-                })?;
-            Ok(LcmDescribeTarget::SummaryNode { node_id })
-        }
-        "external_payload" => {
-            let payload_ref = required_string_arg(target, "payload_ref")
-                .map(str::to_string)
-                .map_err(|_| TokenSaveError::Config {
-                    message: "target.payload_ref is required when target.kind is external_payload"
-                        .to_string(),
-                })?;
-            Ok(LcmDescribeTarget::ExternalPayload { payload_ref })
-        }
+        "summary_node" => Ok(LcmDescribeTarget::SummaryNode {
+            node_id: parse_lcm_summary_node_id(target)?,
+        }),
+        "external_payload" => Ok(LcmDescribeTarget::ExternalPayload {
+            payload_ref: parse_lcm_external_payload_ref(target)?,
+        }),
         "session" => Ok(LcmDescribeTarget::Session),
         _ => Err(TokenSaveError::Config {
             message: "target.kind must be one of session, summary_node, external_payload"
@@ -1034,24 +1045,12 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
             })?;
             Ok(LcmExpandTarget::RawMessage { store_id })
         }
-        "summary_node" => {
-            let node_id = required_string_arg(target, "node_id")
-                .map(str::to_string)
-                .map_err(|_| TokenSaveError::Config {
-                    message: "target.node_id is required when target.kind is summary_node"
-                        .to_string(),
-                })?;
-            Ok(LcmExpandTarget::SummaryNode { node_id })
-        }
-        "external_payload" => {
-            let payload_ref = required_string_arg(target, "payload_ref")
-                .map(str::to_string)
-                .map_err(|_| TokenSaveError::Config {
-                    message: "target.payload_ref is required when target.kind is external_payload"
-                        .to_string(),
-                })?;
-            Ok(LcmExpandTarget::ExternalPayload { payload_ref })
-        }
+        "summary_node" => Ok(LcmExpandTarget::SummaryNode {
+            node_id: parse_lcm_summary_node_id(target)?,
+        }),
+        "external_payload" => Ok(LcmExpandTarget::ExternalPayload {
+            payload_ref: parse_lcm_external_payload_ref(target)?,
+        }),
         _ => Err(TokenSaveError::Config {
             message: "target.kind must be one of raw_message, summary_node, external_payload"
                 .to_string(),
@@ -1145,10 +1144,7 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
 pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let mut status = storage
         .db
         .lcm_status(provider, session_id)
@@ -1189,10 +1185,7 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let page = storage
         .db
         .lcm_load_session(LcmLoadSessionRequest {
@@ -1237,10 +1230,7 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
 pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let query = required_string_arg(&args, "query")?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let hits = storage
         .db
         .lcm_grep(LcmGrepRequest {
@@ -1274,10 +1264,7 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
 pub(super) async fn handle_lcm_describe(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let description = storage
         .db
         .lcm_describe(LcmDescribeRequest {
@@ -1299,10 +1286,7 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let expansion = storage
         .db
         .lcm_expand(LcmExpandRequest {
@@ -1342,10 +1326,7 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
         MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
     )?
     .unwrap_or(default_context_limit);
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let response = storage
         .db
         .lcm_expand_query(LcmExpandQueryRequest {
@@ -1375,10 +1356,7 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
 pub(super) async fn handle_lcm_session_boundary(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let response = storage
         .db
         .lcm_session_boundary(LcmSessionBoundaryRequest {
@@ -1403,10 +1381,7 @@ pub(super) async fn handle_lcm_session_boundary(cg: &TokenSave, args: Value) -> 
 pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let response = storage
         .db
         .lcm_preflight(LcmPreflightRequest {
@@ -1444,10 +1419,7 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
 pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = match open_lcm_storage(cg, &args).await {
-        LcmStorageResolution::Available(storage) => storage,
-        LcmStorageResolution::Unavailable(result) => return Ok(result),
-    };
+    let storage = lcm_open_storage!(cg, &args);
     let response = storage
         .db
         .lcm_compress(LcmCompressionRequest {
