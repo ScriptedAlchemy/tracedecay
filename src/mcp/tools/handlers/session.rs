@@ -962,8 +962,8 @@ fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
     let Some(sort) = string_arg(args, "sort") else {
         return Ok(LcmGrepSort::Recency);
     };
-    LcmGrepSort::from_str(sort)
-        .ok_or_else(|| argument_error("sort must be one of recency, relevance, hybrid"))
+    sort.parse::<LcmGrepSort>()
+        .map_err(|_| argument_error("sort must be one of recency, relevance, hybrid"))
 }
 
 fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {

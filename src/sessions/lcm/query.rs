@@ -46,8 +46,7 @@ pub(crate) async fn load_session(
     let mut role_clause = String::new();
     let roles = normalized_strings(&request.roles);
     if !roles.is_empty() {
-        let placeholders = std::iter::repeat("?")
-            .take(roles.len())
+        let placeholders = std::iter::repeat_n("?", roles.len())
             .collect::<Vec<_>>()
             .join(", ");
         role_clause = format!(" AND role IN ({placeholders})");

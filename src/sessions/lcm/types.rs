@@ -176,13 +176,15 @@ pub enum LcmGrepSort {
     Hybrid,
 }
 
-impl LcmGrepSort {
-    pub fn from_str(value: &str) -> Option<Self> {
+impl std::str::FromStr for LcmGrepSort {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "recency" => Some(Self::Recency),
-            "relevance" => Some(Self::Relevance),
-            "hybrid" => Some(Self::Hybrid),
-            _ => None,
+            "recency" => Ok(Self::Recency),
+            "relevance" => Ok(Self::Relevance),
+            "hybrid" => Ok(Self::Hybrid),
+            _ => Err(()),
         }
     }
 }
