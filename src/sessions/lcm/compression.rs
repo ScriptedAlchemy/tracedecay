@@ -636,8 +636,7 @@ fn compression_window(
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
-        .map(|message| message.store_id)
-        .unwrap_or(i64::MAX);
+        .map_or(i64::MAX, |message| message.store_id);
     let pinned_anchors = raw_messages
         .iter()
         .filter(|message| {
@@ -707,11 +706,7 @@ fn preflight_decision(
             request.dynamic_leaf_chunk_max,
             source_token_count(&window.backlog),
         );
-        if has_eligible_backlog(
-            &window.backlog,
-            leaf_chunk_tokens,
-            request.max_source_messages,
-        ) {
+        if has_eligible_backlog(&window.backlog, leaf_chunk_tokens) {
             return (true, "threshold_backlog_ready");
         }
         return (false, "threshold_no_eligible_backlog");
@@ -745,33 +740,21 @@ fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
         .any(|debt| matches!(debt, LcmMaintenanceDebt::RawBacklog { .. }))
 }
 
-fn has_eligible_backlog(
-    backlog: &[LcmRawMessage],
-    leaf_chunk_tokens: Option<i64>,
-    max_source_messages: Option<usize>,
-) -> bool {
+// Mirrors hermes-lcm `_leaf_compaction_candidate_status`: the full raw backlog
+// outside the fresh tail must reach the working leaf chunk threshold.
+// `max_source_messages` is intentionally ignored here; it only bounds how many
+// messages a single compression pass consumes, and truncating the eligibility
+// sum with it would permanently stall threshold compression whenever the
+// oldest capped slice stays below the leaf chunk threshold.
+fn has_eligible_backlog(backlog: &[LcmRawMessage], leaf_chunk_tokens: Option<i64>) -> bool {
     if backlog.is_empty() {
         return false;
     }
 
-    let max_messages = max_source_messages
-        .filter(|limit| *limit > 0)
-        .unwrap_or(backlog.len())
-        .min(backlog.len());
-    if max_messages == 0 {
-        return false;
+    match leaf_chunk_tokens.filter(|limit| *limit > 0) {
+        Some(token_limit) => source_token_count(backlog) >= token_limit,
+        None => true,
     }
-
-    let Some(token_limit) = leaf_chunk_tokens.filter(|limit| *limit > 0) else {
-        return true;
-    };
-
-    backlog
-        .iter()
-        .take(max_messages)
-        .map(|message| estimate_tokens(&message.content))
-        .sum::<i64>()
-        >= token_limit
 }
 
 fn effective_leaf_chunk_tokens(
@@ -929,6 +912,7 @@ struct CompressionResponseParts<'a> {
     max_assembly_tokens: Option<i64>,
 }
 
+#[derive(Clone, Copy)]
 struct CompressionAttemptState<'a> {
     compression_attempts: usize,
     fallback_used: bool,
@@ -1080,8 +1064,8 @@ async fn condense_summary_nodes_if_ready(
     }
 
     let summary_text = match &request.summarizer {
-        LcmSummarizerMode::Fake { summary_text } => summary_text.clone(),
-        LcmSummarizerMode::Provided { summary_text, .. } => summary_text.clone(),
+        LcmSummarizerMode::Fake { summary_text }
+        | LcmSummarizerMode::Provided { summary_text, .. } => summary_text.clone(),
         LcmSummarizerMode::Noop | LcmSummarizerMode::HermesAuxiliary => unreachable!(),
     };
     let source_tokens = children
@@ -1093,7 +1077,7 @@ async fn condense_summary_nodes_if_ready(
         .map(|node| node.summary_text.clone())
         .collect::<Vec<_>>();
     let (summary_text, fallback_used) =
-        rescuing_summary_text_from_texts(summary_text, source_texts, source_tokens);
+        rescuing_summary_text_from_texts(summary_text, &source_texts, source_tokens);
     let summary = dag::insert_summary_node_in_transaction(
         conn,
         condensation_draft(
@@ -1222,8 +1206,8 @@ fn summary_request_for_backlog(
     focus_topic: Option<String>,
     backlog: &[LcmRawMessage],
 ) -> LcmSummaryRequest {
-    let first_store_id = backlog.first().map(|message| message.store_id).unwrap_or(0);
-    let last_store_id = backlog.last().map(|message| message.store_id).unwrap_or(0);
+    let first_store_id = backlog.first().map_or(0, |message| message.store_id);
+    let last_store_id = backlog.last().map_or(0, |message| message.store_id);
     let focus = focus_topic.as_deref().unwrap_or("the conversation so far");
     let prompt = format!(
         "Summarize LCM raw messages for provider '{provider}', session '{session_id}', \
@@ -1283,16 +1267,17 @@ async fn ingest_active_messages(
             .or_else(|| message.get("message_id"))
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                deterministic_message_id(provider, session_id, idx, &role, &storage_text)
-            });
-        let ordinal = match existing_message_ordinal(conn, provider, &message_id).await? {
-            Some(existing_ordinal) => existing_ordinal,
-            None => {
-                next_available_ordinal += 1;
-                next_available_ordinal
-            }
+            .map_or_else(
+                || deterministic_message_id(provider, session_id, idx, &role, &storage_text),
+                str::to_string,
+            );
+        let ordinal = if let Some(existing_ordinal) =
+            existing_message_ordinal(conn, provider, &message_id).await?
+        {
+            existing_ordinal
+        } else {
+            next_available_ordinal += 1;
+            next_available_ordinal
         };
         let kind = message
             .get("kind")
@@ -1663,12 +1648,12 @@ fn rescuing_summary_text(
         .iter()
         .map(|message| message.content.clone())
         .collect::<Vec<_>>();
-    rescuing_summary_text_from_texts(summary_text, source_texts, source_token_count)
+    rescuing_summary_text_from_texts(summary_text, &source_texts, source_token_count)
 }
 
 fn rescuing_summary_text_from_texts(
     summary_text: String,
-    source_texts: Vec<String>,
+    source_texts: &[String],
     source_token_count: i64,
 ) -> (String, bool) {
     if source_token_count < MIN_SUMMARY_RESCUE_SOURCE_TOKENS
@@ -1677,7 +1662,7 @@ fn rescuing_summary_text_from_texts(
         return (summary_text, false);
     }
     (
-        deterministic_fallback_summary(&source_texts, source_token_count),
+        deterministic_fallback_summary(source_texts, source_token_count),
         true,
     )
 }

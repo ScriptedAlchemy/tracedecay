@@ -82,7 +82,7 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
     let marker = "ref=";
     let start = text.find(marker).expect("placeholder ref") + marker.len();
     let tail = &text[start..];
-    let end = tail.find([']', ',', ';']).unwrap_or_else(|| tail.len());
+    let end = tail.find([']', ',', ';']).unwrap_or(tail.len());
     tail[..end].trim().to_string()
 }
 
@@ -1054,6 +1054,30 @@ async fn preflight_skips_threshold_when_backlog_below_leaf_chunk_threshold() {
     assert_eq!(response.status, "ok");
     assert!(!response.should_compress);
     assert_eq!(response.reason, "threshold_no_eligible_backlog");
+}
+
+#[tokio::test]
+async fn preflight_threshold_eligibility_uses_full_backlog_despite_source_message_cap() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["m1", "m2", "m3", "m4", "m5", "m6", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let mut request = preflight_request("cursor", "session-1", Vec::new(), Some(120));
+    request.threshold_tokens = Some(100);
+    request.leaf_chunk_tokens = Some(5);
+    request.max_source_messages = Some(2);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "threshold_backlog_ready");
 }
 
 #[tokio::test]
