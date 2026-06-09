@@ -786,6 +786,16 @@ impl GlobalDb {
             .await
     }
 
+    /// Records a compression-boundary session start; a skipped carry-over
+    /// starts the durable compression cooldown for the new session.
+    pub async fn lcm_session_boundary(
+        &self,
+        request: crate::sessions::lcm::LcmSessionBoundaryRequest,
+    ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
+    {
+        crate::sessions::lcm::compression::record_session_boundary(&self.conn, request).await
+    }
+
     /// Ingests active messages and reports whether deterministic replay changed.
     pub async fn lcm_preflight(
         &self,

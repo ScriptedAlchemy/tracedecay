@@ -2,7 +2,7 @@ use libsql::{params, Connection, Value};
 
 use super::{raw, LcmRawMessage, LcmStorageKind};
 
-pub const LCM_SCHEMA_VERSION: i64 = 1;
+pub const LCM_SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
@@ -96,6 +96,7 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
             rollover_at INTEGER,
             reset_at INTEGER,
             maintenance_at INTEGER,
+            boundary_skip_at INTEGER,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
             PRIMARY KEY(provider, conversation_id)
         );
@@ -169,6 +170,16 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
     )
     .await
     .ok()?;
+
+    // Schema v2: lifecycle rows gained the compression-boundary cooldown
+    // marker. Databases created before the column existed need the ALTER;
+    // the error is ignored when the column is already present.
+    let _ = conn
+        .execute(
+            "ALTER TABLE lcm_lifecycle_state ADD COLUMN boundary_skip_at INTEGER",
+            (),
+        )
+        .await;
 
     carry_forward_legacy_messages(conn).await?;
     conn.execute(

@@ -527,6 +527,34 @@ pub struct LcmPreflightRequest {
     pub ignore_message_patterns: Vec<String>,
 }
 
+/// Host notification that a session crossed a compression boundary.
+///
+/// Mirrors the hermes-lcm `on_session_start(..., boundary_reason="compression",
+/// old_session_id=...)` contract: when the old session does not match the
+/// host's bound session the boundary skipped carry-over and a short compression
+/// cooldown starts for the new session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionBoundaryRequest {
+    pub provider: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_session_id: Option<String>,
+    /// Unix timestamp of the boundary event; defaults to now when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_skip_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionBoundaryResponse {
+    pub status: String,
+    pub recorded: bool,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPreflightResponse {
     pub status: String,

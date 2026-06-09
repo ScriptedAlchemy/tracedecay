@@ -177,6 +177,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_lcm_expand_query(),
         def_lcm_preflight(),
         def_lcm_compress(),
+        def_lcm_session_boundary(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -2313,6 +2314,43 @@ fn def_lcm_compress() -> ToolDefinition {
                         "route": {"type": "string"}
                     },
                     "required": ["mode"]
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_session_boundary() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_session_boundary",
+        "LCM Session Boundary",
+        "Report a compression-boundary session start. When the old session does not match the bound session the boundary skipped carry-over and a short compression cooldown starts for the new session.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id the host bound after the boundary."
+                },
+                "old_session_id": {
+                    "type": "string",
+                    "description": "Session id the host reports as having crossed the compression boundary."
+                },
+                "boundary_reason": {
+                    "type": "string",
+                    "description": "Host boundary reason; only 'compression' boundaries are evaluated."
+                },
+                "bound_session_id": {
+                    "type": "string",
+                    "description": "Session id that was bound before this boundary; a mismatch with old_session_id records the cooldown."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()

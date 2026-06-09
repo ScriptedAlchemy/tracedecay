@@ -921,6 +921,115 @@ assert args == {
 }
 
 #[test]
+fn context_engine_session_start_reports_compression_boundary() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_session_boundary_bridge.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+parent_name = "_hermes_user_boundary"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(argv)
+    inner = {"status": "ok", "recorded": True, "reason": "compression_boundary_skip_recorded"}
+    outer = {"content": [{"type": "text", "text": json.dumps(inner)}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+engine = plugin.TokenSaveContextEngine()
+engine.initialize(session_id="session-a", project_root="/tmp/project")
+
+# Plain session starts must not call the boundary tool.
+engine.on_session_start(session_id="session-a")
+assert calls == []
+
+# Compression boundary session starts hand bound/old session ids to tokensave
+# so the Rust side can decide whether the boundary skipped carry-over.
+engine.on_session_start(
+    session_id="session-b",
+    old_session_id="session-c",
+    boundary_reason="compression",
+)
+assert len(calls) == 1
+argv = calls[0]
+assert argv[0] == plugin.tools.TOKENSAVE_BIN
+assert argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_session_boundary", "--json"]
+args = json.loads(argv[argv.index("--args") + 1])
+assert args == {
+    "storage_scope": "project_local",
+    "project_root": "/tmp/project",
+    "session_id": "session-b",
+    "old_session_id": "session-c",
+    "boundary_reason": "compression",
+    "bound_session_id": "session-a",
+}
+
+# The engine binds the new session even when the boundary tool was called.
+assert engine.active_session_id == "session-b"
+
+# A non-compression boundary must not call the tool.
+engine.on_session_start(session_id="session-d", old_session_id="session-b", boundary_reason="manual")
+assert len(calls) == 1
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes session boundary bridge check");
+    assert!(
+        output.status.success(),
+        "generated context engine should report compression boundaries through tokensave_lcm_session_boundary\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn context_engine_compress_uses_tokensave_tool_json_args() {
     let home = TempDir::new().unwrap();
     HermesIntegration

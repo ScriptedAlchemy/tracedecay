@@ -3,8 +3,8 @@ use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
-    LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSourceRef, LcmStorageKind,
-    LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
+    LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSourceRef,
+    LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -223,6 +223,28 @@ fn limited_compress_request(
         reserve_tokens_floor: None,
         summarizer,
     }
+}
+
+fn boundary_request(
+    session_id: &str,
+    old_session_id: &str,
+    bound_session_id: Option<&str>,
+) -> LcmSessionBoundaryRequest {
+    LcmSessionBoundaryRequest {
+        provider: "cursor".to_string(),
+        session_id: session_id.to_string(),
+        old_session_id: Some(old_session_id.to_string()),
+        boundary_reason: Some("compression".to_string()),
+        bound_session_id: bound_session_id.map(str::to_string),
+        boundary_skip_at: None,
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_secs() as i64
 }
 
 fn summary_draft(
@@ -1296,6 +1318,169 @@ async fn preflight_requests_compression_for_maintenance_debt() {
     assert_eq!(response.status, "ok");
     assert!(response.should_compress);
     assert_eq!(response.reason, "maintenance_debt_ready");
+}
+
+// Mirrors hermes-lcm `_compression_boundary_cooldown_active`: after a
+// compression-boundary session start whose old_session_id does not match the
+// bound session (skip-carry-over), preflight must not request compression
+// again until the 60-second cooldown elapses — but it must keep ingesting.
+#[tokio::test]
+async fn boundary_skip_starts_preflight_compression_cooldown() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-b",
+        &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-b",
+            "session-c",
+            Some("session-a"),
+        ))
+        .await
+        .unwrap();
+    assert!(boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_skip_recorded");
+
+    let mut request = preflight_request(
+        "cursor",
+        "session-b",
+        vec![json!({"id": "fresh-user", "role": "user", "content": "fresh preflight payload"})],
+        Some(120),
+    );
+    request.threshold_tokens = Some(100);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "compression_boundary_cooldown");
+    // Cooldown is lossless: fresh messages were still ingested and replayed.
+    assert_eq!(response.replay_messages.len(), 1);
+    assert!(db
+        .lcm_load_raw_message("cursor", "fresh-user")
+        .await
+        .is_some());
+}
+
+#[tokio::test]
+async fn boundary_cooldown_blocks_replay_diff_compression() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-1").await;
+
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-1",
+            "session-c",
+            Some("session-a"),
+        ))
+        .await
+        .unwrap();
+    assert!(boundary.recorded);
+
+    let request = preflight_request(
+        "cursor",
+        "session-1",
+        vec![json!({
+            "id": "protected-1",
+            "role": "assistant",
+            "content": format!("data:image/png;base64,{}", "A".repeat(100_000))
+        })],
+        Some(100),
+    );
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "compression_boundary_cooldown");
+}
+
+#[tokio::test]
+async fn boundary_cooldown_expires_after_sixty_seconds() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-b",
+        &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let mut boundary = boundary_request("session-b", "session-c", Some("session-a"));
+    boundary.boundary_skip_at = Some(unix_now() - 61);
+    let recorded = db.lcm_session_boundary(boundary).await.unwrap();
+    assert!(recorded.recorded);
+
+    let mut request = preflight_request("cursor", "session-b", Vec::new(), Some(120));
+    request.threshold_tokens = Some(100);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "threshold_backlog_ready");
+}
+
+// Mirrors hermes-lcm: when old_session_id matches the bound session, the
+// compression boundary continues (Hermes carries lifecycle state over) and no
+// cooldown starts.
+#[tokio::test]
+async fn boundary_continuation_with_matching_bound_session_records_no_cooldown() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-b",
+        &["old-1 token", "old-2 token", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let boundary = db
+        .lcm_session_boundary(boundary_request(
+            "session-b",
+            "session-a",
+            Some("session-a"),
+        ))
+        .await
+        .unwrap();
+    assert!(!boundary.recorded);
+    assert_eq!(boundary.reason, "compression_boundary_continued");
+
+    let mut request = preflight_request("cursor", "session-b", Vec::new(), Some(120));
+    request.threshold_tokens = Some(100);
+
+    let response = db.lcm_preflight(request).await.unwrap();
+
+    assert!(response.should_compress);
+    assert_eq!(response.reason, "threshold_backlog_ready");
+}
+
+#[tokio::test]
+async fn non_compression_boundary_records_no_cooldown() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-b").await;
+
+    let mut manual = boundary_request("session-b", "session-c", Some("session-a"));
+    manual.boundary_reason = Some("manual".to_string());
+    let response = db.lcm_session_boundary(manual).await.unwrap();
+    assert!(!response.recorded);
+    assert_eq!(response.reason, "not_compression_boundary");
+
+    let mut same_session = boundary_request("session-b", "session-b", Some("session-a"));
+    same_session.boundary_reason = Some("compression".to_string());
+    let response = db.lcm_session_boundary(same_session).await.unwrap();
+    assert!(!response.recorded);
+    assert_eq!(response.reason, "not_compression_boundary");
 }
 
 #[tokio::test]

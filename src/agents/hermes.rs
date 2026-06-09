@@ -1697,7 +1697,35 @@ class TokenSaveContextEngine(ContextEngine):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
 
     def on_session_start(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
+        bound_session_id = self.active_session_id
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
+        self._report_compression_boundary(session_id, bound_session_id, kwargs)
+
+    def _report_compression_boundary(self, session_id, bound_session_id, kwargs):
+        # Mirrors Hermes' compression-boundary session starts: hand the
+        # bound/old session ids to tokensave so it can record a boundary-skip
+        # cooldown when carry-over did not continue from the bound session.
+        boundary_reason = str(kwargs.get("boundary_reason") or "")
+        old_session_id = str(kwargs.get("old_session_id") or "")
+        if (
+            boundary_reason != "compression"
+            or not old_session_id
+            or not session_id
+            or old_session_id == session_id
+        ):
+            return
+        args = _storage_args(self.project_root, self.hermes_home)
+        args.update({
+            "session_id": session_id,
+            "old_session_id": old_session_id,
+            "boundary_reason": boundary_reason,
+        })
+        if bound_session_id:
+            args["bound_session_id"] = bound_session_id
+        try:
+            tools.call_tokensave_tool("tokensave_lcm_session_boundary", args)
+        except Exception as exc:
+            logger.warning("LCM session boundary report failed: %s", exc)
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         args = _storage_args(self.project_root, self.hermes_home)

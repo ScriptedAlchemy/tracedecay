@@ -8,7 +8,8 @@ use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort,
-    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSummarizerMode,
+    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
+    LcmSummarizerMode,
 };
 use crate::sessions::SessionSearchScope;
 use crate::tokensave::TokenSave;
@@ -1357,6 +1358,34 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
     Ok(lcm_expand_query_tool_json(&payload))
+}
+
+pub(super) async fn handle_lcm_session_boundary(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let provider = provider_arg(&args);
+    let session_id = required_string_arg(&args, "session_id")?;
+    let storage = match open_lcm_storage(cg, &args).await {
+        LcmStorageResolution::Available(storage) => storage,
+        LcmStorageResolution::Unavailable(result) => return Ok(result),
+    };
+    let response = storage
+        .db
+        .lcm_session_boundary(LcmSessionBoundaryRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            old_session_id: string_arg(&args, "old_session_id").map(str::to_string),
+            boundary_reason: string_arg(&args, "boundary_reason").map(str::to_string),
+            bound_session_id: string_arg(&args, "bound_session_id").map(str::to_string),
+            boundary_skip_at: None,
+        })
+        .await
+        .map_err(lcm_error)?;
+    Ok(tool_json(&json!({
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "recorded": response.recorded,
+        "reason": response.reason,
+    })))
 }
 
 pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {

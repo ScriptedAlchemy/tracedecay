@@ -218,6 +218,7 @@ pub async fn handle_tool_call(
         "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(cg, args).await,
         "tokensave_lcm_preflight" => session::handle_lcm_preflight(cg, args).await,
         "tokensave_lcm_compress" => session::handle_lcm_compress(cg, args).await,
+        "tokensave_lcm_session_boundary" => session::handle_lcm_session_boundary(cg, args).await,
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
         }),
@@ -245,9 +246,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            86
+            87
         } else {
-            85
+            86
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -332,6 +333,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_lcm_expand_query"));
         assert!(tool_names.contains(&"tokensave_lcm_preflight"));
         assert!(tool_names.contains(&"tokensave_lcm_compress"));
+        assert!(tool_names.contains(&"tokensave_lcm_session_boundary"));
         assert!(tool_names.contains(&"tokensave_read"));
         assert!(tool_names.contains(&"tokensave_outline"));
         assert!(tool_names.contains(&"tokensave_implementations"));
@@ -378,6 +380,7 @@ mod tests {
             "tokensave_lcm_doctor",
             "tokensave_lcm_preflight",
             "tokensave_lcm_compress",
+            "tokensave_lcm_session_boundary",
         ];
         for tool in &tools {
             let ann = tool

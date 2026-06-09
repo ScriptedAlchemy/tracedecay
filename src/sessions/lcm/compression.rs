@@ -8,11 +8,15 @@ use crate::sessions::SessionMessageRecord;
 use super::{
     dag, raw, security, LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmLifecycleState,
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest, LcmPreflightResponse,
-    LcmRawMessage, LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode,
-    LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
+    LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSourceRef,
+    LcmStorageKind, LcmSummarizerMode, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+    LcmSummarySourceMessage, LcmSummarySourceRange,
 };
 
 const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
+// Mirrors hermes-lcm `_compression_boundary_cooldown_active`: a boundary skip
+// suppresses compression for 60 seconds.
+const COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 const DEFAULT_SUMMARY_FAN_IN: usize = 4;
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
@@ -91,6 +95,93 @@ pub(crate) async fn lifecycle_state(
     })
 }
 
+/// Records a compression-boundary session start, mirroring hermes-lcm
+/// `_continue_compression_boundary`.
+///
+/// Hermes carries lifecycle state over when the host's `old_session_id`
+/// matches the bound session; when it does not, the boundary skips carry-over
+/// and starts a short compression cooldown so the new session does not cascade
+/// straight back into compression while pressure is still unrelieved.
+pub(crate) async fn record_session_boundary(
+    conn: &Connection,
+    request: LcmSessionBoundaryRequest,
+) -> Result<LcmSessionBoundaryResponse, LcmError> {
+    let old_session_id = request.old_session_id.as_deref().unwrap_or("");
+    let is_compression_boundary = request.boundary_reason.as_deref() == Some("compression")
+        && !old_session_id.is_empty()
+        && old_session_id != request.session_id;
+    if !is_compression_boundary {
+        return Ok(session_boundary_response(false, "not_compression_boundary"));
+    }
+    if request.bound_session_id.as_deref() == Some(old_session_id) {
+        return Ok(session_boundary_response(
+            false,
+            "compression_boundary_continued",
+        ));
+    }
+
+    conn.execute(
+        "INSERT INTO lcm_lifecycle_state (
+            provider, conversation_id, current_session_id, boundary_skip_at, updated_at
+         )
+         VALUES (?1, ?2, ?2, COALESCE(?3, unixepoch()), unixepoch())
+         ON CONFLICT(provider, conversation_id) DO UPDATE SET
+            current_session_id = excluded.current_session_id,
+            boundary_skip_at = excluded.boundary_skip_at,
+            updated_at = unixepoch()",
+        params![
+            request.provider.as_str(),
+            request.session_id.as_str(),
+            opt_i64(request.boundary_skip_at),
+        ],
+    )
+    .await
+    .map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(session_boundary_response(
+        true,
+        "compression_boundary_skip_recorded",
+    ))
+}
+
+fn session_boundary_response(recorded: bool, reason: &str) -> LcmSessionBoundaryResponse {
+    LcmSessionBoundaryResponse {
+        status: "ok".to_string(),
+        recorded,
+        reason: reason.to_string(),
+    }
+}
+
+async fn boundary_cooldown_active(
+    conn: &Connection,
+    provider: &str,
+    conversation_id: &str,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                WHERE provider = ?1 AND conversation_id = ?2
+                  AND boundary_skip_at IS NOT NULL
+                  AND unixepoch() - boundary_skip_at < ?3
+             )",
+            params![
+                provider,
+                conversation_id,
+                COMPRESSION_BOUNDARY_COOLDOWN_SECONDS
+            ],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("boundary cooldown query returned no rows".to_string()))?;
+    let active: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    Ok(active != 0)
+}
+
 pub(crate) async fn preflight(
     conn: &Connection,
     storage_root: &Path,
@@ -126,6 +217,17 @@ pub(crate) async fn preflight(
     )
     .await?;
     let conversation_id = request.session_id.clone();
+    // Mirrors hermes-lcm `should_compress_preflight`: the boundary-skip
+    // cooldown is checked after ingest (preflight stays lossless) and blocks
+    // every compression trigger, including changed-replay and forced overflow.
+    if boundary_cooldown_active(conn, &request.provider, &conversation_id).await? {
+        return Ok(LcmPreflightResponse {
+            status: "ok".to_string(),
+            should_compress: false,
+            reason: "compression_boundary_cooldown".to_string(),
+            replay_messages: ingested.replay_messages,
+        });
+    }
     let existing_frontier = lifecycle_state_or_default(
         conn,
         &request.provider,

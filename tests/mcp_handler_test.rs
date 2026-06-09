@@ -110,6 +110,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tokensave_lcm_expand_query",
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
         "tokensave_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
@@ -134,6 +135,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     for mutating in [
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
         "tokensave_lcm_doctor",
     ] {
         let tool = tools
@@ -153,6 +155,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tokensave_lcm_expand_query",
         "tokensave_lcm_preflight",
         "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
         "tokensave_lcm_doctor",
     ] {
         let tool = tools
@@ -5172,6 +5175,67 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         critical_payload["retry_status"],
         "critical_pressure_catch_up"
     );
+}
+
+#[tokio::test]
+async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
+    let (cg, _dir) = setup_project().await;
+    for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
+        .iter()
+        .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-boundary-session",
+            &format!("lcm-boundary-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let boundary = handle_tool_call(
+        &cg,
+        "tokensave_lcm_session_boundary",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "old_session_id": "lcm-old-session",
+            "boundary_reason": "compression",
+            "bound_session_id": "lcm-bound-session"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let boundary_payload: Value = serde_json::from_str(extract_text(&boundary.value)).unwrap();
+    assert_eq!(boundary_payload["status"], "ok");
+    assert_eq!(boundary_payload["recorded"], true);
+    assert_eq!(
+        boundary_payload["reason"],
+        "compression_boundary_skip_recorded"
+    );
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tokensave_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "messages": [],
+            "current_tokens": 120,
+            "threshold_tokens": 100
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+    assert_eq!(preflight_payload["reason"], "compression_boundary_cooldown");
 }
 
 #[tokio::test]
