@@ -429,8 +429,18 @@ async fn fts_probe_needs_rebuild(
         let Some(term) = first_fts_term(&text) else {
             continue;
         };
-        let match_sql = format!("SELECT COUNT(*) FROM {fts_table} WHERE {fts_table} MATCH ?1");
-        let mut match_rows = match conn.query(&match_sql, params![term]).await {
+        let match_sql = format!(
+            "SELECT COUNT(*)
+             FROM {fts_table}
+             JOIN {content_table} content ON content.rowid = {fts_table}.rowid
+             WHERE {fts_table} MATCH ?1
+               AND content.provider = ?2
+               AND (?3 IS NULL OR content.session_id = ?3)"
+        );
+        let mut match_rows = match conn
+            .query(&match_sql, params![term, provider, opt_text(session_id)])
+            .await
+        {
             Ok(rows) => rows,
             Err(_) => return Ok(true),
         };
@@ -485,20 +495,38 @@ async fn count_broken_summary_sources(
              LEFT JOIN lcm_raw_messages raw
                ON src.source_kind = 'raw_message'
               AND CAST(raw.store_id AS TEXT) = src.source_id
-              AND raw.provider = owner.provider
-              AND raw.session_id = owner.session_id
              LEFT JOIN lcm_summary_nodes child
                ON src.source_kind = 'summary_node'
               AND child.node_id = src.source_id
-              AND child.provider = owner.provider
-              AND child.session_id = owner.session_id
-             WHERE owner.provider = ?1
-               AND (?2 IS NULL OR owner.session_id = ?2)
-               AND (
+             WHERE (
+                    owner.provider = ?1
+                AND (?2 IS NULL OR owner.session_id = ?2)
+                AND (
+                       (src.source_kind = 'raw_message'
+                        AND (
+                              raw.store_id IS NULL
+                           OR raw.provider != owner.provider
+                           OR raw.session_id != owner.session_id
+                        ))
+                    OR (src.source_kind = 'summary_node'
+                        AND (
+                              child.node_id IS NULL
+                           OR child.provider != owner.provider
+                           OR child.session_id != owner.session_id
+                        ))
+                )
+             )
+             OR (
                     owner.node_id IS NULL
-                 OR (src.source_kind = 'raw_message' AND raw.store_id IS NULL)
-                 OR (src.source_kind = 'summary_node' AND child.node_id IS NULL)
-               )",
+                AND (
+                       (src.source_kind = 'raw_message'
+                        AND raw.provider = ?1
+                        AND (?2 IS NULL OR raw.session_id = ?2))
+                    OR (src.source_kind = 'summary_node'
+                        AND child.provider = ?1
+                        AND (?2 IS NULL OR child.session_id = ?2))
+                )
+             )",
             params![provider, opt_text(session_id)],
         )
         .await
@@ -547,7 +575,7 @@ async fn lifecycle_integrity(
 ) -> Result<Value, LcmError> {
     let lifecycle_state_count = count_lifecycle_states(conn, provider, session_id).await?;
     let invalid_frontiers = count_invalid_frontiers(conn, provider, session_id).await?;
-    let orphan_debt = count_orphan_debt(conn, provider).await?;
+    let orphan_debt = count_orphan_debt(conn, provider, session_id).await?;
     Ok(json!({
         "lifecycle_state_count": lifecycle_state_count,
         "invalid_frontiers": invalid_frontiers,
@@ -607,7 +635,11 @@ async fn count_invalid_frontiers(
     row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
 
-async fn count_orphan_debt(conn: &Connection, provider: &str) -> Result<i64, LcmError> {
+async fn count_orphan_debt(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*)
@@ -615,8 +647,10 @@ async fn count_orphan_debt(conn: &Connection, provider: &str) -> Result<i64, Lcm
              LEFT JOIN lcm_lifecycle_state state
                ON state.provider = debt.provider
               AND state.conversation_id = debt.conversation_id
-             WHERE debt.provider = ?1 AND state.conversation_id IS NULL",
-            params![provider],
+             WHERE debt.provider = ?1
+               AND (?2 IS NULL OR debt.conversation_id = ?2)
+               AND state.conversation_id IS NULL",
+            params![provider, opt_text(session_id)],
         )
         .await
         .map_err(|err| LcmError::Db(err.to_string()))?;

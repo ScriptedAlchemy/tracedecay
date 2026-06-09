@@ -34,6 +34,27 @@ pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
 pub fn resolve_hermes_profile_session_db_path(
     hermes_home: &Path,
 ) -> std::result::Result<PathBuf, String> {
+    Ok(resolve_hermes_profile_tokensave_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
+}
+
+pub fn resolve_existing_hermes_profile_session_db_path(
+    hermes_home: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let db_path =
+        resolve_hermes_profile_tokensave_dir(hermes_home, false)?.join(PROJECT_SESSION_DB_FILENAME);
+    if !db_path.is_file() {
+        return Err(format!(
+            "hermes_profile LCM storage requires an existing session database: {}",
+            db_path.display()
+        ));
+    }
+    Ok(db_path)
+}
+
+fn resolve_hermes_profile_tokensave_dir(
+    hermes_home: &Path,
+    create_missing: bool,
+) -> std::result::Result<PathBuf, String> {
     let tokensave_dir = hermes_home.join(".tokensave");
     match std::fs::symlink_metadata(&tokensave_dir) {
         Ok(metadata) => {
@@ -50,13 +71,19 @@ pub fn resolve_hermes_profile_session_db_path(
                 ));
             }
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_missing => {
             std::fs::create_dir_all(&tokensave_dir).map_err(|err| {
                 format!(
                     "could not create hermes_profile .tokensave directory {}: {err}",
                     tokensave_dir.display()
                 )
             })?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "hermes_profile LCM storage requires an existing .tokensave directory: {}",
+                tokensave_dir.display()
+            ));
         }
         Err(err) => {
             return Err(format!(
@@ -78,7 +105,7 @@ pub fn resolve_hermes_profile_session_db_path(
             canonical_parent.display()
         ));
     }
-    Ok(canonical_parent.join(PROJECT_SESSION_DB_FILENAME))
+    Ok(canonical_parent)
 }
 
 pub async fn open_hermes_profile_session_db(hermes_home: &Path) -> Option<GlobalDb> {

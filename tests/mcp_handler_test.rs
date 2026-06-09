@@ -3918,6 +3918,18 @@ async fn lcm_fts_match_count(cg: &TokenSave, query: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn lcm_raw_store_id(cg: &TokenSave, message_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT store_id FROM lcm_raw_messages WHERE provider = 'cursor' AND message_id = ?1",
+            libsql::params![message_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
@@ -3930,10 +3942,34 @@ async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn lcm_schema_migration_count(cg: &TokenSave) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 async fn wipe_lcm_raw_fts(cg: &TokenSave) {
     project_lcm_conn(cg)
         .await
         .execute_batch("DELETE FROM lcm_raw_messages_fts;")
+        .await
+        .unwrap();
+}
+
+async fn wipe_lcm_raw_fts_for_message(cg: &TokenSave, message_id: &str) {
+    let store_id = lcm_raw_store_id(cg, message_id).await;
+    project_lcm_conn(cg)
+        .await
+        .execute(
+            "DELETE FROM lcm_raw_messages_fts WHERE rowid = ?1",
+            libsql::params![store_id],
+        )
         .await
         .unwrap();
 }
@@ -3992,6 +4028,194 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
     let text = extract_text(&result.value);
     assert!(!text.contains("LCM_DOCTOR_SECRET_PAYLOAD"));
     assert!(!text.contains("orphan body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-target",
+        "lcm-doctor-fts-target-message",
+        "scopedneedle target text",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-other",
+        "lcm-doctor-fts-other-message",
+        "scopedneedle other text",
+        2,
+    )
+    .await;
+    wipe_lcm_raw_fts_for_message(&cg, "lcm-doctor-fts-target-message").await;
+    assert_eq!(lcm_fts_match_count(&cg, "scopedneedle").await, 1);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-fts-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["fts"]["raw"]["rebuild_needed"], true);
+}
+
+#[tokio::test]
+async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-orphan-owner",
+        "lcm-doctor-orphan-owner-message",
+        "orphan owner source text",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "lcm-doctor-orphan-owner-message").await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+             VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
+        libsql::params![store_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-orphan-owner",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["summaries"]["broken_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-debt-target",
+        "lcm-doctor-debt-target-message",
+        "target session text",
+        1,
+    )
+    .await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_maintenance_debt(
+                provider, conversation_id, debt_id, debt_kind, from_store_id, to_store_id
+             )
+             VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-debt-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["lifecycle"]["orphan_debt"], 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    if db_path.exists() {
+        fs::remove_file(&db_path).unwrap();
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert!(
+        !db_path.exists(),
+        "diagnose must not create session storage"
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-read-only-existing",
+        "lcm-doctor-read-only-existing-message",
+        "read only existing database text",
+        1,
+    )
+    .await;
+    project_lcm_conn(&cg)
+        .await
+        .execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["schema"]["migration_present"], false);
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
 }
 
 #[tokio::test]

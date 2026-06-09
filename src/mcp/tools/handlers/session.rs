@@ -675,12 +675,24 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
 }
 
 async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution {
+    open_lcm_storage_with_mode(cg, args, false).await
+}
+
+async fn open_lcm_storage_with_mode(
+    cg: &TokenSave,
+    args: &Value,
+    read_only_existing: bool,
+) -> LcmStorageResolution {
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
         "project_local" => {
-            let Some(db) =
+            let db = if read_only_existing {
+                let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+                GlobalDb::open_read_only_at(&db_path).await
+            } else {
                 crate::sessions::cursor::open_project_session_db(cg.project_root()).await
-            else {
+            };
+            let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
             };
             LcmStorageResolution::Available(LcmStorage {
@@ -693,7 +705,18 @@ async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution 
                 Ok(hermes_home) => hermes_home,
                 Err(result) => return LcmStorageResolution::Unavailable(result),
             };
-            let db_path =
+            let db_path = if read_only_existing {
+                match crate::sessions::cursor::resolve_existing_hermes_profile_session_db_path(
+                    &hermes_home,
+                ) {
+                    Ok(db_path) => db_path,
+                    Err(message) => {
+                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                            message,
+                        ))
+                    }
+                }
+            } else {
                 match crate::sessions::cursor::resolve_hermes_profile_session_db_path(&hermes_home)
                 {
                     Ok(db_path) => db_path,
@@ -702,8 +725,14 @@ async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution 
                             message,
                         ))
                     }
-                };
-            let Some(db) = GlobalDb::open_at(&db_path).await else {
+                }
+            };
+            let db = if read_only_existing {
+                GlobalDb::open_read_only_at(&db_path).await
+            } else {
+                GlobalDb::open_at(&db_path).await
+            };
+            let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
                     "could not open hermes_profile tokensave session database",
                 ));
@@ -885,7 +914,8 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
     let session_id = string_arg(&args, "session_id");
     let mode = lcm_doctor_mode(&args)?;
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
-    let storage = match open_lcm_storage(cg, &args).await {
+    let read_only_existing = mode != "repair" || !apply;
+    let storage = match open_lcm_storage_with_mode(cg, &args, read_only_existing).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };

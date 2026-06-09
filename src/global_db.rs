@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use libsql::{params, Builder, Connection, Database as LibsqlDatabase, Value};
+use libsql::{params, Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value};
 
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
@@ -289,6 +289,38 @@ impl GlobalDb {
         .ok()?;
         ensure_session_parent_columns(&conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&conn).await?;
+
+        Some(Self {
+            conn,
+            storage_root,
+            _db: db,
+        })
+    }
+
+    /// Opens an existing database without creating directories, creating schema,
+    /// or running LCM carry-forward migrations.
+    pub async fn open_read_only_at(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        let db = Builder::new_local(db_path)
+            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .ok()?;
+        let conn = db.connect().ok()?;
+
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )
+        .await
+        .ok()?;
 
         Some(Self {
             conn,
