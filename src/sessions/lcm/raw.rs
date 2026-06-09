@@ -242,6 +242,49 @@ pub(crate) async fn upsert_raw_message_with_payload(
     })
 }
 
+/// Applies ingest protection to an arbitrary replay field value (for example
+/// active-replay `tool_calls`) using the same redaction and substring media
+/// externalization primitives as raw-message ingest.
+pub(crate) async fn protect_replay_field_value(
+    conn: &Connection,
+    storage_root: &Path,
+    message: &SessionMessageRecord,
+    field_path: &str,
+    value: &JsonValue,
+) -> Result<JsonValue, LcmError> {
+    let config = ingest_config(message.metadata_json.as_deref());
+    let mut protected = value.clone();
+
+    if config.sensitive_patterns_enabled {
+        match &mut protected {
+            JsonValue::Object(_) | JsonValue::Array(_) => {
+                let mut patterns = Vec::new();
+                let _ = redact_sensitive_json_values(&mut protected, &config, &mut patterns);
+            }
+            JsonValue::String(text) => {
+                let redacted = redact_sensitive_text(text, &config);
+                if redacted.redacted {
+                    *text = redacted.text;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut payloads = Vec::new();
+    protect_json_media_payloads(
+        &mut protected,
+        storage_root,
+        message,
+        field_path,
+        &mut payloads,
+    )?;
+    for payload_ref in &payloads {
+        payload::upsert_payload_metadata(conn, payload_ref).await?;
+    }
+    Ok(protected)
+}
+
 async fn prepare_message(
     conn: &Connection,
     storage_root: &Path,

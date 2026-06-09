@@ -661,6 +661,87 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
 }
 
 #[tokio::test]
+async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_spans() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-tool-calls-protection").await;
+
+    let media_payload = format!("data:image/png;base64,{}", "A".repeat(9_000));
+    let tool_args = serde_json::to_string(&json!({
+        "query": "parity",
+        "image": media_payload,
+        "note": "tool-call-suffix-canary",
+    }))
+    .expect("tool call arguments should serialize");
+
+    let preflight = db
+        .lcm_preflight(preflight_request(
+            "cursor",
+            "session-tool-calls-protection",
+            vec![json!({
+                "id": "assistant-tool-calls-protected",
+                "role": "assistant",
+                "content": "I will look that up.",
+                "tool_calls": [{
+                    "id": "call_media",
+                    "type": "function",
+                    "api_key": "sk-tool-calls-1234567890abcdef",
+                    "function": {"name": "lookup", "arguments": tool_args},
+                }],
+                "lcm_ingest": {
+                    "sensitive_patterns_enabled": true,
+                    "sensitive_patterns": ["api_key"],
+                },
+            })],
+            Some(100),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(preflight.status, "ok");
+    assert!(preflight.should_compress);
+    assert_eq!(preflight.reason, "ingest_protection_changed_replay");
+    let protected_args = preflight.replay_messages[0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("protected tool-call arguments should stay stringified JSON");
+    assert!(protected_args.contains("[Externalized LCM ingest payload:"));
+    assert!(protected_args.contains("tool-call-suffix-canary"));
+    assert!(!protected_args.contains("data:image/png;base64"));
+    let protected_tool_call = preflight.replay_messages[0]["tool_calls"][0].to_string();
+    assert!(!protected_tool_call.contains("sk-tool-calls-1234567890abcdef"));
+
+    let payload_ref = externalized_ref_from_placeholder(protected_args);
+    let expanded = db
+        .lcm_store(tmp.path().join(".tokensave"))
+        .lcm_expand_payload(
+            "cursor",
+            "session-tool-calls-protection",
+            &payload_ref,
+            0,
+            media_payload.chars().count(),
+        )
+        .await
+        .expect("tool-calls payload should remain losslessly recoverable");
+    assert_eq!(expanded.content, media_payload);
+
+    let replay_from_raw = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-tool-calls-protection",
+            LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let replay_args = replay_from_raw.replay_messages[0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("stored replay should preserve protected tool-call arguments");
+    assert!(replay_args.contains("[Externalized LCM ingest payload:"));
+    assert!(!replay_args.contains("data:image/png;base64"));
+}
+
+#[tokio::test]
 async fn nested_media_placeholder_remains_inside_structured_active_content() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

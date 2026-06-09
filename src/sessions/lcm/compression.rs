@@ -11,13 +11,12 @@ use super::{
     LcmPreflightResponse, LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
     LcmSourceRef, LcmStorageKind, LcmSummarizerMode, LcmSummaryNode, LcmSummaryNodeDraft,
     LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
+    LCM_DEFAULT_FRESH_TAIL_COUNT, LCM_DEFAULT_SUMMARY_FAN_IN,
 };
 
-const DEFAULT_FRESH_TAIL_COUNT: usize = 2;
 // Mirrors hermes-lcm `_compression_boundary_cooldown_active`: a boundary skip
 // suppresses compression for 60 seconds.
 const COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
-const DEFAULT_SUMMARY_FAN_IN: usize = 4;
 // Mirrors hermes-lcm `LCMConfig.incremental_max_depth` default: condensation
 // only consumes nodes at depths strictly below this ceiling, so depth-1
 // summaries are never re-condensed to depth 2+ at default settings. The
@@ -918,7 +917,7 @@ fn compression_window(
         .collect::<Vec<_>>();
     let backlog_len = unsummarized
         .len()
-        .saturating_sub(fresh_tail_count.unwrap_or(DEFAULT_FRESH_TAIL_COUNT));
+        .saturating_sub(fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT));
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
@@ -1525,7 +1524,7 @@ async fn condense_summary_nodes_if_ready(
     let fan_in = request
         .summary_fan_in
         .filter(|fan_in| *fan_in > 1)
-        .unwrap_or(DEFAULT_SUMMARY_FAN_IN);
+        .unwrap_or(LCM_DEFAULT_SUMMARY_FAN_IN);
     let children =
         load_condensation_candidates(conn, &request.provider, &request.session_id, fan_in).await?;
     if children.len() < fan_in || matches!(request.summarizer, LcmSummarizerMode::HermesAuxiliary) {
@@ -1804,6 +1803,20 @@ async fn ingest_active_messages(
         let mut replay = message.clone();
         replay["role"] = Value::String(record.role.clone());
         replay["content"] = replay_content;
+        if let Some(tool_calls) = replay.get("tool_calls").cloned() {
+            let protected_tool_calls = raw::protect_replay_field_value(
+                conn,
+                storage_root,
+                &record,
+                "tool_calls",
+                &tool_calls,
+            )
+            .await?;
+            if protected_tool_calls != tool_calls {
+                changed_replay = true;
+                replay["tool_calls"] = protected_tool_calls;
+            }
+        }
         let metadata_json =
             active_replay_metadata_json(upsert.projection_metadata_json.as_deref(), &replay);
         update_active_replay_metadata(conn, provider, &message_id, &metadata_json).await?;
