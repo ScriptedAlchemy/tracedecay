@@ -71,8 +71,11 @@ fn heartbeat_noise_is_diagnostic_only() {
 #[test]
 fn ignore_and_stateless_patterns_use_hermes_style_globs() {
     assert!(pattern_matches("cron-*", "cron-20260414"));
-    assert!(pattern_matches("tmp-session-?", "tmp-session-a"));
+    assert!(pattern_matches("tmp-session-*", "tmp-session-a"));
     assert!(!pattern_matches("cron-*", "interactive-20260414"));
+    assert!(pattern_matches("cron:*", "cron:nightly"));
+    assert!(!pattern_matches("cron:*", "cron:nightly:run-1"));
+    assert!(pattern_matches("cron:**", "cron:nightly:run-1"));
 }
 
 #[test]
@@ -92,6 +95,34 @@ fn ignore_message_reason_classifies_heartbeat_and_configured_noise_without_body_
     assert_eq!(
         ignore_message_reason("user", "real user request", &["Cronjob Response:*"]),
         None
+    );
+}
+
+#[test]
+fn ignore_message_patterns_use_regex_search_with_anchors_and_inline_flags() {
+    assert_eq!(
+        ignore_message_reason(
+            "user",
+            "Cronjob Response: noisy heartbeat",
+            &["^Cronjob Response:"]
+        ),
+        Some("ignore_message_pattern")
+    );
+    assert_eq!(
+        ignore_message_reason(
+            "user",
+            "prefix Cronjob Response: quoted text",
+            &["^Cronjob Response:"]
+        ),
+        None
+    );
+    assert_eq!(
+        ignore_message_reason(
+            "user",
+            "  >>> Cronjob Response: noisy heartbeat",
+            &[r"(?is)^\s*(>>>\s*)?Cronjob Response"]
+        ),
+        Some("ignore_message_pattern")
     );
 }
 

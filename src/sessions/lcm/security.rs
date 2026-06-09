@@ -76,7 +76,7 @@ pub fn ignore_message_reason<S: AsRef<str>>(
     }
     ignore_message_patterns
         .iter()
-        .any(|pattern| pattern_matches(pattern.as_ref(), content))
+        .any(|pattern| message_pattern_matches(pattern.as_ref(), content))
         .then_some("ignore_message_pattern")
 }
 
@@ -91,41 +91,39 @@ pub fn pattern_matches(pattern: &str, value: &str) -> bool {
     if pattern.is_empty() {
         return false;
     }
-    wildcard_matches(
-        &pattern.to_ascii_lowercase().chars().collect::<Vec<_>>(),
-        &value.to_ascii_lowercase().chars().collect::<Vec<_>>(),
-    )
+    let Ok(regex) = regex::Regex::new(&session_pattern_regex(pattern)) else {
+        return false;
+    };
+    regex.is_match(value)
 }
 
-fn wildcard_matches(pattern: &[char], value: &[char]) -> bool {
-    let mut pattern_idx = 0usize;
-    let mut value_idx = 0usize;
-    let mut star_idx = None;
-    let mut star_value_idx = 0usize;
+fn message_pattern_matches(pattern: &str, content: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || content.is_empty() {
+        return false;
+    }
+    regex::Regex::new(pattern)
+        .map(|regex| regex.is_match(content))
+        .unwrap_or(false)
+}
 
-    while value_idx < value.len() {
-        if pattern_idx < pattern.len()
-            && (pattern[pattern_idx] == '?' || pattern[pattern_idx] == value[value_idx])
-        {
-            pattern_idx += 1;
-            value_idx += 1;
-        } else if pattern_idx < pattern.len() && pattern[pattern_idx] == '*' {
-            star_idx = Some(pattern_idx);
-            pattern_idx += 1;
-            star_value_idx = value_idx;
-        } else if let Some(star) = star_idx {
-            pattern_idx = star + 1;
-            star_value_idx += 1;
-            value_idx = star_value_idx;
+fn session_pattern_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '*' {
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                regex.push_str(".*");
+            } else {
+                regex.push_str("[^:]*");
+            }
         } else {
-            return false;
+            regex.push_str(&regex::escape(&ch.to_string()));
         }
     }
-
-    while pattern_idx < pattern.len() && pattern[pattern_idx] == '*' {
-        pattern_idx += 1;
-    }
-    pattern_idx == pattern.len()
+    regex.push('$');
+    regex
 }
 
 pub fn contains_data_uri(content: &str) -> bool {

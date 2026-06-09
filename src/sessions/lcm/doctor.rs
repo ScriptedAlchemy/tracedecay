@@ -41,9 +41,11 @@ pub(crate) async fn doctor(
         db_path,
         storage_root,
         provider,
+        session_id,
         &diagnostics,
         mode,
         apply,
+        &clean_config,
     )
     .await?;
     let issue_count = issue_count(&diagnostics);
@@ -116,9 +118,11 @@ async fn plan_and_apply_repairs(
     db_path: &Path,
     storage_root: &Path,
     provider: &str,
+    session_id: Option<&str>,
     diagnostics: &Value,
     mode: &str,
     apply: bool,
+    clean_config: &LcmCleanConfig,
 ) -> Result<Value, LcmError> {
     let mut planned = Vec::new();
     let mut applied = Vec::new();
@@ -181,8 +185,9 @@ async fn plan_and_apply_repairs(
             });
             planned.push(action.clone());
             if apply {
-                backup = backup_database(db_path, storage_root)?;
-                let deleted = delete_clean_candidates(conn, provider, diagnostics).await?;
+                backup = backup_database(conn, db_path, storage_root).await?;
+                let deleted =
+                    delete_clean_candidates(conn, provider, session_id, clean_config).await?;
                 let mut applied_action = action;
                 if let Some(object) = applied_action.as_object_mut() {
                     object.insert("deleted".to_string(), deleted);
@@ -1092,7 +1097,12 @@ async fn raw_message_has_summary_source(
     Ok(count > 0)
 }
 
-fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
+async fn backup_database(
+    conn: &Connection,
+    db_path: &Path,
+    storage_root: &Path,
+) -> Result<Value, LcmError> {
+    checkpoint_wal_for_backup(conn).await?;
     let backup_dir = storage_root.join("lcm-clean-backups");
     fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
     let stamp = SystemTime::now()
@@ -1109,24 +1119,35 @@ fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmErro
     }))
 }
 
+async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+        .ok_or_else(|| LcmError::Db("WAL checkpoint returned no status row".to_string()))?;
+    let busy: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+    let log_frames: i64 = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+    let checkpointed_frames: i64 = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+    if busy != 0 || checkpointed_frames < log_frames {
+        return Err(LcmError::Db(format!(
+            "WAL checkpoint incomplete before clean backup: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+        )));
+    }
+    Ok(())
+}
+
 async fn delete_clean_candidates(
     conn: &Connection,
     provider: &str,
-    diagnostics: &Value,
+    session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
 ) -> Result<Value, LcmError> {
-    let session_ids = diagnostics["cleanup"]["session_candidates"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|candidate| candidate["session_id"].as_str())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let message_store_ids = diagnostics["cleanup"]["message_candidates"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|candidate| candidate["store_id"].as_i64())
-        .collect::<Vec<_>>();
+    let (session_ids, message_store_ids) =
+        collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
 
     conn.execute("BEGIN IMMEDIATE", ())
         .await
@@ -1147,6 +1168,57 @@ async fn delete_clean_candidates(
             Err(err)
         }
     }
+}
+
+async fn collect_clean_delete_targets(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
+) -> Result<(Vec<String>, Vec<i64>), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT store_id, session_id, role, COALESCE(content, index_text, '')
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+             ORDER BY session_id, store_id",
+            params![provider, opt_text(session_id)],
+        )
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?;
+
+    let mut session_ids = BTreeSet::<String>::new();
+    let mut message_store_ids = Vec::<i64>::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|err| LcmError::Db(err.to_string()))?
+    {
+        let store_id: i64 = row.get(0).map_err(|err| LcmError::Db(err.to_string()))?;
+        let row_session_id: String = row.get(1).map_err(|err| LcmError::Db(err.to_string()))?;
+        let role: String = row.get(2).map_err(|err| LcmError::Db(err.to_string()))?;
+        let content: String = row.get(3).unwrap_or_default();
+
+        let filtered_session =
+            security::matches_any_pattern(&clean_config.ignore_session_patterns, &row_session_id)
+                || security::matches_any_pattern(
+                    &clean_config.stateless_session_patterns,
+                    &row_session_id,
+                );
+        if filtered_session {
+            session_ids.insert(row_session_id);
+            continue;
+        }
+
+        if security::ignore_message_reason(&role, &content, &clean_config.ignore_message_patterns)
+            .is_some()
+            && !raw_message_has_summary_source(conn, store_id).await?
+        {
+            message_store_ids.push(store_id);
+        }
+    }
+
+    Ok((session_ids.into_iter().collect(), message_store_ids))
 }
 
 async fn delete_clean_candidates_in_transaction(

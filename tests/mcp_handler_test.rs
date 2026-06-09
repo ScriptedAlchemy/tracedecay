@@ -3942,6 +3942,19 @@ async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 async fn lcm_summary_node_count(cg: &TokenSave, session_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
@@ -4143,10 +4156,73 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     assert_eq!(payload["dry_run"], false);
     assert_eq!(payload["repairs"]["backup"]["ok"], true);
     assert!(Path::new(backup_path).is_file());
+    assert_eq!(
+        lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
+        1
+    );
     assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
     assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
     assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
     assert!(!text.contains("scheduled report body that must be deleted only after backup"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
+    let (cg, _dir) = setup_project().await;
+    for idx in 0..25 {
+        seed_lcm_session_message(
+            &cg,
+            "normal-session",
+            &format!("cron-noise-{idx}"),
+            format!("Cronjob Response: noisy heartbeat {idx}"),
+            idx + 1,
+        )
+        .await;
+    }
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        30,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "ignore_message_patterns": ["^Cronjob Response:"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        25
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
+        25
+    );
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert!(!text.contains("Cronjob Response: noisy heartbeat"));
     assert!(!text.contains("valuable payload to preserve"));
 }
 

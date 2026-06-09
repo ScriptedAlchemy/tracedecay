@@ -4253,6 +4253,7 @@ dependencies = [
  "ndarray",
  "ort",
  "rayon",
+ "regex",
  "self-replace",
  "serde",
  "serde_json",
