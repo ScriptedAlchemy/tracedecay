@@ -1086,12 +1086,14 @@ fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmErro
 fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
     let mut byte_count =
         fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
-    for suffix in ["-wal", "-shm"] {
-        let source = sqlite_sidecar_path(db_path, suffix);
-        if source.is_file() {
-            let target = sqlite_sidecar_path(backup_path, suffix);
-            byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
-        }
+    // Copy only the WAL sidecar. The -shm file is rebuildable shared memory
+    // that SQLite never reads from a backup, and its live byte-range locks
+    // make plain file reads fail with ERROR_LOCK_VIOLATION (os error 33) on
+    // Windows while any connection is open.
+    let source = sqlite_sidecar_path(db_path, "-wal");
+    if source.is_file() {
+        let target = sqlite_sidecar_path(backup_path, "-wal");
+        byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
     }
     Ok(byte_count)
 }
