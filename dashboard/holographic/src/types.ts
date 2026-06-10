@@ -134,6 +134,35 @@ export interface MemoryDashboardResponse {
   };
 }
 
+/** Entity linked to a fact in the fact-detail payload. */
+export interface MemoryFactDetailEntity {
+  entity_id: number;
+  name: string;
+  entity_type?: string | null;
+}
+
+/**
+ * Wire contract for `GET /api/plugins/holographic/fact/{id}`: the complete
+ * fact row (untruncated content) plus linked entities. List/projection
+ * payloads truncate `content` to 200 chars; detail panels fetch this instead.
+ */
+export interface MemoryFactDetailResponse {
+  fact: {
+    fact_id: number;
+    content: string;
+    category: string;
+    tags?: string | null;
+    trust_score: number;
+    retrieval_count: number;
+    helpful_count: number;
+    created_at?: number | string | null;
+    updated_at?: number | string | null;
+    has_hrr?: boolean | number;
+    entities: MemoryFactDetailEntity[];
+  };
+  error?: string;
+}
+
 /** One fact projected from its HRR vector into 2D semantic space. */
 export interface MemoryProjectionPoint {
   fact_id: number;
@@ -214,7 +243,8 @@ export interface MemorySimilarityResponse {
 /**
  * One proposed (or applied) curation operation inside a curate report. `op`
  * selects which of the optional fields are meaningful (e.g. `loser`/`winner`
- * for merges, `fact_id` for archive/retag, `entity_id` for entity ops).
+ * for merges, `fact_id` for delete/retag, `entity_id` for entity ops).
+ * Deletion is permanent — there is no archive op or restore path.
  */
 export interface MemoryCurateAction {
   op: string;
@@ -237,7 +267,6 @@ export interface MemoryCurateAction {
   fact_links_removed?: number;
   fact_count?: number;
   keep?: number;
-  archive?: number;
   similarity?: number;
   category?: string;
   tags?: string;

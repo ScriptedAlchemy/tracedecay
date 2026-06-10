@@ -1065,3 +1065,71 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         "reason should find matching facts before applying the result cap"
     );
 }
+
+/// Policy: deleted memories are permanently hard-deleted. `remove_fact` (the
+/// path behind dashboard curation and the MCP `fact_remove` tool) must leave
+/// no trace on the store's own connection: the fact row, its FTS mirror, its
+/// entity links, and its feedback events must all be gone, with the fact's
+/// banks marked dirty for rebuild.
+#[tokio::test]
+async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let mut request = fact_request(
+        "Hard delete cascade fixture fact",
+        MemoryCategory::Project,
+        0.8,
+    );
+    request.entities = vec!["CascadeEntity".to_string()];
+    let fact = store.add_fact(request, DEFAULT_TRUST).await.unwrap();
+    store
+        .record_feedback_event(FeedbackRequest {
+            fact_id: fact.fact_id,
+            action: FeedbackAction::Helpful,
+            source: None,
+            note: Some("cascade fixture".to_string()),
+        })
+        .await
+        .unwrap();
+    store.rebuild_dirty_banks().await.unwrap();
+
+    async fn count(db: &Database, sql: &str, fact_id: i64) -> i64 {
+        let mut rows = db
+            .conn()
+            .query(sql, libsql::params![fact_id])
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    let fts_sql = "SELECT COUNT(*) FROM memory_facts_fts WHERE rowid = ?1";
+    let links_sql = "SELECT COUNT(*) FROM memory_fact_entities WHERE fact_id = ?1";
+    let feedback_sql = "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id = ?1";
+    assert_eq!(count(&db, fts_sql, fact.fact_id).await, 1);
+    assert_eq!(count(&db, links_sql, fact.fact_id).await, 1);
+    assert_eq!(count(&db, feedback_sql, fact.fact_id).await, 1);
+
+    assert!(store.remove_fact(fact.fact_id).await.unwrap());
+
+    assert!(store.get_fact(fact.fact_id).await.unwrap().is_none());
+    assert_eq!(
+        count(&db, fts_sql, fact.fact_id).await,
+        0,
+        "FTS delete trigger must remove the mirror row"
+    );
+    assert_eq!(
+        count(&db, links_sql, fact.fact_id).await,
+        0,
+        "entity links must FK-cascade on fact delete"
+    );
+    assert_eq!(
+        count(&db, feedback_sql, fact.fact_id).await,
+        0,
+        "feedback events must FK-cascade on fact delete"
+    );
+    assert!(
+        dirty_bank_names(&db).await.contains(&"project".to_string()),
+        "the deleted fact's bank must be marked dirty for rebuild"
+    );
+}

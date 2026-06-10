@@ -31,8 +31,8 @@ const ACTION_GROUPS: ActionGroupDef[] = [
   {
     key: "fact_cleanup",
     label: "Fact cleanup",
-    description: "Delete, merge, or supersede stale and duplicate facts.",
-    ops: new Set(["delete", "archive", "merge", "supersede"]),
+    description: "Delete or merge stale and duplicate facts.",
+    ops: new Set(["delete", "merge"]),
   },
   {
     key: "entity_cleanup",
@@ -73,7 +73,7 @@ function describe(a: MemoryCurateAction): string {
       return `Merge entity ${from} → ${to}`;
     }
     case "entity_prune": {
-      const entityId = a.entity_id ?? a.archive ?? a.loser ?? a.fact_id;
+      const entityId = a.entity_id ?? a.loser ?? a.fact_id;
       return a.name
         ? `Prune junk entity ${a.name} (#${entityId})`
         : `Prune junk entity #${entityId}`;
@@ -84,20 +84,16 @@ function describe(a: MemoryCurateAction): string {
         ? `Classify entity ${a.name} (#${entityId}) → ${a.entity_type}`
         : `Classify entity #${entityId} → ${a.entity_type}`;
     }
-    case "supersede":
-      return `Supersede #${a.archive} → keep #${a.keep}`;
     case "delete":
       return a.duplicate_of != null
         ? `Delete #${a.fact_id} (duplicate of #${a.duplicate_of})`
         : `Delete #${a.fact_id}`;
-    case "archive":
-      return `Archive #${a.fact_id}`;
     case "retag":
       return `Retag #${a.fact_id}`;
     case "recategorize":
       return `Recategorize #${a.fact_id} → ${a.category}`;
     case "reflect":
-      return `Reflect (supersede ${(a.supersedes ?? []).map((s) => `#${s}`).join(", ")})`;
+      return `Reflect (replaces ${(a.supersedes ?? []).map((s) => `#${s}`).join(", ")})`;
     default:
       return a.op;
   }
@@ -140,7 +136,6 @@ const DIAGNOSTIC_COUNT_KEYS = new Set([
 ]);
 
 const COUNT_LABELS: Record<string, string> = {
-  archive: "archive",
   delete: "delete",
   entity_merge: "entity merges",
   entity_classify: "entity classifications",
@@ -152,7 +147,6 @@ const COUNT_LABELS: Record<string, string> = {
   recategorize: "recategorize",
   reflect: "reflections",
   retag: "retag",
-  supersede: "supersede",
 };
 
 function countLabel(key: string): string {
@@ -161,10 +155,12 @@ function countLabel(key: string): string {
 
 function actionRisk(op: string): ActionRisk {
   if (op === "retag" || op === "entity_prune" || op === "entity_classify") return "low";
-  if (op === "archive" || op === "entity_merge" || op === "recategorize") {
+  if (op === "entity_merge" || op === "recategorize") {
     return "medium";
   }
-  if (op === "delete" || op === "merge" || op === "supersede" || op === "reflect") {
+  // Fact removal is permanent (no archive/restore), so anything that deletes
+  // or rewrites facts is high risk.
+  if (op === "delete" || op === "merge" || op === "reflect") {
     return "high";
   }
   return "review";
@@ -271,18 +267,22 @@ function activityStatusClass(status: string): string {
   }
 }
 
-function formatPreviewSavedAt(ts?: string | null): string {
+/**
+ * One consistent localized timestamp for every curation history surface
+ * (plan "saved" chip, history rows, preview metadata). Falls back to the raw
+ * value when it is not a parseable date.
+ */
+function formatHistoryTime(ts?: string | null): string {
   if (!ts) return "";
-  try {
-    return new Date(ts).toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return String(ts);
-  }
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return String(ts);
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function ActivityScroller({
@@ -696,6 +696,10 @@ export default function CurationPanel({
   const [activityError, setActivityError] = useState("");
   const activityRef = useRef<HTMLDivElement>(null);
   const previewSavedAtRef = useRef<string | null>(null);
+  // Anchor for visibility checks: keep-mounted hosts (the standalone shell)
+  // hide inactive tab panels with `display: none` instead of unmounting them,
+  // and a hidden panel must not keep polling the server.
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const applySavedPreview = useCallback((
     savedReport: MemoryCurateResponse,
@@ -775,6 +779,9 @@ export default function CurationPanel({
         loadSavedPreview(true);
         loadActivity();
         loadStatus();
+        // Land on the plan once the dry run finishes — the activity tab only
+        // matters while the run is in flight.
+        setActiveTab("plan");
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
@@ -831,7 +838,12 @@ export default function CurationPanel({
 
   useEffect(() => {
     if (activeTab !== "activity" && !loading && !applying) return undefined;
-    const interval = window.setInterval(() => loadActivity(false), loading || applying ? 900 : 2500);
+    const interval = window.setInterval(() => {
+      // Suspend polling while the panel is hidden (offsetParent is null under
+      // a display:none ancestor); the next tick after re-show refreshes.
+      if (panelRef.current?.offsetParent === null) return;
+      loadActivity(false);
+    }, loading || applying ? 900 : 2500);
     return () => window.clearInterval(interval);
   }, [activeTab, applying, loadActivity, loading]);
 
@@ -880,6 +892,15 @@ export default function CurationPanel({
             size="sm"
             disabled={!report || !isPlan || actions.length === 0 || applying}
             onClick={() => setConfirmOpen(true)}
+            title={
+              applying
+                ? "Apply in progress…"
+                : !report || !isPlan
+                  ? "Run a Preview first to build a plan"
+                  : actions.length === 0
+                    ? "Nothing to apply — the last preview proposed no changes"
+                    : "Apply the previewed plan (deletes flagged duplicates)"
+            }
           >
             Apply
           </Button>
@@ -891,7 +912,10 @@ export default function CurationPanel({
           plan permanently deletes the flagged duplicate facts.
         </p>
 
-        <div className="grid grid-cols-3 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0">
+        <div
+          ref={panelRef}
+          className="grid grid-cols-3 gap-1 rounded-sm border border-border bg-secondary/30 p-1 shrink-0"
+        >
           {tabs.map(({ id, label, Icon }) => {
             const active = activeTab === id;
             return (
@@ -966,7 +990,7 @@ export default function CurationPanel({
                 ) : null}
                 {isPlan && previewSavedAt ? (
                   <span className="text-text-tertiary whitespace-nowrap">
-                    · saved={formatPreviewSavedAt(previewSavedAt)}
+                    · saved={formatHistoryTime(previewSavedAt)}
                   </span>
                 ) : null}
                 {!isPlan && report.skipped_actions ? (
@@ -1067,18 +1091,34 @@ export default function CurationPanel({
             {status ? (
               <>
                 <div className="border border-border bg-background/30 px-3">
+                  <div className="pt-2 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
+                    Run history
+                  </div>
                   <MetadataRow label="Provider" value={status.provider || "none"} />
-                  <MetadataRow label="Enabled" value={status.config.enabled ? "yes" : "no"} />
-                  <MetadataRow label="Paused" value={status.state.paused ? "yes" : "no"} />
                   <MetadataRow label="Run count" value={status.state.run_count} />
-                  <MetadataRow label="Last apply" value={status.state.last_run_at || "never"} />
+                  <MetadataRow
+                    label="Last apply"
+                    value={formatHistoryTime(status.state.last_run_at) || "never"}
+                  />
                   <MetadataRow label="Last applied summary" value={status.state.last_run_summary || "none"} />
-                  <MetadataRow label="Last preview" value={status.state.last_preview_at || "never"} />
+                  <MetadataRow
+                    label="Last preview"
+                    value={formatHistoryTime(status.state.last_preview_at) || "never"}
+                  />
                   <MetadataRow label="Last preview summary" value={status.state.last_preview_summary || "none"} />
-                  <MetadataRow label="Interval hours" value={status.config.interval_hours ?? "auto"} />
-                  <MetadataRow label="Idle gate hours" value={status.config.min_idle_hours ?? "auto"} />
                 </div>
                 <div className="border border-border bg-background/30 px-3">
+                  <div className="pt-2 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
+                    Curator configuration
+                  </div>
+                  <div className="pt-1 text-[11px] text-text-tertiary">
+                    Settings, not run results — "auto" means the provider
+                    default is used.
+                  </div>
+                  <MetadataRow label="Enabled" value={status.config.enabled ? "yes" : "no"} />
+                  <MetadataRow label="Paused" value={status.state.paused ? "yes" : "no"} />
+                  <MetadataRow label="Interval hours" value={metadataValue(status.config.interval_hours)} />
+                  <MetadataRow label="Idle gate hours" value={metadataValue(status.config.min_idle_hours)} />
                   <MetadataRow label="Resolved mode" value={metadataValue(status.config.mode, "fast")} />
                   <MetadataRow label="Dry-run first" value={metadataValue(status.config.dry_run_first, "no")} />
                   <MetadataRow label="Scan cap" value={metadataValue(status.config.scan_cap)} />
@@ -1147,7 +1187,7 @@ export default function CurationPanel({
                 <div className="border border-border bg-background/30 px-3">
                   <MetadataRow label="Run mode" value={isPlan ? "preview" : "applied"} />
                   {previewSavedAt ? (
-                    <MetadataRow label="Saved" value={previewSavedAt} />
+                    <MetadataRow label="Saved" value={formatHistoryTime(previewSavedAt)} />
                   ) : null}
                   {previewStale ? (
                     <MetadataRow

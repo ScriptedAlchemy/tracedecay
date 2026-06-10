@@ -140,6 +140,21 @@ def _project_root() -> str:
     return os.environ.get("TOKENSAVE_DASHBOARD_PROJECT") or os.getcwd()
 
 
+def _dashboard_env() -> dict[str, str]:
+    """Environment for the spawned tokensave dashboard process.
+
+    `subprocess.Popen` inherits by default, but constructing the child env
+    explicitly makes the Hermes profile contract visible and stable: the
+    spawned Rust server must resolve `HERMES_HOME` and any `TOKENSAVE_*`
+    overrides exactly like the wrapper process did.
+    """
+    env = os.environ.copy()
+    for key, value in os.environ.items():
+        if key == "HERMES_HOME" or key.startswith("TOKENSAVE_"):
+            env[key] = value
+    return env
+
+
 def _spawn_dashboard() -> str:
     """Starts ``tokensave dashboard`` and returns its base URL."""
     binary = _find_tokensave_bin()
@@ -167,6 +182,7 @@ def _spawn_dashboard() -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_dashboard_env(),
         preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509 — minimal prctl-only hook
     )
 
@@ -363,7 +379,7 @@ def get_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``archive``, ``curation/status``, ``curation/activity``,
+    ``similarity``, ``fact/{id}``, ``curation/status``, ``curation/activity``,
     ``curation/preview``), preserving the query string.
     """
     return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)
@@ -375,8 +391,8 @@ async def post_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``POST /api/plugins/holographic/<path>`` (e.g. ``curate``,
-    ``archive/{fact_id}/restore``), forwarding the JSON request body
-    unmodified.
+    ``curate/apply``), forwarding the JSON request body unmodified.
+    (There is no archive/restore: curation deletes are permanent.)
     """
     body = await request.body()
     return _proxy("POST", f"/api/plugins/holographic/{path}", request, body)
