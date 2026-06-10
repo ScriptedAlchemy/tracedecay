@@ -584,11 +584,65 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
     assert!(init_py.contains("tokensave_lcm_status"));
     assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_preflight\""));
     assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_compress\""));
+    assert!(init_py.contains("tokensave_lcm_session_boundary"));
+    // Both registered provider identities are "tokensave"; "lcm" is reserved
+    // for the tool surface (lcm_* / tokensave_lcm_*), not the engine name.
+    assert!(init_py.contains("return \"tokensave\""));
+    assert!(
+        !init_py.contains("return \"lcm\""),
+        "context engine identity must be \"tokensave\", not \"lcm\""
+    );
 
+    // The context engine exposes the full native LCM tool surface: every
+    // native lcm_* tool must be aliased to its tokensave_lcm_* MCP tool and
+    // ship a native schema entry.
+    let native_lcm_tools = [
+        "lcm_grep",
+        "lcm_load_session",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "lcm_status",
+        "lcm_doctor",
+    ];
+    for native in native_lcm_tools {
+        assert!(
+            init_py.contains(&format!("\"{native}\": \"tokensave_{native}\"")),
+            "__init__.py LCM_TOOL_ALIASES must map {native} -> tokensave_{native}"
+        );
+        assert!(
+            init_py.contains(&format!("\"name\": \"{native}\"")),
+            "__init__.py LCM_NATIVE_SCHEMAS must define a schema for {native}"
+        );
+    }
+
+    // Every tokensave_lcm_* MCP tool must be declared in the generated plugin
+    // manifest and tool schemas so the embedded constants cannot drift from
+    // the current LCM tool surface.
     let manifest =
         std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/plugin.yaml")).unwrap();
-    assert!(manifest.contains("tokensave_lcm_status"));
-    assert!(manifest.contains("tokensave_lcm_compress"));
+    let schemas_json =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/schemas.json"))
+            .unwrap();
+    let lcm_tool_names: Vec<String> = tool_names()
+        .into_iter()
+        .filter(|name| name.starts_with("tokensave_lcm_"))
+        .collect();
+    assert_eq!(
+        lcm_tool_names.len(),
+        10,
+        "expected the 10 LCM MCP tools, got {lcm_tool_names:?}"
+    );
+    for name in &lcm_tool_names {
+        assert!(
+            manifest.contains(&format!("  - {name}")),
+            "plugin.yaml provides_tools must list {name}"
+        );
+        assert!(
+            schemas_json.contains(&format!("\"name\": \"{name}\"")),
+            "schemas.json must contain a schema for {name}"
+        );
+    }
 }
 
 #[test]
