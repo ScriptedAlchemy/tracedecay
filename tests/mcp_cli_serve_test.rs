@@ -38,8 +38,7 @@ fn tokensave_command_with_home(home: &Path) -> Command {
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TOKENSAVE_GLOBAL_DB", home.join(".tokensave/global.db"));
+        .env("XDG_CONFIG_HOME", home.join(".config"));
     command
 }
 
