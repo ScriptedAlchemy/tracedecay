@@ -719,7 +719,11 @@ pub fn build_cursor_session_context(initialized: bool, staleness_hint: Option<&s
     );
     if initialized {
         match staleness_hint {
-            Some(hint) => s.push_str(&format!("Index status: {hint}.\n")),
+            Some(hint) => {
+                s.push_str("Index status: ");
+                s.push_str(hint);
+                s.push_str(".\n");
+            }
             None => s.push_str("Index status: initialized.\n"),
         }
     } else {
@@ -902,8 +906,7 @@ fn write_marker_secs(path: &Path, secs: i64) {
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 // ---------------------------------------------------------------------------

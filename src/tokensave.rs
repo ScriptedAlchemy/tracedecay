@@ -2637,11 +2637,10 @@ impl TokenSave {
 
         let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
         let serving = self.serving_branch.as_deref().unwrap_or("default branch");
-        let hint = self
-            .active_branch
-            .as_deref()
-            .map(|branch| format!(" Run `tokensave branch add {branch}` before writing."))
-            .unwrap_or_else(|| " Check out a tracked branch before writing.".to_string());
+        let hint = self.active_branch.as_deref().map_or_else(
+            || " Check out a tracked branch before writing.".to_string(),
+            |branch| format!(" Run `tokensave branch add {branch}` before writing."),
+        );
 
         Err(TokenSaveError::Config {
             message: format!(

@@ -9,6 +9,7 @@ pub mod claude;
 pub mod cline_like;
 pub mod codex;
 pub mod cursor;
+pub mod lcm;
 pub mod source;
 pub mod vibe;
 

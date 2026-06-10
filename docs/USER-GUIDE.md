@@ -226,14 +226,23 @@ operate on the default Hermes profile only.
 The plugin registers one Hermes-native wrapper per tokensave tool, adds a
 lightweight `pre_llm_call` steering hook, registers a `/tokensave_status` slash
 command when the installed Hermes version supports plugin commands, and bundles
-a `tokensave:tokensave` plugin skill. The wrappers call
-`tokensave tool <name> --json --args <json>` from Hermes' current working
-directory, with a 600-second timeout and truncated stdout/stderr in error JSON.
-Passing an explicit project root is a future improvement once Hermes exposes a
-reliable root to plugins.
+a `tokensave:tokensave` plugin skill. It also registers a `tokensave` memory
+provider (holographic facts via `fact_store` / `fact_feedback` /
+`memory_status`) and a `tokensave` context engine that compresses long
+conversations into a plugin-local LCM session database. The context engine exposes native
+`lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`,
+`lcm_expand_query`, `lcm_status`, and `lcm_doctor` tools (backed by the
+`tokensave_lcm_*` MCP tools), stores sessions under the active Hermes home for
+profile installs or under the project for project-local installs, and honors
+the documented `LCM_*` environment knobs over host config defaults. The
+wrappers call `tokensave tool <name> --json --args <json>` from Hermes'
+current working directory, with a 600-second timeout and truncated
+stdout/stderr in error JSON. Passing an explicit project root is a future
+improvement once Hermes exposes a reliable root to plugins.
 Project-local Hermes install without `--profile` writes only project files:
 `.hermes/plugins/tokensave/` and `.hermes/config.yaml`. Launch Hermes with
-`HERMES_ENABLE_PROJECT_PLUGINS=true` to load project plugins. If you pass
+`HERMES_HOME=<project>/.hermes` so it reads the project-local plugin, memory
+provider config, and LCM session storage. If you pass
 `--profile` together with `--local --agent hermes`, tokensave intentionally
 targets the named profile instead of the project plugin directory; use this when
 you want to run the command from a project but update a Hermes profile.
@@ -259,7 +268,7 @@ tokensave install --local --agent cursor
 tokensave install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins require `HERMES_ENABLE_PROJECT_PLUGINS=true` when launching Hermes. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
 
 Cursor install is plugin-based:
 

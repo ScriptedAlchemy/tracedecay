@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use tokensave::errors::{Result, TokenSaveError};
-use tokensave::mcp::tools::{get_tool_definitions, handle_tool_call, ToolDefinition};
+use tokensave::mcp::tools::{
+    get_tool_definitions, handle_profile_scoped_lcm_tool_call, handle_tool_call, ToolDefinition,
+};
 
 use crate::serve;
 
@@ -34,9 +36,25 @@ use crate::serve;
 /// memory working for the seven removed top-level commands. The right-hand
 /// side is the canonical MCP suffix (without the `tokensave_` prefix).
 const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
+const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
+    "tokensave_lcm_status",
+    "tokensave_lcm_doctor",
+    "tokensave_lcm_load_session",
+    "tokensave_lcm_grep",
+    "tokensave_lcm_describe",
+    "tokensave_lcm_expand",
+    "tokensave_lcm_expand_query",
+    "tokensave_lcm_preflight",
+    "tokensave_lcm_compress",
+    "tokensave_lcm_session_boundary",
+];
 
 /// Entry point for `tokensave tool ...`.
-pub(crate) async fn run(name: Option<String>, args: Vec<String>) -> Result<()> {
+pub(crate) async fn run(
+    project: Option<String>,
+    name: Option<String>,
+    args: Vec<String>,
+) -> Result<()> {
     let defs = get_tool_definitions();
 
     let Some(raw_name) = name else {
@@ -54,29 +72,27 @@ pub(crate) async fn run(name: Option<String>, args: Vec<String>) -> Result<()> {
     };
 
     let parsed = parse_invocation(def, &args)?;
-
     if parsed.show_help {
         print_tool_help(def);
         return Ok(());
     }
+    let ParsedInvocation {
+        tool_args,
+        project: parsed_project,
+        raw_json,
+        show_help: _,
+    } = parsed;
 
-    let project_path = tokensave::config::resolve_path(parsed.project.clone());
-    let cg = serve::ensure_initialized(&project_path).await?;
-    let result = handle_tool_call(&cg, &def.name, parsed.tool_args, None, None).await?;
-
-    if parsed.raw_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&result.value).unwrap_or_default()
-        );
-    } else {
-        let text = result
-            .value
-            .pointer("/content/0/text")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        println!("{text}");
+    if is_profile_scoped_lcm_dispatch(&def.name, &tool_args) {
+        let result = handle_profile_scoped_lcm_tool_call(&def.name, tool_args).await?;
+        print_tool_output(&result.value, raw_json);
+        return Ok(());
     }
+
+    let project_path = tokensave::config::resolve_path(project.or(parsed_project));
+    let cg = serve::ensure_initialized(&project_path).await?;
+    let result = handle_tool_call(&cg, &def.name, tool_args, None, None).await?;
+    print_tool_output(&result.value, raw_json);
     Ok(())
 }
 
@@ -102,6 +118,29 @@ fn canonical_tool_name(raw: &str) -> String {
         .find(|(k, _)| *k == normalized)
         .map_or(normalized.as_str(), |(_, v)| *v);
     format!("tokensave_{mapped}")
+}
+
+fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
+    PROFILE_SCOPED_LCM_TOOLS.contains(&tool_name)
+        && tool_args
+            .get("storage_scope")
+            .and_then(Value::as_str)
+            .is_some_and(|scope| scope == "hermes_profile")
+}
+
+fn print_tool_output(result_value: &Value, raw_json: bool) {
+    if raw_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(result_value).unwrap_or_default()
+        );
+    } else {
+        let text = result_value
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        println!("{text}");
+    }
 }
 
 /// Parse CLI args against the tool's JSON Schema. Returns the JSON object to
@@ -725,5 +764,25 @@ mod tests {
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0], json!("auth"));
         assert_eq!(arr[2], json!("session"));
+    }
+
+    #[test]
+    fn profile_scoped_lcm_dispatch_detects_allowlisted_tool_and_scope() {
+        assert!(is_profile_scoped_lcm_dispatch(
+            "tokensave_lcm_status",
+            &json!({"storage_scope": "hermes_profile"})
+        ));
+    }
+
+    #[test]
+    fn profile_scoped_lcm_dispatch_rejects_non_profile_or_non_lcm_calls() {
+        assert!(!is_profile_scoped_lcm_dispatch(
+            "tokensave_lcm_status",
+            &json!({"storage_scope": "project_local"})
+        ));
+        assert!(!is_profile_scoped_lcm_dispatch(
+            "tokensave_status",
+            &json!({"storage_scope": "hermes_profile"})
+        ));
     }
 }

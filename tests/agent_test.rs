@@ -496,6 +496,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(manifest.contains("kind: standalone"));
     assert!(manifest.contains("provides_tools:"));
     assert!(manifest.contains("tokensave_context"));
+    assert!(manifest.contains("tokensave_lcm_status"));
+    assert!(manifest.contains("tokensave_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
     assert!(manifest.contains("provides_commands:"));
@@ -505,11 +507,14 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("def register(ctx):"));
     assert!(init_py.contains("class TokensaveMemoryProvider"));
     assert!(init_py.contains("ctx.register_memory_provider("));
-    assert!(init_py.contains("ctx.register_tool("));
+    assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("class TokenSaveContextEngine"));
+    assert!(init_py.contains("storage_scope"));
+    assert!(init_py.contains("tokensave_lcm_compress"));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
@@ -527,7 +532,11 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
-    assert!(tools_py.contains("\"tool\", name, \"--json\", \"--args\", payload"));
+    assert!(tools_py.contains(
+        "project_root = kwargs.get(\"project_root\") or tool_args.get(\"project_root\")"
+    ));
+    assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
+    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
     assert!(!tools_py.contains("shell=True"));
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
@@ -556,6 +565,84 @@ fn test_hermes_local_install_writes_profile_plugin() {
             .any(|path| stderr.contains(&format!("HERMES_HOME={}", path.display()))),
         "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
     );
+}
+
+#[test]
+fn test_hermes_generated_python_registers_lcm_context_engine() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let init_py =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/__init__.py")).unwrap();
+
+    assert!(init_py.contains("class TokenSaveContextEngine"));
+    assert!(init_py.contains("ctx.register_context_engine"));
+    assert!(init_py.contains("storage_scope"));
+    assert!(init_py.contains("def call_tokensave_json"));
+    assert!(init_py.contains("tokensave_lcm_status"));
+    assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_preflight\""));
+    assert!(init_py.contains("call_tokensave_json(\"tokensave_lcm_compress\""));
+    assert!(init_py.contains("tokensave_lcm_session_boundary"));
+    // Both registered provider identities are "tokensave"; "lcm" is reserved
+    // for the tool surface (lcm_* / tokensave_lcm_*), not the engine name.
+    assert!(init_py.contains("return \"tokensave\""));
+    assert!(
+        !init_py.contains("return \"lcm\""),
+        "context engine identity must be \"tokensave\", not \"lcm\""
+    );
+
+    // The context engine exposes the full native LCM tool surface: every
+    // native lcm_* tool must be aliased to its tokensave_lcm_* MCP tool and
+    // ship a native schema entry.
+    let native_lcm_tools = [
+        "lcm_grep",
+        "lcm_load_session",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "lcm_status",
+        "lcm_doctor",
+    ];
+    for native in native_lcm_tools {
+        assert!(
+            init_py.contains(&format!("\"{native}\": \"tokensave_{native}\"")),
+            "__init__.py LCM_TOOL_ALIASES must map {native} -> tokensave_{native}"
+        );
+        assert!(
+            init_py.contains(&format!("\"name\": \"{native}\"")),
+            "__init__.py LCM_NATIVE_SCHEMAS must define a schema for {native}"
+        );
+    }
+
+    // Every tokensave_lcm_* MCP tool must be declared in the generated plugin
+    // manifest and tool schemas so the embedded constants cannot drift from
+    // the current LCM tool surface.
+    let manifest =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/plugin.yaml")).unwrap();
+    let schemas_json =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tokensave/schemas.json"))
+            .unwrap();
+    let lcm_tool_names: Vec<String> = tool_names()
+        .into_iter()
+        .filter(|name| name.starts_with("tokensave_lcm_"))
+        .collect();
+    assert_eq!(
+        lcm_tool_names.len(),
+        10,
+        "expected the 10 LCM MCP tools, got {lcm_tool_names:?}"
+    );
+    for name in &lcm_tool_names {
+        assert!(
+            manifest.contains(&format!("  - {name}")),
+            "plugin.yaml provides_tools must list {name}"
+        );
+        assert!(
+            schemas_json.contains(&format!("\"name\": \"{name}\"")),
+            "schemas.json must contain a schema for {name}"
+        );
+    }
 }
 
 #[test]
@@ -703,6 +790,8 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
 class FullCtx:
+    context_engine_tool_handlers_receive_messages = True
+
     def __init__(self):
         self.tools = []
         self.hooks = []
@@ -802,6 +891,8 @@ assert calls[3][0] == "tokensave_memory_status"
 assert calls[3][1] == {}
 
 class LegacyCtx:
+    context_engine_tool_handlers_receive_messages = True
+
     def __init__(self):
         self.tools = []
         self.hooks = []

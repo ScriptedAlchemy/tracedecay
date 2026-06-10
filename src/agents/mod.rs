@@ -619,7 +619,7 @@ fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
                 return Ok(canonical);
             }
             Err(err) => {
-                let Some(name) = existing.file_name().map(|name| name.to_owned()) else {
+                let Some(name) = existing.file_name().map(std::borrow::ToOwned::to_owned) else {
                     return Err(err);
                 };
                 missing.push(name);

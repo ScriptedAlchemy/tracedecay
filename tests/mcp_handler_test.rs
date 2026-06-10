@@ -3,12 +3,20 @@
 //! Each test exercises a real `TokenSave` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
-use serde_json::{json, Value};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
+use std::path::Path;
+
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::db::Database;
+use tokensave::global_db::GlobalDb;
 use tokensave::mcp::{get_tool_definitions, handle_tool_call};
 use tokensave::sessions::cursor::open_project_session_db;
+use tokensave::sessions::lcm::{
+    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
+};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
@@ -83,6 +91,169 @@ fn expect_tool_error<T>(result: tokensave::errors::Result<T>) -> String {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),
     }
+}
+
+#[test]
+fn lcm_tool_schemas_are_registered_with_stable_names() {
+    let tools = get_tool_definitions();
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for expected in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
+        "tokensave_lcm_doctor",
+    ] {
+        assert!(names.contains(expected), "missing {expected}");
+    }
+
+    for read_only in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == read_only)
+            .unwrap_or_else(|| panic!("{read_only} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    }
+
+    for mutating in [
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
+        "tokensave_lcm_doctor",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == mutating)
+            .unwrap_or_else(|| panic!("{mutating} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
+    }
+
+    for scoped in [
+        "tokensave_lcm_status",
+        "tokensave_lcm_load_session",
+        "tokensave_lcm_grep",
+        "tokensave_lcm_describe",
+        "tokensave_lcm_expand",
+        "tokensave_lcm_expand_query",
+        "tokensave_lcm_preflight",
+        "tokensave_lcm_compress",
+        "tokensave_lcm_session_boundary",
+        "tokensave_lcm_doctor",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == scoped)
+            .unwrap_or_else(|| panic!("{scoped} definition"));
+        let storage_scope = &tool.input_schema["properties"]["storage_scope"];
+        assert_eq!(
+            storage_scope["enum"],
+            json!(["project_local", "hermes_profile"]),
+            "{scoped} must advertise supported storage scopes"
+        );
+        assert!(
+            storage_scope["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("hermes_home"),
+            "{scoped} storage_scope should document hermes_profile requirements"
+        );
+        let hermes_home = &tool.input_schema["properties"]["hermes_home"];
+        assert_eq!(
+            hermes_home["type"],
+            json!("string"),
+            "{scoped} must expose hermes_home"
+        );
+        assert!(
+            hermes_home["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("absolute"),
+            "{scoped} hermes_home should document absolute path requirements"
+        );
+    }
+
+    let load = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_load_session")
+        .expect("tokensave_lcm_load_session definition");
+    assert_eq!(load.input_schema["required"], json!(["session_id"]));
+    assert!(load.input_schema["properties"]
+        .get("content_limit")
+        .is_some());
+    assert_eq!(
+        load.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        load.input_schema["properties"]["content_limit"]["maximum"],
+        json!(20000)
+    );
+
+    let grep = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_grep")
+        .expect("tokensave_lcm_grep definition");
+    assert_eq!(
+        grep.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
+
+    let expand = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_expand")
+        .expect("tokensave_lcm_expand definition");
+    assert_eq!(
+        expand.input_schema["required"],
+        json!(["session_id", "target"])
+    );
+    assert!(expand.input_schema["properties"].get("target").is_some());
+    assert_eq!(
+        expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["source_offset"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["source_limit"]["type"],
+        json!("integer")
+    );
+
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_lcm_doctor")
+        .expect("tokensave_lcm_doctor definition");
+    assert_eq!(
+        doctor.input_schema["properties"]["mode"]["enum"],
+        json!(["diagnose", "repair", "retention", "clean"])
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["apply"]["type"],
+        json!("boolean")
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
+        json!("boolean")
+    );
 }
 
 /// Searches for `name` via the search handler and returns the first matching
@@ -3594,6 +3765,2755 @@ async fn message_search_reads_project_local_session_db() {
     );
 }
 
+async fn seed_lcm_session_message(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+async fn seed_lcm_tool_result_message(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_lcm_session_message_with_role_source_timestamp(
+    cg: &TokenSave,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    role: &str,
+    source: &str,
+    timestamp: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: role.to_string(),
+            timestamp: Some(timestamp),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: Some(serde_json::json!({"source": source}).to_string()),
+        })
+        .await
+    );
+}
+
+async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
+    GlobalDb::open_at(&hermes_home.join(".tokensave/sessions.db"))
+        .await
+        .expect("profile-local session db should open")
+}
+
+async fn seed_lcm_session_message_in_db(
+    db: &GlobalDb,
+    project_path: &Path,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: project_path.to_string_lossy().to_string(),
+            project_path: project_path.to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+async fn project_lcm_conn(cg: &TokenSave) -> libsql::Connection {
+    let db = libsql::Builder::new_local(cg.project_root().join(".tokensave/sessions.db"))
+        .build()
+        .await
+        .unwrap();
+    db.connect().unwrap()
+}
+
+async fn lcm_fts_match_count(cg: &TokenSave, query: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH ?1",
+            libsql::params![query],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_store_id(cg: &TokenSave, message_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT store_id FROM lcm_raw_messages WHERE provider = 'cursor' AND message_id = ?1",
+            libsql::params![message_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_summary_node_count(cg: &TokenSave, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_summary_nodes WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_schema_migration_count(cg: &TokenSave) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn wipe_lcm_raw_fts(cg: &TokenSave) {
+    project_lcm_conn(cg)
+        .await
+        .execute_batch("DELETE FROM lcm_raw_messages_fts;")
+        .await
+        .unwrap();
+}
+
+async fn wipe_lcm_raw_fts_for_message(cg: &TokenSave, message_id: &str) {
+    let store_id = lcm_raw_store_id(cg, message_id).await;
+    project_lcm_conn(cg)
+        .await
+        .execute(
+            "DELETE FROM lcm_raw_messages_fts WHERE rowid = ?1",
+            libsql::params![store_id],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must not leak",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "scratch-shell-a",
+        "scratch-shell-message",
+        "scratch one-shot body that must not leak",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        3,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        4,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": false,
+            "ignore_session_patterns": ["cron-*"],
+            "stateless_session_patterns": ["scratch-shell-*"],
+            "ignore_message_patterns": ["Cronjob Response:*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["cleanup"]["read_only"], true);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["ignored_session_candidates"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["stateless_session_candidates"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["cleanup"]["candidate_count"], 2);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "clean_lcm_noise"));
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "scratch-shell-a").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert!(!text.contains("scheduled report body that must not leak"));
+    assert!(!text.contains("scratch one-shot body that must not leak"));
+    assert!(!text.contains("Still working"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_is_denied_by_default() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must remain without explicit opt-in",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(
+        payload["error"],
+        "destructive cleanup is disabled by default"
+    );
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["apply"], true);
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must be deleted only after backup",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let cron_store_id = lcm_raw_store_id(&cg, "cron-20260414-message").await;
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "cron-20260414".to_string(),
+        session_id: "cron-20260414".to_string(),
+        depth: 0,
+        summary_text: "scheduled report summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: cron_store_id,
+        }],
+        source_token_count: 12,
+        summary_token_count: 3,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("test clean candidate".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .unwrap();
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        3,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "doctor_clean_apply_enabled": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("clean apply should report backup path");
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(
+        lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
+        1
+    );
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert!(!text.contains("scheduled report body that must be deleted only after backup"));
+    assert!(!text.contains("Still working"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
+    let (cg, _dir) = setup_project().await;
+    for idx in 0..25 {
+        seed_lcm_session_message(
+            &cg,
+            "normal-session",
+            &format!("cron-noise-{idx}"),
+            format!("Cronjob Response: noisy heartbeat {idx}"),
+            idx + 1,
+        )
+        .await;
+    }
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        30,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "doctor_clean_apply_enabled": true,
+            "ignore_message_patterns": ["^Cronjob Response:"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        25
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
+        25
+    );
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert!(!text.contains("Cronjob Response: noisy heartbeat"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let secret = format!(
+        "LCM_DOCTOR_SECRET_PAYLOAD\n{}",
+        "doctor-secret ".repeat(30_000)
+    );
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload",
+        "lcm-doctor-payload-message",
+        secret,
+        1,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-message")
+        .await
+        .expect("externalized raw message should load");
+    let payload_ref = raw.payload_ref.expect("external payload ref");
+    fs::remove_file(
+        cg.project_root()
+            .join(".tokensave/lcm-payloads")
+            .join(&payload_ref),
+    )
+    .unwrap();
+    fs::write(
+        cg.project_root()
+            .join(".tokensave/lcm-payloads/payload_unreferenced_test.payload"),
+        "orphan body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 1);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 1);
+    let text = extract_text(&result.value);
+    assert!(!text.contains("LCM_DOCTOR_SECRET_PAYLOAD"));
+    assert!(!text.contains("orphan body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let missing_ref = "payload_missing_placeholder_test.payload";
+    let placeholder = format!(
+        "[Externalized LCM ingest payload: kind=ingest_payload; role=user; field=content; chars=2048; bytes=2048; ref={missing_ref}]"
+    );
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-placeholder",
+        "lcm-doctor-placeholder-message",
+        placeholder,
+        1,
+    )
+    .await;
+
+    let payload_dir = cg.project_root().join(".tokensave/lcm-payloads");
+    fs::create_dir_all(&payload_dir).unwrap();
+    fs::write(
+        payload_dir.join("payload_gc_candidate_test.payload"),
+        "gc candidate body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-placeholder",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["payloads"]["gc_candidate_files"], 1);
+    assert!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["payload_ref"] == missing_ref)
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["gc_candidate_payload_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("payload_gc_candidate_test.payload"))
+    );
+    let text = extract_text(&result.value);
+    assert!(!text.contains("gc candidate body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
+    let (cg, _dir) = setup_project().await;
+    let media_payload = format!(
+        "data:image/png;base64,{}",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
+    );
+    let content = json!({
+        "content": [
+            {"type": "text", "text": "doctor nested payload canary"},
+            {"type": "image_url", "image_url": {"url": media_payload}},
+        ]
+    })
+    .to_string();
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-nested-payload",
+        "lcm-doctor-nested-payload-message",
+        content,
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-nested-payload",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["unreferenced_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-plain-ref",
+        "lcm-doctor-plain-ref-message",
+        "plain documentation mentions ref=payload_plain_text_false_positive.payload outside a placeholder",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-plain-ref",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-target",
+        "lcm-doctor-payload-target-message",
+        format!("target payload\n{}", "target-body ".repeat(30_000)),
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-other",
+        "lcm-doctor-payload-other-message",
+        format!("other payload\n{}", "other-body ".repeat(30_000)),
+        2,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let other_raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-other-message")
+        .await
+        .expect("other externalized raw message should load");
+    let other_payload_ref = other_raw.payload_ref.expect("other external payload ref");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-payload-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 0);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 0);
+    assert!(!payload["diagnostics"]["payloads"]["orphan_payload_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some(&other_payload_ref)));
+    assert!(!extract_text(&result.value).contains(&other_payload_ref));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-target",
+        "lcm-doctor-fts-target-message",
+        "scopedneedle target text",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-other",
+        "lcm-doctor-fts-other-message",
+        "scopedneedle other text",
+        2,
+    )
+    .await;
+    wipe_lcm_raw_fts_for_message(&cg, "lcm-doctor-fts-target-message").await;
+    assert_eq!(lcm_fts_match_count(&cg, "scopedneedle").await, 1);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-fts-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["fts"]["raw"]["rebuild_needed"], true);
+}
+
+#[tokio::test]
+async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-orphan-owner",
+        "lcm-doctor-orphan-owner-message",
+        "orphan owner source text",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "lcm-doctor-orphan-owner-message").await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+             VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
+        libsql::params![store_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-orphan-owner",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["summaries"]["broken_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-debt-target",
+        "lcm-doctor-debt-target-message",
+        "target session text",
+        1,
+    )
+    .await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_maintenance_debt(
+                provider, conversation_id, debt_id, debt_kind, from_store_id, to_store_id
+             )
+             VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-debt-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["lifecycle"]["orphan_debt"], 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    if db_path.exists() {
+        fs::remove_file(&db_path).unwrap();
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert!(
+        !db_path.exists(),
+        "diagnose must not create session storage"
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-read-only-existing",
+        "lcm-doctor-read-only-existing-message",
+        "read only existing database text",
+        1,
+    )
+    .await;
+    project_lcm_conn(&cg)
+        .await
+        .execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["schema"]["migration_present"], false);
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-dry-run",
+        "lcm-doctor-dry-run-message",
+        "dry run searchable needle",
+        1,
+    )
+    .await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["fts"]["rebuild_needed"], true);
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-apply",
+        "lcm-doctor-apply-message",
+        "apply repair searchable needle",
+        1,
+    )
+    .await;
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("repair apply should report backup path");
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
+    assert!(payload["repairs"]["applied_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_retention_reports_candidates_without_deleting() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-retention",
+        "lcm-doctor-retention-message",
+        "old session retention candidate",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({"provider": "cursor", "mode": "retention"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "retention");
+    assert_eq!(payload["diagnostics"]["retention"]["read_only"], true);
+    assert!(payload["diagnostics"]["retention"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["session_id"] == "lcm-doctor-retention"));
+    assert_eq!(lcm_raw_message_count(&cg, "lcm-doctor-retention").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-project",
+        "project-local doctor should not be counted",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-message",
+        "profile-local doctor should be counted",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path().to_string_lossy()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert_eq!(payload["diagnostics"]["raw_message_count"], 1);
+}
+
+#[tokio::test]
+async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
+    seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-message")
+        .await
+        .expect("LCM raw message should be created by compatibility ingest");
+
+    let status = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({"provider": "cursor"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "ok");
+    assert_eq!(status_payload["lcm"]["raw_message_count"], 1);
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "content_limit": 24
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert!(loaded_payload["messages"][0]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        loaded_payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        24
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
+    assert!(
+        grep_payload["hits"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 4096,
+        "grep snippets must stay bounded"
+    );
+
+    let described = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({"provider": "cursor", "session_id": "lcm-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let described_payload: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
+    assert_eq!(described_payload["status"], "ok");
+    assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    assert!(described_payload["description"]["raw_messages"][0]
+        .get("content_preview")
+        .is_some());
+    assert!(
+        described_payload["description"]["raw_messages"][0]
+            .get("content")
+            .is_none(),
+        "describe must not expose raw payload bodies"
+    );
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "target": {"kind": "raw_message", "store_id": raw.store_id},
+            "content_offset": 8,
+            "content_limit": 16
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["expansion"]["kind"], "raw_message");
+    assert_eq!(
+        expanded_payload["expansion"]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        16
+    );
+    assert!(expanded_payload["expansion"]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "prompt": "Summarize orchard dispatch",
+            "query": "orchard dispatch",
+            "context_max_tokens": 128,
+            "max_tokens": 64
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["prompt"], "Summarize orchard dispatch");
+    assert!(payload["context_blocks"]
+        .as_array()
+        .expect("context blocks")
+        .iter()
+        .any(|block| block["kind"] == "raw_message"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("EXPANDED CONTEXT"));
+    assert!(extract_text(&result.value).len() <= 15_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tokensave_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-preflight", "role": "user", "content": "hello"}]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+
+    let compress = handle_tool_call(
+        &cg,
+        "tokensave_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-compress", "role": "user", "content": "hello again"}],
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let compress_payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
+    assert_eq!(compress_payload["status"], "ok");
+    assert_eq!(compress_payload["summary_nodes_created"], 0);
+    assert_eq!(compress_payload["compression_attempts"], 0);
+    assert_eq!(compress_payload["fallback_used"], false);
+    assert!(
+        compress_payload.get("retry_status").is_some(),
+        "compress response must expose retry_status for bridge contract"
+    );
+    assert_eq!(compress_payload["retry_status"], Value::Null);
+
+    for (index, content) in [
+        "old-1 token",
+        "old-2 token",
+        "old-3 token",
+        "old-4 token",
+        "old-5 token",
+        "old-6 token",
+        "fresh-1",
+        "fresh-2",
+    ]
+    .iter()
+    .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-critical-session",
+            &format!("lcm-critical-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let critical_compress = handle_tool_call(
+        &cg,
+        "tokensave_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-critical-session",
+            "messages": [],
+            "current_tokens": 40,
+            "max_assembly_tokens": 2,
+            "leaf_chunk_tokens": 1,
+            "max_source_messages": 3,
+            "summarizer": {"mode": "fake", "summary_text": "catchup summary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let critical_payload: Value =
+        serde_json::from_str(extract_text(&critical_compress.value)).unwrap();
+    assert_eq!(critical_payload["status"], "ok");
+    assert_eq!(critical_payload["reason"], "forced_overflow_recovery");
+    assert_eq!(critical_payload["summary_nodes_created"], 4);
+    assert_eq!(critical_payload["compression_attempts"], 4);
+    assert_eq!(critical_payload["fallback_used"], false);
+    assert_eq!(
+        critical_payload["retry_status"],
+        "critical_pressure_catch_up"
+    );
+}
+
+#[tokio::test]
+async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
+    let (cg, _dir) = setup_project().await;
+    for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
+        .iter()
+        .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-boundary-session",
+            &format!("lcm-boundary-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let boundary = handle_tool_call(
+        &cg,
+        "tokensave_lcm_session_boundary",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "old_session_id": "lcm-old-session",
+            "boundary_reason": "compression",
+            "bound_session_id": "lcm-bound-session"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let boundary_payload: Value = serde_json::from_str(extract_text(&boundary.value)).unwrap();
+    assert_eq!(boundary_payload["status"], "ok");
+    assert_eq!(boundary_payload["recorded"], true);
+    assert_eq!(
+        boundary_payload["reason"],
+        "compression_boundary_skip_recorded"
+    );
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tokensave_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "messages": [],
+            "current_tokens": 120,
+            "threshold_tokens": 100
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+    assert_eq!(preflight_payload["reason"], "compression_boundary_cooldown");
+}
+
+#[tokio::test]
+async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("LCM status diagnostics".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("lcm-status-session.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+
+    let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
+    db.lcm_store(cg.project_root().join(".tokensave"))
+        .ingest_raw_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "lcm-status-secret-message".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: secret,
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("lcm-status-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+        .expect("external payload should ingest");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-session",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).expect("LCM status response must be JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["payload"]["externalized_count"], 1);
+    assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
+    assert_eq!(payload["lcm"]["payload"]["unreferenced_count"], 0);
+    assert_eq!(payload["lcm"]["redaction"]["enabled"], false);
+    assert!(!text.contains("MCP_STATUS_SECRET_PAYLOAD"));
+}
+
+#[tokio::test]
+async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-1",
+        "frontier seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-2",
+        "frontier seed two",
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let first = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-1")
+        .await
+        .expect("first raw message should load");
+    let second = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-2")
+        .await
+        .expect("second raw message should load");
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "lcm-status-frontier".into(),
+        current_session_id: "lcm-status-frontier".into(),
+        current_frontier_store_id: Some(second.store_id),
+        last_finalized_session_id: Some("lcm-status-prior".into()),
+        last_finalized_frontier_store_id: Some(first.store_id),
+        maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: first.store_id,
+            to_store_id: second.store_id,
+        }],
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_session_id"],
+        "lcm-status-frontier"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_frontier_store_id"],
+        second.store_id
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_session_id"],
+        "lcm-status-prior"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_frontier_store_id"],
+        first.store_id
+    );
+    assert_eq!(payload["lcm"]["lifecycle"]["maintenance_debt_count"], 1);
+
+    let profile_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let profile_payload: Value = serde_json::from_str(extract_text(&profile_result.value)).unwrap();
+    assert_eq!(profile_payload["status"], "unavailable");
+    assert_eq!(profile_payload["storage_scope"], "hermes_profile");
+    assert!(
+        profile_payload.get("lcm").is_none(),
+        "hermes_profile requests must not return project-local LCM counts"
+    );
+}
+
+#[tokio::test]
+async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-source",
+        "describe source body must not leak through metadata",
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-tool",
+        format!("describe external secret {}", "payload ".repeat(40_000)),
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let source = db
+        .lcm_load_raw_message("cursor", "lcm-describe-source")
+        .await
+        .expect("source raw message should exist");
+    let external = db
+        .lcm_load_raw_message("cursor", "lcm-describe-tool")
+        .await
+        .expect("external raw message should exist");
+    let payload_ref = external.payload_ref.expect("payload ref");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-describe-targets".to_string(),
+            depth: 0,
+            summary_text: "summary secret body must not leak through metadata".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: source.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("describe target summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let node_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "summary_node", "node_id": summary.node_id.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let node_payload: Value = serde_json::from_str(extract_text(&node_result.value)).unwrap();
+    assert_eq!(node_payload["status"], "ok");
+    assert_eq!(node_payload["description"]["target"], "summary_node");
+    assert_eq!(
+        node_payload["description"]["summary_node"]["node_id"],
+        summary.node_id
+    );
+    assert_eq!(
+        node_payload["description"]["summary_node"]["source_count"],
+        1
+    );
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload_payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload_payload["status"], "ok");
+    assert_eq!(payload_payload["description"]["target"], "external_payload");
+    assert_eq!(
+        payload_payload["description"]["external_payload"]["payload_ref"],
+        payload_ref
+    );
+    assert!(
+        payload_payload["description"]["external_payload"]["content_preview"]
+            .as_str()
+            .unwrap()
+            .contains(payload_ref.as_str())
+    );
+
+    let rendered = format!(
+        "{}\n{}",
+        extract_text(&node_result.value),
+        extract_text(&payload_result.value)
+    );
+    assert!(!rendered.contains("summary secret body"));
+    assert!(!rendered.contains("describe source body"));
+    assert!(!rendered.contains("describe external secret"));
+}
+
+#[tokio::test]
+async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-old-cli-assistant",
+        "orchard native old cli assistant",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-cli-user",
+        "orchard native new cli user",
+        2,
+        "user",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-api-assistant",
+        "orchard native new api assistant",
+        3,
+        "assistant",
+        "api",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard native",
+            "scope": "session",
+            "session_id": "lcm-native-filters",
+            "sort": "recency",
+            "source": "cli",
+            "role": "assistant",
+            "start_time": 5,
+            "end_time": 25,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(
+        grep_payload["hits"][0]["message_id"],
+        "lcm-native-old-cli-assistant"
+    );
+    assert_eq!(grep_payload["sort"], "recency");
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-native-filters",
+            "roles": ["assistant", "user"],
+            "time_from": 1,
+            "time_to": 25,
+            "content_limit": 25_000,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["content_limit"], 20_000);
+    assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
+    assert_eq!(
+        loaded_payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["message_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["lcm-native-old-cli-assistant", "lcm-native-new-cli-user"]
+    );
+}
+
+#[tokio::test]
+async fn lcm_grep_accepts_string_timestamp_filters() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-old",
+        "orchard string timestamp old",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-target",
+        "orchard string timestamp target",
+        2,
+        "assistant",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-new",
+        "orchard string timestamp new",
+        3,
+        "assistant",
+        "cli",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard string timestamp",
+            "scope": "session",
+            "session_id": "lcm-string-timestamps",
+            "start_time": "15",
+            "end_time": "1970-01-01T00:00:25Z",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(
+        payload["hits"][0]["message_id"],
+        "lcm-string-timestamps-target"
+    );
+}
+
+#[tokio::test]
+async fn lcm_status_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-status",
+        "lcm-profile-status-project",
+        "project-local distractor status",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-1",
+        "profile-local status seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-2",
+        "profile-local status seed two",
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-status",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert!(hermes_home.path().join(".tokensave/sessions.db").exists());
+}
+
+#[tokio::test]
+async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-read",
+        "lcm-profile-read-project",
+        "project-local distractor profile query",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-read",
+        "lcm-profile-read-profile",
+        "profile-local pear evidence",
+        1,
+    )
+    .await;
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        loaded_payload["messages"][0]["content"],
+        "profile-local pear evidence"
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tokensave_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
+    assert!(grep_payload["hits"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "prompt": "Explain profile pear evidence",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "context_max_tokens": 1024,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["storage_scope"], "hermes_profile");
+    assert_eq!(expanded_payload["needs_synthesis"], true);
+    assert!(expanded_payload["context_blocks"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-missing-home",
+        "lcm-profile-missing-home-project",
+        "project-local must not leak without hermes home",
+        1,
+    )
+    .await;
+
+    let status = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "unavailable");
+    assert_eq!(status_payload["storage_scope"], "hermes_profile");
+    assert!(status_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("hermes_home"));
+    assert!(status_payload.get("lcm").is_none());
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile",
+            "hermes_home": "relative-hermes-home"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "unavailable");
+    assert_eq!(loaded_payload["storage_scope"], "hermes_profile");
+    assert!(loaded_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("absolute hermes_home"));
+    assert!(loaded_payload.get("messages").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_symlinked_tokensave_dir_escape() {
+    let (cg, _dir) = setup_project().await;
+    let hermes_home = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    unix_fs::symlink(outside.path(), hermes_home.path().join(".tokensave")).unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"].as_str().unwrap().contains(".tokensave"),
+        "rejection should identify the unsafe profile storage component: {payload}"
+    );
+    assert!(
+        !outside.path().join("sessions.db").exists(),
+        "profile DB must not be created through a symlink escape"
+    );
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_non_directory_home() {
+    let (cg, _dir) = setup_project().await;
+    let dir = TempDir::new().unwrap();
+    let hermes_home = dir.path().join("hermes-home-file");
+    fs::write(&hermes_home, "not a directory").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a directory"),
+        "non-directory hermes_home should be rejected clearly: {payload}"
+    );
+    assert!(payload.get("lcm").is_none());
+}
+
+#[tokio::test]
+async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-a",
+        "lcm-scope-message-a",
+        "fail closed unique-cross-session-token alpha",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-b",
+        "lcm-scope-message-b",
+        "fail closed unique-cross-session-token beta",
+        2,
+    )
+    .await;
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tokensave_lcm_grep",
+            json!({
+                "provider": "cursor",
+                "query": "unique-cross-session-token",
+                "scope": "everything",
+                "limit": 10
+            }),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("scope"),
+        "invalid scope should report an argument error, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-numeric",
+        "lcm-numeric-message",
+        "numeric validation test body",
+        1,
+    )
+    .await;
+
+    for (case, args) in [
+        (
+            "fractional limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": 1.5}),
+        ),
+        (
+            "negative limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": -1}),
+        ),
+        (
+            "string limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": "1"}),
+        ),
+    ] {
+        let err = expect_tool_error(
+            handle_tool_call(&cg, "tokensave_lcm_load_session", args, None, None).await,
+        );
+        assert!(
+            err.contains("limit"),
+            "{case} should report an argument error mentioning limit, got {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lcm_load_session_accepts_valid_integer_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-valid-integers",
+        "lcm-valid-integers-message",
+        "valid integer argument body",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-valid-integers",
+            "limit": 1,
+            "content_offset": 0,
+            "content_limit": 8,
+            "start_time": 1,
+            "end_time": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["messages"][0]["content"].as_str().unwrap(),
+        "valid in"
+    );
+}
+
+#[tokio::test]
+async fn lcm_large_json_response_stays_parseable_after_truncation() {
+    let (cg, _dir) = setup_project().await;
+    for index in 0..4 {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-large-json",
+            &format!("lcm-large-json-message-{index}"),
+            format!("large json response {index} {}", "payload ".repeat(2000)),
+            index + 1,
+        )
+        .await;
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-json",
+            "limit": 4,
+            "content_limit": 8192
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value))
+        .expect("truncated LCM tool text should remain valid JSON");
+    assert_eq!(payload["truncated"], true);
+    assert!(payload["preview"].as_str().unwrap().len() <= 15_000);
+}
+
+#[tokio::test]
+async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-large-expand-query",
+        "lcm-large-expand-query-message",
+        format!(
+            "oversized expand-query evidence {}",
+            "context ".repeat(4000)
+        ),
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-expand-query",
+            "prompt": "Summarize oversized expand-query evidence",
+            "query": "oversized expand-query evidence",
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("large expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(
+        payload["prompt"],
+        "Summarize oversized expand-query evidence"
+    );
+    assert!(payload["synthesis_prompt"]["system"]
+        .as_str()
+        .unwrap()
+        .contains("expanded LCM retrieval context"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize oversized expand-query evidence"));
+    assert!(payload["context_truncated"].as_bool().is_some());
+    assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
+    assert!(!payload["matches"].as_array().unwrap().is_empty());
+    assert!(
+        payload["context_blocks"].as_array().unwrap().len() <= 3,
+        "MCP expand-query context should stay compact"
+    );
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
+async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-huge-prompt-expand-query",
+        "lcm-huge-prompt-expand-query-message",
+        "contract overflow evidence lives in this raw message",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-huge-prompt-expand-query-message")
+        .await
+        .expect("raw message should exist");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-huge-prompt-expand-query".to_string(),
+            depth: 0,
+            summary_text: "summary contract overflow evidence".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: raw.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("contract overflow summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+    let huge_prompt = format!(
+        "Explain contract overflow evidence. {}",
+        "PROMPT_OVERFLOW ".repeat(12_000)
+    );
+    let huge_query = format!(
+        "contract overflow evidence {}",
+        "QUERY_OVERFLOW ".repeat(12_000)
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-huge-prompt-expand-query",
+            "prompt": huge_prompt,
+            "query": huge_query,
+            "node_ids": [summary.node_id],
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("oversized expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert!(payload["prompt"].as_str().unwrap().chars().count() <= 2_048);
+    assert!(payload["query"].as_str().unwrap().chars().count() <= 1_024);
+    assert!(payload["prompt_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["query_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["contract_truncated"].as_bool().unwrap());
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("QUESTION:"));
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
+async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "parent".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Parent session".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("parent.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "child".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Child session".to_string()),
+            started_at: Some(2),
+            ended_at: None,
+            transcript_path: Some("child.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: Some("parent".to_string()),
+            is_subagent: true,
+            agent_id: Some("child".to_string()),
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "child-message".to_string(),
+            session_id: "child".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(3),
+            ordinal: 1,
+            text: "orchard dispatch compatibility result".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("child.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_message_search",
+        json!({
+            "query": "orchard dispatch",
+            "provider": "cursor",
+            "project_key": cg.project_root().to_string_lossy(),
+            "scope": "subagents_only",
+            "parent_session_id": "parent",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["scope"], "subagents_only");
+    assert_eq!(payload["provider"], "cursor");
+    assert_eq!(payload["parent_session_id"], "parent");
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
+    assert!(payload["results"][0]["message"].get("text").is_some());
+    assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
+}
+
+#[tokio::test]
+async fn lcm_status_cli_bridge_accepts_json_args() {
+    let (cg, _dir) = setup_project().await;
+    let outside_cwd = TempDir::new().unwrap();
+    let project_arg = cg.project_root().display().to_string();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor"}"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "tokensave tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["content"][0]["type"], "text");
+    let payload: Value =
+        serde_json::from_str(json["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["status"], "ok");
+}
+
+#[tokio::test]
+async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
+    let outside_cwd = TempDir::new().unwrap();
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-cli-profile",
+        "lcm-cli-profile-message-1",
+        "profile-only status message",
+        1,
+    )
+    .await;
+    let profile_args = json!({
+        "provider": "cursor",
+        "session_id": "lcm-cli-profile",
+        "storage_scope": "hermes_profile",
+        "hermes_home": hermes_home.path(),
+    })
+    .to_string();
+    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            profile_args.as_str(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        profile_output.status.success(),
+        "profile-scoped tokensave tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&profile_output.stdout),
+        String::from_utf8_lossy(&profile_output.stderr)
+    );
+    let profile_json: Value = serde_json::from_slice(&profile_output.stdout).unwrap();
+    let profile_payload: Value =
+        serde_json::from_str(profile_json["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(profile_payload["status"], "ok");
+    assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
+
+    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor","storage_scope":"project_local"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !project_output.status.success(),
+        "project-local tool calls without an initialized cwd should still fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&project_output.stdout),
+        String::from_utf8_lossy(&project_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&project_output.stderr);
+    assert!(
+        stderr.contains("run 'tokensave init' first"),
+        "project-local failure should continue to require initialization:\n{stderr}"
+    );
+}
+
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions();
@@ -5207,4 +8127,395 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn lcm_expand_paginates_summary_sources_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=4 {
+        let message_id = format!("page-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-page-session",
+            &message_id,
+            format!("paged source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-page-session".to_string(),
+            session_id: "lcm-page-session".to_string(),
+            depth: 0,
+            summary_text: "paged summary".to_string(),
+            source_refs: store_ids
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 16,
+            summary_token_count: 2,
+            source_time_start: Some(1),
+            source_time_end: Some(4),
+            expand_hint: Some("pagination test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary.node_id},
+            "source_offset": 1,
+            "source_limit": 2
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
+    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
+    let pagination = &payload["expansion"]["source_pagination"];
+    assert_eq!(pagination["source_offset"], 1);
+    assert_eq!(pagination["source_limit"], 2);
+    assert_eq!(pagination["returned_sources"], 2);
+    assert_eq!(pagination["total_sources"], 4);
+    assert_eq!(pagination["next_source_offset"], 3);
+    assert_eq!(pagination["has_more"], true);
+    assert_eq!(pagination["remaining_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-message",
+        "cross session grep target body",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "the caller's active session",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "raw_message");
+    assert_eq!(payload["expansion"]["from_current_session"], false);
+    assert_eq!(
+        payload["expansion"]["raw_message"]["session_id"],
+        "lcm-origin-session"
+    );
+    assert_eq!(
+        payload["expansion"]["content"],
+        "cross session grep target body"
+    );
+}
+
+#[tokio::test]
+async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
+    let (cg, _dir) = setup_project().await;
+    let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-external-message",
+        body,
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "active context",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
+
+    let raw_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let raw_payload: Value = serde_json::from_str(extract_text(&raw_result.value)).unwrap();
+    assert_eq!(raw_payload["status"], "ok");
+    assert_eq!(raw_payload["expansion"]["from_current_session"], false);
+    assert!(raw_payload["expansion"]["externalized_note"].is_null());
+    let payload_ref = raw_payload["expansion"]["payload_ref"]
+        .as_str()
+        .expect("cross-session external row should surface payload_ref")
+        .to_string();
+    let owner_session = raw_payload["expansion"]["raw_message"]["session_id"]
+        .as_str()
+        .expect("owner session id should be surfaced")
+        .to_string();
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "content_limit": 80
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "external_payload");
+    assert!(payload["expansion"]["content"]
+        .as_str()
+        .expect("external payload content")
+        .starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
+async fn lcm_compress_handler_honors_incremental_max_depth_override() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=6 {
+        let message_id = format!("depth-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-depth-session",
+            &message_id,
+            format!("depth source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    for (index, pair) in store_ids.chunks(2).enumerate() {
+        db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-depth-session".to_string(),
+            session_id: "lcm-depth-session".to_string(),
+            depth: 1,
+            summary_text: format!("depth one summary {}", index + 1),
+            source_refs: pair
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 12,
+            summary_token_count: 4,
+            source_time_start: Some(10 + index as i64),
+            source_time_end: Some(20 + index as i64),
+            expand_hint: Some("depth override test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("depth-1 summary should insert");
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-depth-session".to_string(),
+        current_session_id: "lcm-depth-session".to_string(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-depth-session",
+            "messages": [],
+            "summary_fan_in": 3,
+            "incremental_max_depth": 2,
+            "summarizer": {"mode": "fake", "summary_text": "depth-two condensation"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["reason"], "condensed_summary_nodes");
+    assert_eq!(payload["summary_nodes_created"], 1);
+    assert_eq!(payload["summary_nodes"][0]["depth"], 2);
+}
+
+#[tokio::test]
+async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-diag-session",
+        "diag-message",
+        "alpha beta gamma delta",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "diag-message").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-diag-session".to_string(),
+        session_id: "lcm-diag-session".to_string(),
+        depth: 0,
+        summary_text: "diag summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage { store_id }],
+        source_token_count: 24,
+        summary_token_count: 6,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("diagnostics test".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_lcm_status",
+        json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let lcm = &payload["lcm"];
+    assert_eq!(lcm["store"]["messages"], 1);
+    assert_eq!(lcm["store"]["estimated_tokens"], 4);
+    assert_eq!(lcm["dag"]["total_nodes"], 1);
+    assert_eq!(lcm["dag"]["total_tokens"], 6);
+    assert_eq!(lcm["dag"]["total_source_tokens"], 24);
+    assert_eq!(lcm["dag"]["compression_ratio"], "4.0:1");
+    assert_eq!(lcm["dag"]["depths"]["d0"]["count"], 1);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["tokens"], 6);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["source_tokens"], 24);
+    assert_eq!(lcm["config"]["fresh_tail_count"], 2);
+    assert_eq!(lcm["config"]["summary_fan_in"], 4);
+    assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
+}
+
+// Repeated LCM tool calls in one process must reuse the per-process
+// "schema already ensured" flag instead of re-opening the project DB with a
+// full DDL ensure each time. Observable via the version gate: after the
+// first call marks the path as ensured, a manually downgraded version
+// marker stays downgraded — a re-run of the migrations would bump it back
+// to LCM_SCHEMA_VERSION.
+#[tokio::test]
+async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
+    let (cg, _dir) = setup_project().await;
+
+    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(tokensave::sessions::lcm::LCM_SCHEMA_VERSION)
+    );
+
+    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE session_schema_migrations SET version = 1 WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(
+        payload["status"], "ok",
+        "repeated serve-mode call must work"
+    );
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(1),
+        "second call must take the per-process ensured fast path instead of re-running migrations"
+    );
+
+    // The on-disk marker is untouched as well.
+    let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
 }

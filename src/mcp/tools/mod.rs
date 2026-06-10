@@ -14,7 +14,7 @@ pub use definitions::{
     ast_grep_available, context_description, explore_call_budget, get_tool_definitions,
     get_tool_definitions_with_budget,
 };
-pub use handlers::handle_tool_call;
+pub use handlers::{handle_profile_scoped_lcm_tool_call, handle_tool_call};
 
 /// Maximum character length for a tool response before truncation.
 const MAX_RESPONSE_CHARS: usize = 15_000;

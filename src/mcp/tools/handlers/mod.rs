@@ -209,8 +209,53 @@ pub async fn handle_tool_call(
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
+        "tokensave_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
+        "tokensave_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
+        "tokensave_lcm_load_session" => {
+            session::handle_lcm_load_session(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_grep" => session::handle_lcm_grep(Some(cg.project_root()), args).await,
+        "tokensave_lcm_describe" => {
+            session::handle_lcm_describe(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_expand" => session::handle_lcm_expand(Some(cg.project_root()), args).await,
+        "tokensave_lcm_expand_query" => {
+            session::handle_lcm_expand_query(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_preflight" => {
+            session::handle_lcm_preflight(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_compress" => {
+            session::handle_lcm_compress(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_session_boundary" => {
+            session::handle_lcm_session_boundary(Some(cg.project_root()), args).await
+        }
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
+        }),
+    }
+}
+
+/// Dispatches only the storage-scoped LCM tools that can run without an
+/// initialized project (e.g. `storage_scope=hermes_profile`).
+pub async fn handle_profile_scoped_lcm_tool_call(
+    tool_name: &str,
+    args: Value,
+) -> Result<ToolResult> {
+    match tool_name {
+        "tokensave_lcm_status" => session::handle_lcm_status(None, args).await,
+        "tokensave_lcm_doctor" => session::handle_lcm_doctor(None, args).await,
+        "tokensave_lcm_load_session" => session::handle_lcm_load_session(None, args).await,
+        "tokensave_lcm_grep" => session::handle_lcm_grep(None, args).await,
+        "tokensave_lcm_describe" => session::handle_lcm_describe(None, args).await,
+        "tokensave_lcm_expand" => session::handle_lcm_expand(None, args).await,
+        "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(None, args).await,
+        "tokensave_lcm_preflight" => session::handle_lcm_preflight(None, args).await,
+        "tokensave_lcm_compress" => session::handle_lcm_compress(None, args).await,
+        "tokensave_lcm_session_boundary" => session::handle_lcm_session_boundary(None, args).await,
+        _ => Err(TokenSaveError::Config {
+            message: format!("tool `{tool_name}` does not support profile-scoped dispatch"),
         }),
     }
 }
@@ -236,9 +281,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            77
+            87
         } else {
-            76
+            86
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -314,6 +359,16 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
         assert!(tool_names.contains(&"tokensave_message_search"));
+        assert!(tool_names.contains(&"tokensave_lcm_status"));
+        assert!(tool_names.contains(&"tokensave_lcm_doctor"));
+        assert!(tool_names.contains(&"tokensave_lcm_load_session"));
+        assert!(tool_names.contains(&"tokensave_lcm_grep"));
+        assert!(tool_names.contains(&"tokensave_lcm_describe"));
+        assert!(tool_names.contains(&"tokensave_lcm_expand"));
+        assert!(tool_names.contains(&"tokensave_lcm_expand_query"));
+        assert!(tool_names.contains(&"tokensave_lcm_preflight"));
+        assert!(tool_names.contains(&"tokensave_lcm_compress"));
+        assert!(tool_names.contains(&"tokensave_lcm_session_boundary"));
         assert!(tool_names.contains(&"tokensave_read"));
         assert!(tool_names.contains(&"tokensave_outline"));
         assert!(tool_names.contains(&"tokensave_implementations"));
@@ -357,6 +412,10 @@ mod tests {
             "tokensave_fact_store",
             "tokensave_fact_feedback",
             "tokensave_memory_status",
+            "tokensave_lcm_doctor",
+            "tokensave_lcm_preflight",
+            "tokensave_lcm_compress",
+            "tokensave_lcm_session_boundary",
         ];
         for tool in &tools {
             let ann = tool

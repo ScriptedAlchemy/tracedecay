@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::source::{
-    collect_files_with_ext, paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript,
-    SessionDraft, StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, collect_files_with_ext, content_storage_text_and_tools,
+    paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
+    StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -173,7 +174,12 @@ fn message_from_line(
         .get("content")
         .or_else(|| record.pointer("/message/content"))
         .unwrap_or(record);
-    let (text, tool_names) = content_text_and_tools(content);
+    let (text, tool_names) = content_storage_text_and_tools(
+        content,
+        record
+            .get("tool_calls")
+            .or_else(|| record.pointer("/message/tool_calls")),
+    );
     if text.trim().is_empty() {
         return None;
     }
@@ -199,44 +205,19 @@ fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&serde_json::json!({
-            "source": "vibe_messages",
-        }))
-        .ok(),
+        metadata_json: serde_json::to_string(&message_metadata(record)).ok(),
     })
 }
 
-fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), Vec::new());
+fn message_metadata(record: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("vibe_messages".to_string()),
+    );
+    append_tool_calls_metadata(&mut metadata, record);
+    if let Some(message) = record.get("message") {
+        append_tool_calls_metadata(&mut metadata, message);
     }
-    let Some(items) = content.as_array() else {
-        return (
-            content
-                .get("text")
-                .or_else(|| content.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            Vec::new(),
-        );
-    };
-
-    let mut texts = Vec::new();
-    let mut tools = Vec::new();
-    for item in items {
-        if let Some(text) = item.get("text").and_then(Value::as_str) {
-            texts.push(text.to_string());
-        }
-        if let Some(name) = item
-            .get("tool_call")
-            .or_else(|| item.get("functionCall"))
-            .or_else(|| item.get("function_call"))
-            .and_then(|call| call.get("name"))
-            .and_then(Value::as_str)
-        {
-            tools.push(name.to_string());
-        }
-    }
-    (texts.join("\n\n"), tools)
+    Value::Object(metadata)
 }

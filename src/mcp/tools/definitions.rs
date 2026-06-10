@@ -168,6 +168,16 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_feedback(),
         def_memory_status(),
         def_message_search(),
+        def_lcm_status(),
+        def_lcm_doctor(),
+        def_lcm_load_session(),
+        def_lcm_grep(),
+        def_lcm_describe(),
+        def_lcm_expand(),
+        def_lcm_expand_query(),
+        def_lcm_preflight(),
+        def_lcm_compress(),
+        def_lcm_session_boundary(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -1717,6 +1727,658 @@ fn def_message_search() -> ToolDefinition {
                 }
             },
             "required": ["query"]
+        }),
+    )
+}
+
+fn lcm_storage_scope_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["project_local", "hermes_profile"],
+        "description": "Storage scope for LCM session state. Defaults to project_local. Use hermes_profile only with an explicit absolute hermes_home."
+    })
+}
+
+fn lcm_hermes_home_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "absolute Hermes profile home directory required when storage_scope is hermes_profile."
+    })
+}
+
+fn lcm_pattern_array_schema(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": description
+    })
+}
+
+fn lcm_storage_scope_requires_hermes_home() -> Value {
+    json!([{
+        "if": {
+            "properties": {
+                "storage_scope": { "const": "hermes_profile" }
+            },
+            "required": ["storage_scope"]
+        },
+        "then": {
+            "required": ["hermes_home"]
+        }
+    }])
+}
+
+fn def_lcm_status() -> ToolDefinition {
+    def(
+        "tokensave_lcm_status",
+        "LCM Status",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, and effective engine config defaults from project-local or Hermes profile sessions.db storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id to inspect (default: cursor)."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional provider-local session id filter."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
+        }),
+    )
+}
+
+fn def_lcm_doctor() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_doctor",
+        "LCM Doctor",
+        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs, and report retention candidates without payload body exposure.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id to inspect (default: cursor)."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional provider-local session id filter."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["diagnose", "repair", "retention", "clean"],
+                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup."
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "When mode=repair or mode=clean, apply safe repairs/cleanup. Defaults to false for dry-run."
+                },
+                "doctor_clean_apply_enabled": {
+                    "type": "boolean",
+                    "description": "Safety gate for mode=clean + apply. Defaults to false unless LCM_DOCTOR_CLEAN_APPLY_ENABLED is set."
+                },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise."),
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
+        }),
+    )
+}
+
+fn def_lcm_load_session() -> ToolDefinition {
+    def(
+        "tokensave_lcm_load_session",
+        "LCM Load Session",
+        "Load ordered lossless raw session messages with stable pagination and bounded content slices from project-local or Hermes profile LCM storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "after_store_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Return rows after this raw store id."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum rows."
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Optional single role filter. Prefer roles for native Hermes parity."
+                },
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional role filters. Matches any listed role."
+                },
+                "start_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional inclusive minimum message timestamp."
+                },
+                "end_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional inclusive maximum message timestamp."
+                },
+                "content_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset for each returned content slice."
+                },
+                "content_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20000,
+                    "description": "Maximum characters returned per message. Values above 20000 are clamped and reported in content_limit_clamped_from."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_grep() -> ToolDefinition {
+    def(
+        "tokensave_lcm_grep",
+        "LCM Grep",
+        "Search bounded LCM raw-message snippets and optional summary text in project-local or Hermes profile sessions.db storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Full-text query for LCM snippets."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["current", "session", "all"],
+                    "description": "Search scope. current/session require session_id; all is the default."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id used when scope is current or session."
+                },
+                "include_summaries": {
+                    "type": "boolean",
+                    "description": "Include summary node text after raw-message matches (default: true)."
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": ["recency", "relevance", "hybrid"],
+                    "description": "How to order matches. Defaults to recency."
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Optional source/platform filter from raw-message metadata."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "description": "Optional raw-message role filter. When supplied, summary results are omitted."
+                },
+                "start_time": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive minimum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                },
+                "end_time": {
+                    "oneOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "string" }
+                    ],
+                    "description": "Optional inclusive maximum raw-message timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum hits."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["query"]
+        }),
+    )
+}
+
+fn def_lcm_describe() -> ToolDefinition {
+    def(
+        "tokensave_lcm_describe",
+        "LCM Describe",
+        "Describe one session's LCM raw-message and summary-DAG shape from project-local or Hermes profile storage without exposing full payload bodies.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Optional describe target. Omit for session overview.",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["session", "summary_node", "external_payload"]
+                        },
+                        "node_id": {
+                            "type": "string",
+                            "description": "Summary node id when kind=summary_node."
+                        },
+                        "payload_ref": {
+                            "type": "string",
+                            "description": "External payload ref when kind=external_payload."
+                        }
+                    }
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_expand() -> ToolDefinition {
+    def(
+        "tokensave_lcm_expand",
+        "LCM Expand",
+        "Expand one raw message, summary node, or external payload through the bounded LCM query API from project-local or Hermes profile storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "target": {
+                    "type": "object",
+                    "description": "Expansion target.",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["raw_message", "summary_node", "external_payload"]
+                        },
+                        "store_id": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Raw-message store id when kind=raw_message."
+                        },
+                        "node_id": {
+                            "type": "string",
+                            "description": "Summary node id when kind=summary_node."
+                        },
+                        "payload_ref": {
+                            "type": "string",
+                            "description": "Payload ref when kind=external_payload."
+                        }
+                    },
+                    "required": ["kind"]
+                },
+                "content_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset for returned content."
+                },
+                "content_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8192,
+                    "description": "Maximum characters returned."
+                },
+                "source_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Zero-based pagination offset into a summary node's immediate source list (summary_node targets only)."
+                },
+                "source_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id", "target"]
+        }),
+    )
+}
+
+fn def_lcm_expand_query() -> ToolDefinition {
+    def(
+        "tokensave_lcm_expand_query",
+        "LCM Expand Query",
+        "Assemble bounded LCM retrieval context for a prompt from project-local or Hermes profile storage; host integrations synthesize the final answer when needs_synthesis is true.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional search query to select candidate LCM context."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Question or instruction to answer from LCM context."
+                },
+                "node_ids": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "integer", "minimum": 0 }
+                        ]
+                    },
+                    "description": "Optional summary node ids to expand."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum candidate results."
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Desired synthesized answer token budget."
+                },
+                "context_max_tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65536,
+                    "description": "Maximum retrieval context budget assembled before host-side synthesis."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id", "prompt"]
+        }),
+    )
+}
+
+fn def_lcm_preflight() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_preflight",
+        "LCM Preflight",
+        "Run compression preflight checks against project-local or Hermes profile LCM storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "messages": {
+                    "type": "array",
+                    "description": "Current active context messages to inspect before compression.",
+                    "items": {"type": "object"}
+                },
+                "current_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional current context token estimate."
+                },
+                "threshold_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token threshold that allows preflight to request compression when current_tokens meets or exceeds it and eligible backlog exists."
+                },
+                "max_assembly_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
+                },
+                "leaf_chunk_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
+                },
+                "max_source_messages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional source-window cap for raw messages included in one compression unit."
+                },
+                "summary_fan_in": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
+                "incremental_max_depth": {
+                    "type": "integer",
+                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
+                },
+                "fresh_tail_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
+                },
+                "dynamic_leaf_chunk_enabled": {
+                    "type": "boolean",
+                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
+                },
+                "dynamic_leaf_chunk_max": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional upper bound for dynamic leaf chunk token budget."
+                },
+                "context_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
+                },
+                "reserve_tokens_floor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
+                },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home()
+        }),
+    )
+}
+
+fn def_lcm_compress() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_compress",
+        "LCM Compress",
+        "Advance the LCM compression lifecycle in project-local or Hermes profile storage without invoking an auxiliary LLM.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id."
+                },
+                "messages": {
+                    "type": "array",
+                    "description": "Current active context messages to ingest before compression.",
+                    "items": {"type": "object"}
+                },
+                "current_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional current context token estimate."
+                },
+                "focus_topic": {
+                    "type": "string",
+                    "description": "Optional focus for the summary request prompt."
+                },
+                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
+                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
+                "expected_current_frontier_store_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional optimistic guard. Compression no-ops if the durable frontier has changed."
+                },
+                "threshold_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token threshold mirrored from Hermes config for parity with preflight calls."
+                },
+                "max_assembly_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
+                },
+                "leaf_chunk_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
+                },
+                "max_source_messages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional source-window cap for raw messages included in one compression unit."
+                },
+                "summary_fan_in": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
+                },
+                "incremental_max_depth": {
+                    "type": "integer",
+                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
+                },
+                "fresh_tail_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
+                },
+                "dynamic_leaf_chunk_enabled": {
+                    "type": "boolean",
+                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
+                },
+                "dynamic_leaf_chunk_max": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional upper bound for dynamic leaf chunk token budget."
+                },
+                "context_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
+                },
+                "reserve_tokens_floor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
+                },
+                "summarizer": {
+                    "type": "object",
+                    "description": "Deterministic summarizer mode: noop, fake, provided, or hermes_auxiliary.",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["noop", "fake", "provided", "hermes_auxiliary"]
+                        },
+                        "summary_text": {"type": "string"},
+                        "route": {"type": "string"}
+                    },
+                    "required": ["mode"]
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id"]
+        }),
+    )
+}
+
+fn def_lcm_session_boundary() -> ToolDefinition {
+    def_rw(
+        "tokensave_lcm_session_boundary",
+        "LCM Session Boundary",
+        "Report a compression-boundary session start. When the old session does not match the bound session the boundary skipped carry-over and a short compression cooldown starts for the new session.",
+        json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id, default cursor."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Provider-local session id the host bound after the boundary."
+                },
+                "old_session_id": {
+                    "type": "string",
+                    "description": "Session id the host reports as having crossed the compression boundary."
+                },
+                "boundary_reason": {
+                    "type": "string",
+                    "description": "Host boundary reason; only 'compression' boundaries are evaluated."
+                },
+                "bound_session_id": {
+                    "type": "string",
+                    "description": "Session id that was bound before this boundary; a mismatch with old_session_id records the cooldown."
+                },
+                "storage_scope": lcm_storage_scope_schema(),
+                "hermes_home": lcm_hermes_home_schema()
+            },
+            "allOf": lcm_storage_scope_requires_hermes_home(),
+            "required": ["session_id"]
         }),
     )
 }

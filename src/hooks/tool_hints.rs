@@ -288,7 +288,7 @@ fn is_explore_subagent(input: &ToolHintInput) -> bool {
 fn is_shell_search_command(command: &str) -> bool {
     let tokens = shell_words(command);
     match tokens.first().map(String::as_str) {
-        Some("rg") | Some("ripgrep") => true,
+        Some("rg" | "ripgrep") => true,
         Some("grep") => tokens
             .iter()
             .skip(1)

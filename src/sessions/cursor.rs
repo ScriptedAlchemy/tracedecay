@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::global_db::GlobalDb;
 use crate::sessions::source::{
-    ingest_source, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
-    StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, content_storage_text_and_tools, ingest_source, stream_new_jsonl,
+    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -25,10 +25,90 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
     GlobalDb::open_at(&project_session_db_path(project_root)).await
 }
 
-/// A Cursor hook event scoped to one transcript file. Cursor is hook-driven —
-/// the transcript path, session id, and project all come from the event payload
-/// rather than from a directory scan — so the source wraps the parsed event and
-/// yields exactly that one path.
+pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
+    hermes_home
+        .join(".tokensave")
+        .join(PROJECT_SESSION_DB_FILENAME)
+}
+
+pub fn resolve_hermes_profile_session_db_path(
+    hermes_home: &Path,
+) -> std::result::Result<PathBuf, String> {
+    Ok(resolve_hermes_profile_tokensave_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
+}
+
+pub fn resolve_existing_hermes_profile_session_db_path(
+    hermes_home: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let db_path =
+        resolve_hermes_profile_tokensave_dir(hermes_home, false)?.join(PROJECT_SESSION_DB_FILENAME);
+    if !db_path.is_file() {
+        return Err(format!(
+            "hermes_profile LCM storage requires an existing session database: {}",
+            db_path.display()
+        ));
+    }
+    Ok(db_path)
+}
+
+fn resolve_hermes_profile_tokensave_dir(
+    hermes_home: &Path,
+    create_missing: bool,
+) -> std::result::Result<PathBuf, String> {
+    let tokensave_dir = hermes_home.join(".tokensave");
+    match std::fs::symlink_metadata(&tokensave_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "hermes_profile LCM storage rejects symlinked .tokensave directory: {}",
+                    tokensave_dir.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "hermes_profile LCM storage requires .tokensave to be a directory: {}",
+                    tokensave_dir.display()
+                ));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_missing => {
+            std::fs::create_dir_all(&tokensave_dir).map_err(|err| {
+                format!(
+                    "could not create hermes_profile .tokensave directory {}: {err}",
+                    tokensave_dir.display()
+                )
+            })?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "hermes_profile LCM storage requires an existing .tokensave directory: {}",
+                tokensave_dir.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "could not inspect hermes_profile .tokensave directory {}: {err}",
+                tokensave_dir.display()
+            ));
+        }
+    }
+
+    let canonical_parent = tokensave_dir.canonicalize().map_err(|err| {
+        format!(
+            "could not resolve hermes_profile .tokensave directory {}: {err}",
+            tokensave_dir.display()
+        )
+    })?;
+    if !canonical_parent.starts_with(hermes_home) {
+        return Err(format!(
+            "hermes_profile LCM storage path must stay inside hermes_home: {}",
+            canonical_parent.display()
+        ));
+    }
+    Ok(canonical_parent)
+}
+
+/// A Cursor hook event scoped to one transcript file.
 struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
@@ -62,10 +142,10 @@ impl TranscriptSource for CursorEventSource {
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let parent_session_id = event_session_id(&self.event, &self.transcript_path);
         let subagent = cursor_subagent_identity(path, &parent_session_id);
-        let session_id = subagent
-            .as_ref()
-            .map(|(session_id, _agent_id)| session_id.clone())
-            .unwrap_or_else(|| parent_session_id.clone());
+        let session_id = subagent.as_ref().map_or_else(
+            || parent_session_id.clone(),
+            |(session_id, _agent_id)| session_id.clone(),
+        );
         let mut messages = Vec::new();
         for line in &new.lines {
             // The byte offset doubles as the message ordinal and source_offset,
@@ -106,8 +186,9 @@ impl TranscriptSource for CursorEventSource {
         } else {
             let (project_key, project_path) = event_project(&self.event);
             let (draft_parent_session_id, agent_id) = subagent
-                .map(|(_session_id, agent_id)| (Some(parent_session_id), Some(agent_id)))
-                .unwrap_or((None, None));
+                .map_or((None, None), |(_session_id, agent_id)| {
+                    (Some(parent_session_id), Some(agent_id))
+                });
             let is_subagent = draft_parent_session_id.is_some();
             SessionDraft {
                 session_id,
@@ -248,7 +329,15 @@ fn event_message(
         .filter(|role| !role.is_empty())?;
     let message = record.get("message").unwrap_or(record);
     let content = message.get("content").unwrap_or(message);
-    let (text, tool_names) = content_text_and_tools(content);
+    if content_is_only_subagent_dispatch(content) {
+        return None;
+    }
+    let (text, tool_names) = content_storage_text_and_tools(
+        content,
+        message
+            .get("tool_calls")
+            .or_else(|| record.get("tool_calls")),
+    );
     if text.trim().is_empty() {
         return None;
     }
@@ -282,7 +371,7 @@ fn event_message(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(transcript_path.to_string_lossy().to_string()),
         source_offset: Some(source_offset),
-        metadata_json: serde_json::to_string(&message_metadata(record)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(record, message)).ok(),
     })
 }
 
@@ -358,6 +447,20 @@ fn is_subagent_dispatch_tool(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
 }
 
+fn content_is_only_subagent_dispatch(content: &Value) -> bool {
+    let Some(items) = content.as_array() else {
+        return false;
+    };
+    !items.is_empty()
+        && items.iter().all(|item| {
+            item.get("type").and_then(Value::as_str) == Some("tool_use")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_subagent_dispatch_tool)
+        })
+}
+
 fn dispatch_text(item: &Value) -> Option<String> {
     let input = item.get("input").unwrap_or(item);
     let mut parts = Vec::new();
@@ -372,41 +475,6 @@ fn dispatch_text(item: &Value) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-fn content_text_and_tools(content: &Value) -> (String, Vec<String>) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), Vec::new());
-    }
-    let Some(items) = content.as_array() else {
-        return (
-            content
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            Vec::new(),
-        );
-    };
-
-    let mut texts = Vec::new();
-    let mut tools = Vec::new();
-    for item in items {
-        match item.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    texts.push(text.to_string());
-                }
-            }
-            Some("tool_use") => {
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (texts.join("\n\n"), tools)
 }
 
 fn content_kind(content: &Value) -> Option<&'static str> {
@@ -497,9 +565,16 @@ fn session_metadata(event: &Value) -> Value {
     })
 }
 
-fn message_metadata(record: &Value) -> Value {
-    serde_json::json!({
-        "source": "cursor_transcript",
-        "raw_type": record.get("type").cloned(),
-    })
+fn message_metadata(record: &Value, message: &Value) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("cursor_transcript".to_string()),
+    );
+    metadata.insert(
+        "raw_type".to_string(),
+        record.get("type").cloned().unwrap_or(Value::Null),
+    );
+    append_tool_calls_metadata(&mut metadata, message);
+    Value::Object(metadata)
 }

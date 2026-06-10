@@ -180,13 +180,45 @@ fn hermes_selected_profile_targets(
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// Stack size for the thread driving the async entrypoint. Windows gives the
+/// process main thread only 1 MiB of stack (Linux and macOS give 8 MiB), and
+/// the combined CLI + MCP tool-dispatch futures exceed that in unoptimized
+/// builds — `tokensave serve` and `tokensave tool` died with
+/// STATUS_STACK_OVERFLOW on Windows CI. Running the runtime on a thread with
+/// an explicit stack size gives every platform the same headroom.
+const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
+    let spawned = std::thread::Builder::new()
+        .name("tokensave-main".to_string())
+        .stack_size(ASYNC_STACK_BYTES)
+        .spawn(move || async_main(cli));
+    let result = match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        Err(e) => {
+            eprintln!("Error: failed to spawn main thread: {e}");
+            process::exit(1);
+        }
+    };
+    if let Err(e) = result {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
+}
+
+fn async_main(cli: Cli) -> tokensave::errors::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ASYNC_STACK_BYTES)
+        .build()
+        .map_err(|e| tokensave::errors::TokenSaveError::Config {
+            message: format!("failed to start async runtime: {e}"),
+        })?;
+    runtime.block_on(run(cli))
 }
 
 async fn run(cli: Cli) -> tokensave::errors::Result<()> {
@@ -622,8 +654,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 global::check_for_update(&mut config, false, true);
             }
         }
-        Commands::Tool { name, args } => {
-            tool_command::run(name, args).await?;
+        Commands::Tool {
+            project,
+            name,
+            args,
+        } => {
+            tool_command::run(project, name, args).await?;
         }
         Commands::Install {
             agent,
@@ -981,40 +1017,38 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 return Ok(());
             }
             let original_cwd = std::env::current_dir().ok();
-            let project_path = tokensave::config::resolve_path_with_discovery(path);
             // Track the first stdin line if we need to peek at `initialize` roots.
             let mut peeked_line: Option<String> = None;
+            let explicit_path = path.is_some();
+            let project_path = tokensave::config::resolve_path_with_discovery(path);
             let cg = match serve::ensure_initialized(&project_path).await {
                 Ok(cg) => cg,
-                Err(_) => {
+                Err(e) => {
+                    if explicit_path {
+                        return Err(e);
+                    }
                     // CWD-based discovery failed (e.g. VS Code launched us from ~).
-                    // Fall back to the global DB's registered projects.
-                    let global_fallback = serve::resolve_serve_from_global_db().await;
-                    match global_fallback {
-                        serve::ServeGlobalDbResolution::Found(p) => {
-                            serve::ensure_initialized(&p).await?
-                        }
-                        serve::ServeGlobalDbResolution::None
-                        | serve::ServeGlobalDbResolution::Ambiguous(_) => {
-                            // Last resort: peek at the first stdin line for MCP
-                            // `initialize` roots (e.g. VS Code multi-folder workspace).
-                            match serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                                Some(p) => serve::ensure_initialized(&p).await?,
-                                None => {
-                                    if let serve::ServeGlobalDbResolution::Ambiguous(paths) =
-                                        global_fallback
-                                    {
-                                        return Err(tokensave::errors::TokenSaveError::Config {
-                                            message: serve::global_db_ambiguity_message(&paths),
-                                        });
-                                    }
-                                    return Err(tokensave::errors::TokenSaveError::Config {
-                                        message: format!(
-                                            "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
-                                            project_path.display()
-                                        ),
-                                    });
-                                }
+                    // Next try MCP initialize roots from editor workspace context.
+                    if let Some(p) = serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
+                        serve::ensure_initialized(&p).await?
+                    } else {
+                        // Last resort: fall back to the global DB's registered projects.
+                        match serve::resolve_serve_from_global_db().await {
+                            serve::ServeGlobalDbResolution::Found(p) => {
+                                serve::ensure_initialized(&p).await?
+                            }
+                            serve::ServeGlobalDbResolution::Ambiguous(paths) => {
+                                return Err(tokensave::errors::TokenSaveError::Config {
+                                    message: serve::global_db_ambiguity_message(&paths),
+                                });
+                            }
+                            serve::ServeGlobalDbResolution::None => {
+                                return Err(tokensave::errors::TokenSaveError::Config {
+                                    message: format!(
+                                        "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
+                                        project_path.display()
+                                    ),
+                                });
                             }
                         }
                     }
@@ -1450,6 +1484,7 @@ mod startup_tests {
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
+            project: None,
             name: Some("message_search".to_string()),
             args: Vec::new(),
         }));

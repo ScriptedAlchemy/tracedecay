@@ -7,14 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use libsql::{params, Builder, Connection, Database as LibsqlDatabase, Value};
+use libsql::{params, Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value};
 
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
 };
-
-const MAX_SESSION_MESSAGE_TEXT_BYTES: usize = 256 * 1024;
-const SESSION_MESSAGE_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -34,6 +31,8 @@ pub struct SavingsDay {
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
+    storage_root: PathBuf,
+    db_path: PathBuf,
     _db: LibsqlDatabase,
 }
 
@@ -49,28 +48,6 @@ pub fn global_db_path() -> Option<PathBuf> {
 
 fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |s| Value::Text(s.to_string()))
-}
-
-fn capped_session_message_text(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.len() <= MAX_SESSION_MESSAGE_TEXT_BYTES {
-        return std::borrow::Cow::Borrowed(text);
-    }
-
-    let budget =
-        MAX_SESSION_MESSAGE_TEXT_BYTES.saturating_sub(SESSION_MESSAGE_TRUNCATION_MARKER.len());
-    let mut end = 0;
-    for (idx, ch) in text.char_indices() {
-        let next = idx + ch.len_utf8();
-        if next > budget {
-            break;
-        }
-        end = next;
-    }
-
-    let mut capped = String::with_capacity(end + SESSION_MESSAGE_TRUNCATION_MARKER.len());
-    capped.push_str(&text[..end]);
-    capped.push_str(SESSION_MESSAGE_TRUNCATION_MARKER);
-    std::borrow::Cow::Owned(capped)
 }
 
 fn opt_i64(value: Option<i64>) -> Value {
@@ -183,34 +160,58 @@ async fn add_session_parent_column_after_missing_check(
 }
 
 impl GlobalDb {
+    async fn open_local(db_path: &Path, read_only: bool) -> Option<Self> {
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let builder = if read_only {
+            Builder::new_local(db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Builder::new_local(db_path)
+        };
+        let db = builder.build().await.ok()?;
+        let conn = db.connect().ok()?;
+
+        let pragmas = if read_only {
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;"
+        } else {
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;"
+        };
+        conn.execute_batch(pragmas).await.ok()?;
+
+        Some(Self {
+            conn,
+            storage_root,
+            db_path: db_path.to_path_buf(),
+            _db: db,
+        })
+    }
+
     /// Opens (or creates) the global database at an explicit path. Returns
     /// `None` if the directory cannot be created or the DB fails to open.
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
+        let db = Self::open_local(db_path, false).await?;
 
-        let db = Builder::new_local(db_path).build().await.ok()?;
-        let conn = db.connect().ok()?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;",
-        )
-        .await
-        .ok()?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS projects (
+        db.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS projects (
                 path TEXT PRIMARY KEY,
                 tokens_saved INTEGER NOT NULL DEFAULT 0
             )",
-        )
-        .await
-        .ok()?;
+            )
+            .await
+            .ok()?;
 
-        conn.execute_batch(
+        db.conn
+            .execute_batch(
             "CREATE TABLE IF NOT EXISTS turns (
                 message_id TEXT PRIMARY KEY,
                 project_hash TEXT NOT NULL,
@@ -311,9 +312,31 @@ impl GlobalDb {
         )
         .await
         .ok()?;
-        ensure_session_parent_columns(&conn).await?;
+        ensure_session_parent_columns(&db.conn).await?;
+        crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
 
-        Some(Self { conn, _db: db })
+        Some(db)
+    }
+
+    /// Opens a writable database at an explicit path assuming its schema was
+    /// already ensured by a prior [`Self::open_at`] in this process: skips the
+    /// DDL batch and LCM migrations while still applying the per-connection
+    /// PRAGMAs. Long-lived servers use this to avoid re-paying the schema
+    /// ensure on every tool call (the caller tracks which paths are ensured).
+    pub async fn open_at_assuming_schema(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        Self::open_local(db_path, false).await
+    }
+
+    /// Opens an existing database without creating directories, creating schema,
+    /// or running LCM carry-forward migrations.
+    pub async fn open_read_only_at(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        Self::open_local(db_path, true).await
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
@@ -539,7 +562,7 @@ impl GlobalDb {
                     opt_text(session.transcript_path.as_deref()),
                     opt_text(session.metadata_json.as_deref()),
                     opt_text(session.parent_session_id.as_deref()),
-                    if session.is_subagent { 1_i64 } else { 0_i64 },
+                    i64::from(session.is_subagent),
                     opt_text(session.agent_id.as_deref()),
                     opt_text(session.parent_tool_use_id.as_deref()),
                 ],
@@ -566,7 +589,45 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
-        let text = capped_session_message_text(&message.text);
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return false;
+        }
+
+        let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
+            &self.conn,
+            &self.storage_root,
+            message,
+        )
+        .await;
+        let projection_ok = match raw_result {
+            Ok(raw) => {
+                self.upsert_session_message_projection(
+                    message,
+                    &raw.projection_text,
+                    raw.projection_metadata_json.as_deref(),
+                )
+                .await
+            }
+            Err(_) => false,
+        };
+
+        if !projection_ok {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
+    }
+
+    async fn upsert_session_message_projection(
+        &self,
+        message: &SessionMessageRecord,
+        text: &str,
+        metadata_json: Option<&str>,
+    ) -> bool {
         self.conn
             .execute(
                 "INSERT INTO session_messages
@@ -592,13 +653,13 @@ impl GlobalDb {
                     message.role.as_str(),
                     opt_i64(message.timestamp),
                     message.ordinal,
-                    text.as_ref(),
+                    text,
                     opt_text(message.kind.as_deref()),
                     opt_text(message.model.as_deref()),
                     opt_text(message.tool_names.as_deref()),
                     opt_text(message.source_path.as_deref()),
                     opt_i64(message.source_offset),
-                    opt_text(message.metadata_json.as_deref()),
+                    opt_text(metadata_json),
                 ],
             )
             .await
@@ -622,6 +683,189 @@ impl GlobalDb {
             .await
             .ok()?;
         row_to_message(&rows.next().await.ok()??, 0)
+    }
+
+    /// Returns the current LCM schema version recorded for this session DB.
+    ///
+    /// Intentional integration-test seam for verifying migrations without
+    /// routing through MCP/tool handlers.
+    pub async fn lcm_schema_version(&self) -> Option<i64> {
+        crate::sessions::lcm::schema::schema_version(&self.conn).await
+    }
+
+    /// Loads a raw LCM message by provider and provider-local message ID.
+    ///
+    /// Intentional integration-test seam for asserting raw-store fidelity while
+    /// keeping production callers on higher-level LCM query APIs.
+    pub async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<crate::sessions::lcm::LcmRawMessage> {
+        crate::sessions::lcm::schema::load_raw_message(&self.conn, provider, message_id).await
+    }
+
+    /// Loads ordered raw LCM messages for one session with stable store-id pagination.
+    pub async fn lcm_load_session(
+        &self,
+        request: crate::sessions::lcm::LcmLoadSessionRequest,
+    ) -> Result<crate::sessions::lcm::LcmLoadSessionPage, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::load_session(&self.conn, request).await
+    }
+
+    /// Searches bounded LCM raw snippets and, optionally, summary node text.
+    pub async fn lcm_grep(
+        &self,
+        request: crate::sessions::lcm::LcmGrepRequest,
+    ) -> Result<Vec<crate::sessions::lcm::LcmGrepHit>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::grep(&self.conn, request).await
+    }
+
+    /// Expands a raw message, summary node, or external payload with content range metadata.
+    pub async fn lcm_expand(
+        &self,
+        request: crate::sessions::lcm::LcmExpandRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Assembles bounded LCM retrieval context for host-side query synthesis.
+    pub async fn lcm_expand_query(
+        &self,
+        request: crate::sessions::lcm::LcmExpandQueryRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandQueryResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand_query(&self.conn, request).await
+    }
+
+    /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.
+    pub async fn lcm_describe(
+        &self,
+        request: crate::sessions::lcm::LcmDescribeRequest,
+    ) -> Result<crate::sessions::lcm::LcmDescribeResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::describe(&self.conn, request).await
+    }
+
+    /// Reports LCM schema, storage, payload, and currently implemented maintenance counts.
+    pub async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::status(&self.conn, &self.storage_root, provider, session_id)
+            .await
+    }
+
+    /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
+    pub async fn lcm_doctor(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+        mode: &str,
+        apply: bool,
+        clean_config: crate::sessions::lcm::LcmCleanConfig,
+    ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::doctor::doctor(
+            &self.conn,
+            crate::sessions::lcm::doctor::DoctorRequest {
+                storage_root: &self.storage_root,
+                db_path: &self.db_path,
+                provider,
+                session_id,
+                mode,
+                apply,
+                clean_config,
+            },
+        )
+        .await
+    }
+
+    /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
+    ///
+    /// Intentional integration-test seam for lifecycle state setup; production
+    /// code updates this state through LCM preflight/compression flows.
+    pub async fn lcm_update_lifecycle(
+        &self,
+        update: crate::sessions::lcm::LcmLifecycleUpdate,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::update_lifecycle(&self.conn, update).await
+    }
+
+    /// Loads durable LCM lifecycle/frontier state for a provider conversation.
+    ///
+    /// Intentional integration-test seam for verifying lifecycle persistence
+    /// without coupling tests to compression internals.
+    pub async fn lcm_lifecycle_state(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::lifecycle_state(&self.conn, provider, conversation_id)
+            .await
+    }
+
+    /// Records a compression-boundary session start; a skipped carry-over
+    /// starts the durable compression cooldown for the new session.
+    pub async fn lcm_session_boundary(
+        &self,
+        request: crate::sessions::lcm::LcmSessionBoundaryRequest,
+    ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
+    {
+        crate::sessions::lcm::compression::record_session_boundary(&self.conn, request).await
+    }
+
+    /// Ingests active messages and reports whether deterministic replay changed.
+    pub async fn lcm_preflight(
+        &self,
+        request: crate::sessions::lcm::LcmPreflightRequest,
+    ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::preflight(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Runs deterministic LCM compression without invoking an auxiliary LLM.
+    pub async fn lcm_compress(
+        &self,
+        request: crate::sessions::lcm::LcmCompressionRequest,
+    ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::compress(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Returns an LCM store bound to an explicit storage root for payload files.
+    ///
+    /// Intentional integration-test seam for ingesting payload-backed messages
+    /// with temporary storage roots.
+    pub fn lcm_store(
+        &self,
+        storage_root: impl AsRef<Path>,
+    ) -> crate::sessions::lcm::payload::LcmStore<'_> {
+        crate::sessions::lcm::payload::LcmStore::new(
+            &self.conn,
+            storage_root.as_ref().to_path_buf(),
+        )
+    }
+
+    /// Inserts or updates an LCM summary node and its ordered source lineage.
+    ///
+    /// Intentional integration-test seam for constructing DAG fixtures without
+    /// invoking the summarization pipeline.
+    pub async fn lcm_insert_summary_node(
+        &self,
+        draft: crate::sessions::lcm::LcmSummaryNodeDraft,
+    ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::insert_summary_node(&self.conn, draft).await
+    }
+
+    /// Expands one summary node to its direct raw-message or summary-node sources.
+    ///
+    /// Intentional integration-test seam for asserting DAG lineage expansion
+    /// directly while production callers use `lcm_expand`.
+    pub async fn lcm_expand_summary_node(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmSummaryExpansion, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::expand_summary_node(&self.conn, provider, session_id, node_id)
+            .await
     }
 
     /// Searches message text for a provider, optionally constrained to one project.

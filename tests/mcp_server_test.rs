@@ -1363,6 +1363,101 @@ async fn test_run_returns_transport_read_errors() {
 // search_call_writes_savings_ledger_row
 // ---------------------------------------------------------------------------
 
+// Repeated serve-mode LCM calls must keep working while the project session
+// DB schema is ensured at most once per process: after the first call, later
+// calls (even from a fresh `McpServer` in the same process) take the
+// version-gate fast path and never re-run the LCM migrations — observable
+// via the migration row's `applied_at`, which only a migration run rewrites.
+#[tokio::test]
+async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
+    let (server, dir) = setup_server().await;
+    let lcm_status_call = |id: i64| {
+        jsonrpc_request(
+            json!(id),
+            "tools/call",
+            json!({ "name": "tokensave_lcm_status", "arguments": {} }),
+        )
+    };
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_request(json!(1), "initialize", json!({})),
+            jsonrpc_notification("notifications/initialized"),
+            lcm_status_call(2),
+            lcm_status_call(3),
+        ],
+    )
+    .await;
+    for id in [2_i64, 3] {
+        let resp = responses
+            .iter()
+            .map(|r| parse_response(r))
+            .find(|r| r["id"] == json!(id))
+            .unwrap_or_else(|| panic!("missing response for id={id}"));
+        assert!(
+            resp["error"].is_null(),
+            "lcm_status id={id} should not error"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["status"], "ok", "lcm_status id={id} payload");
+    }
+
+    // Stamp a sentinel applied_at; only a re-run of the migrations would
+    // rewrite it (the version-gate fast path and the per-process ensured
+    // flag both leave the row untouched).
+    let db_path = tokensave::sessions::cursor::project_session_db_path(dir.path());
+    let applied_at = |db_path: std::path::PathBuf| async move {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    };
+    {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE session_schema_migrations SET applied_at = 123 WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(applied_at(db_path.clone()).await, 123);
+
+    // A second serve session over the same project in the same process.
+    let cg = TokenSave::open(dir.path()).await.unwrap();
+    let server = McpServer::new(cg, None).await;
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_request(json!(1), "initialize", json!({})),
+            lcm_status_call(2),
+            lcm_status_call(3),
+        ],
+    )
+    .await;
+    for id in [2_i64, 3] {
+        let resp = responses
+            .iter()
+            .map(|r| parse_response(r))
+            .find(|r| r["id"] == json!(id))
+            .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
+        assert!(resp["error"].is_null(), "second-session lcm_status id={id}");
+    }
+    assert_eq!(
+        applied_at(db_path).await,
+        123,
+        "repeated serve-mode LCM calls must not re-run the LCM migrations"
+    );
+}
+
 #[tokio::test]
 async fn search_call_writes_savings_ledger_row() {
     let tmp_home = tempfile::tempdir().unwrap();
@@ -1371,6 +1466,9 @@ async fn search_call_writes_savings_ledger_row() {
     std::env::set_var("HOME", tmp_home.path());
     #[cfg(target_os = "windows")]
     std::env::set_var("USERPROFILE", tmp_home.path());
+    // The global DB (and thus the savings ledger) is opt-in since the
+    // holographic fact store landed; enable it for this test.
+    std::env::set_var("TOKENSAVE_ENABLE_GLOBAL_DB", "1");
 
     let (server, _proj_tmp) = setup_server().await;
 
@@ -1395,16 +1493,22 @@ async fn search_call_writes_savings_ledger_row() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    // Allow the spawned ledger-write task to complete before opening the DB.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
+    // The ledger row is written by a spawned task; poll with a deadline
+    // instead of a fixed sleep so the test survives heavy parallel load.
     let db = tokensave::global_db::GlobalDb::open()
         .await
         .expect("global db opens at isolated HOME");
-    let total = db.sum_savings(None, 0).await;
-    assert!(
-        total.calls >= 1,
-        "expected at least one ledger row, got {}",
-        total.calls
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let total = db.sum_savings(None, 0).await;
+        if total.calls >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected at least one ledger row within 10s, got {}",
+            total.calls
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
