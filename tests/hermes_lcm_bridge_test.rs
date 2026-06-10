@@ -185,7 +185,7 @@ plugin.register(ctx)
 assert ctx.tools == []
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert engine.name == "lcm"
+assert engine.name == "tokensave"
 assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
 "#,
         "generated plugin should skip direct tools when host does not forward messages",
@@ -202,7 +202,7 @@ import json
 engine = plugin.TokenSaveContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
-assert engine.name == "lcm"
+assert engine.name == "tokensave"
 
 schemas = engine.get_tool_schemas()
 schemas_by_name = {schema["name"]: schema for schema in schemas}
@@ -260,7 +260,7 @@ assert status_params["properties"] == {}
 assert doctor_params["properties"] == {}
 
 status = engine.get_status()
-assert status["engine"] == "lcm"
+assert status["engine"] == "tokensave"
 assert status["session_id"] == "session-1"
 assert status["storage_scope"] == "project_local"
 assert status["context_engine_tool_names"] == sorted(schema_names)
@@ -785,7 +785,7 @@ plugin.register(ctx)
 
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert engine.name == "lcm"
+assert engine.name == "tokensave"
 assert engine.hermes_home == "/tmp/hermes-from-config"
 "#,
         "generated registration should resolve configured hermes_home",
