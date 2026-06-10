@@ -346,6 +346,12 @@ impl GlobalDb {
         Self::open_at(&db_path).await
     }
 
+    /// Raw connection for crate-internal read layers (the dashboard HTTP
+    /// server queries the LCM tables directly).
+    pub(crate) fn dashboard_connection(&self) -> Connection {
+        self.conn.clone()
+    }
+
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         let path_str = project_path.to_string_lossy().to_string();

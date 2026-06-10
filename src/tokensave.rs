@@ -2630,6 +2630,18 @@ impl TokenSave {
         &self.project_root
     }
 
+    /// Raw connection to the project database for crate-internal read layers
+    /// (the dashboard HTTP server). Honors whatever branch DB `open` selected.
+    pub(crate) fn dashboard_connection(&self) -> libsql::Connection {
+        self.db.conn().clone()
+    }
+
+    /// Filesystem path of the project's tokensave directory, for display in
+    /// dashboard payloads (mirrors the `path` field of the Hermes plugin API).
+    pub(crate) fn dashboard_db_path(&self) -> std::path::PathBuf {
+        crate::config::get_tokensave_dir(&self.project_root).join("tokensave.db")
+    }
+
     fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
         if !self.is_fallback() {
             return Ok(());
