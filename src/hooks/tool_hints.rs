@@ -15,9 +15,11 @@ pub enum HintAgent {
     Kiro,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HintCategory {
     Search,
+    SemanticSearch,
+    FileRead,
     BroadRead,
     CallGraph,
     Impact,
@@ -30,6 +32,8 @@ impl HintCategory {
     fn as_key(self) -> &'static str {
         match self {
             HintCategory::Search => "search",
+            HintCategory::SemanticSearch => "semantic_search",
+            HintCategory::FileRead => "file_read",
             HintCategory::BroadRead => "broad_read",
             HintCategory::CallGraph => "call_graph",
             HintCategory::Impact => "impact",
@@ -42,6 +46,8 @@ impl HintCategory {
     fn from_key(key: &str) -> Option<Self> {
         match key {
             "search" => Some(HintCategory::Search),
+            "semantic_search" => Some(HintCategory::SemanticSearch),
+            "file_read" => Some(HintCategory::FileRead),
             "broad_read" => Some(HintCategory::BroadRead),
             "call_graph" => Some(HintCategory::CallGraph),
             "impact" => Some(HintCategory::Impact),
@@ -88,6 +94,11 @@ pub struct ToolHint {
     pub nonblocking: bool,
 }
 
+/// Upper bound on persisted (session, category) pairs. The file accrues a
+/// handful of entries per session; past this bound it is stale history from
+/// long-dead sessions, so the store resets rather than growing forever.
+const MAX_PERSISTED_HINT_ENTRIES: usize = 4096;
+
 #[derive(Debug, Default)]
 pub struct ToolHintDedupe {
     seen: HashSet<(String, HintCategory)>,
@@ -96,6 +107,16 @@ pub struct ToolHintDedupe {
 impl ToolHintDedupe {
     pub fn should_emit(&mut self, session_id: impl Into<String>, category: HintCategory) -> bool {
         self.seen.insert((session_id.into(), category))
+    }
+
+    /// Loads the dedupe set from `path`, tolerating a missing file (empty set)
+    /// and resetting when the persisted history exceeds
+    /// [`MAX_PERSISTED_HINT_ENTRIES`].
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::load(path) {
+            Ok(loaded) if loaded.seen.len() <= MAX_PERSISTED_HINT_ENTRIES => loaded,
+            _ => Self::default(),
+        }
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
@@ -140,7 +161,7 @@ struct PersistedHintEntry {
 }
 
 pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
-    if !input.hints_enabled || is_single_file_read(input) {
+    if !input.hints_enabled {
         return None;
     }
 
@@ -149,6 +170,15 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
             HintCategory::ExploreSubagent,
             "For code research subagents, consider adding tokensave MCP context before broad exploration.",
             "tokensave_context can gather focused code context, while tokensave_search, tokensave_callers, and tokensave_impact can answer common research questions without a broad scan.",
+            true,
+        ));
+    }
+
+    if is_semantic_search_tool(input) {
+        return Some(hint(
+            HintCategory::SemanticSearch,
+            "For conceptual codebase questions, consider tokensave_context.",
+            "tokensave_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tokensave_search ranks symbols by name/keyword.",
             true,
         ));
     }
@@ -189,6 +219,15 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
             "For finding files by role or path, consider using tokensave_files.",
             "tokensave_files can list indexed files and narrow file lookup before opening individual files.",
             false,
+        ));
+    }
+
+    if is_single_file_read(input) {
+        return Some(hint(
+            HintCategory::FileRead,
+            "Before reading whole files, consider tokensave_outline, tokensave_body, or tokensave_read.",
+            "tokensave_outline gives a file's table of contents, tokensave_body returns one symbol's source, and tokensave_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read.",
+            true,
         ));
     }
 
@@ -271,6 +310,19 @@ fn is_single_file_read(input: &ToolHintInput) -> bool {
             .as_deref()
             .unwrap_or_default()
             .is_empty()
+}
+
+/// Matches Cursor's semantic/codebase-search tool names. Cursor's hooks docs do
+/// not enumerate a matcher value for semantic search, so the post-tool-use hook
+/// runs unmatched and this predicate recognizes the tool names Cursor has
+/// reported for it (`SemanticSearch`, `codebase_search`, `Codebase Search`).
+fn is_semantic_search_tool(input: &ToolHintInput) -> bool {
+    input.tool_name.as_deref().is_some_and(|name| {
+        matches_normalized(
+            name,
+            &["semanticsearch", "semantic_search", "codebasesearch", "codebase_search"],
+        )
+    })
 }
 
 fn is_explore_subagent(input: &ToolHintInput) -> bool {
@@ -403,4 +455,82 @@ fn matches_normalized(value: &str, expected: &[&str]) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     expected.iter().any(|candidate| normalized == *candidate)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn input_for_tool(tool_name: &str) -> ToolHintInput {
+        ToolHintInput {
+            tool_name: Some(tool_name.to_string()),
+            session_id: Some("session-1".to_string()),
+            ..ToolHintInput::default()
+        }
+    }
+
+    #[test]
+    fn semantic_search_tools_get_a_context_hint() {
+        for name in ["SemanticSearch", "codebase_search", "Codebase Search"] {
+            let hint = decide_hint(&input_for_tool(name)).unwrap();
+            assert_eq!(hint.category, HintCategory::SemanticSearch, "{name}");
+            assert!(hint.context.contains("tokensave_context"), "{name}");
+            assert!(hint.nonblocking, "semantic-search hints must stay soft");
+        }
+    }
+
+    #[test]
+    fn single_file_read_gets_a_soft_outline_hint() {
+        let mut input = input_for_tool("Read");
+        input.file_path = Some("src/lib.rs".to_string());
+        let hint = decide_hint(&input).unwrap();
+        assert_eq!(hint.category, HintCategory::FileRead);
+        assert!(hint.message.contains("tokensave_outline"));
+        assert!(hint.nonblocking, "read hints must stay soft");
+    }
+
+    #[test]
+    fn read_without_file_path_gets_no_hint() {
+        assert!(decide_hint(&input_for_tool("Read")).is_none());
+    }
+
+    #[test]
+    fn dedupe_emits_each_category_once_per_session() {
+        let mut dedupe = ToolHintDedupe::default();
+        assert!(dedupe.should_emit("s1", HintCategory::Search));
+        assert!(!dedupe.should_emit("s1", HintCategory::Search));
+        assert!(dedupe.should_emit("s1", HintCategory::FileRead));
+        assert!(dedupe.should_emit("s2", HintCategory::Search));
+    }
+
+    #[test]
+    fn dedupe_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/tool_hints_seen.json");
+
+        let mut dedupe = ToolHintDedupe::load_or_default(&path);
+        assert!(dedupe.should_emit("s1", HintCategory::Search));
+        dedupe.save(&path).unwrap();
+
+        let mut reloaded = ToolHintDedupe::load_or_default(&path);
+        assert!(
+            !reloaded.should_emit("s1", HintCategory::Search),
+            "persisted (session, category) pairs must suppress re-emission"
+        );
+        assert!(reloaded.should_emit("s1", HintCategory::FileRead));
+    }
+
+    #[test]
+    fn dedupe_load_tolerates_missing_and_corrupt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        let mut dedupe = ToolHintDedupe::load_or_default(&missing);
+        assert!(dedupe.should_emit("s1", HintCategory::Search));
+
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, "not json").unwrap();
+        let mut dedupe = ToolHintDedupe::load_or_default(&corrupt);
+        assert!(dedupe.should_emit("s1", HintCategory::Search));
+    }
 }

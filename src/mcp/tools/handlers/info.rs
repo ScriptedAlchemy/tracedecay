@@ -36,11 +36,51 @@ pub(super) async fn handle_status(
                 }
             }
         }
+        // Surface a checkout/index branch divergence prominently: a graph
+        // that silently tracks another branch is the fastest way to lose an
+        // agent's trust in the index.
+        if let Some(git_branch) = crate::branch::current_branch(cg.project_root()) {
+            if git_branch != branch {
+                output["branch_mismatch"] = json!({
+                    "git_branch": git_branch,
+                    "indexed_branch": branch,
+                });
+                output["branch_mismatch_warning"] = json!(format!(
+                    "WARNING: git checkout is on '{git_branch}' but the index tracks \
+                     '{branch}'. Results may be stale for this branch — run \
+                     `tokensave branch add {git_branch}` to track it."
+                ));
+            }
+        }
     }
     if cg.is_fallback() {
         output["branch_fallback"] = json!(true);
         if let Some(warning) = cg.fallback_warning() {
             output["branch_warning"] = json!(warning);
+        }
+    }
+
+    // Session-transcript ingest health (recall trust): last ingest time and
+    // any un-ingested transcript backlog from the project sessions.db.
+    let session_db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+    if session_db_path.exists() {
+        if let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await
+        {
+            let ingest = db.session_ingest_health().await;
+            output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
+            if ingest.max_transcript_pending_bytes
+                > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+            {
+                output["session_ingest_warning"] = json!(format!(
+                    "session transcript ingest looks stalled: a transcript has {} \
+                     un-ingested bytes ({} total across {} transcript(s)), exceeding \
+                     the per-transcript hook catch-up cap — session recall is missing \
+                     those turns. See `tokensave doctor --agent cursor`.",
+                    ingest.max_transcript_pending_bytes,
+                    ingest.pending_bytes,
+                    ingest.pending_transcripts
+                ));
+            }
         }
     }
 

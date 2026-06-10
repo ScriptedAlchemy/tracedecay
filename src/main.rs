@@ -168,6 +168,29 @@ fn validate_hermes_profile_flags(
     Ok(())
 }
 
+/// Validates `--project-root` (Hermes plugin project pin): hermes-only and
+/// absolute, so the generated plugin never depends on the install cwd.
+fn validate_hermes_project_root_flag(
+    agent: Option<&str>,
+    project_root: &Option<String>,
+) -> tokensave::errors::Result<Option<std::path::PathBuf>> {
+    let Some(project_root) = project_root else {
+        return Ok(None);
+    };
+    if agent != Some("hermes") {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: "`--project-root` is only supported with `--agent hermes`".to_string(),
+        });
+    }
+    let path = std::path::PathBuf::from(project_root);
+    if !path.is_absolute() {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: format!("`--project-root` must be an absolute path, got '{project_root}'"),
+        });
+    }
+    Ok(Some(path))
+}
+
 fn hermes_selected_profile_targets(
     home: &std::path::Path,
     profile: &Option<String>,
@@ -318,6 +341,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
+                            project_root: None,
                         };
                         if ag.install(&ctx).is_err() {
                             all_ok = false;
@@ -666,8 +690,11 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             local,
             profile,
             all_profiles,
+            project_root,
         } => {
             validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
+            let pinned_project_root =
+                validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -692,6 +719,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     tokensave_bin: tokensave_bin.clone(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
                     profile: profile.clone(),
+                    project_root: pinned_project_root.clone(),
                 };
                 let mut installed_names: Vec<String> = Vec::new();
 
@@ -705,6 +733,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: tokensave_bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: target_profile,
+                            project_root: pinned_project_root.clone(),
                         };
                         ag.install_local(&ctx, &project_path)?;
                         ag.post_install(Some(&project_path)).await;
@@ -757,6 +786,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
+                        project_root: pinned_project_root.clone(),
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -779,6 +809,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
+                        project_root: pinned_project_root.clone(),
                     };
                     ag.uninstall(&ctx)?;
                     removed_names.push(ag.name().to_string());
@@ -791,6 +822,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
+                        project_root: pinned_project_root.clone(),
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -850,6 +882,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: None,
+                        project_root: None,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -883,6 +916,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: String::new(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
+                        project_root: None,
                     };
                     ag.uninstall(&ctx)?;
                 }
@@ -896,6 +930,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: String::new(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
+                            project_root: None,
                         };
                         ag.uninstall(&ctx).ok();
                     }
@@ -943,8 +978,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
-        Commands::HookCursorPreToolUse => {
-            let code = tokensave::hooks::hook_cursor_pre_tool_use();
+        Commands::HookCursorPostToolUse => {
+            let code = tokensave::hooks::hook_cursor_post_tool_use();
             if code != 0 {
                 process::exit(code);
             }
@@ -963,6 +998,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         }
         Commands::HookCursorSessionStart => {
             let code = tokensave::hooks::hook_cursor_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorSessionEnd => {
+            let code = tokensave::hooks::hook_cursor_session_end().await;
             if code != 0 {
                 process::exit(code);
             }
@@ -1385,10 +1426,11 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookKiroPromptSubmit
             | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
-            | Commands::HookCursorPreToolUse
+            | Commands::HookCursorPostToolUse
             | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart
+            | Commands::HookCursorSessionEnd
             | Commands::HookCursorAfterShell
             | Commands::HookCursorWorkspaceOpen
             | Commands::HookCursorStop

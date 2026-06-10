@@ -35,6 +35,15 @@ impl AgentIntegration for CursorIntegration {
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tokensave init");
         eprintln!("  2. Reload Cursor — the tokensave plugin is now installed");
+        eprintln!(
+            "  3. Optional: Cursor's Auto-review mode reviews every MCP call; to let \
+             tokensave's read-only tools run without per-call review, copy the \
+             permissions.json mcpAllowlist snippet from the plugin README \
+             ({})",
+            cursor_plugin_install_dir(&ctx.home)
+                .join("README.md")
+                .display()
+        );
         Ok(())
     }
 
@@ -90,6 +99,7 @@ impl AgentIntegration for CursorIntegration {
                  `tokensave install --local --agent cursor` to remove tokensave-owned entries",
             );
         }
+        doctor_check_session_ingest(dc, &ctx.project_path);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -173,8 +183,16 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/architecture-overview/SKILL.md"),
     ),
     (
+        "skills/assessing-test-coverage/SKILL.md",
+        include_str!("../../cursor-plugin/skills/assessing-test-coverage/SKILL.md"),
+    ),
+    (
         "skills/atomic-code-edits/SKILL.md",
         include_str!("../../cursor-plugin/skills/atomic-code-edits/SKILL.md"),
+    ),
+    (
+        "skills/auditing-code-safety/SKILL.md",
+        include_str!("../../cursor-plugin/skills/auditing-code-safety/SKILL.md"),
     ),
     (
         "skills/cleaning-up-dead-code/SKILL.md",
@@ -193,12 +211,24 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/drafting-commit-and-pr/SKILL.md"),
     ),
     (
+        "skills/exploring-types-and-traits/SKILL.md",
+        include_str!("../../cursor-plugin/skills/exploring-types-and-traits/SKILL.md"),
+    ),
+    (
+        "skills/finding-duplicate-logic/SKILL.md",
+        include_str!("../../cursor-plugin/skills/finding-duplicate-logic/SKILL.md"),
+    ),
+    (
         "skills/finding-impacted-areas/SKILL.md",
         include_str!("../../cursor-plugin/skills/finding-impacted-areas/SKILL.md"),
     ),
     (
         "skills/fixing-build-and-type-errors/SKILL.md",
         include_str!("../../cursor-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
+    ),
+    (
+        "skills/memorize-subject/SKILL.md",
+        include_str!("../../cursor-plugin/skills/memorize-subject/SKILL.md"),
     ),
     (
         "skills/memorizing-subject/SKILL.md",
@@ -213,8 +243,20 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/project-status/SKILL.md"),
     ),
     (
+        "skills/reading-code-cheaply/SKILL.md",
+        include_str!("../../cursor-plugin/skills/reading-code-cheaply/SKILL.md"),
+    ),
+    (
         "skills/recalling-project-memory/SKILL.md",
         include_str!("../../cursor-plugin/skills/recalling-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/recalling-session-context/SKILL.md",
+        include_str!("../../cursor-plugin/skills/recalling-session-context/SKILL.md"),
+    ),
+    (
+        "skills/refactoring-safely/SKILL.md",
+        include_str!("../../cursor-plugin/skills/refactoring-safely/SKILL.md"),
     ),
     (
         "skills/reviewing-a-diff/SKILL.md",
@@ -229,8 +271,60 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/searching-for-code/SKILL.md"),
     ),
     (
+        "skills/tokensave-arch/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-arch/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-audit/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-audit/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-branch/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-branch/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-clean/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-clean/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-commit/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-commit/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-diagnose/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-diagnose/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-health/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-health/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-impact/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-impact/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-port/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-port/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-recall/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-recall/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-review/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-review/SKILL.md"),
+    ),
+    (
+        "skills/tokensave-test/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-test/SKILL.md"),
+    ),
+    (
         "skills/tracing-functions/SKILL.md",
         include_str!("../../cursor-plugin/skills/tracing-functions/SKILL.md"),
+    ),
+    (
+        "skills/tracking-session-health/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tracking-session-health/SKILL.md"),
     ),
     (
         "agents/code-explorer.md",
@@ -241,32 +335,8 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/agents/code-health-auditor.md"),
     ),
     (
-        "commands/memorize-subject.md",
-        include_str!("../../cursor-plugin/commands/memorize-subject.md"),
-    ),
-    (
-        "commands/tokensave-arch.md",
-        include_str!("../../cursor-plugin/commands/tokensave-arch.md"),
-    ),
-    (
-        "commands/tokensave-branch.md",
-        include_str!("../../cursor-plugin/commands/tokensave-branch.md"),
-    ),
-    (
-        "commands/tokensave-diagnose.md",
-        include_str!("../../cursor-plugin/commands/tokensave-diagnose.md"),
-    ),
-    (
-        "commands/tokensave-health.md",
-        include_str!("../../cursor-plugin/commands/tokensave-health.md"),
-    ),
-    (
-        "commands/tokensave-port.md",
-        include_str!("../../cursor-plugin/commands/tokensave-port.md"),
-    ),
-    (
-        "commands/tokensave-review.md",
-        include_str!("../../cursor-plugin/commands/tokensave-review.md"),
+        "agents/session-historian.md",
+        include_str!("../../cursor-plugin/agents/session-historian.md"),
     ),
 ];
 
@@ -342,6 +412,14 @@ fn cursor_plugin_hooks(raw: &str, tokensave_bin: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
+/// Bundle directories shipped by older tokensave plugin versions that no
+/// longer exist in the current bundle. Swept during replace/uninstall so
+/// upgrades don't strand stale surfaces (managed-path removal only covers
+/// files the *current* bundle ships). `commands/` was migrated to slash
+/// skills (`disable-model-invocation: true`) when Cursor deprecated the
+/// standalone Commands surface.
+const LEGACY_PLUGIN_DIRS: &[&str] = &["commands"];
+
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
         return Ok(());
@@ -367,6 +445,15 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
                 install_dir.display()
             ),
         });
+    }
+    // The directory is tokensave-owned: sweep bundle dirs that older versions
+    // shipped, so they don't count as "unmanaged" leftovers below and linger
+    // across upgrades.
+    for legacy in LEGACY_PLUGIN_DIRS {
+        let path = install_dir.join(legacy);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).ok();
+        }
     }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TokenSaveError::Config {
@@ -655,8 +742,9 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     });
     let expected = [
         ("sessionStart", "hook-cursor-session-start"),
+        ("sessionEnd", "hook-cursor-session-end"),
         ("subagentStart", "hook-cursor-subagent-start"),
-        ("preToolUse", "hook-cursor-pre-tool-use"),
+        ("postToolUse", "hook-cursor-post-tool-use"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
@@ -686,6 +774,53 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         dc.fail(&format!(
             "Cursor plugin hook(s) missing for {} — run `tokensave install --agent cursor`",
             missing.join(", ")
+        ));
+    }
+}
+
+/// Flags a stalled Cursor transcript ingest. The per-turn hooks cap how much
+/// transcript tail they read ([`crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES`]),
+/// so a backlog above that cap will never drain on its own — exactly the
+/// "session recall is silently missing recent turns" failure users hit.
+fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
+    let db_path = crate::sessions::cursor::project_session_db_path(project_path);
+    if !db_path.exists() {
+        return;
+    }
+    // `healthcheck` is a sync trait method but runs inside the multi-thread
+    // tokio runtime, so the bounded DB read runs via block_in_place.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let health = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let db = crate::sessions::cursor::open_project_session_db(project_path).await?;
+            Some(db.session_ingest_health().await)
+        })
+    });
+    let Some(health) = health else {
+        dc.warn(&format!(
+            "could not open session store {} to check transcript ingest",
+            db_path.display()
+        ));
+        return;
+    };
+    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
+        dc.warn(&format!(
+            "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
+             byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
+             per-transcript hook catch-up cap — it will not drain automatically and \
+             session recall is missing those turns",
+            health.max_transcript_pending_bytes,
+            health.pending_bytes,
+            health.pending_transcripts,
+            crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+        ));
+    } else {
+        dc.pass(&format!(
+            "Cursor transcript ingest healthy ({} transcript(s) tracked, {} pending \
+             byte(s), all within the per-transcript hook cap)",
+            health.tracked_transcripts, health.pending_bytes
         ));
     }
 }
@@ -755,8 +890,9 @@ mod tests {
         assert!(install_dir.join("hooks/hooks.json").exists());
         assert!(install_dir.join("rules/tokensave.mdc").exists());
 
-        // A representative skill, the agent, and a command also ship, so released
-        // installs are no longer missing the bundle that the symlink path provides.
+        // A representative skill, the agent, and a dispatcher skill also ship,
+        // so released installs are no longer missing the bundle that the
+        // symlink path provides.
         assert!(
             install_dir
                 .join("skills/searching-for-code/SKILL.md")
@@ -768,8 +904,12 @@ mod tests {
             "the code-explorer agent should be embedded"
         );
         assert!(
-            install_dir.join("commands/tokensave-arch.md").exists(),
-            "a representative command should be embedded"
+            install_dir.join("skills/tokensave-arch/SKILL.md").exists(),
+            "a representative slash-dispatcher skill should be embedded"
+        );
+        assert!(
+            !install_dir.join("commands").exists(),
+            "the deprecated commands surface must not ship"
         );
 
         // Every embedded file is also a managed path so uninstall can clean it.
@@ -796,6 +936,163 @@ mod tests {
         );
     }
 
+    /// Every `tokensave_*` token mentioned anywhere in the embedded plugin
+    /// bundle (skills, rules, agents, commands, README).
+    fn embedded_plugin_tool_mentions() -> std::collections::BTreeSet<String> {
+        let mut mentions = std::collections::BTreeSet::new();
+        for &(_, contents) in EMBEDDED_PLUGIN_FILES {
+            let bytes = contents.as_bytes();
+            let mut search_from = 0;
+            while let Some(found) = contents[search_from..].find("tokensave_") {
+                let start = search_from + found;
+                let mut end = start + "tokensave_".len();
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_lowercase()
+                        || bytes[end].is_ascii_digit()
+                        || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                let token = contents[start..end].trim_end_matches('_');
+                if token.len() > "tokensave_".len() {
+                    mentions.insert(token.to_string());
+                }
+                search_from = end;
+            }
+        }
+        mentions
+    }
+
+    /// The full registered tool-name set, independent of host capabilities
+    /// (`tokensave_ast_grep_rewrite` is filtered from `get_tool_definitions`
+    /// when the external `ast-grep` binary is absent, but it is still a real
+    /// tool the bundle legitimately references).
+    fn registered_tool_names() -> std::collections::BTreeSet<String> {
+        let mut names: std::collections::BTreeSet<String> =
+            crate::mcp::tools::get_tool_definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect();
+        names.insert("tokensave_ast_grep_rewrite".to_string());
+        names
+    }
+
+    /// Guards against the plugin steering agents toward tools that do not
+    /// exist: every `tokensave_*` name mentioned in the bundle must be a
+    /// registered MCP tool (or an explicitly allow-listed non-tool marker).
+    #[test]
+    fn plugin_tool_mentions_resolve_to_registered_tools() {
+        // `tokensave_metrics` is the savings-report line prefix in tool
+        // output, not a tool name.
+        const NON_TOOL_MENTIONS: &[&str] = &["tokensave_metrics"];
+        let known = registered_tool_names();
+        let unknown: Vec<String> = embedded_plugin_tool_mentions()
+            .into_iter()
+            .filter(|mention| {
+                !known.contains(mention) && !NON_TOOL_MENTIONS.contains(&mention.as_str())
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "cursor-plugin mentions tool names missing from get_tool_definitions(): {unknown:?}"
+        );
+    }
+
+    /// Guards against shipping tools no skill/rule/command ever points an
+    /// agent at (the audit found whole tool families with zero usage because
+    /// nothing in the bundle referenced them). New tools must either be
+    /// referenced somewhere under cursor-plugin/ or consciously allow-listed
+    /// here with a reason.
+    #[test]
+    fn registered_tools_are_referenced_by_the_plugin_bundle() {
+        // Currently every registered tool is referenced by the bundle. Add a
+        // name here only with a written reason for shipping it unsteered.
+        const TOOLS_WITHOUT_PLUGIN_REFERENCE: &[&str] = &[];
+        let mentions = embedded_plugin_tool_mentions();
+        let missing: Vec<String> = registered_tool_names()
+            .into_iter()
+            .filter(|name| {
+                !mentions.contains(name) && !TOOLS_WITHOUT_PLUGIN_REFERENCE.contains(&name.as_str())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "tools registered in get_tool_definitions() but referenced nowhere under \
+             cursor-plugin/ (reference them in a skill or allow-list them): {missing:?}"
+        );
+    }
+
+    /// The skill index injected into Cursor `sessionStart` context must match
+    /// the *model-invocable* skills shipped in the bundle — slash dispatchers
+    /// (`disable-model-invocation: true`) are explicit-invoke-only and would
+    /// be noise in steering context.
+    #[test]
+    fn session_context_skill_index_matches_bundle_skills() {
+        let mut bundled: Vec<String> = EMBEDDED_PLUGIN_FILES
+            .iter()
+            .filter_map(|&(relative, contents)| {
+                let name = relative
+                    .strip_prefix("skills/")
+                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
+                (!contents.contains("disable-model-invocation: true")).then(|| name.to_string())
+            })
+            .collect();
+        bundled.sort();
+        let mut listed: Vec<String> = crate::hooks::CURSOR_PLUGIN_SKILLS
+            .iter()
+            .map(|skill| (*skill).to_string())
+            .collect();
+        listed.sort();
+        assert_eq!(
+            bundled, listed,
+            "hooks::CURSOR_PLUGIN_SKILLS must list exactly the model-invocable bundled skills"
+        );
+    }
+
+    /// The Auto-review allowlist documented in the plugin README must stay in
+    /// lockstep with the tools' `readOnlyHint` annotations: every read-only
+    /// tool is listed (so it skips the classifier) and no mutating tool is.
+    #[test]
+    fn readme_mcp_allowlist_matches_read_only_tools() {
+        let readme = EMBEDDED_PLUGIN_FILES
+            .iter()
+            .find(|&&(relative, _)| relative == "README.md")
+            .map(|&(_, contents)| contents)
+            .expect("plugin README must be embedded");
+
+        let mut listed: Vec<String> = readme
+            .lines()
+            .filter_map(|line| {
+                let entry = line.trim().trim_end_matches(',').trim_matches('"');
+                entry
+                    .strip_prefix("tokensave:")
+                    .filter(|tool| tool.starts_with("tokensave_"))
+                    .map(str::to_string)
+            })
+            .collect();
+        listed.sort();
+        listed.dedup();
+
+        let mut read_only: Vec<String> = crate::mcp::tools::get_tool_definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("readOnlyHint"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .map(|definition| definition.name)
+            .collect();
+        read_only.sort();
+
+        assert_eq!(
+            listed, read_only,
+            "the README mcpAllowlist snippet must list exactly the readOnlyHint=true tools"
+        );
+    }
+
     #[test]
     fn embedded_install_uninstalls_completely() {
         let tmp = TempDir::new().unwrap();
@@ -811,6 +1108,29 @@ mod tests {
         assert!(
             !install_dir.exists(),
             "embedded install should be fully removed on uninstall"
+        );
+    }
+
+    /// Upgrading over an older install must sweep bundle directories the
+    /// current bundle no longer ships (the deprecated `commands/` surface),
+    /// instead of stranding them as unmanaged leftovers forever.
+    #[test]
+    fn reinstall_sweeps_legacy_commands_dir() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
+        // Simulate a pre-migration install that shipped commands/.
+        std::fs::create_dir_all(install_dir.join("commands")).unwrap();
+        std::fs::write(
+            install_dir.join("commands/tokensave-arch.md"),
+            "legacy command",
+        )
+        .unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("replace should succeed");
+        assert!(
+            !install_dir.exists(),
+            "legacy commands/ must be swept so the tokensave-only dir is fully removed"
         );
     }
 

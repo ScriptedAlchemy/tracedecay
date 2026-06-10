@@ -197,11 +197,31 @@ fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tokensave");
-    assert_eq!(manifest["displayName"], "TokenSave");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
+    // Documented manifest metadata (displayName is not a documented field and
+    // must not reappear; author/homepage/keywords are the documented ones).
+    assert!(
+        manifest.get("displayName").is_none(),
+        "displayName is not a documented plugin.json field"
+    );
+    assert!(
+        manifest["author"]["name"].is_string(),
+        "plugin manifest should carry a documented author object"
+    );
+    assert!(manifest["homepage"].is_string());
+    assert!(
+        manifest["keywords"]
+            .as_array()
+            .is_some_and(|keywords| !keywords.is_empty()),
+        "plugin manifest should carry keywords"
+    );
+    assert!(
+        manifest.get("commands").is_none(),
+        "the deprecated commands surface must not be referenced by the manifest"
+    );
     assert!(
         manifest["rules"]
             .as_array()
@@ -219,29 +239,23 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     );
 
     let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    // The hint hook lives on postToolUse (the only generic tool event whose
+    // documented output supports `additional_context`) and runs unmatched so
+    // it also sees Read and Cursor's semantic search, whose matcher names are
+    // not documented. afterFileEdit runs unmatched so every Agent edit tool
+    // (not just Write) triggers the targeted sync.
     let expected_hooks = [
-        ("sessionStart", "hook-cursor-session-start", None),
-        ("subagentStart", "hook-cursor-subagent-start", None),
-        (
-            "preToolUse",
-            "hook-cursor-pre-tool-use",
-            Some("Shell|Bash|Grep|Glob|Search"),
-        ),
-        (
-            "beforeSubmitPrompt",
-            "hook-cursor-before-submit-prompt",
-            None,
-        ),
-        (
-            "afterFileEdit",
-            "hook-cursor-after-file-edit",
-            Some("Write"),
-        ),
-        ("afterShellExecution", "hook-cursor-after-shell", None),
-        ("workspaceOpen", "hook-cursor-workspace-open", None),
-        ("stop", "hook-cursor-stop", None),
+        ("sessionStart", "hook-cursor-session-start"),
+        ("sessionEnd", "hook-cursor-session-end"),
+        ("subagentStart", "hook-cursor-subagent-start"),
+        ("postToolUse", "hook-cursor-post-tool-use"),
+        ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
+        ("afterFileEdit", "hook-cursor-after-file-edit"),
+        ("afterShellExecution", "hook-cursor-after-shell"),
+        ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
     ];
-    for (event, subcommand, matcher) in expected_hooks {
+    for (event, subcommand) in expected_hooks {
         let entries = hooks["hooks"][event]
             .as_array()
             .unwrap_or_else(|| panic!("plugin hook {event} should be an array"));
@@ -259,15 +273,22 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
                 .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
             "plugin hook commands should use the installed tokensave binary"
         );
-        if let Some(matcher) = matcher {
-            assert_eq!(hook["matcher"], matcher);
-        }
+        assert!(
+            hook.get("matcher").is_none(),
+            "plugin hook {event} should run unmatched (matchers either miss \
+             undocumented tool names or restrict edits to Write only)"
+        );
     }
+    assert!(
+        hooks["hooks"].get("preToolUse").is_none(),
+        "the hint hook must not register on preToolUse: its documented output \
+         schema has no context-injection field"
+    );
 
     let rule = std::fs::read_to_string(plugin_dir.join("rules/tokensave.mdc")).unwrap();
     assert!(rule.contains("alwaysApply: true"));
     assert!(rule.contains("tokensave MCP tools"));
-    assert!(rule.contains("fall back"));
+    assert!(rule.to_lowercase().contains("fall back"));
     assert!(plugin_dir.join("README.md").exists());
 }
 
@@ -511,7 +532,7 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
-    assert!(init_py.contains("register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("register_skill(\"tokensave\""));
     assert!(init_py.contains("class TokenSaveContextEngine"));
     assert!(init_py.contains("storage_scope"));
     assert!(init_py.contains("tokensave_lcm_compress"));
@@ -819,7 +840,7 @@ plugin.register(ctx)
 assert any(tool["name"] == "tokensave_context" for tool in ctx.tools)
 assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
 assert ctx.commands and ctx.commands[0][0] == "/tokensave_status"
-assert ctx.skills and ctx.skills[0][0] == "tokensave:tokensave"
+assert ctx.skills and ctx.skills[0][0] == "tokensave"
 assert len(ctx.memory_providers) == 1
 
 provider = ctx.memory_providers[0]
@@ -1396,6 +1417,151 @@ fn test_hermes_install_removes_tokensave_from_disabled_list() {
         "plugins.disabled must not keep tokensave because disabled wins"
     );
     assert!(config.contains("    - other"));
+}
+
+#[test]
+fn test_hermes_install_matches_two_space_list_item_indent() {
+    // Hermes itself writes sequence items at the same indent as the key
+    // (`enabled:` + `  - item`); inserting a 4-space item into such a list
+    // produces unparseable YAML, so the installer must match the style.
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  enabled:\n  - other\n  - second\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n  - tokensave\n  - other\n  - second\n"),
+        "tokensave must be inserted with the existing 2-space item indent:\n{config}"
+    );
+    assert!(
+        !config.contains("    - tokensave"),
+        "no 4-space item may be mixed into a 2-space list:\n{config}"
+    );
+
+    // Idempotency: a second install must detect the 2-space item.
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert_eq!(
+        config.matches("- tokensave").count(),
+        1,
+        "re-install must not duplicate the 2-space list item:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_removes_two_space_indent_disabled_entry() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  disabled:\n  - tokensave\n  - other\n  enabled:\n  - kept\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled:\n  - other\n"),
+        "tokensave must be removed from the 2-space disabled list:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n  - tokensave\n  - kept\n"),
+        "tokensave must be enabled with matching indent:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_accepts_flow_style_empty_disabled_list() {
+    // Hermes writes `disabled: []` for the empty list; the installer used to
+    // reject it as "unsupported Hermes plugins config".
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  disabled: []\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled: []"),
+        "the empty flow-style disabled list must be preserved:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n    - tokensave\n    - other\n"),
+        "tokensave must be added to the enabled list:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  enabled: []\n  disabled: []\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n    - tokensave\n"),
+        "`enabled: []` must be rewritten into a block list with tokensave:\n{config}"
+    );
+    assert!(
+        !config.contains("enabled: []"),
+        "the empty flow-style enabled list must be replaced:\n{config}"
+    );
+    assert!(
+        config.contains("  disabled: []"),
+        "the untouched disabled flow list must survive:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_still_rejects_non_empty_flow_lists() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "plugins:\n  enabled: [other]\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("unsupported Hermes plugins config"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "non-empty flow lists must not be rewritten"
+    );
 }
 
 #[test]

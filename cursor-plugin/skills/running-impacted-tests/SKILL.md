@@ -1,6 +1,9 @@
 ---
 name: running-impacted-tests
 description: Run only the tests affected by your changes and map failures back to source. Use for "run the affected tests", "run impacted tests", or "tokensave test" to verify a change without a full test run. (Rust/cargo projects.)
+paths:
+  - "**/*.rs"
+  - "**/Cargo.toml"
 ---
 
 # Running impacted tests
@@ -20,6 +23,7 @@ Use this when impacted-test verification is relevant to the task. Respect Cursor
 - `tokensave_run_affected_tests` and `tokensave_diagnostics` run cargo-backed checks, and the first `diagnostics` build can take minutes (forced target dir `.tokensave/target/`). Respect Cursor approval/run-mode and avoid duplicate runs.
 - `tokensave_run_affected_tests` is cargo-only. For non-Rust repos use `tokensave_diagnostics` (tsc/pyright) and the project's own test runner.
 - Steps 1–2 and 5 are read-only and safe to run first to preview scope before the user commits to a run.
+- Pure coverage questions ("which tests cover X", "is this tested", "where should the next test go") that don't need a run → `tokensave:assessing-test-coverage`.
 
 ## Output
 

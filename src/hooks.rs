@@ -148,13 +148,20 @@ pub fn hook_cursor_subagent_start() -> i32 {
     0
 }
 
-/// Cursor `preToolUse` hook handler.
+/// Cursor `postToolUse` hook handler.
 ///
-/// Emits nonblocking Cursor-shaped hook-specific context for broad search
-/// tools such as Grep and shell `rg` before the model spends a tool call on them.
-pub fn hook_cursor_pre_tool_use() -> i32 {
+/// Emits soft `additional_context` hints steering exploration tools (Grep,
+/// Glob, Read, semantic search, shell `rg`) toward tokensave MCP tools.
+/// Registered on `postToolUse` rather than `preToolUse` because Cursor's
+/// documented `preToolUse` output schema has no context-injection field —
+/// `additional_context` is only honored on `postToolUse`. The hook runs
+/// unmatched (the docs enumerate no matcher value for Cursor's semantic
+/// search tool) and irrelevant tools fail open with no output. Each hint
+/// category is emitted at most once per session via [`ToolHintDedupe`]
+/// persisted under `.tokensave/`.
+pub fn hook_cursor_post_tool_use() -> i32 {
     let event = read_stdin_to_string();
-    if let Some(decision) = evaluate_cursor_pre_tool_use(&event) {
+    if let Some(decision) = cursor_post_tool_use_decision(&event) {
         println!("{decision}");
     }
     0
@@ -176,11 +183,30 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
         CURSOR_HOT_INGEST_BUDGET,
     )
     .await;
-    let mut output = serde_json::json!({ "continue": true });
-    if let Some(hint) = cursor_prompt_hint(&event) {
-        output["additional_context"] = Value::String(format_tool_hint(&hint));
-    }
-    println!("{output}");
+    // Cursor's documented `beforeSubmitPrompt` output is `continue` +
+    // `user_message` only — `additional_context` is not part of this event's
+    // contract, so no hint is emitted here (the postToolUse and sessionStart
+    // hooks are the documented context channels).
+    println!("{}", serde_json::json!({ "continue": true }));
+    0
+}
+
+/// Cursor `sessionEnd` hook handler (fire-and-forget).
+///
+/// Final transcript-ingest flush when a conversation ends (including
+/// `window_close` / `user_close`, which the end-of-turn `stop` hook can
+/// miss). `sessionEnd` receives the common-schema `transcript_path`, so the
+/// regular capped catch-up ingest applies. The response is logged but unused,
+/// so an empty object is emitted. Fail-open.
+pub async fn hook_cursor_session_end() -> i32 {
+    let event = read_stdin_to_string();
+    ingest_cursor_transcript_for_event(
+        &event,
+        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
+        CURSOR_STOP_INGEST_BUDGET,
+    )
+    .await;
+    println!("{}", serde_json::json!({}));
     0
 }
 
@@ -233,22 +259,40 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let root = cursor_project_root_from_event(&event);
-    let context = session_steering_context_for_root(root.as_deref()).await;
+    let context = cursor_session_context_for_root(root.as_deref()).await;
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
     0
 }
 
-/// Builds the tokensave steering `additional_context` for a resolved project
-/// root: reports index freshness when initialized, otherwise suggests
-/// `tokensave init`. Shared by the Cursor and Codex session/prompt hooks.
-async fn session_steering_context_for_root(root: Option<&Path>) -> String {
+/// Builds the lean Cursor `sessionStart` context for a resolved project root.
+///
+/// Deliberately complementary to (not duplicative of) the plugin's always-on
+/// rule: the rule carries the tool-routing steering, so this only adds what
+/// the rule cannot know — index freshness, the skill index, and the
+/// tokens-saved counter.
+async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
+    let (initialized, staleness, tokens_saved) = match root {
+        Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
+            let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
+            (true, staleness, tokens_saved)
+        }
+        _ => (false, None, None),
+    };
+    build_cursor_session_context(initialized, staleness.as_deref(), tokens_saved)
+}
+
+/// Builds the tokensave steering `additional_context` for Codex session/prompt
+/// hooks. Unlike Cursor, Codex has no always-applied tokensave rule, so this
+/// context carries the full tool-routing steering plus index freshness.
+async fn codex_session_context_for_root(root: Option<&Path>) -> String {
     let (initialized, staleness) = match root {
         Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
-            (true, cursor_staleness_for_root(r).await)
+            let (staleness, _) = cursor_index_signals_for_root(r).await;
+            (true, staleness)
         }
         _ => (false, None),
     };
-    build_cursor_session_context(initialized, staleness.as_deref())
+    build_codex_session_context(initialized, staleness.as_deref())
 }
 
 /// Cursor `afterShellExecution` hook handler.
@@ -276,16 +320,43 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     0
 }
 
+/// Subagent types shipped by the tokensave Cursor plugin itself. These are
+/// already tokensave-first by construction, so the research deny below must
+/// never fire for them. Cursor's hooks docs only enumerate the built-in
+/// subagent types (`generalPurpose`, `explore`, `shell`, …); live Cursor
+/// reports plugin agents under their bare agent-file name (e.g.
+/// `code-explorer`), optionally namespaced (`tokensave:code-explorer`), so
+/// matching is done on the normalized name after any `:` prefix.
+const TOKENSAVE_PLUGIN_SUBAGENTS: &[&str] =
+    &["codeexplorer", "codehealthauditor", "sessionhistorian"];
+
+fn is_tokensave_plugin_subagent(subagent_type: &str) -> bool {
+    let bare = subagent_type
+        .rsplit(':')
+        .next()
+        .unwrap_or(subagent_type)
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    TOKENSAVE_PLUGIN_SUBAGENTS.contains(&bare.as_str())
+}
+
 /// Pure decision logic for Cursor `subagentStart` hook events.
 ///
 /// Returns a Cursor hook response only when a research-oriented subagent should
-/// be denied in favor of tokensave MCP tools.
+/// be denied in favor of tokensave MCP tools. The plugin's own tokensave-first
+/// agents (code-explorer, code-health-auditor, session-historian) are
+/// allow-listed before the research-prompt check so they are never denied.
 pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let subagent_type = parsed
         .get("subagent_type")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if is_tokensave_plugin_subagent(subagent_type) {
+        return None;
+    }
     let task = parsed
         .get("task")
         .and_then(Value::as_str)
@@ -315,20 +386,63 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
     None
 }
 
-/// Pure decision logic for Cursor `preToolUse` hook events.
+/// Pure decision logic for Cursor `postToolUse` hook events.
 ///
-/// Returns a soft native Cursor `additional_context` hint only for high-confidence
-/// broad search tools. Invalid or unrelated tool events fail open with no output.
-pub fn evaluate_cursor_pre_tool_use(event_json: &str) -> Option<String> {
+/// Returns a soft `additional_context` payload (Cursor's documented
+/// `postToolUse` output shape) for exploration tools tokensave can replace.
+/// Invalid or unrelated tool events fail open with no output. Session-level
+/// dedupe lives in [`cursor_post_tool_use_decision`]; this stays pure for
+/// tests.
+pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let hint = decide_hint(&cursor_pre_tool_hint_input(&parsed))?;
+    let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
     Some(
         serde_json::json!({
-            "continue": true,
             "additional_context": format_tool_hint(&hint),
         })
         .to_string(),
     )
+}
+
+/// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
+/// per-session hint dedupe persisted under the project's `.tokensave/` dir.
+pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
+    let hint = deduped_cursor_hint(event_json, hint)?;
+    Some(
+        serde_json::json!({
+            "additional_context": format_tool_hint(&hint),
+        })
+        .to_string(),
+    )
+}
+
+/// Suppresses hints that were already emitted for this session.
+///
+/// The `(session_id, category)` pairs are persisted in
+/// `.tokensave/tool_hints_seen.json` so each hint category surfaces at most
+/// once per Cursor session across short-lived hook processes. Hints are also
+/// suppressed entirely when the workspace has no tokensave index (suggesting
+/// tokensave tools there would be misleading). When no session id is present
+/// the hint is emitted as-is — dedupe is impossible but the hint is still
+/// useful (fail-open).
+fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
+    let root = cursor_project_root_from_event(event_json)?;
+    if !crate::tokensave::TokenSave::is_initialized(&root) {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let Some(session_id) = event_session_id(&parsed) else {
+        return Some(hint);
+    };
+    let path = crate::config::get_tokensave_dir(&root).join("tool_hints_seen.json");
+    let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
+    if !dedupe.should_emit(session_id, hint.category) {
+        return None;
+    }
+    let _ = dedupe.save(&path);
+    Some(hint)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -706,9 +820,78 @@ pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_se
     }
 }
 
-/// Builds the `sessionStart` `additional_context` text: steer the agent toward
-/// tokensave MCP tools and report index freshness for the workspace.
-pub fn build_cursor_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
+/// Model-invocable workflow skills shipped in the tokensave Cursor plugin's
+/// `skills/` directory (slash dispatchers with `disable-model-invocation:
+/// true` are excluded). Kept as one constant so the session steering context
+/// and the bundle coverage test in `agents::cursor` stay in sync.
+pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
+    "architecture-overview",
+    "assessing-test-coverage",
+    "atomic-code-edits",
+    "auditing-code-safety",
+    "cleaning-up-dead-code",
+    "code-health-report",
+    "cross-branch-investigation",
+    "drafting-commit-and-pr",
+    "exploring-types-and-traits",
+    "finding-duplicate-logic",
+    "finding-impacted-areas",
+    "fixing-build-and-type-errors",
+    "porting-code",
+    "project-status",
+    "reading-code-cheaply",
+    "recalling-project-memory",
+    "recalling-session-context",
+    "refactoring-safely",
+    "reviewing-a-diff",
+    "running-impacted-tests",
+    "searching-for-code",
+    "tracing-functions",
+    "tracking-session-health",
+];
+
+/// Builds the Cursor `sessionStart` `additional_context` text.
+///
+/// Intentionally lean: the always-applied plugin rule already carries the
+/// tool-routing steering, so repeating it here would burn tokens every
+/// session. This adds only the session-specific signals — index freshness,
+/// the workflow-skill index, and the tokens-saved counter.
+pub fn build_cursor_session_context(
+    initialized: bool,
+    staleness_hint: Option<&str>,
+    tokens_saved: Option<u64>,
+) -> String {
+    let mut s = String::new();
+    if initialized {
+        match staleness_hint {
+            Some(hint) => {
+                s.push_str("tokensave index status: ");
+                s.push_str(hint);
+                s.push_str(".\n");
+            }
+            None => s.push_str("tokensave index status: initialized.\n"),
+        }
+        s.push_str("Workflow skills: tokensave:");
+        s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
+        s.push_str(" — each maps a common workflow to the right tokensave tools.\n");
+        if let Some(saved) = tokens_saved.filter(|saved| *saved > 0) {
+            s.push_str("Tokens saved by tokensave this session: ");
+            s.push_str(&saved.to_string());
+            s.push_str(".\n");
+        }
+    } else {
+        s.push_str(
+            "tokensave index status: no .tokensave/ index found in this workspace — \
+             run `tokensave init` to enable tokensave MCP tools.\n",
+        );
+    }
+    s
+}
+
+/// Builds the Codex session/prompt steering context. Codex has no
+/// always-applied tokensave rule, so the full tool-routing steering lives
+/// here.
+pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str(
         "tokensave is available via MCP. Prefer tokensave MCP tools \
@@ -767,13 +950,16 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
     .to_string()
 }
 
-async fn cursor_staleness_for_root(root: &Path) -> Option<String> {
-    let cg = crate::tokensave::TokenSave::open(root).await.ok()?;
+/// Opens the index once and reads both session-steering signals: the
+/// staleness hint and the session tokens-saved counter.
+async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u64>) {
+    let Ok(cg) = crate::tokensave::TokenSave::open(root).await else {
+        return (None, None);
+    };
     let last = cg.last_sync_timestamp().await;
-    if last <= 0 {
-        return None;
-    }
-    Some(cursor_staleness_hint(now_unix_secs() - last))
+    let staleness = (last > 0).then(|| cursor_staleness_hint(now_unix_secs() - last));
+    let tokens_saved = cg.get_tokens_saved().await.ok();
+    (staleness, tokens_saved)
 }
 
 /// Targeted, fail-open single-file sync for Cursor `afterFileEdit`.
@@ -927,7 +1113,7 @@ fn now_unix_secs() -> i64 {
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_stdin_to_string();
     let root = codex_project_root_from_event(&event);
-    let context = session_steering_context_for_root(root.as_deref()).await;
+    let context = codex_session_context_for_root(root.as_deref()).await;
     println!(
         "{}",
         codex_additional_context_json("SessionStart", &context)
@@ -943,7 +1129,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_stdin_to_string();
     let root = codex_project_root_from_event(&event);
     reset_counter_for_codex_event(&event).await;
-    let mut context = session_steering_context_for_root(root.as_deref()).await;
+    let mut context = codex_session_context_for_root(root.as_deref()).await;
     if let Some(hint) = codex_prompt_hint(&event) {
         append_tool_hint(&mut context, &hint);
     }
@@ -1300,8 +1486,10 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
 /// backlogs are left for the `sessionStart` / `stop` catch-up ingests.
 const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
 /// Largest transcript tail a low-priority Cursor catch-up hook will read.
-/// Oversized backlogs stay queued instead of blocking hook execution.
-const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// Oversized backlogs stay queued instead of blocking hook execution. Public
+/// so ingest-health reporting (`tokensave_status`, doctor) can flag a backlog
+/// the hooks will never drain on their own.
+pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
 /// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
 const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
@@ -1363,24 +1551,7 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
     }
 }
 
-fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    decide_hint(&ToolHintInput {
-        agent: HintAgent::Cursor,
-        session_id: event_session_id(&parsed),
-        tool_name: None,
-        command: None,
-        prompt: prompt_like_text(&parsed),
-        subagent_type: None,
-        file_path: parsed
-            .get("file_path")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        hints_enabled: true,
-    })
-}
-
-fn cursor_pre_tool_hint_input(parsed: &Value) -> ToolHintInput {
+fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
     let tool_input = parsed
         .get("tool_input")
         .or_else(|| parsed.get("toolInput"))

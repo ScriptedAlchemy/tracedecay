@@ -5,7 +5,7 @@ description: Produce a code-health scorecard for the repo or a directory — com
 
 # Code-health report
 
-Quality-scorecard companion to `tokensave:architecture-overview` (which maps structure). Lead with the one composite signal, then drill only into the weak dimensions and the specific scans the user asked for — don't run every tool by reflex.
+Quality-scorecard companion to `tokensave:architecture-overview` (which maps structure; for a module map or layering questions go there). This skill is the **canonical home of the `tokensave_health` drill-down ladder**: lead with the one composite signal, then drill only into the weak dimensions and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Workflow
 
@@ -18,13 +18,13 @@ Quality-scorecard companion to `tokensave:architecture-overview` (which maps str
 7. **Safety / panic sites → `tokensave_unsafe_patterns`** (`kinds?`, `exclude_tests?`, `path?`).
 8. **Risk-weighted test gaps → `tokensave_test_risk`** (`path?`, `limit?`): where the next test should go.
 9. **Changed-files-only pass (optional) → `tokensave_simplify_scan`** (`files`).
-10. **Track a session (optional):** `tokensave_session_start` before edits, `tokensave_session_end` after, for the per-dimension health delta.
+10. **Track a session (optional):** bracket the work via `tokensave:tracking-session-health` for the per-dimension before/after delta.
 
 ## Guardrails
 
 - Discovery/analysis tools are read-only and parallel-safe. `tokensave_session_start` / `tokensave_session_end` write/remove `.tokensave/session_baseline.json`; use them only when a before/after delta is relevant and respect Cursor approval/run-mode.
 - `tokensave_redundancy` is computed lazily and cached; the first call on a fresh index can be slow on large repos — keep `path`/`max_pairs` tight.
-- This skill reports and prioritizes; it does not edit. To fix findings, hand off to `tokensave:atomic-code-edits` / `tokensave:cleaning-up-dead-code`; to verify, `tokensave:running-impacted-tests`.
+- This skill reports and prioritizes; it does not edit. To fix findings, hand off to `tokensave:atomic-code-edits` / `tokensave:cleaning-up-dead-code`; to verify, `tokensave:running-impacted-tests`. For a focused ship-readiness sweep (panic sites, risk markers, dead code, untested high-risk symbols) use `tokensave:auditing-code-safety` instead of the full scorecard.
 
 ## Output
 

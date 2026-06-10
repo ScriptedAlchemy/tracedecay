@@ -28,6 +28,24 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
+/// Transcript-ingest backlog snapshot for a session store. See
+/// [`GlobalDb::session_ingest_health`].
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct SessionIngestHealth {
+    /// Transcripts referenced by sessions that still exist on disk.
+    pub tracked_transcripts: u64,
+    /// Transcripts with un-ingested appended bytes.
+    pub pending_transcripts: u64,
+    /// Total un-ingested bytes across pending transcripts.
+    pub pending_bytes: u64,
+    /// Largest single-transcript backlog. The hook ingest caps are
+    /// per-transcript, so this (not the total) decides whether the hooks can
+    /// still drain the backlog on their own.
+    pub max_transcript_pending_bytes: u64,
+    /// Newest transcript mtime recorded at ingest time (Unix seconds).
+    pub last_ingest_unix: Option<i64>,
+}
+
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
@@ -44,6 +62,13 @@ pub fn global_db_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
+}
+
+/// True when `TOKENSAVE_GLOBAL_DB` pins the global DB to an explicit path.
+/// Consumers (the dashboard LCM store selection) treat the override as an
+/// operator decision that wins over project-local store discovery.
+pub fn global_db_path_is_overridden() -> bool {
+    std::env::var_os(GLOBAL_DB_PATH_ENV).is_some_and(|path| !path.is_empty())
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -350,6 +375,57 @@ impl GlobalDb {
     /// server queries the LCM tables directly).
     pub(crate) fn dashboard_connection(&self) -> Connection {
         self.conn.clone()
+    }
+
+    /// Transcript-ingest backlog for the session store backing this DB.
+    ///
+    /// For every session with a known transcript path, compares the on-disk
+    /// transcript size against the persisted parse offset. `pending_bytes` is
+    /// the total un-ingested tail across transcripts; `last_ingest_unix` is
+    /// the newest transcript mtime recorded at ingest time. Surfaced by
+    /// `tokensave_status` and `tokensave doctor --agent cursor` so a stalled
+    /// ingest (e.g. a backlog larger than the hook ingest caps) is visible
+    /// instead of silently eroding trust in session recall.
+    pub async fn session_ingest_health(&self) -> SessionIngestHealth {
+        let mut health = SessionIngestHealth::default();
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT DISTINCT transcript_path FROM sessions
+                 WHERE transcript_path IS NOT NULL AND transcript_path != ''
+                 LIMIT 1000",
+                (),
+            )
+            .await
+        else {
+            return health;
+        };
+        let mut paths = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Ok(path) = row.get::<String>(0) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            health.tracked_transcripts += 1;
+            let (offset, mtime) = self.get_parse_offset(&path).await.unwrap_or((0, 0));
+            if mtime > 0 {
+                let mtime = mtime as i64;
+                health.last_ingest_unix =
+                    Some(health.last_ingest_unix.map_or(mtime, |prev| prev.max(mtime)));
+            }
+            let pending = meta.len().saturating_sub(offset);
+            if pending > 0 {
+                health.pending_transcripts += 1;
+                health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                health.max_transcript_pending_bytes =
+                    health.max_transcript_pending_bytes.max(pending);
+            }
+        }
+        health
     }
 
     /// Registers or updates a project's tokens-saved count. Best-effort.

@@ -70,7 +70,8 @@ pub enum Commands {
     // so we can print the per-tool schema instead of clap's generic help.
     #[command(disable_help_flag = true)]
     Tool {
-        /// Project root to open before dispatching the tool. Defaults to cwd.
+        /// Project root to open before dispatching the tool. Defaults to the
+        /// nearest initialised project walking up from cwd.
         #[arg(long)]
         project: Option<String>,
         /// MCP tool name (with or without the `tokensave_` prefix). Omit to list all tools.
@@ -97,6 +98,11 @@ pub enum Commands {
         /// Install into the default profile and every Hermes profile directory
         #[arg(long, conflicts_with = "profile")]
         all_profiles: bool,
+        /// Pin the generated plugin to a project root (absolute path; only
+        /// used with --agent hermes). All plugin tool calls then resolve that
+        /// project's .tokensave/ stores regardless of the Hermes cwd.
+        #[arg(long, conflicts_with = "all_profiles")]
+        project_root: Option<String>,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
@@ -137,9 +143,9 @@ pub enum Commands {
     /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-subagent-start", hide = true)]
     HookCursorSubagentStart,
-    /// Cursor preToolUse hook handler (called by Cursor, not by users directly)
-    #[command(name = "hook-cursor-pre-tool-use", hide = true)]
-    HookCursorPreToolUse,
+    /// Cursor postToolUse hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-post-tool-use", hide = true)]
+    HookCursorPostToolUse,
     /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
     HookCursorBeforeSubmitPrompt,
@@ -149,6 +155,9 @@ pub enum Commands {
     /// Cursor sessionStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-session-start", hide = true)]
     HookCursorSessionStart,
+    /// Cursor sessionEnd hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-session-end", hide = true)]
+    HookCursorSessionEnd,
     /// Cursor afterShellExecution hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-after-shell", hide = true)]
     HookCursorAfterShell,

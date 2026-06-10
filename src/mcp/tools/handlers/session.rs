@@ -1027,6 +1027,23 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
     }
 }
 
+/// Parses the `scope` argument for `tokensave_message_search`. Like
+/// [`parse_lcm_scope`], invalid values are a hard error naming the valid set —
+/// never silently broadened to `all`.
+fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
+    let Some(value) = args.get("scope") else {
+        return Ok(SessionSearchScope::All);
+    };
+    match value.as_str().map(str::trim) {
+        Some("all") => Ok(SessionSearchScope::All),
+        Some("parents_only") => Ok(SessionSearchScope::ParentsOnly),
+        Some("subagents_only") => Ok(SessionSearchScope::SubagentsOnly),
+        _ => Err(argument_error(
+            "scope must be one of all, parents_only, subagents_only",
+        )),
+    }
+}
+
 pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let query = args
         .get("query")
@@ -1056,15 +1073,7 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         .get("include_subagents")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let mut scope = match args
-        .get("scope")
-        .and_then(Value::as_str)
-        .map_or("all", str::trim)
-    {
-        "parents_only" => SessionSearchScope::ParentsOnly,
-        "subagents_only" => SessionSearchScope::SubagentsOnly,
-        _ => SessionSearchScope::All,
-    };
+    let mut scope = parse_message_search_scope(&args)?;
     if !include_subagents && matches!(scope, SessionSearchScope::All) {
         scope = SessionSearchScope::ParentsOnly;
     }

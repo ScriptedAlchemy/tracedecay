@@ -166,21 +166,27 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
 fn sample_process() -> ProcessSnapshot {
     let pid = Pid::from_u32(std::process::id());
 
-    // First refresh: takes the baseline reading.
+    // Refresh only *our own* process. The previous implementation passed
+    // `.with_processes(..)` to `System::new_with_specifics`, which enumerates
+    // and samples every process on the host — by far the heaviest part of the
+    // reported Windows `tokensave_runtime` crash (STATUS_STACK_OVERFLOW on a
+    // host with a large process table). The primary fix for that crash is the
+    // explicit-stack entrypoint in `main.rs` (`ASYNC_STACK_BYTES`: Windows
+    // gives the main thread only 1 MiB); scoping the refresh to our PID
+    // additionally bounds this handler's work and memory regardless of host
+    // process count. `sample_process_fits_in_a_small_stack` guards the stack
+    // footprint of this path.
+    let refresh = ProcessRefreshKind::new().with_cpu().with_memory();
     let mut sys = System::new_with_specifics(
         RefreshKind::new()
-            .with_processes(ProcessRefreshKind::new().with_cpu().with_memory())
             .with_memory(sysinfo::MemoryRefreshKind::new().with_ram())
             .with_cpu(sysinfo::CpuRefreshKind::new()),
     );
     // Two reads bracketing a sleep are required: sysinfo reports
     // `cpu_usage()` as the delta between successive refreshes.
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
     std::thread::sleep(CPU_SAMPLE_WINDOW);
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::new().with_cpu().with_memory(),
-    );
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
 
     let proc = sys.process(pid);
     let rss_bytes = proc.map_or(0, sysinfo::Process::memory);
@@ -345,7 +351,7 @@ fn bytes_human(n: u64) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -363,5 +369,20 @@ mod tests {
         let p = Path::new("/tmp/x.db");
         assert_eq!(with_suffix(p, "-wal"), Path::new("/tmp/x.db-wal"));
         assert_eq!(with_suffix(p, "-shm"), Path::new("/tmp/x.db-shm"));
+    }
+
+    /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against
+    /// `tokensave_runtime`: the process-sampling path must fit comfortably
+    /// inside a stack far smaller than Windows' 1 MiB main-thread default.
+    #[test]
+    fn sample_process_fits_in_a_small_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(sample_process)
+            .expect("spawn small-stack thread");
+        let snap = handle
+            .join()
+            .expect("sample_process must not overflow a 512 KiB stack");
+        assert_eq!(snap.pid, std::process::id());
     }
 }

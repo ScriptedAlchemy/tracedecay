@@ -489,3 +489,50 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
         Some("parent")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Transcript ingest health
+// ---------------------------------------------------------------------------
+
+/// `session_ingest_health` must report the un-ingested tail per transcript:
+/// fully-ingested transcripts contribute nothing, partially-ingested ones
+/// contribute their pending bytes, and the per-transcript maximum drives the
+/// stalled-ingest detection in `tokensave_status` / doctor.
+#[tokio::test]
+async fn session_ingest_health_reports_pending_transcript_backlog() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+
+    let drained = tmp.path().join("drained.jsonl");
+    std::fs::write(&drained, "x".repeat(100)).unwrap();
+    let backlogged = tmp.path().join("backlogged.jsonl");
+    std::fs::write(&backlogged, "y".repeat(500)).unwrap();
+    let missing = tmp.path().join("missing.jsonl");
+
+    for (session_id, path) in [
+        ("s-drained", &drained),
+        ("s-backlogged", &backlogged),
+        ("s-missing", &missing),
+    ] {
+        let mut session = sample_session("cursor", session_id, "proj");
+        session.transcript_path = Some(path.to_string_lossy().to_string());
+        db.upsert_session(&session).await;
+    }
+
+    // drained: offset == file size; backlogged: 200 of 500 bytes ingested.
+    db.set_parse_offset(&drained.to_string_lossy(), 100, 1_000)
+        .await;
+    db.set_parse_offset(&backlogged.to_string_lossy(), 200, 2_000)
+        .await;
+
+    let health = db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 2, "missing files are skipped");
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(health.pending_bytes, 300);
+    assert_eq!(health.max_transcript_pending_bytes, 300);
+    assert_eq!(
+        health.last_ingest_unix,
+        Some(2_000),
+        "the newest recorded ingest mtime should be reported"
+    );
+}

@@ -8519,3 +8519,51 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     let row = rows.next().await.unwrap().unwrap();
     assert_eq!(row.get::<i64>(0).unwrap(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Scope validation (fail-closed, not fail-open)
+// ---------------------------------------------------------------------------
+
+/// Regression test: an invalid `scope` must be a hard error naming the valid
+/// values — never silently broadened to `all`.
+#[tokio::test]
+async fn lcm_grep_rejects_invalid_scope() {
+    let (cg, _dir) = setup_project().await;
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tokensave_lcm_grep",
+            json!({"query": "anything", "scope": "everything"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("scope must be one of current, session, all"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Same contract for `tokensave_message_search`: invalid scope values fail
+/// closed instead of broadening the search to every session.
+#[tokio::test]
+async fn message_search_rejects_invalid_scope() {
+    let (cg, _dir) = setup_project().await;
+    for invalid in ["everything", "", "parents"] {
+        let err = expect_tool_error(
+            handle_tool_call(
+                &cg,
+                "tokensave_message_search",
+                json!({"query": "anything", "scope": invalid}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            err.contains("scope must be one of all, parents_only, subagents_only"),
+            "unexpected error for scope {invalid:?}: {err}"
+        );
+    }
+}

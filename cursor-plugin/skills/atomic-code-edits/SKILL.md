@@ -14,16 +14,17 @@ These tools mutate files; invoke them only when an edit is relevant to the task 
 3. **Insert at an anchor → `tokensave_insert_at`** (`path`, `anchor` = unique string or 1-indexed line number, `content`, `before?`): add a line/block before or after a unique anchor.
 4. **Insert around a symbol → `tokensave_insert_at_symbol`** (`symbol`, `content`, `position`: `before`|`after`): drop code adjacent to a named symbol's range (prefer a qualified name).
 5. **Rewrite a whole symbol → `tokensave_replace_symbol`** (`symbol`, `new_source`): replace a function/method/struct/enum; `new_source` must include the declaration line. Refused on unresolved ambiguity.
+6. **Structural pattern rewrite → `tokensave_ast_grep_rewrite`** (`path`, `pattern`, `rewrite`, ast-grep SGPattern syntax): rewrite every match of a syntactic pattern in one file — e.g. swap argument order or wrap calls (`foo($A)` → `bar(foo($A))`) — where string matching would over- or under-match. Repeat per file for multi-file rewrites.
 
 ## Before & after
 
-- **Preview blast radius first → `tokensave_rename_preview`** (`node_id`) for renames, or resolve the target with the `tokensave:searching-for-code` ladder so you edit the right symbol.
+- **Preview blast radius first → `tokensave_rename_preview`** (`node_id`) for renames, or resolve the target with the `tokensave:searching-for-code` ladder so you edit the right symbol. For multi-site mechanical refactors (rename everywhere, signature/field changes), run the `tokensave:refactoring-safely` recon first and use its checklist as the edit plan.
 - **Verify after editing:** typecheck via `tokensave:fixing-build-and-type-errors`, then `tokensave:running-impacted-tests`.
 
 ## Guardrails
 
 - `str_replace` / `multi_str_replace` / `insert_at` are single-file; `insert_at_symbol` / `replace_symbol` resolve by (qualified) name and refuse ambiguous matches — disambiguate rather than forcing.
-- For structural multi-file rewrites the graph can't anchor, fall back to your normal edit tools.
+- `tokensave_ast_grep_rewrite` shells out to the external `ast-grep` binary: it is only registered when `ast-grep` is on PATH and fails when it is not installed. If the tool is absent, tell the user to install ast-grep rather than approximating the rewrite with regex.
 
 ## Output
 
