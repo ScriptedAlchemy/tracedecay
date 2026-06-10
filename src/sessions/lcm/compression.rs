@@ -3,6 +3,7 @@ use std::path::Path;
 use libsql::{params, Connection};
 use serde_json::{json, Map, Value};
 
+use crate::sessions::source::message_storage_text;
 use crate::sessions::SessionMessageRecord;
 
 use super::extraction;
@@ -533,6 +534,7 @@ async fn compress_in_transaction(
                 conn,
                 &request.provider,
                 &request.session_id,
+                &raw_messages,
                 ReplayWindowParts {
                     pinned_anchors: &window.pinned_anchors,
                     deferred_backlog: &[],
@@ -566,6 +568,7 @@ async fn compress_in_transaction(
             &conversation_id,
             &existing_frontier,
             &window,
+            &raw_messages,
         )
         .await?
         {
@@ -575,6 +578,7 @@ async fn compress_in_transaction(
             conn,
             &request.provider,
             &request.session_id,
+            &raw_messages,
             ReplayWindowParts {
                 pinned_anchors: &window.pinned_anchors,
                 deferred_backlog: &[],
@@ -613,6 +617,7 @@ async fn compress_in_transaction(
                 conn,
                 &request.provider,
                 &request.session_id,
+                &raw_messages,
                 ReplayWindowParts {
                     pinned_anchors: &window.pinned_anchors,
                     deferred_backlog: &window.backlog,
@@ -743,6 +748,7 @@ async fn compress_in_transaction(
         conn,
         &request.provider,
         &request.session_id,
+        &raw_messages,
         ReplayWindowParts {
             pinned_anchors: &window.pinned_anchors,
             deferred_backlog: &remaining_backlog,
@@ -1220,18 +1226,17 @@ async fn assemble_replay_context(
     conn: &Connection,
     provider: &str,
     session_id: &str,
+    anchor_source: &[LcmRawMessage],
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
-    let anchor_source = load_raw_messages_for_session(conn, provider, session_id).await?;
-    let anchor_source = anchor_source.iter().collect::<Vec<_>>();
     let (anchors, raws) = split_leading_anchors(&parts);
     Ok(assemble_replay_messages(
         &anchors,
         &summaries,
         &raws,
-        &anchor_source,
+        anchor_source,
         max_assembly_tokens,
     ))
 }
@@ -1243,18 +1248,17 @@ async fn assemble_overflow_recovery_replay(
     conn: &Connection,
     provider: &str,
     session_id: &str,
+    anchor_source: &[LcmRawMessage],
     parts: ReplayWindowParts<'_>,
     max_assembly_tokens: Option<i64>,
 ) -> Result<Vec<Value>, LcmError> {
     let summaries = dag::load_uncondensed_summary_nodes(conn, provider, session_id).await?;
-    let anchor_source = load_raw_messages_for_session(conn, provider, session_id).await?;
-    let anchor_source = anchor_source.iter().collect::<Vec<_>>();
     let (anchors, raws) = split_leading_anchors(&parts);
     let candidate = assemble_replay_messages(
         &anchors,
         &summaries,
         &raws,
-        &anchor_source,
+        anchor_source,
         max_assembly_tokens,
     );
     if candidate.len() == anchors.len() {
@@ -1294,7 +1298,7 @@ fn assemble_replay_messages(
     anchors: &[&LcmRawMessage],
     summaries: &[dag::LcmUncondensedSummaryNode],
     raws: &[&LcmRawMessage],
-    anchor_source: &[&LcmRawMessage],
+    anchor_source: &[LcmRawMessage],
     max_assembly_tokens: Option<i64>,
 ) -> Vec<Value> {
     let (selected_raws, selected_summaries, preserved_objective_anchor) = match max_assembly_tokens
@@ -1424,7 +1428,7 @@ fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
 }
 
 fn latest_user_context_anchor(
-    raws: &[&LcmRawMessage],
+    raws: &[LcmRawMessage],
     selected_tail: &[&LcmRawMessage],
 ) -> Option<(i64, String, bool)> {
     for message in raws.iter().rev() {
@@ -1686,6 +1690,7 @@ async fn condense_summary_nodes_if_ready(
     conversation_id: &str,
     existing_frontier: &LcmLifecycleState,
     window: &CompressionWindow,
+    raw_messages: &[LcmRawMessage],
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
     let fan_in = request
         .summary_fan_in
@@ -1759,6 +1764,7 @@ async fn condense_summary_nodes_if_ready(
         conn,
         &request.provider,
         &request.session_id,
+        raw_messages,
         ReplayWindowParts {
             pinned_anchors: &window.pinned_anchors,
             deferred_backlog: &[],
@@ -2030,13 +2036,6 @@ fn message_content_value(message: &Value) -> Value {
         .get("content")
         .cloned()
         .unwrap_or_else(|| Value::String(String::new()))
-}
-
-fn message_storage_text(content: &Value) -> String {
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-    serde_json::to_string(content).unwrap_or_else(|_| content.to_string())
 }
 
 fn default_message_kind(role: &str) -> String {

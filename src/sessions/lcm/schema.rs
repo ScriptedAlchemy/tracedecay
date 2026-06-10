@@ -43,20 +43,19 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 /// their DDL; a missing table counts as current here because presence is
 /// checked separately (doctor) or guaranteed (migration runs the DDL).
 pub(crate) async fn raw_fts_structure_is_current(conn: &Connection) -> Option<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE name IN ('lcm_raw_messages_fts',
-                            'lcm_raw_messages_fts_insert',
-                            'lcm_raw_messages_fts_delete',
-                            'lcm_raw_messages_fts_update')
-               AND sql LIKE '%metadata_json%'",
-            (),
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let stale: i64 = row.get(0).ok()?;
+    let stale = util::fetch_i64(
+        conn,
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name IN ('lcm_raw_messages_fts',
+                        'lcm_raw_messages_fts_insert',
+                        'lcm_raw_messages_fts_delete',
+                        'lcm_raw_messages_fts_update')
+           AND sql LIKE '%metadata_json%'",
+        (),
+        "raw FTS structure query returned no rows",
+    )
+    .await
+    .ok()?;
     Some(stale == 0)
 }
 

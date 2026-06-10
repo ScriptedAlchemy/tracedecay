@@ -155,39 +155,58 @@ async fn add_session_parent_column_after_missing_check(
 }
 
 impl GlobalDb {
+    async fn open_local(db_path: &Path, read_only: bool) -> Option<Self> {
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let builder = if read_only {
+            Builder::new_local(db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Builder::new_local(db_path)
+        };
+        let db = builder.build().await.ok()?;
+        let conn = db.connect().ok()?;
+
+        let pragmas = if read_only {
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;"
+        } else {
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;"
+        };
+        conn.execute_batch(pragmas).await.ok()?;
+
+        Some(Self {
+            conn,
+            storage_root,
+            db_path: db_path.to_path_buf(),
+            _db: db,
+        })
+    }
+
     /// Opens (or creates) the global database at an explicit path. Returns
     /// `None` if the directory cannot be created or the DB fails to open.
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
-        let storage_root = db_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let db = Self::open_local(db_path, false).await?;
 
-        let db = Builder::new_local(db_path).build().await.ok()?;
-        let conn = db.connect().ok()?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;",
-        )
-        .await
-        .ok()?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS projects (
+        db.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS projects (
                 path TEXT PRIMARY KEY,
                 tokens_saved INTEGER NOT NULL DEFAULT 0
             )",
-        )
-        .await
-        .ok()?;
+            )
+            .await
+            .ok()?;
 
-        conn.execute_batch(
+        db.conn
+            .execute_batch(
             "CREATE TABLE IF NOT EXISTS turns (
                 message_id TEXT PRIMARY KEY,
                 project_hash TEXT NOT NULL,
@@ -288,15 +307,10 @@ impl GlobalDb {
         )
         .await
         .ok()?;
-        ensure_session_parent_columns(&conn).await?;
-        crate::sessions::lcm::schema::ensure_lcm_schema(&conn).await?;
+        ensure_session_parent_columns(&db.conn).await?;
+        crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
 
-        Some(Self {
-            conn,
-            storage_root,
-            db_path: db_path.to_path_buf(),
-            _db: db,
-        })
+        Some(db)
     }
 
     /// Opens a writable database at an explicit path assuming its schema was
@@ -308,29 +322,7 @@ impl GlobalDb {
         if !db_path.is_file() {
             return None;
         }
-        let storage_root = db_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-
-        let db = Builder::new_local(db_path).build().await.ok()?;
-        let conn = db.connect().ok()?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;",
-        )
-        .await
-        .ok()?;
-
-        Some(Self {
-            conn,
-            storage_root,
-            db_path: db_path.to_path_buf(),
-            _db: db,
-        })
+        Self::open_local(db_path, false).await
     }
 
     /// Opens an existing database without creating directories, creating schema,
@@ -339,31 +331,7 @@ impl GlobalDb {
         if !db_path.is_file() {
             return None;
         }
-        let storage_root = db_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-
-        let db = Builder::new_local(db_path)
-            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .ok()?;
-        let conn = db.connect().ok()?;
-
-        conn.execute_batch(
-            "PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;",
-        )
-        .await
-        .ok()?;
-
-        Some(Self {
-            conn,
-            storage_root,
-            db_path: db_path.to_path_buf(),
-            _db: db,
-        })
+        Self::open_local(db_path, true).await
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
@@ -638,17 +606,15 @@ impl GlobalDb {
             Err(_) => false,
         };
 
-        if projection_ok {
-            if self.conn.execute("COMMIT", ()).await.is_ok() {
-                true
-            } else {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                false
-            }
-        } else {
+        if !projection_ok {
             let _ = self.conn.execute("ROLLBACK", ()).await;
-            false
+            return false;
         }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
     }
 
     async fn upsert_session_message_projection(

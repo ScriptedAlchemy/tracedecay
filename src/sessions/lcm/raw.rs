@@ -467,21 +467,21 @@ fn protect_json_media_payloads(
             let original = std::mem::take(map);
             let mut rebuilt = Map::with_capacity(original.len());
             for (key, mut child) in original {
-                let mut protected_key = key.clone();
+                let mut replaced_key = None;
                 if security::contains_media_payload(&key) {
                     let key_field_path = format!("{field_path}.<key>");
-                    if let Some(replaced_key) = replace_media_substrings(
+                    if let Some(protected_key) = replace_media_substrings(
                         &key,
                         storage_root,
                         message,
                         &key_field_path,
                         payloads,
                     )? {
-                        protected_key = replaced_key;
+                        replaced_key = Some(protected_key);
                     }
                 }
-                let child_path = if protected_key == key {
-                    format!("{field_path}.{protected_key}")
+                let child_path = if replaced_key.is_none() {
+                    format!("{field_path}.{key}")
                 } else {
                     format!("{field_path}.<key>")
                 };
@@ -492,6 +492,7 @@ fn protect_json_media_payloads(
                     &child_path,
                     payloads,
                 )?;
+                let protected_key = replaced_key.unwrap_or(key);
                 rebuilt.insert(protected_key, child);
             }
             *map = rebuilt;
