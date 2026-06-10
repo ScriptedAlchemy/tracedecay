@@ -16,6 +16,18 @@ pub mod tool_hints;
 
 use tool_hints::{decide_hint, HintAgent, ToolHint, ToolHintInput};
 
+macro_rules! read_hook_event {
+    () => {{
+        match read_stdin_to_string() {
+            Ok(event) => event,
+            Err(e) => {
+                eprintln!("tokensave hook: failed to read stdin: {e}");
+                return 1;
+            }
+        }
+    }};
+}
+
 const TOKENSAVE_RESEARCH_BLOCK_REASON: &str = "STOP: Use tokensave MCP tools \
 (tokensave_context, tokensave_search, tokensave_callees, tokensave_callers, \
 tokensave_impact, tokensave_files, tokensave_affected) instead of agents for \
@@ -127,7 +139,7 @@ fn is_code_research_prompt(prompt: &str) -> bool {
 /// tool call and sends stderr back to the model. This is intentionally separate
 /// from Claude's hook handler because Claude expects a JSON decision on stdout.
 pub fn hook_kiro_pre_tool_use() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
         eprintln!("{reason}");
         2
@@ -141,7 +153,7 @@ pub fn hook_kiro_pre_tool_use() -> i32 {
 /// Cursor sends hook event JSON on stdin and expects Cursor-shaped JSON on
 /// stdout. This intentionally does not reuse the Claude hook output schema.
 pub fn hook_cursor_subagent_start() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     if let Some(decision) = evaluate_cursor_subagent_start(&event) {
         println!("{decision}");
     }
@@ -160,7 +172,7 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// category is emitted at most once per session via [`ToolHintDedupe`]
 /// persisted under `.tokensave/`.
 pub fn hook_cursor_post_tool_use() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     if let Some(decision) = cursor_post_tool_use_decision(&event) {
         println!("{decision}");
     }
@@ -175,7 +187,7 @@ pub fn hook_cursor_post_tool_use() -> i32 {
 /// output uses Cursor's documented `beforeSubmitPrompt` shape and never blocks
 /// submission, even if the tail ingest times out.
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     reset_counter_for_cursor_event(&event).await;
     ingest_cursor_transcript_for_event(
         &event,
@@ -199,7 +211,7 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
 /// regular capped catch-up ingest applies. The response is logged but unused,
 /// so an empty object is emitted. Fail-open.
 pub async fn hook_cursor_session_end() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -217,7 +229,7 @@ pub async fn hook_cursor_session_end() -> i32 {
 /// tails appended during the turn. The `stop` output is informational only, so
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 pub async fn hook_cursor_stop() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -238,7 +250,7 @@ pub async fn hook_cursor_stop() -> i32 {
 /// scan, no-ops when not stale, and waits/gives up on the sync lock, so no
 /// time-based debounce is needed. Fail-open and silent.
 pub async fn hook_cursor_after_file_edit() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     targeted_sync_for_cursor_after_file_edit(&event).await;
     0
 }
@@ -249,7 +261,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// steering the agent toward tokensave MCP tools and reporting index freshness
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     // Catch-up ingest for resumed sessions whose transcript grew while no agent
     // was attached. No-op (no transcript_path) for brand-new sessions. Fail-open.
     ingest_cursor_transcript_for_event(
@@ -303,7 +315,7 @@ async fn codex_session_context_for_root(root: Option<&Path>) -> String {
 /// acceptable. Back-to-back git commands are coalesced via a short marker-based
 /// guard (and the sync lock no-ops concurrent runs). Fail-open and silent.
 pub async fn hook_cursor_after_shell() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     sync_after_cursor_shell_event(&event).await;
     0
 }
@@ -314,7 +326,7 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// tokensave index, picking up changes made while no agent was attached. We
 /// don't load plugins, so the output is an empty object. Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     workspace_open_for_cursor_event(&event).await;
     println!("{}", serde_json::json!({}));
     0
@@ -447,26 +459,34 @@ fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    cursor_event_candidates(&parsed)
+    cursor_project_root_from_parsed_event(&parsed)
+}
+
+fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
+    let resolved = cursor_event_candidates(parsed)
         .into_iter()
-        .find_map(|candidate| crate::config::discover_project_root(&candidate))
+        .find_map(|candidate| crate::config::discover_project_root(&candidate));
+    let cwd_root = cursor_event_cwd(parsed)
+        .as_deref()
+        .and_then(crate::config::discover_project_root);
+    match (cwd_root, resolved) {
+        // Prefer the root derived from cwd when available; this avoids routing
+        // a root-B event into root A just because workspace_roots listed A first.
+        (Some(cwd_root), Some(resolved)) if !paths_same(&cwd_root, &resolved) => Some(cwd_root),
+        (Some(cwd_root), None) => Some(cwd_root),
+        (_, other) => other,
+    }
 }
 
 fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
-        for root in roots {
-            if let Some(path) = root.as_str().filter(|s| !s.is_empty()) {
-                candidates.push(PathBuf::from(path));
-            }
+    let mut push_unique = |candidate: PathBuf| {
+        if !candidates.iter().any(|seen| seen == &candidate) {
+            candidates.push(candidate);
         }
-    }
-    if let Some(cwd) = event
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        candidates.push(PathBuf::from(cwd));
+    };
+    if let Some(cwd) = cursor_event_cwd(event) {
+        push_unique(cwd);
     }
     if let Some(file_path) = event
         .get("file_path")
@@ -474,9 +494,32 @@ fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
         .filter(|s| !s.is_empty())
     {
         let path = Path::new(file_path);
-        candidates.push(path.parent().unwrap_or(path).to_path_buf());
+        push_unique(path.parent().unwrap_or(path).to_path_buf());
+    }
+    if let Some(transcript_path) = event
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        let path = Path::new(transcript_path);
+        push_unique(path.parent().unwrap_or(path).to_path_buf());
+    }
+    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
+        for root in roots {
+            if let Some(path) = root.as_str().filter(|s| !s.is_empty()) {
+                push_unique(PathBuf::from(path));
+            }
+        }
     }
     candidates
+}
+
+fn cursor_event_cwd(event: &Value) -> Option<PathBuf> {
+    event
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Returns `true` when `command` is a git invocation that changes the working
@@ -618,7 +661,10 @@ fn is_obvious_checkout_pathspec(token: &str) -> bool {
             .is_some_and(|(_, ext)| !ext.is_empty())
 }
 
-fn shell_words(command: &str) -> Vec<String> {
+/// Splits a shell command line into words, honoring single/double quotes and
+/// backslash escapes. Shared with `tool_hints` so search-command
+/// classification sees the same tokens as the checkout/sync parsing here.
+pub(crate) fn shell_words(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -1111,7 +1157,7 @@ fn now_unix_secs() -> i64 {
 /// Emits `hookSpecificOutput.additionalContext` steering the agent toward
 /// tokensave MCP tools and reporting index freshness for the session `cwd`.
 pub async fn hook_codex_session_start() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
     let context = codex_session_context_for_root(root.as_deref()).await;
     println!(
@@ -1126,7 +1172,7 @@ pub async fn hook_codex_session_start() -> i32 {
 /// Resets the per-project local counter for the new turn and injects the same
 /// tokensave steering context as `SessionStart`. Never blocks the prompt.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
     reset_counter_for_codex_event(&event).await;
     let mut context = codex_session_context_for_root(root.as_deref()).await;
@@ -1146,7 +1192,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 /// hard-stop a subagent at start (`continue: false` is ignored for this event),
 /// so this injects `additionalContext` instead of denying.
 pub fn hook_codex_subagent_start() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     if let Some(output) = evaluate_codex_subagent_start(&event) {
         println!("{output}");
     }
@@ -1161,7 +1207,7 @@ pub fn hook_codex_subagent_start() -> i32 {
 /// bootstrap branch tracking, other state-changing commands run a coalesced
 /// incremental sync. Fail-open and silent.
 pub async fn hook_codex_post_tool_use() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     codex_post_tool_use(&event).await;
     0
 }
@@ -1443,7 +1489,7 @@ pub async fn hook_prompt_submit() {
 ///
 /// Kiro adds successful hook stdout to context, so this handler stays silent.
 pub async fn hook_kiro_prompt_submit() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     reset_counter_for_kiro_event(&event).await;
     0
 }
@@ -1454,7 +1500,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// nearest initialized tokensave project from Kiro's `cwd` field and runs a
 /// silent incremental sync. Missing indexes and concurrent syncs are no-ops.
 pub async fn hook_kiro_post_tool_use() -> i32 {
-    let event = read_stdin_to_string();
+    let event = read_hook_event!();
     match sync_for_kiro_event(&event).await {
         Ok(()) => 0,
         Err(e) => {
@@ -1508,9 +1554,20 @@ async fn ingest_cursor_transcript_for_event(
     budget: Duration,
 ) {
     let work = async {
-        let Some(project_root) = cursor_project_root_from_event(event_json) else {
+        let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
             return;
         };
+        let Some(project_root) = cursor_project_root_from_parsed_event(&parsed) else {
+            return;
+        };
+        if let Some(cwd_root) = cursor_event_cwd(&parsed)
+            .as_deref()
+            .and_then(crate::config::discover_project_root)
+        {
+            if !paths_same(&cwd_root, &project_root) {
+                return;
+            }
+        }
         let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
             return;
         };
@@ -1654,10 +1711,10 @@ fn event_cwd(event_json: &str) -> Option<PathBuf> {
     }
 }
 
-fn read_stdin_to_string() -> String {
+fn read_stdin_to_string() -> std::io::Result<String> {
     let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    input
+    std::io::stdin().read_to_string(&mut input)?;
+    Ok(input)
 }
 
 /// `Stop` hook handler: ingests new session data and prints a cost receipt.

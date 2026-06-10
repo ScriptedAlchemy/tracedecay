@@ -330,8 +330,7 @@ fn test_cursor_post_tool_use_hints_for_semantic_search() {
         "session_id": "cursor-test"
     }"#;
 
-    let output =
-        evaluate_cursor_post_tool_use(input).expect("semantic search should get a hint");
+    let output = evaluate_cursor_post_tool_use(input).expect("semantic search should get a hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert!(v["additional_context"]
         .as_str()
@@ -480,6 +479,34 @@ fn test_cursor_project_root_uses_file_path_parent() {
         cursor_project_root_from_event(&input),
         Some(dir.path().to_path_buf())
     );
+}
+
+#[test]
+fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_a = dir.path().join("root-a");
+    let root_b = dir.path().join("root-b");
+    std::fs::create_dir_all(root_a.join(".tokensave")).unwrap();
+    std::fs::create_dir_all(root_b.join(".tokensave")).unwrap();
+    std::fs::write(root_a.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::write(root_b.join(".tokensave/tokensave.db"), "").unwrap();
+    let cwd_b = root_b.join("src");
+    std::fs::create_dir_all(&cwd_b).unwrap();
+
+    let input = format!(
+        r#"{{
+            "hook_event_name": "beforeSubmitPrompt",
+            "workspace_roots": [{}, {}],
+            "cwd": {},
+            "transcript_path": {}
+        }}"#,
+        serde_json::to_string(root_a.to_str().unwrap()).unwrap(),
+        serde_json::to_string(root_b.to_str().unwrap()).unwrap(),
+        serde_json::to_string(cwd_b.to_str().unwrap()).unwrap(),
+        serde_json::to_string(root_b.join("agent-transcripts/s1.jsonl").to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(cursor_project_root_from_event(&input), Some(root_b));
 }
 
 #[test]

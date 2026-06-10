@@ -320,7 +320,12 @@ fn is_semantic_search_tool(input: &ToolHintInput) -> bool {
     input.tool_name.as_deref().is_some_and(|name| {
         matches_normalized(
             name,
-            &["semanticsearch", "semantic_search", "codebasesearch", "codebase_search"],
+            &[
+                "semanticsearch",
+                "semantic_search",
+                "codebasesearch",
+                "codebase_search",
+            ],
         )
     })
 }
@@ -338,26 +343,24 @@ fn is_explore_subagent(input: &ToolHintInput) -> bool {
 }
 
 fn is_shell_search_command(command: &str) -> bool {
-    let tokens = shell_words(command);
-    match tokens.first().map(String::as_str) {
-        Some("rg" | "ripgrep") => true,
-        Some("grep") => tokens
+    // The quote/escape-aware parser shared with hooks.rs: quoted arguments
+    // stay single tokens, so a pattern like `grep "needle -r" file` can no
+    // longer leak a fake `-r` flag (the old split_whitespace misparse).
+    let tokens = super::shell_words(command);
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    // Tolerate a leading subshell paren (`(grep -r foo)`), which the shell
+    // parser keeps attached to the first word.
+    let program = first.trim_start_matches('(').to_ascii_lowercase();
+    match program.as_str() {
+        "rg" | "ripgrep" => true,
+        "grep" => tokens
             .iter()
             .skip(1)
             .any(|token| is_recursive_grep_flag(token)),
         _ => false,
     }
-}
-
-fn shell_words(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|part| {
-            part.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ';' | ','))
-                .to_ascii_lowercase()
-        })
-        .filter(|part| !part.is_empty())
-        .collect()
 }
 
 fn is_recursive_grep_flag(token: &str) -> bool {
@@ -519,6 +522,22 @@ mod tests {
             "persisted (session, category) pairs must suppress re-emission"
         );
         assert!(reloaded.should_emit("s1", HintCategory::FileRead));
+    }
+
+    #[test]
+    fn shell_search_classification_honors_quoting() {
+        assert!(is_shell_search_command("rg foo src/"));
+        assert!(is_shell_search_command("grep -r foo ."));
+        assert!(is_shell_search_command("grep --recursive foo ."));
+        assert!(is_shell_search_command("(grep -r foo .)"));
+        // Quoted multi-word pattern: still a recursive grep.
+        assert!(is_shell_search_command("grep -r \"foo bar\" src/"));
+        // A flag-looking string INSIDE quotes is data, not a flag — the old
+        // split_whitespace parser misclassified this as recursive.
+        assert!(!is_shell_search_command("grep \"needle -r\" file.txt"));
+        assert!(!is_shell_search_command("grep foo file.txt"));
+        assert!(!is_shell_search_command("cat file.txt"));
+        assert!(!is_shell_search_command(""));
     }
 
     #[test]
