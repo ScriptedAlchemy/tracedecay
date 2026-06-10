@@ -60,11 +60,18 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .to_string()
 }
 
-fn canonical_path_string(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+fn search_hit_count(stdout: &[u8], id: i64) -> usize {
+    let stdout = String::from_utf8(stdout.to_vec()).unwrap();
+    let response: Value = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|candidate| candidate.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("missing search response in stdout:\n{stdout}"));
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("search tool should return text content");
+    let hits: Value = serde_json::from_str(text).unwrap();
+    hits.as_array().map_or(0, Vec::len)
 }
 
 #[cfg(unix)]
@@ -146,8 +153,11 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
-                    "arguments": {}
+                    "name": "tokensave_search",
+                    "arguments": {
+                        "query": "active_project_marker",
+                        "limit": 1
+                    }
                 }
             })
         )
@@ -165,9 +175,9 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     );
 
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        active.path().to_str().unwrap(),
-        "serve should prefer MCP initialize roots over stale global DB fallback"
+        search_hit_count(&output.stdout, 2),
+        1,
+        "serve should query symbols from the MCP initialize root project"
     );
 }
 
@@ -213,8 +223,11 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
-                    "arguments": {}
+                    "name": "tokensave_search",
+                    "arguments": {
+                        "query": "cwd_project_marker",
+                        "limit": 1
+                    }
                 }
             })
         )
@@ -232,8 +245,8 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     );
 
     assert_eq!(
-        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
-        canonical_path_string(cwd_project.path()),
+        search_hit_count(&output.stdout, 2),
+        1,
         "discovered cwd project should be preferred over MCP initialize roots"
     );
 }
@@ -280,8 +293,11 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
-                    "arguments": {}
+                    "name": "tokensave_search",
+                    "arguments": {
+                        "query": "explicit_project_marker",
+                        "limit": 1
+                    }
                 }
             })
         )
@@ -299,8 +315,8 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     );
 
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        explicit.path().to_str().unwrap(),
+        search_hit_count(&output.stdout, 2),
+        1,
         "explicit --path should be authoritative over MCP initialize roots"
     );
 }
