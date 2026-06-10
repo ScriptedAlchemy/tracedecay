@@ -2776,6 +2776,9 @@ class TokenSaveContextEngine(ContextEngine):
             or ""
         ).strip()
         timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
+        # Intentional divergence from upstream hermes-lcm: Rust stores extraction results in
+        # summary-node metadata instead of writing daily markdown files. We still surface
+        # output_path in the extraction contract for config/API parity.
         output_path = _lcm_extraction_output_path(self.config)
         client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
         if client is None or not callable(getattr(client, "call_llm", None)):

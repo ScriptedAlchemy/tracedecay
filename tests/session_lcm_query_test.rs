@@ -333,6 +333,90 @@ async fn grep_tokenizes_punctuation_heavy_path_like_queries() {
 }
 
 #[tokio::test]
+async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "copilot canary rollout checklist".to_string(),
+            "baseline note without the compound token".to_string(),
+        ],
+    )
+    .await;
+    db.lcm_insert_summary_node(summary_draft(
+        "cursor",
+        "session-1",
+        "summary references copilot migration decisions",
+        vec![LcmSourceRef::RawMessage {
+            store_id: store_ids[0],
+        }],
+    ))
+    .await
+    .expect("summary should insert");
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "co-pilot".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: true,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("hyphenated fallback query should keep infix matches");
+
+    assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
+    assert!(hits
+        .iter()
+        .any(|hit| hit.kind == "summary_node"
+            && hit.snippet.to_ascii_lowercase().contains("copilot")));
+}
+
+#[tokio::test]
+async fn grep_like_fallback_recalls_infix_slash_query_matches() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &["the docs mention srcfoo as a fused path token".to_string()],
+    )
+    .await;
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "cursor".into(),
+            query: "src/foo".into(),
+            scope: LcmScope::Session,
+            session_id: Some("session-1".into()),
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .expect("slash fallback query should keep infix matches");
+
+    assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
+    assert!(hits
+        .iter()
+        .any(|hit| hit.snippet.to_ascii_lowercase().contains("srcfoo")));
+}
+
+#[tokio::test]
 async fn grep_quotes_reserved_operator_looking_query_text() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

@@ -1047,21 +1047,11 @@ async fn raw_like_grep_hits(
     if query_plan.like_terms.is_empty() {
         return Ok(Vec::new());
     }
+    let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
 
     let mut values = vec![Value::Text(request.provider.clone())];
     let mut filters = Vec::new();
     push_raw_grep_filters(request, session_id, &mut filters, &mut values);
-    if let Some(prefilter_query) = like_fts_prefilter_query(query_plan) {
-        filters.push(
-            "r.store_id IN (
-                SELECT rowid
-                FROM lcm_raw_messages_fts
-                WHERE lcm_raw_messages_fts MATCH ?
-             )"
-            .to_string(),
-        );
-        values.push(Value::Text(prefilter_query));
-    }
 
     let like_sql = like_predicate_sql(
         query_plan.like_terms.len(),
@@ -1076,7 +1066,7 @@ async fn raw_like_grep_hits(
         }
     }
 
-    values.push(Value::Integer(limit as i64));
+    values.push(Value::Integer(fetch_limit as i64));
     let order_by = grep_order_by(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
@@ -1096,6 +1086,9 @@ async fn raw_like_grep_hits(
     while let Some(row) = rows.next().await? {
         hits.push(raw_hit_from_row(&row, &query_plan.like_terms)?);
     }
+    if hits.len() > limit {
+        hits.truncate(limit);
+    }
     Ok(hits)
 }
 
@@ -1109,21 +1102,11 @@ async fn summary_like_grep_hits(
     if query_plan.like_terms.is_empty() {
         return Ok(Vec::new());
     }
+    let fetch_limit = compute_like_fallback_fetch_limit(limit, query_plan);
 
     let mut values = vec![Value::Text(request.provider.clone())];
     let mut filters = Vec::new();
     push_summary_grep_filters(request, session_id, &mut filters, &mut values);
-    if let Some(prefilter_query) = like_fts_prefilter_query(query_plan) {
-        filters.push(
-            "n.rowid IN (
-                SELECT rowid
-                FROM lcm_summary_nodes_fts
-                WHERE lcm_summary_nodes_fts MATCH ?
-             )"
-            .to_string(),
-        );
-        values.push(Value::Text(prefilter_query));
-    }
 
     filters.push(like_predicate_sql(
         query_plan.like_terms.len(),
@@ -1133,7 +1116,7 @@ async fn summary_like_grep_hits(
         values.push(Value::Text(format!("%{}%", escape_like(term))));
     }
 
-    values.push(Value::Integer(limit as i64));
+    values.push(Value::Integer(fetch_limit as i64));
     let order_by = grep_order_by(request.sort, SUMMARY_GREP_RECENCY_EXPR, None);
     let sql = format!(
         "SELECT n.provider, n.session_id, n.node_id, n.summary_text, 0.0 AS rank
@@ -1148,6 +1131,9 @@ async fn summary_like_grep_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().await? {
         hits.push(summary_hit_from_row(&row, &query_plan.like_terms)?);
+    }
+    if hits.len() > limit {
+        hits.truncate(limit);
     }
     Ok(hits)
 }
@@ -1249,31 +1235,6 @@ fn summary_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmG
         node_id: Some(row.get(2)?),
         store_id: None,
         snippet: match_centered_snippet(&summary_text, like_terms),
-    })
-}
-
-fn like_fts_prefilter_query(query_plan: &GrepQueryPlan) -> Option<String> {
-    if !query_plan.allow_fts_like_prefilter {
-        return None;
-    }
-    let mut terms = Vec::new();
-    for term in &query_plan.like_terms {
-        if term.chars().any(|ch| TERM_SEPARATORS.contains(&ch)) {
-            continue;
-        }
-        let sanitized = sanitize_fts5_query(term);
-        for token in sanitized.split_whitespace() {
-            if !token.is_empty() && !terms.iter().any(|existing| existing == token) {
-                terms.push(token.to_string());
-            }
-        }
-    }
-    (!terms.is_empty()).then(|| {
-        terms
-            .into_iter()
-            .map(|term| format!("\"{term}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ")
     })
 }
 
@@ -1841,8 +1802,8 @@ fn scoped_session_filter(scope: LcmScope, session_id: Option<&str>) -> Option<&s
 struct GrepQueryPlan {
     fts_query: String,
     like_terms: Vec<String>,
+    quoted_phrases: Vec<String>,
     requires_like_fallback: bool,
-    allow_fts_like_prefilter: bool,
 }
 
 impl GrepQueryPlan {
@@ -1854,6 +1815,7 @@ impl GrepQueryPlan {
 fn grep_query_plan(query: &str) -> GrepQueryPlan {
     let fts_query = sanitize_fts5_query(query);
     let terms = extract_search_terms(query);
+    let quoted_phrases = extract_quoted_phrases(query);
     let mut like_terms = Vec::new();
     for term in terms {
         if !term.is_empty() && !like_terms.iter().any(|existing| existing == &term) {
@@ -1870,11 +1832,29 @@ fn grep_query_plan(query: &str) -> GrepQueryPlan {
     GrepQueryPlan {
         fts_query,
         like_terms,
+        quoted_phrases,
         requires_like_fallback,
-        allow_fts_like_prefilter: requires_like_fallback
-            && !contains_cjk(query)
-            && !contains_emoji(query),
     }
+}
+
+fn compute_like_fallback_fetch_limit(limit: usize, query_plan: &GrepQueryPlan) -> usize {
+    compute_search_fetch_limit(limit, &query_plan.like_terms, &query_plan.quoted_phrases)
+}
+
+fn compute_search_fetch_limit(limit: usize, terms: &[String], phrases: &[String]) -> usize {
+    let base = limit.saturating_mul(5).max(limit).max(20);
+    if should_widen_candidate_fetch(terms, phrases) {
+        return base.max(limit.saturating_mul(10)).max(50);
+    }
+    base
+}
+
+fn should_widen_candidate_fetch(terms: &[String], phrases: &[String]) -> bool {
+    is_precise_query_shape(terms, phrases)
+}
+
+fn is_precise_query_shape(terms: &[String], phrases: &[String]) -> bool {
+    terms.len() == 1 || (phrases.len() == 1 && terms.len() <= 2)
 }
 
 fn sanitize_fts5_query(query: &str) -> String {
@@ -1997,6 +1977,21 @@ fn extract_search_terms(query: &str) -> Vec<String> {
         }
     }
     terms
+}
+
+fn extract_quoted_phrases(query: &str) -> Vec<String> {
+    let text = query.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let (phrases, _) = split_quoted(text);
+    let mut unique = Vec::new();
+    for phrase in phrases {
+        if !phrase.is_empty() && !unique.iter().any(|existing| existing == &phrase) {
+            unique.push(phrase);
+        }
+    }
+    unique
 }
 
 fn split_quoted(text: &str) -> (Vec<String>, String) {

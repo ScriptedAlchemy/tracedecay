@@ -75,6 +75,9 @@ pub(crate) fn summary_metadata_extraction(
     extraction_result: Option<&LcmExtractionResult>,
     condensation: bool,
 ) -> Value {
+    // Intentional divergence from upstream hermes-lcm: extraction output is persisted in
+    // summary-node metadata. `LCM_EXTRACTION_OUTPUT_PATH` is accepted for parity, but no
+    // markdown file is written by the Rust LCM pipeline.
     if condensation {
         return json!({ "status": "not_applicable" });
     }
