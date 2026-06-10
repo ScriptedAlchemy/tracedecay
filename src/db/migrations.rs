@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 12;
+const LATEST_VERSION: u32 = 13;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -292,6 +292,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         10 => migrate_v10(conn).await,
         11 => migrate_v11(conn).await,
         12 => migrate_v12(conn).await,
+        13 => migrate_v13(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -306,6 +307,63 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
 /// so later schema work can safely use v13 instead of reusing an exposed number.
 #[allow(clippy::unused_async)] // keeps the migration dispatch uniform
 async fn migrate_v12(_conn: &Connection) -> Result<()> {
+    Ok(())
+}
+
+/// v13: Cleanup marker for the (never-shipped) fact-archive schema.
+///
+/// An uncommitted revision of v13 briefly added archive columns (`state`,
+/// `archived_at`, `archived_reason`, `merged_into`, `superseded_by`) to
+/// `memory_facts`. Curation now hard-deletes losing facts instead, so this
+/// migration drops those columns from any local development database that
+/// ran the earlier revision, and is a no-op everywhere else.
+async fn migrate_v13(conn: &Connection) -> Result<()> {
+    let existing: std::collections::HashSet<String> = {
+        let mut rows = conn
+            .query("PRAGMA table_info(memory_facts)", ())
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("v13: failed to read table_info: {e}"),
+                operation: "migrate_v13".to_string(),
+            })?;
+        let mut names = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            message: format!("v13: failed to iterate table_info: {e}"),
+            operation: "migrate_v13".to_string(),
+        })? {
+            let name: String = row.get(1).map_err(|e| TokenSaveError::Database {
+                message: format!("v13: failed to read column name: {e}"),
+                operation: "migrate_v13".to_string(),
+            })?;
+            names.insert(name);
+        }
+        names
+    };
+
+    // The index must go before its column can be dropped.
+    conn.execute("DROP INDEX IF EXISTS idx_memory_facts_state", ())
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v13: failed to drop state index: {e}"),
+            operation: "migrate_v13".to_string(),
+        })?;
+
+    for col in [
+        "state",
+        "archived_at",
+        "archived_reason",
+        "merged_into",
+        "superseded_by",
+    ] {
+        if existing.contains(col) {
+            conn.execute(&format!("ALTER TABLE memory_facts DROP COLUMN {col}"), ())
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("v13: failed to drop column {col}: {e}"),
+                    operation: "migrate_v13".to_string(),
+                })?;
+        }
+    }
     Ok(())
 }
 
