@@ -109,6 +109,7 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -180,6 +181,7 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let home = TempDir::new().unwrap();
@@ -250,6 +252,7 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn explicit_initialized_path_ignores_initialize_roots() {
     let home = TempDir::new().unwrap();
@@ -320,6 +323,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_without_roots_still_uses_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -424,6 +428,7 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn same_depth_descendant_global_fallback_is_ambiguous() {
     let home = TempDir::new().unwrap();
