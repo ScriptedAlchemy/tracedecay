@@ -30,6 +30,7 @@ impl AgentIntegration for HermesIntegration {
         install_plugin(
             &hermes_plugin_dir(&ctx.home, profile.as_deref()),
             &ctx.tokensave_bin,
+            ctx.project_root.as_deref(),
         )?;
 
         eprintln!();
@@ -49,7 +50,7 @@ impl AgentIntegration for HermesIntegration {
             Some(profile) => hermes_plugin_dir(&ctx.home, Some(profile)),
             None => project_path.join(".hermes/plugins/tokensave"),
         };
-        install_plugin(&plugin_dir, &ctx.tokensave_bin)?;
+        install_plugin(&plugin_dir, &ctx.tokensave_bin, ctx.project_root.as_deref())?;
         if profile.is_none() {
             eprintln!(
                 "  Launch Hermes with HERMES_HOME={} so it reads this project-local plugin and memory provider config.",
@@ -101,6 +102,10 @@ fn hermes_plugin_dir(home: &Path, profile: Option<&str>) -> PathBuf {
     hermes_profile_dir(home, profile).join("plugins/tokensave")
 }
 
+// Profile names are deliberately restricted to ASCII `[a-z0-9][a-z0-9_-]`:
+// non-ASCII names are rejected outright (clear error below), so Unicode
+// normalization concerns (NFC vs NFD on macOS filesystems producing
+// colliding/diverging directory names) cannot arise by construction.
 fn normalize_profile(profile: Option<&str>) -> Result<Option<String>> {
     let Some(profile) = profile else {
         return Ok(None);
@@ -180,7 +185,30 @@ fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
     profiles
 }
 
-fn install_plugin(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
+/// Reads the `PINNED_PROJECT_ROOT = "..."` line from an existing generated
+/// `tools.py`, so reinstalls without `--project-root` keep the pin.
+fn read_pinned_project_root(plugin_dir: &Path) -> Option<String> {
+    let tools = std::fs::read_to_string(plugin_dir.join("tools.py")).ok()?;
+    let line = tools
+        .lines()
+        .find_map(|line| line.strip_prefix("PINNED_PROJECT_ROOT = "))?;
+    if line.trim() == "None" {
+        return None;
+    }
+    serde_json::from_str::<String>(line.trim()).ok()
+}
+
+fn install_plugin(
+    plugin_dir: &Path,
+    tokensave_bin: &str,
+    project_root: Option<&Path>,
+) -> Result<()> {
+    // An explicit pin wins; otherwise preserve whatever pin a previous
+    // install wrote, so `tokensave reinstall` does not silently unpin.
+    let pinned_project_root = match project_root {
+        Some(path) => Some(path.display().to_string()),
+        None => read_pinned_project_root(plugin_dir),
+    };
     std::fs::create_dir_all(plugin_dir).map_err(|e| TokenSaveError::Config {
         message: format!("failed to create {}: {e}", plugin_dir.display()),
     })?;
@@ -196,7 +224,10 @@ fn install_plugin(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
     write_text_file(&plugin_dir.join("plugin.yaml"), &plugin_manifest())?;
     write_text_file(&plugin_dir.join("schemas.py"), &plugin_schemas())?;
     write_text_file(&plugin_dir.join("schemas.json"), &plugin_schemas_json()?)?;
-    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tokensave_bin))?;
+    write_text_file(
+        &plugin_dir.join("tools.py"),
+        &plugin_tools(tokensave_bin, pinned_project_root.as_deref()),
+    )?;
     write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
     write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)?;
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
@@ -214,7 +245,10 @@ fn install_plugin(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
 fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
     let updated = enable_plugin_config(&existing).map_err(|message| TokenSaveError::Config {
-        message: format!("{message} in {}", config_path.display()),
+        message: format!(
+            "{message} in {}.\nFix the config by hand, then re-run: tokensave install --agent hermes",
+            config_path.display()
+        ),
     })?;
     if updated != existing {
         write_config_file(config_path, &updated)?;
@@ -293,23 +327,37 @@ fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
 
     let (plugins_start, plugins_end) = find_top_level_section(existing, "plugins")
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    let disabled = find_child_section_from_strings(&lines, plugins_start, plugins_end, "disabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    if let Some((disabled_start, disabled_end)) = disabled {
-        lines = remove_list_item(lines, disabled_start, disabled_end, "tokensave");
+    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "disabled")
+        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
+    {
+        ChildSection::Block { start, end } => {
+            lines = remove_list_item(lines, start, end, "tokensave");
+        }
+        ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
     }
 
     let (plugins_start, plugins_end) = find_top_level_section_from_strings(&lines, "plugins")
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    let enabled = find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    if let Some((enabled_start, enabled_end)) = enabled {
-        if !list_contains_item_strings(&lines, enabled_start, enabled_end, "tokensave") {
-            lines.insert(enabled_start + 1, "    - tokensave".to_string());
+    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
+        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
+    {
+        ChildSection::Block { start, end } => {
+            if !list_contains_item_strings(&lines, start, end, "tokensave") {
+                // Match the existing list's item indentation (Hermes writes
+                // 2-space items); only default to 4 when the list is empty.
+                let indent = list_item_indent(&lines, start, end).unwrap_or(4);
+                lines.insert(start + 1, format!("{}- tokensave", " ".repeat(indent)));
+            }
         }
-    } else {
-        lines.insert(plugins_start + 1, "  enabled:".to_string());
-        lines.insert(plugins_start + 2, "    - tokensave".to_string());
+        ChildSection::EmptyFlow { line } => {
+            // Rewrite `enabled: []` into a block list containing tokensave.
+            lines[line] = "  enabled:".to_string();
+            lines.insert(line + 1, "    - tokensave".to_string());
+        }
+        ChildSection::Missing => {
+            lines.insert(plugins_start + 1, "  enabled:".to_string());
+            lines.insert(plugins_start + 2, "    - tokensave".to_string());
+        }
     }
 
     enable_memory_provider_config(&join_lines(&lines, had_trailing_newline))
@@ -325,10 +373,13 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
     let Some((plugins_start, plugins_end)) = find_top_level_section(existing, "plugins") else {
         return Ok(existing.to_string());
     };
-    let enabled = find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    if let Some((enabled_start, enabled_end)) = enabled {
-        lines = remove_list_item(lines, enabled_start, enabled_end, "tokensave");
+    match find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
+        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
+    {
+        ChildSection::Block { start, end } => {
+            lines = remove_list_item(lines, start, end, "tokensave");
+        }
+        ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
     }
     disable_memory_provider_config(&join_lines(&lines, had_trailing_newline))
 }
@@ -457,26 +508,35 @@ fn find_top_level_section_in(lines: &[&str], key: &str) -> Option<(usize, usize)
     Some((start, end))
 }
 
-// Outer `None` means the config is unsupported/ambiguous; inner `None` means
-// the section was simply not found.
-#[allow(clippy::option_option)]
+/// Shape of a `plugins.<key>` child section found by
+/// [`find_child_section_in`]. `None` from the finder means the config is
+/// unsupported/ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildSection {
+    /// The key is not present inside the parent section.
+    Missing,
+    /// Block-style `key:` at `start`; the section ends (exclusive) at `end`.
+    Block { start: usize, end: usize },
+    /// Flow-style empty list `key: []` (Hermes writes this) on `line`.
+    EmptyFlow { line: usize },
+}
+
 fn find_child_section_from_strings(
     lines: &[String],
     plugins_start: usize,
     plugins_end: usize,
     key: &str,
-) -> Option<Option<(usize, usize)>> {
+) -> Option<ChildSection> {
     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
     find_child_section_in(&borrowed, plugins_start, plugins_end, key)
 }
 
-#[allow(clippy::option_option)]
 fn find_child_section_in(
     lines: &[&str],
     plugins_start: usize,
     plugins_end: usize,
     key: &str,
-) -> Option<Option<(usize, usize)>> {
+) -> Option<ChildSection> {
     let target = format!("{key}:");
     let mut start = None;
     for (idx, line) in lines
@@ -494,14 +554,23 @@ fn find_child_section_in(
                 start = Some(idx);
                 break;
             }
-            if trimmed.starts_with(&target) {
+            if let Some(rest) = trimmed.strip_prefix(&target) {
+                // `key: []` is a flow-style empty list; anything else after
+                // the colon (flow lists with items, scalars) is unsupported.
+                if rest.trim() == "[]" {
+                    return Some(ChildSection::EmptyFlow { line: idx });
+                }
                 return None;
             }
         }
     }
     let Some(start) = start else {
-        return Some(None);
+        return Some(ChildSection::Missing);
     };
+    // YAML allows sequence items at the same indent as the parent key
+    // (`enabled:` followed by `  - item`), which Hermes itself writes. The
+    // section therefore ends at the first line that is shallower than the
+    // key, or at key depth without being a list item (e.g. a sibling key).
     let end = lines
         .iter()
         .enumerate()
@@ -509,11 +578,25 @@ fn find_child_section_in(
         .skip(start + 1)
         .find_map(|(idx, line)| {
             let trimmed = line.trim();
-            (!trimmed.is_empty() && !trimmed.starts_with('#') && line_indent(line) <= 2)
-                .then_some(idx)
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let indent = line_indent(line);
+            (indent < 2 || (indent == 2 && !trimmed.starts_with("- "))).then_some(idx)
         })
         .unwrap_or(plugins_end);
-    Some(Some((start, end)))
+    Some(ChildSection::Block { start, end })
+}
+
+/// Indent (in spaces) of the first `- ` list item inside a block section, if
+/// the list already has items.
+fn list_item_indent(lines: &[String], start: usize, end: usize) -> Option<usize> {
+    lines
+        .iter()
+        .take(end)
+        .skip(start + 1)
+        .find(|line| line.trim().starts_with("- "))
+        .map(|line| line_indent(line))
 }
 
 #[allow(clippy::option_option)]
@@ -592,9 +675,27 @@ fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if current == contents {
         return Ok(());
     }
-    std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })
+    // Write-to-.new-then-rename so a mid-write crash can never leave a
+    // truncated/corrupt generated file behind (same pattern as
+    // write_config_file, minus the backup — these files are regenerable).
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(e) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TokenSaveError::Config {
+            message: format!("failed to write {}: {e}", new_path.display()),
+        });
+    }
+    if let Err(e) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "failed to replace {} with {}: {e}",
+                path.display(),
+                new_path.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn write_config_file(path: &Path, contents: &str) -> Result<()> {
@@ -710,14 +811,22 @@ fn plugin_schemas_json() -> Result<String> {
         })
 }
 
-fn plugin_tools(tokensave_bin: &str) -> String {
+fn plugin_tools(tokensave_bin: &str, project_root: Option<&str>) -> String {
     let bin = serde_json::to_string(tokensave_bin).unwrap_or_else(|_| "\"tokensave\"".to_string());
+    let pin = match project_root {
+        Some(path) => serde_json::to_string(path).unwrap_or_else(|_| "None".to_string()),
+        None => "None".to_string(),
+    };
     format!(
         r#""""Generated tokensave tool handlers for Hermes."""
 import json
 import subprocess
 
 TOKENSAVE_BIN = {bin}
+# Install-time project pin (tokensave install --agent hermes --project-root).
+# When set, every tool call resolves this project's .tokensave/ stores
+# regardless of the Hermes process working directory.
+PINNED_PROJECT_ROOT = {pin}
 TOKENSAVE_TIMEOUT_SECONDS = 600
 MAX_CAPTURE_CHARS = 4000
 
@@ -752,7 +861,11 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
         payload = json.dumps(tool_args)
-        project_root = kwargs.get("project_root") or tool_args.get("project_root")
+        project_root = (
+            kwargs.get("project_root")
+            or tool_args.get("project_root")
+            or PINNED_PROJECT_ROOT
+        )
         argv = [TOKENSAVE_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
@@ -1175,6 +1288,20 @@ def _configured_hermes_home(config):
         value = getattr(config, attr, None)
         if value:
             return value
+    return None
+
+def _configured_project_root(config):
+    # Profiles can pin the indexed project via a `project_root` config key
+    # (kwargs from the host take precedence; cwd is the last fallback).
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        value = config.get("project_root") or config.get("tokensave_project_root")
+        return str(value) if value else None
+    for attr in ("project_root", "tokensave_project_root"):
+        value = getattr(config, attr, None)
+        if value:
+            return str(value)
     return None
 
 def _resolve_hermes_home(config=None, hermes_home=None):
@@ -2268,9 +2395,12 @@ class TokenSaveContextEngine(ContextEngine):
         self.active_session_id = None
         self.config = config
         self.hermes_home = _resolve_hermes_home(config, hermes_home)
-        self.project_root = None
+        self.project_root = _configured_project_root(config) or tools.PINNED_PROJECT_ROOT
         self.agent = None
         self.model = ""
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+        self.last_total_tokens = 0
         self._runtime_context_length = None
         self._session_start_context_length = None
         self._route_failures = {}
@@ -2304,7 +2434,13 @@ class TokenSaveContextEngine(ContextEngine):
             )
             if next_hermes_home:
                 self.hermes_home = next_hermes_home
-        next_project_root = project_root or kwargs.get("project_root") or kwargs.get("cwd")
+        next_project_root = (
+            project_root
+            or kwargs.get("project_root")
+            or _configured_project_root(kwargs.get("config", self.config))
+            or tools.PINNED_PROJECT_ROOT
+            or kwargs.get("cwd")
+        )
         if next_project_root:
             self.project_root = next_project_root
 
@@ -2322,6 +2458,27 @@ class TokenSaveContextEngine(ContextEngine):
             self._runtime_context_length = int(context_length)
         except Exception:
             self._runtime_context_length = None
+
+    def update_from_response(self, usage):
+        # Required by newer Hermes ContextEngine ABCs (abstract method).
+        # Tracks normalized token usage; run_agent.py reads these attrs.
+        usage = usage or {}
+
+        def _as_int(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        self.last_prompt_tokens = _as_int(
+            usage.get("prompt_tokens") or usage.get("input_tokens")
+        )
+        self.last_completion_tokens = _as_int(
+            usage.get("completion_tokens") or usage.get("output_tokens")
+        )
+        self.last_total_tokens = _as_int(usage.get("total_tokens")) or (
+            self.last_prompt_tokens + self.last_completion_tokens
+        )
 
     def _effective_context_length(self):
         if self._runtime_context_length is not None:
@@ -3048,7 +3205,12 @@ def register(ctx):
     skill_path = skills_dir / "tokensave" / "SKILL.md"
     register_skill = getattr(ctx, "register_skill", None)
     if skill_path.exists() and callable(register_skill):
-        register_skill("tokensave:tokensave", skill_path)
+        # Newer Hermes derives the namespace from the plugin name and
+        # rejects ':' in skill names, so register the bare name.
+        try:
+            register_skill("tokensave", skill_path)
+        except Exception as exc:
+            logger.warning("tokensave skill registration failed: %s", exc)
 "#
     .to_string()
 }

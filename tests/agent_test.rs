@@ -127,6 +127,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
     }
 }
 
@@ -553,9 +554,12 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
-    assert!(tools_py.contains(
-        "project_root = kwargs.get(\"project_root\") or tool_args.get(\"project_root\")"
-    ));
+    assert!(tools_py.contains("kwargs.get(\"project_root\")"));
+    assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
+    assert!(
+        tools_py.contains("or PINNED_PROJECT_ROOT"),
+        "tool dispatch must fall back to the install-time project pin"
+    );
     assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
     assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
     assert!(!tools_py.contains("shell=True"));
@@ -675,6 +679,7 @@ fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
         tokensave_bin: tokensave_bin.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1137,6 +1142,7 @@ fn test_hermes_profile_install_targets_named_profile() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("Work_Profile".to_string()),
+        project_root: None,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1318,6 +1324,7 @@ fn test_hermes_install_rejects_invalid_profile_names() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("_bad".to_string()),
+        project_root: None,
     };
 
     let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
@@ -1652,6 +1659,7 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
         tokensave_bin: String::new(),
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
+        project_root: None,
     };
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -2902,6 +2910,7 @@ fn test_antigravity_install_writes_cli_plugin() {
         tokensave_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
     };
 
     AntigravityIntegration.install(&ctx).expect("install ok");
@@ -2952,6 +2961,7 @@ fn test_antigravity_uninstall_removes_both_locations() {
         tokensave_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
     };
 
     AntigravityIntegration.install(&ctx).unwrap();
@@ -3118,6 +3128,7 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         tokensave_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
     }
 }
 
@@ -3257,6 +3268,7 @@ fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
+        project_root: None,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -4297,4 +4309,47 @@ fn test_backup_and_safe_write_round_trip() {
     let restored: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(restored["version"], 1);
+}
+
+#[test]
+fn test_hermes_install_writes_and_preserves_project_root_pin() {
+    let home = TempDir::new().unwrap();
+    let pinned = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+    };
+    HermesIntegration.install(&pinned).unwrap();
+
+    let tools_path = home.path().join(".hermes/plugins/tokensave/tools.py");
+    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
+    assert!(
+        tools_py.contains("PINNED_PROJECT_ROOT = \"/pinned/project\""),
+        "install --project-root must write the pin into tools.py:\n{tools_py}"
+    );
+
+    // A reinstall without the flag must keep the pin (no silent unpinning).
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
+    assert!(
+        tools_py.contains("PINNED_PROJECT_ROOT = \"/pinned/project\""),
+        "reinstall without --project-root must preserve the existing pin:\n{tools_py}"
+    );
+
+    // A fresh install without a pin stays unpinned.
+    let fresh_home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(fresh_home.path()))
+        .unwrap();
+    let tools_py =
+        std::fs::read_to_string(fresh_home.path().join(".hermes/plugins/tokensave/tools.py"))
+            .unwrap();
+    assert!(
+        tools_py.contains("PINNED_PROJECT_ROOT = None"),
+        "fresh install without --project-root must leave the plugin unpinned:\n{tools_py}"
+    );
 }

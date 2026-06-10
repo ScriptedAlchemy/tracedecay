@@ -131,6 +131,11 @@ pub struct InstallContext {
     pub tokensave_bin: String,
     pub tool_permissions: Vec<String>,
     pub profile: Option<String>,
+    /// Hermes only: pin the generated plugin's project root so every tool
+    /// call resolves this project's `.tokensave/` stores regardless of the
+    /// host's working directory (`tokensave install --agent hermes
+    /// --project-root <path>`). `None` preserves any existing pin.
+    pub project_root: Option<PathBuf>,
 }
 
 /// Context passed to [`AgentIntegration::healthcheck`].
