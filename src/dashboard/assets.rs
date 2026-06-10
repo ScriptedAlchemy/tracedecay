@@ -31,6 +31,8 @@ const LCM_JS: &[u8] = include_bytes!("../../dashboard/lcm/dist/index.js");
 const LCM_CSS: &[u8] = include_bytes!("../../dashboard/lcm/dist/style.css");
 const GRAPH_JS: &[u8] = include_bytes!("../../dashboard/graph/dist/index.js");
 const GRAPH_CSS: &[u8] = include_bytes!("../../dashboard/graph/dist/style.css");
+const SAVINGS_JS: &[u8] = include_bytes!("../../dashboard/savings/dist/index.js");
+const SAVINGS_CSS: &[u8] = include_bytes!("../../dashboard/savings/dist/style.css");
 const ASSET_STAMP: &str = env!("TOKENSAVE_DASHBOARD_ASSET_STAMP");
 
 fn static_response(body: &'static [u8], content_type: &'static str) -> Response {
@@ -69,6 +71,8 @@ pub(crate) async fn plugin_asset(Path((plugin, file)): Path<(String, String)>) -
         ("hermes-lcm", "style.css") => static_response(LCM_CSS, "text/css"),
         ("graph", "index.js") => static_response(GRAPH_JS, "application/javascript"),
         ("graph", "style.css") => static_response(GRAPH_CSS, "text/css"),
+        ("savings", "index.js") => static_response(SAVINGS_JS, "application/javascript"),
+        ("savings", "style.css") => static_response(SAVINGS_CSS, "text/css"),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }

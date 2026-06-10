@@ -1,0 +1,9 @@
+{
+  "name": "savings",
+  "label": "Savings & Cost",
+  "description": "Token savings ledger and per-session cost accounting.",
+  "icon": "PiggyBank",
+  "version": "0.1.0",
+  "entry": "dist/index.js",
+  "css": "dist/style.css"
+}

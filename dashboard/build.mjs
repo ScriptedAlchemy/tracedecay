@@ -109,6 +109,35 @@ async function buildGraph() {
   );
 }
 
+async function buildSavings() {
+  const srcDir = path.join(root, "savings/src");
+  await esbuild.build({
+    entryPoints: [path.join(srcDir, "entry.tsx")],
+    outfile: path.join(root, "savings/dist/index.js"),
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: ["es2020"],
+    jsx: "automatic",
+    minify: true,
+    legalComments: "none",
+    define: { "process.env.NODE_ENV": '"production"' },
+    alias: {
+      react: path.join(srcDir, "react-shim.ts"),
+      "react/jsx-runtime": path.join(srcDir, "jsx-runtime.ts"),
+      "react/jsx-dev-runtime": path.join(srcDir, "jsx-runtime.ts"),
+    },
+    banner: {
+      js: "/* tokensave savings & cost dashboard plugin — bundled with esbuild. Do not edit; see src/. */",
+    },
+    logLevel: "warning",
+  });
+  await fs.copyFile(
+    path.join(srcDir, "styles.css"),
+    path.join(root, "savings/dist/style.css"),
+  );
+}
+
 async function copyLcm() {
   const dist = path.join(root, "lcm/dist");
   await fs.mkdir(dist, { recursive: true });
@@ -147,7 +176,7 @@ async function buildHermesWrapper() {
 
 async function main() {
   await fs.mkdir(path.join(root, "shell/dist"), { recursive: true });
-  await Promise.all([buildShell(), buildHolographic(), buildGraph(), copyLcm()]);
+  await Promise.all([buildShell(), buildHolographic(), buildGraph(), buildSavings(), copyLcm()]);
   await buildHermesWrapper();
   for (const f of [
     "shell/dist/shell.js",
@@ -158,6 +187,8 @@ async function main() {
     "lcm/dist/style.css",
     "graph/dist/index.js",
     "graph/dist/style.css",
+    "savings/dist/index.js",
+    "savings/dist/style.css",
     "hermes-wrapper/dist/index.js",
     "hermes-wrapper/dist/graph.js",
     "hermes-wrapper/dist/style.css",
