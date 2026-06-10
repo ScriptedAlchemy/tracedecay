@@ -74,8 +74,10 @@ AI coding agents waste tokens exploring codebases. Every grep, glob, and file re
 | From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Hermes, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
 | **Multi-Branch Indexing (opt-in)** | **100% Local** | **Always Fresh** |
 | Optional per-branch databases. Cross-branch diff and search without switching your checkout. | Source code and memory content stay on your machine. No API keys or hosted database are required; the index runs on local libSQL. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and the index diverges are merged by git, not by a file watcher. |
-| **Subprocess-Isolated Extraction** | **Code-Health Analytics** | **Atomic Edit Primitives** |
-| A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. | Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. |
+| **Local Dashboard** | **Subprocess-Isolated Extraction** | **Code-Health Analytics** |
+| Explore holographic memory (facts, entities, similarity detection) and LCM session data via a local web UI. Built-in PCA projection, duplicate detection, and curation tools. | A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. |
+| **Atomic Edit Primitives** | | |
+| Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. | | |
 
 ---
 
@@ -216,6 +218,63 @@ The hook runs `tokensave hook-pre-tool-use` -- a native Rust command (no bash or
 Appends instructions to `~/.claude/CLAUDE.md` that tell Claude to use tokensave tools before reaching for Explore agents or raw file reads.
 
 </details>
+
+---
+
+## Local Dashboard
+
+tokensave includes a local web dashboard for exploring your project's holographic memory and LCM (Lossless Context Management) session data. Everything runs locally — no external services or API keys required.
+
+### Quick Start
+
+```bash
+# Start the dashboard (serves on http://127.0.0.1:7341 by default)
+tokensave dashboard
+
+# Use a custom port or bind to a different address
+tokensave dashboard --port 8080
+tokensave dashboard --host 0.0.0.0 --port 7341
+
+# Let the OS pick a free port (prints the URL)
+tokensave dashboard --port 0
+
+# Open the dashboard in your default browser automatically
+tokensave dashboard --open
+```
+
+MCP-connected agents can also start/stop the dashboard via the `tokensave_dashboard` tool, which runs the server as a background task inside the MCP server and returns the listening URL (idempotent; pass `action: "stop"` to shut it down).
+
+### What You'll See
+
+The dashboard has three main tabs:
+
+**Holographic Memory** — Explore your project's persistent memory:
+- **Inspector**: Browse facts, entities, and memory banks with trust scores and HRR coverage
+- **Semantic Map**: 2D PCA visualization of holographic vectors showing fact relationships
+- **Association Graph**: Interactive graph of facts, entities, categories, and banks
+- **Similarity**: Detect likely duplicates and merge candidates using phase-vector cosine similarity
+- **Curation**: *(feature-flagged)* Preview and run similarity-based deduplication; applying a plan permanently deletes the flagged duplicate facts (there is no archive or restore)
+
+**LCM** — Analyze Lossless Context Management session data:
+- **Overview**: Message counts, summary nodes, compression ratios, and role/source breakdowns
+- **Search**: Full-text search across raw messages and summary nodes with role/source/session filters
+- **Timeline**: Time-bucketed activity visualization (hourly or daily)
+- **Compression**: Per-session and per-node compression statistics showing token savings
+
+**Code Graph** — Interactively explore the indexed code graph:
+- **Overview**: Symbols by kind family, files by language, most-connected symbols, largest files
+- **Canvas**: Force-directed explorer with search-to-focus, progressive neighbor expansion, callers/callees, filters, and shortest-path finding between two symbols
+
+See [docs/graph-explorer.md](docs/graph-explorer.md) for the Code Graph tab's API and interaction details.
+
+### Dashboard with Hermes
+
+When using the Hermes agent, the dashboard can be accessed via the **Hermes Intelligence** tab. Two integration modes are supported:
+
+1. **Spawn mode** (default): Hermes automatically launches the dashboard server
+2. **External URL mode**: Point Hermes at an already-running dashboard
+
+See [docs/dashboard.md](docs/dashboard.md) for full documentation on environment variables, API endpoints, and troubleshooting.
 
 ---
 
@@ -615,6 +674,10 @@ tokensave sync --doctor [path]     # Sync and list added/modified/removed files
 tokensave status [path]            # Show statistics + cost summary
 tokensave status [path] --json     # Show statistics (JSON output)
 tokensave status --details         # Include node-kind breakdown
+tokensave dashboard                # Start local web dashboard (default port 7341)
+tokensave dashboard --port 8080    # Start dashboard on custom port
+tokensave dashboard --port 0       # Auto-select a free port
+tokensave dashboard --open         # Open the URL in the default browser
 tokensave cost [range]             # Token cost summary (default: 7d)
 tokensave cost --by-model          # Cost grouped by model
 tokensave cost --by-task           # Cost grouped by task category
