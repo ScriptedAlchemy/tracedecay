@@ -622,7 +622,7 @@ async fn fts_probe_needs_rebuild(
         .query(&sql, params![provider, util::opt_text(session_id)])
         .await?;
     while let Some(row) = rows.next().await? {
-        let text: String = row.get(0).unwrap_or_default();
+        let text: String = row.get(0)?;
         let Some(term) = first_fts_term(&text) else {
             continue;
         };
@@ -750,8 +750,8 @@ async fn count_summary_hash_mismatches(
         .await?;
     let mut mismatches = 0;
     while let Some(row) = rows.next().await? {
-        let text: String = row.get(0).unwrap_or_default();
-        let hash: String = row.get(1).unwrap_or_default();
+        let text: String = row.get(0)?;
+        let hash: String = row.get(1)?;
         if util::sha256_hex(text.as_bytes()) != hash {
             mismatches += 1;
         }
@@ -886,9 +886,9 @@ async fn retention_candidates(
         let session_id: String = row.get(0)?;
         let message_count: i64 = row.get(1)?;
         let retained_chars: i64 = row.get(2)?;
-        let first_message_at: i64 = row.get(3).unwrap_or_default();
-        let last_message_at: i64 = row.get(4).unwrap_or_default();
-        let summary_node_count: i64 = row.get(5).unwrap_or_default();
+        let first_message_at: i64 = row.get(3)?;
+        let last_message_at: i64 = row.get(4)?;
+        let summary_node_count: i64 = row.get(5)?;
         let age_days = if last_message_at > 0 {
             (now.saturating_sub(last_message_at) as f64) / 86_400.0
         } else {
