@@ -180,13 +180,45 @@ fn hermes_selected_profile_targets(
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// Stack size for the thread driving the async entrypoint. Windows gives the
+/// process main thread only 1 MiB of stack (Linux and macOS give 8 MiB), and
+/// the combined CLI + MCP tool-dispatch futures exceed that in unoptimized
+/// builds — `tokensave serve` and `tokensave tool` died with
+/// STATUS_STACK_OVERFLOW on Windows CI. Running the runtime on a thread with
+/// an explicit stack size gives every platform the same headroom.
+const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
+    let spawned = std::thread::Builder::new()
+        .name("tokensave-main".to_string())
+        .stack_size(ASYNC_STACK_BYTES)
+        .spawn(move || async_main(cli));
+    let result = match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        },
+        Err(e) => {
+            eprintln!("Error: failed to spawn main thread: {e}");
+            process::exit(1);
+        }
+    };
+    if let Err(e) = result {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
+}
+
+fn async_main(cli: Cli) -> tokensave::errors::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ASYNC_STACK_BYTES)
+        .build()
+        .map_err(|e| tokensave::errors::TokenSaveError::Config {
+            message: format!("failed to start async runtime: {e}"),
+        })?;
+    runtime.block_on(run(cli))
 }
 
 async fn run(cli: Cli) -> tokensave::errors::Result<()> {
