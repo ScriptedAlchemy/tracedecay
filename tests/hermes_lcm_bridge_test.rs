@@ -683,14 +683,16 @@ with tempfile.TemporaryDirectory() as tmp:
     home.mkdir()
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
+    expected = str(home / ".hermes")
+    assert not pathlib.Path(expected).exists()
+
     engine = plugin.TokenSaveContextEngine()
     engine.initialize(session_id="session-1")
 
-    assert engine.hermes_home
-    assert pathlib.Path(engine.hermes_home).name == ".hermes"
+    assert engine.hermes_home == expected
     status = engine.get_status()
     assert status["storage_scope"] == "hermes_profile"
-    assert status["hermes_home"] == engine.hermes_home
+    assert status["hermes_home"] == expected
 "#,
         "generated context engine should default to ~/.hermes even if missing",
     );
@@ -3596,8 +3598,8 @@ tools.TOKENSAVE_BIN = write_fake_binary(
 )
 crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert crashed["error"] == "tokensave tool exited with status 3", crashed
-assert crashed.get("stdout", "").startswith('{"content')
-assert "handshake aborted" in crashed.get("stderr", "")
+assert crashed["stdout"] == '{"content'
+assert crashed["stderr"] == "handshake aborted"
 
 # Exit 0 with malformed JSON on stdout.
 tools.TOKENSAVE_BIN = write_fake_binary(
@@ -3607,7 +3609,7 @@ tools.TOKENSAVE_BIN = write_fake_binary(
 )
 malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
-assert "not-json-at-all" in malformed.get("stdout", "")
+assert malformed["stdout"] == "not-json-at-all"
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
 tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n", "exit /b 0\n")

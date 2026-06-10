@@ -38,7 +38,8 @@ fn tokensave_command_with_home(home: &Path) -> Command {
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"));
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("TOKENSAVE_GLOBAL_DB", home.join(".tokensave/global.db"));
     command
 }
 
@@ -59,18 +60,11 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .to_string()
 }
 
-fn search_hit_count(stdout: &[u8], id: i64) -> usize {
-    let stdout = String::from_utf8(stdout.to_vec()).unwrap();
-    let response: Value = stdout
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|candidate| candidate.get("id") == Some(&json!(id)))
-        .unwrap_or_else(|| panic!("missing search response in stdout:\n{stdout}"));
-    let text = response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("search tool should return text content");
-    let hits: Value = serde_json::from_str(text).unwrap();
-    hits.as_array().map_or(0, Vec::len)
+fn canonical_path_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(unix)]
@@ -109,7 +103,6 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
     );
 }
 
-#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -153,11 +146,8 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_search",
-                    "arguments": {
-                        "query": "active_project_marker",
-                        "limit": 1
-                    }
+                    "name": "tokensave_runtime",
+                    "arguments": {}
                 }
             })
         )
@@ -175,13 +165,12 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     );
 
     assert_eq!(
-        search_hit_count(&output.stdout, 2),
-        1,
-        "serve should query symbols from the MCP initialize root project"
+        runtime_project_root(&output.stdout, 2),
+        active.path().to_str().unwrap(),
+        "serve should prefer MCP initialize roots over stale global DB fallback"
     );
 }
 
-#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let home = TempDir::new().unwrap();
@@ -224,11 +213,8 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_search",
-                    "arguments": {
-                        "query": "cwd_project_marker",
-                        "limit": 1
-                    }
+                    "name": "tokensave_runtime",
+                    "arguments": {}
                 }
             })
         )
@@ -246,13 +232,12 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     );
 
     assert_eq!(
-        search_hit_count(&output.stdout, 2),
-        1,
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(cwd_project.path()),
         "discovered cwd project should be preferred over MCP initialize roots"
     );
 }
 
-#[cfg(not(windows))]
 #[tokio::test]
 async fn explicit_initialized_path_ignores_initialize_roots() {
     let home = TempDir::new().unwrap();
@@ -295,11 +280,8 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_search",
-                    "arguments": {
-                        "query": "explicit_project_marker",
-                        "limit": 1
-                    }
+                    "name": "tokensave_runtime",
+                    "arguments": {}
                 }
             })
         )
@@ -317,13 +299,12 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     );
 
     assert_eq!(
-        search_hit_count(&output.stdout, 2),
-        1,
+        runtime_project_root(&output.stdout, 2),
+        explicit.path().to_str().unwrap(),
         "explicit --path should be authoritative over MCP initialize roots"
     );
 }
 
-#[cfg(not(windows))]
 #[tokio::test]
 async fn no_explicit_path_without_roots_still_uses_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -428,7 +409,6 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     );
 }
 
-#[cfg(not(windows))]
 #[tokio::test]
 async fn same_depth_descendant_global_fallback_is_ambiguous() {
     let home = TempDir::new().unwrap();
