@@ -31,6 +31,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -47,6 +59,19 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -63,3 +88,93 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  dashboard:
+    name: Dashboard
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DASHBOARD_DIST_FILES: >-
+        shell/dist/shell.js
+        shell/dist/shell.css
+        holographic/dist/index.js
+        holographic/dist/style.css
+        lcm/dist/index.js
+        lcm/dist/style.css
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Verify embedded dist artifacts
+        working-directory: dashboard
+        run: |
+          set -euo pipefail
+          for f in $DASHBOARD_DIST_FILES; do
+            if [ ! -s "$f" ]; then
+              echo "missing or empty dist artifact: $f" >&2
+              exit 1
+            fi
+          done
+          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          npm run build
+          sha256sum -c /tmp/dashboard-dist.sha
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-dashboard
+
+      - name: Run dashboard integration tests
+        run: cargo test --test dashboard_api_test
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+
+      - name: Prebuild dashboard binary for smoke
+        run: cargo build --bin tokensave
+
+      - name: Run dashboard smoke (empty LCM)
+        working-directory: dashboard
+        env:
+          TOKENSAVE_GLOBAL_DB: ${{ runner.temp }}/tokensave-dashboard-smoke-empty.db
+        run: |
+          set -euo pipefail
+          rm -f "$TOKENSAVE_GLOBAL_DB"
+          attempts=0
+          max_attempts=3
+          until [ "$attempts" -ge "$max_attempts" ]; do
+            attempts=$((attempts + 1))
+            echo "Smoke attempt ${attempts}/${max_attempts}..."
+            if npm run smoke -- --expect-lcm=empty; then
+              exit 0
+            fi
+            if [ "$attempts" -lt "$max_attempts" ]; then
+              sleep 10
+            fi
+          done
+          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
+          exit 1
