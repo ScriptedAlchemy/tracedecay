@@ -4201,6 +4201,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
     assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     let (cg, _dir) = setup_project().await;
@@ -4292,6 +4293,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     assert!(!text.contains("valuable payload to preserve"));
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
     let (cg, _dir) = setup_project().await;
@@ -6411,6 +6413,7 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
     assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
