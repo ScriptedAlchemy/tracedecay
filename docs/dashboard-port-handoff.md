@@ -115,9 +115,13 @@ tokensave dashboard [--path <project>] [--host 127.0.0.1] [--port 7341]
 - Static assets are **embedded at compile time** (`src/dashboard/assets.rs`
   uses `include_bytes!` of `dashboard/*/dist/*`), so run
   `cd dashboard && npm install && npm run build` before `cargo build` when
-  the UI changes. Frontend-only edits may not trigger Rust recompilation by
-  themselves; touch `src/dashboard/assets.rs` or clean/rebuild so debug builds
-  re-embed the new dist files.
+  the UI changes. `build.rs` emits rerun-if-changed for every dist file (so
+  rebuilt assets re-embed automatically) and, when the dist files are missing
+  entirely (fresh checkout / `cargo install --path .`), builds them itself via
+  `npm ci`/`npm install` + `npm run build`, failing fast with instructions
+  only when npm is unavailable. Crate packages ship the prebuilt dist files
+  (`package.include` whitelist), so `cargo package`/`publish`/crates.io builds
+  need no Node toolchain.
 
 ## Endpoint mapping (old API → tokensave-backed API)
 
@@ -134,7 +138,7 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tokensave curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
 | `GET /curation/status` | hermes curator state files | Returns `enabled:true`, `mode: similarity_dedup`, last preview timestamp | **working** |
 | `GET /curation/activity` | curator activity events | Always empty (no LLM/agent event stream) | working |
-| `GET /curation/preview` | saved dry-run file | In-memory cache of last `dry_run=true` result; stale when fact count changes | **working** |
+| `GET /curation/preview` | saved dry-run file | Last `dry_run=true` result, persisted to a `.tokensave/dashboard/curation_preview.json` sidecar (survives restarts); stale when fact count changes | **working** |
 | `POST /curate` | `agent.memory_curator.run_memory_curation` | Similarity-based dedup: proposes/applies `delete` actions for `likely_duplicate` pairs; `dry_run=true` returns plan, `dry_run=false` hard-deletes losers via `MemoryStore::remove_fact` | **working** |
 | `POST /curate/apply` | (new, no Hermes equivalent) | Generic curation-ops apply API: `{"ops": [{"op":"delete",...} \| {"op":"merge",...}]}` with per-op results; the contract for external (LLM) planners | **working** |
 | `providers` block in `GET /` | hermes provider discovery | static tokensave stub | stubbed |
@@ -510,24 +514,27 @@ conservatism backstop, and callers can pass a higher `threshold` /
    `supersede`, `retag`, and `entity_*` ops from holographic_plus are not
    implemented; an LLM planner (Hermes wrapper, `llm_curation` flag) is expected
    to supply richer plans via `/curate/apply` later.
-3. **Preview persistence**: The dry-run preview is stored in memory only and lost
-   on server restart. holographic_plus saves it to a JSON file on disk.
-4. **Similarity floor**: the cached pair set is computed at threshold 0.5 (the
-   UI slider minimum); API callers passing `threshold < 0.5` won't see pairs
-   below the floor.
+3. **Preview persistence**: RESOLVED — the dry-run preview is mirrored to a
+   sidecar (`.tokensave/dashboard/curation_preview.json`) and re-hydrated on
+   server start; applying curation clears both copies. API shape unchanged.
+4. **Similarity floor**: RESOLVED — the cached pair set keeps every finite
+   phase-cosine pair (`SIMILARITY_PAIR_FLOOR = -1.0`), and the API accepts a
+   `min_similarity` parameter clamped to [-1, 1], so callers can brush below
+   the UI's default duplicate-review floor without recomputation.
 
 ## Remaining stubbed / known gaps (post Phase 3)
 
-1. LCM data scope: standalone always reads the default global DB. Hermes
-   profile-scoped LCM stores (`storage_scope: hermes_profile`, profile
-   `hermes_home`) are not selectable yet; workaround is setting
-   `TOKENSAVE_GLOBAL_DB` before spawning.
-3. The wrapper picks the project root from `TOKENSAVE_DASHBOARD_PROJECT` or
+1. LCM data scope: MOSTLY RESOLVED — the standalone dashboard now serves the
+   project-local `.tokensave/sessions.db` (where transcript ingest writes),
+   with `TOKENSAVE_GLOBAL_DB` pinning an explicit store (also the path for
+   hermes-profile stores: point it at `<hermes_home>/.tokensave/sessions.db`).
+   Remaining: an in-UI store *switcher* for browsing multiple stores.
+2. The wrapper picks the project root from `TOKENSAVE_DASHBOARD_PROJECT` or
    Hermes' cwd — no per-request/workspace project selection.
-4. The wrapper UI is now also rendered + verified inside a live
+3. The wrapper UI is now also rendered + verified inside a live
    `hermes dashboard` session (Hermes live-render section below), in addition
    to the earlier structural / FastAPI proxy validation.
-5. The old holographic_plus dashboard tab is **retired** (Phase 3). The
+4. The old holographic_plus dashboard tab is **retired** (Phase 3). The
    plugin's memory provider/tools/curator remain active; only its dashboard
    UI registration was disabled, since the `hermes-intelligence` wrapper now
    provides that UI backed by tokensave.
@@ -558,6 +565,19 @@ conservatism backstop, and callers can pass a higher `threshold` /
       hermes-profile stores); consider storing real `token_estimate`,
       `tool_name`, `pinned` in `lcm_raw_messages` so the session drawer
       stops approximating.
+      - 2026-06-10 PARTIAL — project-local vs global selection shipped. The
+        dashboard now serves the project's `.tokensave/sessions.db` (where
+        Cursor hooks + the hookless-agent catch-up sweep actually ingest)
+        instead of the always-empty `~/.tokensave/global.db`; a
+        `TOKENSAVE_GLOBAL_DB` override still pins the store (smoke harness /
+        Hermes wrapper contract, which is also the path for hermes-profile
+        stores: point the override at `<hermes_home>/.tokensave/sessions.db`).
+        Additive `storage_scope` field on every LCM payload + `lcm_scope` in
+        capabilities; LCM header shows "Project store"/"Global store".
+        `tokensave dashboard` startup now spawns the same detached catch-up
+        ingest sweep as `tokensave serve`. Remaining: an in-UI store
+        *switcher* (multi-store browsing) and real `token_estimate` /
+        `tool_name` / `pinned` columns.
 - [x] Wire curation: tokensave-side fact maintenance (dedupe via the
       existing similarity classification, trust decay) behind the
       `features.curation` capability flag; then enable the CurationPanel.
@@ -653,6 +673,14 @@ committed.
   existing `test_hermes_intelligence_llm_curation.py` +
   `test_hermes_intelligence_wrapper_lifecycle.py` suites (9 passed).
 - **Docs**: README + `docs/dashboard.md` updated for the Code Graph tab, the
-  `tokensave_dashboard` MCP tool, `--open`, and hard-delete curation (the
-  stale `archive_restore` capability-flag examples removed). CHANGELOG
-  `[Unreleased]` covers the dashboard feature set.
+  `tokensave_dashboard` MCP tool, `--open`, hard-delete curation, JSON error
+  contracts (400/404/422 with `{"detail"}`), `storage_scope` badges, and the full
+  environment variable matrix (TOKENSAVE_GLOBAL_DB, TOKENSAVE_BIN,
+  TOKENSAVE_DASHBOARD_PROJECT, TOKENSAVE_DASHBOARD_URL, HERMES_HOME,
+  TOKENSAVE_OFFLINE, DISABLE_TOKENSAVE). CHANGELOG `[Unreleased]` covers the
+  dashboard feature set.
+
+**Documentation coordination note:** The **Savings & Cost** dashboard tab is
+under active development by a parallel agent. README.md and docs/dashboard.md
+reference it as "(under active development)" to avoid duplicating work-in-progress
+documentation that may change before the feature lands.

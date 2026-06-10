@@ -1,6 +1,6 @@
 # tokensave Dashboard
 
-The tokensave dashboard is a local web interface for exploring your project's holographic memory, LCM (Lossless Context Management) session data, and indexed code graph. It runs entirely on your machine — no external services, API keys, or network connections required.
+The tokensave dashboard is a local web interface for exploring your project's holographic memory, LCM (Lossless Context Management) session data, indexed code graph, and token savings / session cost accounting. It runs entirely on your machine — no external services or API keys required (the Savings & Cost tab optionally refreshes public model prices in the background; everything else is fully offline).
 
 ---
 
@@ -13,10 +13,12 @@ The tokensave dashboard is a local web interface for exploring your project's ho
   - [Holographic Memory](#holographic-memory)
   - [LCM](#lcm)
   - [Code Graph](#code-graph)
+  - [Savings & Cost](#savings--cost)
 - [API Reference](#api-reference)
   - [Capability Discovery](#capability-discovery)
   - [Holographic Memory API](#holographic-memory-api)
   - [LCM API](#lcm-api)
+  - [Savings & Cost API](#savings--cost-api)
 - [Capability Flags](#capability-flags)
 - [Frontend Development](#frontend-development)
 - [Troubleshooting](#troubleshooting)
@@ -78,7 +80,14 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 | Variable | Description |
 |----------|-------------|
-| `TOKENSAVE_GLOBAL_DB` | Override the path to the global database used for LCM data (default: `~/.tokensave/global.db`) |
+| `TOKENSAVE_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over project-local store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the project's `.tokensave/sessions.db` and only falls back to `~/.tokensave/global.db` if the project store cannot be opened |
+| `TOKENSAVE_BIN` | Path to the tokensave binary (used by Hermes wrapper for spawn mode) |
+| `TOKENSAVE_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
+| `TOKENSAVE_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
+| `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation |
+| `TOKENSAVE_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback) |
+| `TOKENSAVE_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tokensave/model-prices.json`; mainly for tests) |
+| `DISABLE_TOKENSAVE` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
 
 ---
 
@@ -146,6 +155,7 @@ Features:
 - Trust score histogram visualization
 - HRR coverage status per category (ready, missing_vectors, missing_bank, stale_bank)
 - Fact growth chart (last 30 days)
+- **Fact Detail View**: Click any fact to see full untruncated content, linked entities, and trust score components
 
 #### Semantic Map
 
@@ -182,16 +192,47 @@ Detects duplicate and related facts using phase-vector cosine similarity:
 Memory maintenance tools:
 - **Status**: Current curation configuration and last run summary
 - **Activity**: Event log of curation actions
-- **Preview**: Dry-run analysis showing proposed actions
-- **Run Curation**: Execute deduplication (permanently DELETES the lower-trust fact in each duplicate pair)
+- **Preview**: Dry-run analysis showing proposed actions (persisted to `.tokensave/dashboard/curation_preview.json` so it survives server restarts)
+- **Run Curation**: Execute deduplication (**permanently hard-DELETES** the lower-trust fact in each duplicate pair)
 
-Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair. **Deletion is permanent — there is no archive or restore.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tokensave_fact_store` recall.
+Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap).
+
+**Deletion is permanent — there is no archive, no restore, and no soft-delete state.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tokensave_fact_store` recall. The winner fact in a merge operation may have its content rewritten and HRR vector re-encoded.
 
 External planners (such as an LLM-backed Hermes wrapper, gated behind the `features.llm_curation` flag) can apply their own delete/merge operations through `POST /curate/apply` (see API reference).
 
 ### LCM
 
-The LCM (Lossless Context Management) tab visualizes session data from the global database.
+The LCM (Lossless Context Management) tab visualizes agent session transcripts and summary nodes from the project's session store.
+
+**Ingest Durability**: Transcript ingest uses per-file byte offsets and file-identity-based rewrite detection. If a session file is rewritten (different content at the same path), the offset resets automatically and the new content is fully ingested. Transactional commits ensure no data loss during concurrent ingest operations.
+
+#### Storage Scopes — Where Messages Live
+
+Transcript ingest is **per project**, not global:
+
+| Store | Path | Written by | `storage_scope` |
+|-------|------|------------|-----------------|
+| Project-local (default) | `<project>/.tokensave/sessions.db` | All transcript ingest for sessions belonging to that project root | `"project_local"` |
+| Hermes profile | `<hermes_home>/.tokensave/sessions.db` | Hermes-side ingest | `"hermes_profile"` |
+| Global | `~/.tokensave/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
+
+The dashboard serves the **project-local store** by default (where Cursor hooks and hookless-agent catch-up sweeps actually ingest). The LCM header shows a **"Project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
+
+Setting `TOKENSAVE_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests, the smoke harness, and the Hermes wrapper, which points it at a Hermes profile's `sessions.db`). When this override is active, `storage_scope` becomes `"global"`.
+
+#### How Ingest Works Per Tool
+
+| Tool | Trigger |
+|------|---------|
+| Cursor | Cursor hooks ingest incrementally at end of turn / stop / session start (subagent transcripts included); no sweep needed |
+| Claude Code, Codex, Vibe, Cline / Roo / Kilo | No hooks — discovered by a catch-up sweep that scans each tool's home transcript directory (e.g. `~/.codex/sessions`) and ingests sessions whose recorded `cwd`/project matches the served project root |
+| Hermes | Hermes-side ingest into the Hermes profile store (not the project store) |
+
+The catch-up sweep runs automatically when the MCP server starts
+(`tokensave serve`) and when `tokensave dashboard` starts with project-local
+scope. Ingest is incremental (per-file byte offsets in `parse_offsets`), so
+repeat sweeps are cheap no-ops.
 
 #### Overview
 
@@ -269,11 +310,102 @@ wrapper at `/api/plugins/hermes-intelligence/graph/*`). See
 [graph-explorer.md](graph-explorer.md) for the full API table, frontend
 design, and performance notes.
 
+### Savings & Cost
+
+The Savings & Cost tab is the accounting surface: how many tokens tokensave
+saved you, and what your agent sessions cost. Three views behind a shared
+time-range selector (All time / Today / 7 days / 30 days):
+
+- **Savings**: the `savings_ledger` event log from the global accounting DB
+  (`~/.tokensave/global.db`, the same data `tokensave gain` reports) —
+  totals, per-tool and per-project breakdowns, a daily series, and the legacy
+  per-project lifetime counters (`projects.tokens_saved`), which predate the
+  ledger and usually carry the big historical numbers. Saved tokens are
+  valued in dollars at the Claude Sonnet *input* rate (same convention as
+  `tokensave gain`), labeled as estimated. The view discloses the
+  methodology inline: per call, `before` = indexed bytes/4 of every file the
+  response references (full-read counterfactual), `after` = response
+  chars/4, saved = `max(0, before - after)` — an estimated upper bound,
+  since repeated calls re-count files and agents would not always have read
+  every referenced file raw. (Historical lifetime counters accumulated the
+  gross `before` without subtracting responses; the recording path now
+  credits only the net difference.)
+- **Sessions**: one row per ingested session from the session store (the
+  same store the LCM tab serves) — model(s) used, input/output token counts,
+  cost, and a **cost basis** badge. Rows expand to a per-model breakdown
+  with the resolved OpenRouter slug.
+- **Models & Pricing**: aggregate cost per model and per day, the `turns`
+  accounting imported by `tokensave cost` from Claude Code transcripts
+  (always `actual` — costs were computed from real usage data at ingest),
+  and a panel showing where prices came from.
+
+#### Cost-basis semantics (`actual` vs `estimated`)
+
+Every token count and cost is labeled with its provenance — in the UI
+(badges) and in the API (`cost_basis` fields):
+
+- **`actual`** — the transcript recorded real usage data
+  (`metadata_json.usage.input_tokens`/`output_tokens`, or OpenAI-style
+  `prompt_tokens`/`completion_tokens`; cache read/write tokens are honored
+  too). Costs computed from these are labeled *actual (from transcript
+  usage)*.
+- **`estimated`** — no usage data exists, so tokens are estimated with the
+  same ~4 chars/token heuristic the LCM views use (`(LENGTH(text)+3)/4`),
+  attributing non-assistant text to input and assistant text to output.
+  This only covers stored message text — resent context windows and tool
+  payloads are not modeled — so estimated costs are a deliberate lower
+  bound, and the UI says so. (Cursor hook ingests record models but no usage
+  and no timestamps, so Cursor-heavy stores are fully `estimated` and have
+  empty daily charts.)
+- **`mixed`** — a session/aggregate containing both.
+
+Messages with no recorded model id appear as explicit **unknown model** rows:
+their tokens are counted but never priced.
+
+#### Model pricing
+
+Prices come from [OpenRouter's public model list](https://openrouter.ai/api/v1/models)
+(no auth needed for pricing metadata):
+
+1. **Disk cache** at `~/.tokensave/model-prices.json` (override:
+   `TOKENSAVE_MODEL_PRICES_PATH`) — served immediately, even when stale.
+2. **Background refresh** at most once per process when the cache is older
+   than 24h. The fetch never blocks a request and never fails the dashboard.
+3. **Bundled snapshot** (`src/dashboard/model_prices_fallback.json`, a
+   curated ~157-model subset) — used when there is no usable cache, so the
+   tab works offline and on first run.
+
+`TOKENSAVE_OFFLINE=1` disables the network entirely (cache/snapshot only).
+Transcript model ids are fuzzy-mapped to OpenRouter slugs client-side
+(`dashboard/savings/src/pricing.ts`): manual alias table, effort/thinking
+suffix stripping (`claude-fable-5-thinking-xhigh` → `anthropic/claude-fable-5`),
+dash→dot version normalization (`claude-opus-4-8` → `claude-opus-4.8`),
+Claude family/version reorder (`claude-4.6-sonnet` → `claude-sonnet-4.6`),
+and vendor-prefix probing. Unmatched models (e.g. Cursor's
+`composer-2.5-fast`) show *no price data* — the UI never guesses.
+
 ---
 
 ## API Reference
 
 All API endpoints return JSON. The dashboard mirrors the original Hermes plugin API paths for compatibility.
+
+### Error Responses
+
+All error responses use a consistent JSON contract with an HTTP 4xx status code and a `detail` field:
+
+```json
+{
+  "detail": "Human-readable error message"
+}
+```
+
+Common status codes:
+- `400` — Bad request (invalid query parameters, malformed input)
+- `404` — Resource not found (unknown fact ID, missing node, non-existent session)
+- `422` — Unprocessable entity (validation errors, semantic constraints violated)
+
+Example: Requesting a non-existent fact returns `404` with `{"detail": "fact not found: 12345"}`. Invalid query parameters (e.g., `limit=not-a-number`) return `400` with details about the parameter.
 
 ### Capability Discovery
 
@@ -289,7 +421,8 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
   "mode": "standalone",
   "project_root": "/home/user/my-project",
   "memory_db": "/home/user/my-project/.tokensave/tokensave.db",
-  "lcm_db": "/home/user/.tokensave/global.db",
+  "lcm_db": "/home/user/my-project/.tokensave/sessions.db",
+  "lcm_scope": "project_local",
   "features": {
     "memory": true,
     "lcm": true,
@@ -303,8 +436,9 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 
 **Fields:**
 - `mode`: `"standalone"` for direct use, `"hermes"` when wrapped by Hermes
+- `lcm_db` / `lcm_scope`: The LCM session store being served and its scope (`"project_local"` or `"global"`; see [Storage Scopes](#storage-scopes--where-messages-live))
 - `features.memory`: Whether the project database is available
-- `features.lcm`: Whether the global database is available
+- `features.lcm`: Whether the LCM session store is available
 - `features.curation`: Whether similarity-dedup curation tools are enabled
 - `features.llm_curation`: Whether an LLM-backed curation planner is available. Always `false` in standalone; the Hermes wrapper flips this when it adds an LLM planner that generates ops for `POST /curate/apply`
 
@@ -346,6 +480,35 @@ Main overview endpoint returning facts, entities, and graph data.
     "entities": [...],
     "graph": { "nodes": [...], "edges": [...] }
   }
+}
+```
+
+#### `GET /api/plugins/holographic/fact/{fact_id}`
+
+Full fact detail. List and projection payloads truncate `content` to 200
+characters; detail panels (e.g. the Semantic Map's pinned card) fetch the
+complete row — plus linked entities — from here. Returns `404` with a
+`{"detail": "fact not found: <id>"}` body for unknown ids.
+
+**Response:**
+```json
+{
+  "fact": {
+    "fact_id": 103,
+    "content": "Full untruncated fact content…",
+    "category": "tool",
+    "tags": "[\"lcm\",\"ux\"]",
+    "trust_score": 0.76,
+    "retrieval_count": 3,
+    "helpful_count": 2,
+    "created_at": 1700000020,
+    "updated_at": 1700000120,
+    "has_hrr": 1,
+    "entities": [
+      { "entity_id": 202, "name": "LCMTab", "entity_type": "feature" }
+    ]
+  },
+  "error": ""
 }
 ```
 
@@ -427,7 +590,10 @@ Recent curation activity log.
 
 #### `GET /api/plugins/holographic/curation/preview`
 
-Last saved dry-run preview (if any exists from current server session).
+Last saved dry-run preview. Persisted to
+`.tokensave/dashboard/curation_preview.json`, so it survives server restarts;
+applying curation (or any `/curate/apply` mutation) clears it. Staleness is
+recomputed against the live fact count on every read.
 
 **Response:**
 ```json
@@ -551,7 +717,8 @@ Summary statistics and recent sessions/nodes.
 **Response Structure:**
 ```json
 {
-  "path": "/home/user/.tokensave/global.db",
+  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "storage_scope": "project_local",
   "exists": true,
   "overview": {
     "messages_total": 1500,
@@ -593,7 +760,8 @@ Full-text search with facets.
 **Response:**
 ```json
 {
-  "path": "/home/user/.tokensave/global.db",
+  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "storage_scope": "project_local",
   "exists": true,
   "query": "authentication",
   "limit": 25,
@@ -639,7 +807,8 @@ Get a summary node with its source items.
 **Response:**
 ```json
 {
-  "path": "/home/user/.tokensave/global.db",
+  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "storage_scope": "project_local",
   "exists": true,
   "node_id": "node-abc",
   "node": { /* node details */ },
@@ -669,6 +838,62 @@ Compression statistics.
 - `by` — Group by `"session"` or `"node"` (default: `"session"`)
 - `limit` — Max groups (default: 50, max: 500)
 
+### Savings & Cost API
+
+Routes under `/api/plugins/savings/*` (proxied by the Hermes wrapper at
+`/api/plugins/hermes-intelligence/savings/*`). All endpoints degrade
+gracefully: when a backing store is unavailable they return `200` with
+`"available": false` instead of failing. `range` accepts `today`, `7d`,
+`30d`, `all` (default `all`; sessions without any timestamp — e.g. Cursor
+hook ingests — only appear in `all`).
+
+#### `GET /api/plugins/savings/overview`
+
+Combined summary: ledger totals (today / 7d / 30d / all-time), lifetime
+per-project counters, session-store rollup (message counts split into
+`usage_messages` vs `estimated_messages`, actual vs estimated token sums,
+`unknown_model_messages`), `turns` accounting totals, and pricing provenance
+(`source`, `fetched_at`, `offline`).
+
+#### `GET /api/plugins/savings/ledger`
+
+Savings-ledger detail for a range: `total`, `by_day`, `by_tool`,
+`by_project`. Reuses the same aggregation as `tokensave gain` / `--history`.
+
+**Query Parameters:** `range`
+
+#### `GET /api/plugins/savings/sessions`
+
+Paged per-session cost rows. Each session carries `cost_basis`
+(`"actual" | "estimated" | "mixed"`), `usage_messages` /
+`estimated_messages`, and a `models` array; each model entry has `model`
+(`null` = unknown model), its own `cost_basis`, an `actual` block
+(`input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_write_tokens`) and an `estimated` block (`input_tokens`,
+`output_tokens`). Dollar costs are computed by the UI from the `/pricing`
+table.
+
+**Query Parameters:** `range`, `limit` (default 25, max 100), `offset`
+
+#### `GET /api/plugins/savings/models`
+
+Per-model aggregates (same token-block shape as session model entries, plus
+`sessions`), a `daily` series for timestamped messages, and the `turns`
+block: `by_model` (`model`, `cost_usd`, `total_tokens`, `cost_basis:
+"actual"`) and `by_day` — reusing the `tokensave cost` queries.
+
+**Query Parameters:** `range`
+
+#### `GET /api/plugins/savings/pricing`
+
+The merged model price table: `source` (`"cache"` or `"fallback"`),
+`fetched_at` (cache mtime), `ttl_secs`, `offline`, `cache_path`,
+`model_count`, and `models` — OpenRouter slug → `prompt_per_mtok`,
+`completion_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok` (USD
+per million tokens). Requesting this endpoint (or `/overview`) kicks off the
+at-most-once background refresh when the cache is stale and
+`TOKENSAVE_OFFLINE` is unset.
+
 ---
 
 ## Capability Flags
@@ -696,8 +921,9 @@ fetch('/api/capabilities')
 | Flag | Meaning | UI Impact |
 |------|---------|-----------|
 | `features.memory` | Project database is accessible | Show Holographic Memory tab |
-| `features.lcm` | Global database is accessible | Show LCM tab |
+| `features.lcm` | LCM session store is accessible (see `lcm_scope` for which one) | Show LCM tab |
 | `features.graph` | Code-graph API is available | Show Code Graph tab |
+| `features.savings` | Savings & Cost API is available | Show Savings & Cost tab |
 | `features.curation` | Similarity-dedup curation tools are available | Show Curation panel, enable curate actions |
 | `features.llm_curation` | An LLM-backed curation planner is available (Hermes wrapper only) | Enable LLM plan actions that target `POST /curate/apply` |
 
@@ -758,6 +984,22 @@ cd .. && cargo build --bin tokensave
 
 The `build.rs` script emits `cargo::rerun-if-changed` directives for all embedded assets, so the binary automatically rebuilds when dist files change.
 
+When the dist files are missing entirely (fresh checkout, `cargo install
+--path .`), `build.rs` builds them automatically: it runs `npm ci` (falling
+back to `npm install`) and `npm run build` in `dashboard/` and embeds the
+result. If npm is not on PATH, the build fails fast with instructions instead.
+
+### Packaging / crates.io
+
+`Cargo.toml` uses an explicit `package.include` whitelist that ships the
+**prebuilt** `dashboard/*/dist` bundles inside the crate package. This means:
+
+- `cargo package` / `cargo publish` must be run after `cd dashboard && npm ci
+  && npm run build` (the release workflow does this); the package verify step
+  then compiles without touching npm.
+- Crates.io consumers (`cargo install tokensave`) and docs.rs need **no**
+  Node.js toolchain — the embedded assets come straight from the package.
+
 ### Development Workflow
 
 For rapid frontend iteration without rebuilding Rust:
@@ -813,16 +1055,24 @@ tokensave dashboard
 ```bash
 # LCM tab shows empty state
 
-# This is expected if you haven't used LCM-enabled tools yet.
-# The global database is populated by:
-# - Cursor transcript ingestion (via hooks)
+# Session messages live in the PROJECT store, not the global DB.
+# The project store is populated by:
+# - Cursor transcript ingestion (via end-of-turn hooks)
+# - The catch-up sweep for Claude/Codex/Vibe/Cline transcripts, which runs
+#   when `tokensave serve` or `tokensave dashboard` starts
 # - Explicit LCM tool calls
 
-# Check if global database exists
-ls -la ~/.tokensave/global.db
+# Check the project session store for rows
+ls -la .tokensave/sessions.db
+sqlite3 .tokensave/sessions.db 'SELECT COUNT(*) FROM lcm_raw_messages'
 
-# Set custom path if needed
-export TOKENSAVE_GLOBAL_DB=/path/to/global.db
+# The LCM header shows which store is being served ("Project store" /
+# "Global store") and its path. If it shows the global DB unexpectedly,
+# check whether TOKENSAVE_GLOBAL_DB is set — it pins the store:
+echo "$TOKENSAVE_GLOBAL_DB"
+
+# Pin to an explicit store if needed
+export TOKENSAVE_GLOBAL_DB=/path/to/sessions.db
 tokensave dashboard
 ```
 
@@ -844,9 +1094,11 @@ touch src/dashboard/assets.rs && cargo build
 ### Build Errors: Dashboard Assets Missing
 
 ```bash
-# Error: couldn't read dashboard/shell/dist/shell.js
+# Error: missing dashboard dist assets ... npm was not found on PATH
 
-# The frontend must be built before the Rust binary:
+# build.rs builds missing assets automatically when npm is available.
+# This error means npm is not installed; install Node.js 22+, or build
+# the frontend manually before the Rust binary:
 cd dashboard && npm install && npm run build
 cd .. && cargo build --bin tokensave
 ```
