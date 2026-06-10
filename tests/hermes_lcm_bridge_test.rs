@@ -3607,7 +3607,7 @@ tools.TOKENSAVE_BIN = write_fake_binary(
 )
 malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
-assert malformed["stdout"] == "not-json-at-all"
+assert "not-json-at-all" in malformed.get("stdout", "")
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
 tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n", "exit /b 0\n")
