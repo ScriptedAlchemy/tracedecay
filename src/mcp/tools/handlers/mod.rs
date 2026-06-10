@@ -209,18 +209,53 @@ pub async fn handle_tool_call(
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
-        "tokensave_lcm_status" => session::handle_lcm_status(cg, args).await,
-        "tokensave_lcm_doctor" => session::handle_lcm_doctor(cg, args).await,
-        "tokensave_lcm_load_session" => session::handle_lcm_load_session(cg, args).await,
-        "tokensave_lcm_grep" => session::handle_lcm_grep(cg, args).await,
-        "tokensave_lcm_describe" => session::handle_lcm_describe(cg, args).await,
-        "tokensave_lcm_expand" => session::handle_lcm_expand(cg, args).await,
-        "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(cg, args).await,
-        "tokensave_lcm_preflight" => session::handle_lcm_preflight(cg, args).await,
-        "tokensave_lcm_compress" => session::handle_lcm_compress(cg, args).await,
-        "tokensave_lcm_session_boundary" => session::handle_lcm_session_boundary(cg, args).await,
+        "tokensave_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
+        "tokensave_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
+        "tokensave_lcm_load_session" => {
+            session::handle_lcm_load_session(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_grep" => session::handle_lcm_grep(Some(cg.project_root()), args).await,
+        "tokensave_lcm_describe" => {
+            session::handle_lcm_describe(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_expand" => session::handle_lcm_expand(Some(cg.project_root()), args).await,
+        "tokensave_lcm_expand_query" => {
+            session::handle_lcm_expand_query(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_preflight" => {
+            session::handle_lcm_preflight(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_compress" => {
+            session::handle_lcm_compress(Some(cg.project_root()), args).await
+        }
+        "tokensave_lcm_session_boundary" => {
+            session::handle_lcm_session_boundary(Some(cg.project_root()), args).await
+        }
         _ => Err(TokenSaveError::Config {
             message: format!("unknown tool: {tool_name}"),
+        }),
+    }
+}
+
+/// Dispatches only the storage-scoped LCM tools that can run without an
+/// initialized project (e.g. `storage_scope=hermes_profile`).
+pub async fn handle_profile_scoped_lcm_tool_call(
+    tool_name: &str,
+    args: Value,
+) -> Result<ToolResult> {
+    match tool_name {
+        "tokensave_lcm_status" => session::handle_lcm_status(None, args).await,
+        "tokensave_lcm_doctor" => session::handle_lcm_doctor(None, args).await,
+        "tokensave_lcm_load_session" => session::handle_lcm_load_session(None, args).await,
+        "tokensave_lcm_grep" => session::handle_lcm_grep(None, args).await,
+        "tokensave_lcm_describe" => session::handle_lcm_describe(None, args).await,
+        "tokensave_lcm_expand" => session::handle_lcm_expand(None, args).await,
+        "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(None, args).await,
+        "tokensave_lcm_preflight" => session::handle_lcm_preflight(None, args).await,
+        "tokensave_lcm_compress" => session::handle_lcm_compress(None, args).await,
+        "tokensave_lcm_session_boundary" => session::handle_lcm_session_boundary(None, args).await,
+        _ => Err(TokenSaveError::Config {
+            message: format!("tool `{tool_name}` does not support profile-scoped dispatch"),
         }),
     }
 }

@@ -6444,6 +6444,76 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     assert_eq!(payload["status"], "ok");
 }
 
+#[tokio::test]
+async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
+    let outside_cwd = TempDir::new().unwrap();
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-cli-profile",
+        "lcm-cli-profile-message-1",
+        "profile-only status message",
+        1,
+    )
+    .await;
+    let profile_args = json!({
+        "provider": "cursor",
+        "session_id": "lcm-cli-profile",
+        "storage_scope": "hermes_profile",
+        "hermes_home": hermes_home.path(),
+    })
+    .to_string();
+    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            profile_args.as_str(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        profile_output.status.success(),
+        "profile-scoped tokensave tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&profile_output.stdout),
+        String::from_utf8_lossy(&profile_output.stderr)
+    );
+    let profile_json: Value = serde_json::from_slice(&profile_output.stdout).unwrap();
+    let profile_payload: Value =
+        serde_json::from_str(profile_json["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(profile_payload["status"], "ok");
+    assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
+
+    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tokensave_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor","storage_scope":"project_local"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !project_output.status.success(),
+        "project-local tool calls without an initialized cwd should still fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&project_output.stdout),
+        String::from_utf8_lossy(&project_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&project_output.stderr);
+    assert!(
+        stderr.contains("run 'tokensave init' first"),
+        "project-local failure should continue to require initialization:\n{stderr}"
+    );
+}
+
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions();

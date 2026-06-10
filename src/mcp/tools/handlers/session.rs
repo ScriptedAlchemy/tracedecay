@@ -751,6 +751,13 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
     )
 }
 
+fn project_local_storage_without_project() -> ToolResult {
+    lcm_scoped_unavailable(
+        "project_local",
+        "project_local LCM storage requires an initialized TokenSave project root",
+    )
+}
+
 struct LcmStorage {
     db: GlobalDb,
     scope: &'static str,
@@ -846,13 +853,13 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
     Ok(canonical)
 }
 
-async fn open_lcm_storage(cg: &TokenSave, args: &Value) -> LcmStorageResolution {
-    open_lcm_storage_with_mode(cg, args, false).await
+async fn open_lcm_storage(project_root: Option<&Path>, args: &Value) -> LcmStorageResolution {
+    open_lcm_storage_with_mode(project_root, args, false).await
 }
 
 macro_rules! lcm_open_storage {
-    ($cg:expr, $args:expr) => {
-        match open_lcm_storage($cg, $args).await {
+    ($project_root:expr, $args:expr) => {
+        match open_lcm_storage($project_root, $args).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
@@ -860,14 +867,17 @@ macro_rules! lcm_open_storage {
 }
 
 async fn open_lcm_storage_with_mode(
-    cg: &TokenSave,
+    project_root: Option<&Path>,
     args: &Value,
     read_only_existing: bool,
 ) -> LcmStorageResolution {
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
         "project_local" => {
-            let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+            let Some(project_root) = project_root else {
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+            };
+            let db_path = crate::sessions::cursor::project_session_db_path(project_root);
             let db = if read_only_existing {
                 GlobalDb::open_read_only_at(&db_path).await
             } else {
@@ -1101,10 +1111,13 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
     })))
 }
 
-pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_status(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let mut status = storage
         .db
         .lcm_status(provider, session_id)
@@ -1119,7 +1132,10 @@ pub(super) async fn handle_lcm_status(cg: &TokenSave, args: Value) -> Result<Too
     })))
 }
 
-pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_doctor(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
     let mode = lcm_doctor_mode(&args)?;
@@ -1151,7 +1167,7 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
     }
     let clean_config = lcm_clean_config(&args)?;
     let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
-    let storage = match open_lcm_storage_with_mode(cg, &args, read_only_existing).await {
+    let storage = match open_lcm_storage_with_mode(project_root, &args, read_only_existing).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
@@ -1166,11 +1182,14 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
     Ok(tool_json(&payload))
 }
 
-pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_load_session(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let page = storage
         .db
         .lcm_load_session(LcmLoadSessionRequest {
@@ -1212,10 +1231,13 @@ pub(super) async fn handle_lcm_load_session(cg: &TokenSave, args: Value) -> Resu
     Ok(tool_json(&payload))
 }
 
-pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_grep(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let query = required_string_arg(&args, "query")?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let hits = storage
         .db
         .lcm_grep(LcmGrepRequest {
@@ -1246,10 +1268,13 @@ pub(super) async fn handle_lcm_grep(cg: &TokenSave, args: Value) -> Result<ToolR
     })))
 }
 
-pub(super) async fn handle_lcm_describe(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_describe(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let description = storage
         .db
         .lcm_describe(LcmDescribeRequest {
@@ -1267,11 +1292,14 @@ pub(super) async fn handle_lcm_describe(cg: &TokenSave, args: Value) -> Result<T
     })))
 }
 
-pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_expand(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let expansion = storage
         .db
         .lcm_expand(LcmExpandRequest {
@@ -1292,7 +1320,10 @@ pub(super) async fn handle_lcm_expand(cg: &TokenSave, args: Value) -> Result<Too
     })))
 }
 
-pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_expand_query(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let prompt = required_string_arg(&args, "prompt")?;
@@ -1311,7 +1342,7 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
         MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
     )?
     .unwrap_or(default_context_limit);
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let response = storage
         .db
         .lcm_expand_query(LcmExpandQueryRequest {
@@ -1338,10 +1369,13 @@ pub(super) async fn handle_lcm_expand_query(cg: &TokenSave, args: Value) -> Resu
     Ok(lcm_expand_query_tool_json(&payload))
 }
 
-pub(super) async fn handle_lcm_session_boundary(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_session_boundary(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let response = storage
         .db
         .lcm_session_boundary(LcmSessionBoundaryRequest {
@@ -1363,10 +1397,13 @@ pub(super) async fn handle_lcm_session_boundary(cg: &TokenSave, args: Value) -> 
     })))
 }
 
-pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_preflight(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let response = storage
         .db
         .lcm_preflight(LcmPreflightRequest {
@@ -1401,10 +1438,13 @@ pub(super) async fn handle_lcm_preflight(cg: &TokenSave, args: Value) -> Result<
     })))
 }
 
-pub(super) async fn handle_lcm_compress(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_lcm_compress(
+    project_root: Option<&Path>,
+    args: Value,
+) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(cg, &args);
+    let storage = lcm_open_storage!(project_root, &args);
     let response = storage
         .db
         .lcm_compress(LcmCompressionRequest {
