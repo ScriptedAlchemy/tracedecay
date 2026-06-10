@@ -35,6 +35,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
+        project_root: None,
     }
 }
 
@@ -3770,5 +3771,284 @@ fn lcm_summarizer_modes_are_stable_bridge_placeholders() {
         LcmSummarizerMode::Fake {
             summary_text: "fixed".to_string()
         }
+    );
+}
+
+/// Newer Hermes declares `ContextEngine.update_from_response(usage)` as an
+/// abstract method; the generated engine must implement it or the plugin
+/// fails to load with "Can't instantiate abstract class".
+#[test]
+fn generated_context_engine_satisfies_abstract_update_from_response() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let script = plugin_dir.join("check_update_from_response.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+
+# Mimic the newer Hermes ABC *before* the plugin module is executed.
+class ContextEngine(abc.ABC):
+    @abc.abstractmethod
+    def update_from_response(self, usage):
+        raise NotImplementedError
+
+agent_module = types.ModuleType("agent")
+agent_module.__path__ = []
+context_engine_module = types.ModuleType("agent.context_engine")
+context_engine_module.ContextEngine = ContextEngine
+agent_module.context_engine = context_engine_module
+sys.modules["agent"] = agent_module
+sys.modules["agent.context_engine"] = context_engine_module
+
+parent_name = "_hermes_user_abc"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class Ctx:
+    def __init__(self):
+        self.context_engines = []
+    def register_hook(self, name, handler):
+        pass
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = Ctx()
+# This instantiates TokenSaveContextEngine; an unimplemented abstract method
+# raises TypeError here.
+plugin.register(ctx)
+assert len(ctx.context_engines) == 1
+engine = ctx.context_engines[0]
+
+engine.update_from_response({"prompt_tokens": 11, "completion_tokens": 7})
+assert engine.last_prompt_tokens == 11
+assert engine.last_completion_tokens == 7
+assert engine.last_total_tokens == 18
+
+engine.update_from_response(
+    {"input_tokens": "3", "output_tokens": "4", "total_tokens": 9}
+)
+assert engine.last_prompt_tokens == 3
+assert engine.last_completion_tokens == 4
+assert engine.last_total_tokens == 9
+
+engine.update_from_response(None)
+assert engine.last_prompt_tokens == 0
+assert engine.last_completion_tokens == 0
+assert engine.last_total_tokens == 0
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(&plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes plugin check");
+    assert!(
+        output.status.success(),
+        "generated engine must satisfy the abstract update_from_response contract\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Newer Hermes derives the skill namespace from the plugin name and rejects
+/// ':' inside skill names, so registration must use the bare "tokensave".
+#[test]
+fn generated_register_uses_colon_free_skill_name() {
+    run_generated_plugin_script(
+        "check_skill_name.py",
+        r#"
+class Ctx:
+    def __init__(self):
+        self.skills = []
+    def register_hook(self, name, handler):
+        pass
+    def register_skill(self, name, path):
+        if ":" in name:
+            raise ValueError(f"invalid skill name: {name}")
+        self.skills.append((name, path))
+
+ctx = Ctx()
+plugin.register(ctx)
+assert ctx.skills, "expected the tokensave skill to be registered"
+assert ctx.skills[0][0] == "tokensave", ctx.skills
+assert ctx.skills[0][1].name == "SKILL.md"
+"#,
+        "generated registration must register the skill under the bare 'tokensave' name",
+    );
+}
+
+/// Profiles can pin the indexed project via a `project_root` config key:
+/// explicit kwargs win, then config, with the session cwd as last fallback.
+#[test]
+fn generated_context_engine_resolves_project_root_from_config() {
+    run_generated_plugin_script(
+        "check_context_engine_project_root.py",
+        r#"
+class Ctx:
+    def __init__(self):
+        self.config = {"project_root": "/tmp/pinned-project"}
+        self.context_engines = []
+    def register_hook(self, name, handler):
+        pass
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+
+ctx = Ctx()
+plugin.register(ctx)
+engine = ctx.context_engines[0]
+
+# Config pin applies at registration time.
+assert engine.project_root == "/tmp/pinned-project", engine.project_root
+
+# A session cwd does NOT override the config pin...
+engine.on_session_start(session_id="s1", cwd="/somewhere/else")
+assert engine.project_root == "/tmp/pinned-project", engine.project_root
+
+# ...but an explicit kwargs project_root does.
+engine.on_session_start(session_id="s2", project_root="/explicit/root")
+assert engine.project_root == "/explicit/root", engine.project_root
+
+# Without a pin or explicit root, cwd remains the fallback.
+unpinned = plugin.TokenSaveContextEngine(config={})
+assert unpinned.project_root is None
+unpinned.on_session_start(session_id="s3", cwd="/cwd/fallback")
+assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
+"#,
+        "generated engine must honor the project_root config pin (kwargs > config > cwd)",
+    );
+}
+
+/// The install-time `--project-root` pin must flow through both dispatch
+/// layers: `tools.call_tokensave_tool` adds `--project <pin>` to every CLI
+/// invocation that has no explicit project, and the context engine resolves
+/// `project_root` as kwargs > config > pin > cwd.
+#[test]
+fn generated_plugin_honors_install_time_project_root_pin() {
+    let home = TempDir::new().unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: Vec::new(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_project_root_pin.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_pin"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+tools = plugin.tools
+assert tools.PINNED_PROJECT_ROOT == "/pinned/project", tools.PINNED_PROJECT_ROOT
+
+# Every CLI dispatch picks up the pin when no explicit project is given.
+captured = []
+
+class FakeResult:
+    returncode = 0
+    stdout = "{}"
+    stderr = ""
+
+def fake_run(argv, **kwargs):
+    captured.append(argv)
+    return FakeResult()
+
+tools.subprocess.run = fake_run
+tools.call_tokensave_tool("tokensave_status", {})
+assert captured, "expected a subprocess invocation"
+argv = captured[-1]
+idx = argv.index("--project")
+assert argv[idx + 1] == "/pinned/project", argv
+
+# An explicit project still wins over the pin.
+tools.call_tokensave_tool("tokensave_status", {}, project_root="/explicit/root")
+argv = captured[-1]
+idx = argv.index("--project")
+assert argv[idx + 1] == "/explicit/root", argv
+
+# Engine resolution: pin applies by default, config beats pin, kwargs beat
+# config, and cwd no longer overrides any pin.
+engine = plugin.TokenSaveContextEngine(config={})
+assert engine.project_root == "/pinned/project", engine.project_root
+engine.on_session_start(session_id="s1", cwd="/somewhere/else")
+assert engine.project_root == "/pinned/project", engine.project_root
+
+configured = plugin.TokenSaveContextEngine(config={"project_root": "/from/config"})
+assert configured.project_root == "/from/config", configured.project_root
+
+explicit = plugin.TokenSaveContextEngine(config={})
+explicit.on_session_start(session_id="s2", project_root="/explicit/root")
+assert explicit.project_root == "/explicit/root", explicit.project_root
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(&plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes plugin check");
+    assert!(
+        output.status.success(),
+        "generated plugin must honor the install-time project-root pin\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

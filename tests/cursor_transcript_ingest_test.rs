@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
+use tokensave::global_db::GlobalDb;
 use tokensave::sessions::cursor::{
     ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped, open_project_session_db,
     project_session_db_path,
@@ -191,6 +192,52 @@ async fn cursor_transcript_ingest_is_idempotent() {
 }
 
 #[tokio::test]
+async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Replay this line after failure."}]}}
+"#,
+    )
+    .unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    let db_path = project_session_db_path(&project);
+
+    // Ensure schema exists, then deliberately break the raw-message table.
+    drop(open_project_session_db(&project).await.unwrap());
+    let broken = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let broken_conn = broken.connect().unwrap();
+    broken_conn
+        .execute("DROP TABLE session_messages", ())
+        .await
+        .unwrap();
+
+    // Skip schema ensure so ingest runs against the broken table.
+    let broken_db = GlobalDb::open_at_assuming_schema(&db_path).await.unwrap();
+    let first = ingest_cursor_transcript_event(&event.to_string(), &broken_db).await;
+    assert_eq!(first.sessions_upserted, 0);
+    assert_eq!(first.messages_upserted, 0);
+
+    // Re-opening with schema ensure repairs the dropped table; retry should
+    // ingest the same line because the failed pass did not advance the cursor.
+    let repaired_db = open_project_session_db(&project).await.unwrap();
+    let second = ingest_cursor_transcript_event(&event.to_string(), &repaired_db).await;
+    assert_eq!(second.sessions_upserted, 1);
+    assert_eq!(second.messages_upserted, 1);
+
+    let hits = repaired_db
+        .search_session_messages("cursor", None, "Replay this line", 10)
+        .await;
+    assert_eq!(hits.len(), 1);
+}
+
+#[tokio::test]
 async fn cursor_transcript_ingest_reads_only_appended_lines() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
@@ -231,6 +278,43 @@ async fn cursor_transcript_ingest_reads_only_appended_lines() {
         .search_session_messages("cursor", None, "incremental ingestion", 10)
         .await;
     assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let root_a = tmp.path().join("root-a");
+    let root_b = tmp.path().join("root-b");
+    std::fs::create_dir_all(root_a.join(".tokensave")).unwrap();
+    std::fs::create_dir_all(root_b.join(".tokensave")).unwrap();
+    std::fs::write(root_a.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::write(root_b.join(".tokensave/tokensave.db"), "").unwrap();
+    let cwd_b = root_b.join("workspace");
+    std::fs::create_dir_all(&cwd_b).unwrap();
+    let transcript = root_b.join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Route this to root B."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&root_b).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [root_a, root_b],
+        "cwd": cwd_b
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+    let session = db
+        .get_session("cursor", "cursor-session")
+        .await
+        .expect("session should be stored under root B");
+    assert_eq!(session.project_path, root_b.to_string_lossy());
+    assert_eq!(session.project_key, root_b.to_string_lossy());
 }
 
 #[tokio::test]

@@ -4,8 +4,9 @@ use serde_json::Value;
 
 use crate::global_db::GlobalDb;
 use crate::sessions::source::{
-    append_tool_calls_metadata, content_storage_text_and_tools, ingest_source, stream_new_jsonl,
-    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, content_storage_text_and_tools, ingest_source, paths_equal,
+    stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
+    TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -49,6 +50,34 @@ pub fn resolve_existing_hermes_profile_session_db_path(
         ));
     }
     Ok(db_path)
+}
+
+/// Typed outcome of [`resolve_hermes_profile_session_db_readonly`].
+pub enum HermesProfileDbReadOnly {
+    /// sessions.db exists and is ready to open read-only.
+    Exists(PathBuf),
+    /// The `.tokensave` dir and path are valid but sessions.db is absent —
+    /// nothing has been ingested yet.
+    NotIngested,
+    /// A security or configuration error (symlink escape, bad path, etc.)
+    /// that should be surfaced as a hard error.
+    ConfigError(String),
+}
+
+/// Resolves the path to the hermes profile session DB for read-only access,
+/// distinguishing "valid path but file not yet created" from security /
+/// configuration errors such as symlink escapes or non-directory `.tokensave`.
+pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesProfileDbReadOnly {
+    let dir = match resolve_hermes_profile_tokensave_dir(hermes_home, false) {
+        Ok(dir) => dir,
+        Err(msg) => return HermesProfileDbReadOnly::ConfigError(msg),
+    };
+    let db_path = dir.join(PROJECT_SESSION_DB_FILENAME);
+    if db_path.is_file() {
+        HermesProfileDbReadOnly::Exists(db_path)
+    } else {
+        HermesProfileDbReadOnly::NotIngested
+    }
 }
 
 fn resolve_hermes_profile_tokensave_dir(
@@ -507,40 +536,63 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
 }
 
 fn event_project(event: &Value) -> (String, String) {
+    let cwd_root = event
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .and_then(|cwd| crate::config::discover_project_root(&cwd));
     let candidates = event_project_candidates(event);
-    let project = candidates
+    let resolved = candidates
         .iter()
         .find_map(|candidate| crate::config::discover_project_root(candidate))
-        .or_else(|| candidates.into_iter().next())
-        .map_or_else(
-            || "unknown".to_string(),
-            |path| path.to_string_lossy().to_string(),
-        );
+        .or_else(|| candidates.into_iter().next());
+    let project_path = match (cwd_root, resolved) {
+        (Some(cwd_root), Some(resolved)) if !paths_equal(&cwd_root, &resolved) => cwd_root,
+        (Some(cwd_root), None) => cwd_root,
+        (_, Some(resolved)) => resolved,
+        _ => return ("unknown".to_string(), "unknown".to_string()),
+    };
+    let project = project_path.to_string_lossy().to_string();
     (project.clone(), project)
 }
 
 fn event_project_candidates(event: &Value) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
-        for root in roots {
-            if let Some(path) = root.as_str().filter(|path| !path.is_empty()) {
-                candidates.push(PathBuf::from(path));
-            }
+    let mut push_unique = |candidate: PathBuf| {
+        if !candidates.iter().any(|seen| seen == &candidate) {
+            candidates.push(candidate);
         }
-    }
+    };
     if let Some(cwd) = event
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
     {
-        candidates.push(PathBuf::from(cwd));
+        push_unique(PathBuf::from(cwd));
     }
     if let Some(file_path) = event
         .get("file_path")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
     {
-        candidates.push(PathBuf::from(file_path));
+        let path = Path::new(file_path);
+        push_unique(path.parent().unwrap_or(path).to_path_buf());
+    }
+    if let Some(transcript_path) = event
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    {
+        let path = Path::new(transcript_path);
+        push_unique(path.parent().unwrap_or(path).to_path_buf());
+    }
+    if let Some(roots) = event.get("workspace_roots").and_then(Value::as_array) {
+        for root in roots {
+            if let Some(path) = root.as_str().filter(|path| !path.is_empty()) {
+                push_unique(PathBuf::from(path));
+            }
+        }
     }
     candidates
 }

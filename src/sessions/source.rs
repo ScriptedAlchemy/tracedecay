@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::global_db::GlobalDb;
+use crate::global_db::{GlobalDb, ParseOffset};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 /// Counters returned by an ingestion pass.
@@ -70,6 +70,7 @@ impl TranscriptIngestStats {
 pub struct StoredCursor {
     pub position: u64,
     pub mtime: u64,
+    pub file_id: u64,
 }
 
 /// Provider-neutral session metadata an adapter derives while parsing.
@@ -158,25 +159,31 @@ async fn ingest_one(
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
     let path_str = path.to_string_lossy().to_string();
-    let (prev_position, prev_mtime) = db.get_parse_offset(&path_str).await.unwrap_or((0, 0));
+    let prev_offset = db
+        .get_parse_offset_with_file_id(&path_str)
+        .await
+        .unwrap_or_default();
     let prev = StoredCursor {
-        position: prev_position,
-        mtime: prev_mtime,
+        position: prev_offset.byte_offset,
+        mtime: prev_offset.mtime,
+        file_id: prev_offset.file_id,
     };
     let Some(parsed) = source.parse_new(path, prev, project_root, max_new_bytes) else {
         return TranscriptIngestStats::default();
     };
 
-    // Persist progress (even with zero messages) so the next run only sees
-    // genuinely new content.
-    db.set_parse_offset(
-        &path_str,
-        parsed.new_cursor.position,
-        parsed.new_cursor.mtime,
-    )
-    .await;
-
     if parsed.messages.is_empty() {
+        // Non-message append (e.g. blank/undecodable rows) still advances the
+        // cursor so the next ingest only sees genuinely new content.
+        db.set_parse_offset_with_file_id(
+            &path_str,
+            ParseOffset {
+                byte_offset: parsed.new_cursor.position,
+                mtime: parsed.new_cursor.mtime,
+                file_id: parsed.new_cursor.file_id,
+            },
+        )
+        .await;
         return TranscriptIngestStats::default();
     }
 
@@ -220,16 +227,24 @@ async fn ingest_one(
         parent_tool_use_id: draft.parent_tool_use_id,
     };
 
-    let sessions_upserted = u64::from(db.upsert_session(&session).await);
-    let mut messages_upserted = 0_u64;
-    for message in &parsed.messages {
-        if db.upsert_session_message(message).await {
-            messages_upserted = messages_upserted.saturating_add(1);
-        }
+    if !db
+        .upsert_transcript_batch(
+            &session,
+            &parsed.messages,
+            &path_str,
+            ParseOffset {
+                byte_offset: parsed.new_cursor.position,
+                mtime: parsed.new_cursor.mtime,
+                file_id: parsed.new_cursor.file_id,
+            },
+        )
+        .await
+    {
+        return TranscriptIngestStats::default();
     }
     TranscriptIngestStats {
-        sessions_upserted,
-        messages_upserted,
+        sessions_upserted: 1,
+        messages_upserted: parsed.messages.len() as u64,
     }
 }
 
@@ -264,11 +279,12 @@ pub fn stream_new_jsonl(
     let meta = std::fs::metadata(path).ok()?;
     let file_size = meta.len();
     let mtime = file_mtime_secs(&meta);
+    let file_id = stable_jsonl_file_id(path, &meta).unwrap_or(0);
 
     // Resume from the saved offset only when the file has grown (or stayed) and
-    // its mtime has not regressed; otherwise treat it as truncated/rewritten and
-    // restart from the beginning.
-    let resume = prev.position > 0 && file_size >= prev.position && mtime >= prev.mtime;
+    // its identity still matches. Legacy cursors without a file id fall back to
+    // the old mtime guard.
+    let resume = should_resume_jsonl(prev, file_size, mtime, file_id);
     let seek_to = if resume { prev.position } else { 0 };
 
     if seek_to >= file_size {
@@ -278,6 +294,7 @@ pub fn stream_new_jsonl(
             new_cursor: StoredCursor {
                 position: seek_to,
                 mtime,
+                file_id,
             },
         });
     }
@@ -328,6 +345,7 @@ pub fn stream_new_jsonl(
         new_cursor: StoredCursor {
             position: offset,
             mtime,
+            file_id,
         },
     })
 }
@@ -362,6 +380,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor) -> Option<ChangedFile>
         new_cursor: StoredCursor {
             position: hash,
             mtime,
+            file_id: 0,
         },
     })
 }
@@ -415,6 +434,7 @@ pub async fn read_new_rows<T>(
             // Row stores have no single file mtime; the rowid alone is the
             // monotonic cursor, so mtime is left as a sentinel.
             mtime: 0,
+            file_id: 0,
         },
     })
 }
@@ -463,6 +483,53 @@ fn file_mtime_secs(meta: &std::fs::Metadata) -> u64 {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs())
+}
+
+const JSONL_HEAD_FINGERPRINT_BYTES: usize = 1024;
+
+fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: u64) -> bool {
+    if prev.position == 0 || file_size < prev.position {
+        return false;
+    }
+    if prev.file_id != 0 && file_id != 0 {
+        return prev.file_id == file_id;
+    }
+    mtime >= prev.mtime
+}
+
+fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tokensave-jsonl-file-id-v1");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hasher.update(meta.dev().to_le_bytes());
+        hasher.update(meta.ino().to_le_bytes());
+    }
+    hasher.update(jsonl_head_fingerprint(path)?.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Some(u64::from_be_bytes(bytes))
+}
+
+fn jsonl_head_fingerprint(path: &Path) -> Option<u64> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    // Hash only the first logical line prefix so append-only writes keep a
+    // stable identity even for initially tiny files.
+    let _ = reader.read_until(b'\n', &mut buf).ok()?;
+    if buf.len() > JSONL_HEAD_FINGERPRINT_BYTES {
+        buf.truncate(JSONL_HEAD_FINGERPRINT_BYTES);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"tokensave-jsonl-head-v1");
+    hasher.update(&buf);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Some(u64::from_be_bytes(bytes))
 }
 
 /// Stable 64-bit content hash prefix suitable for the existing integer
@@ -636,6 +703,28 @@ mod tests {
 
         // A cap smaller than the unread tail defers the whole read (no cursor advance).
         assert!(stream_new_jsonl(&path, StoredCursor::default(), Some(1)).is_none());
+    }
+
+    #[test]
+    fn stream_new_jsonl_resets_offset_when_file_identity_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // Keep byte length stable across rewrite to simulate same-size rotation.
+        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+
+        let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+        assert_eq!(first.lines.len(), 2);
+
+        std::fs::write(&path, "{\"a\":9}\n{\"a\":8}\n").unwrap();
+        // Simulate a non-regressing mtime guard; identity must still force a reset.
+        let stale = StoredCursor {
+            mtime: 0,
+            ..first.new_cursor
+        };
+        let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
+        assert_eq!(rewritten.lines.len(), 2);
+        assert_eq!(rewritten.lines[0].value["a"], 9);
+        assert_eq!(rewritten.lines[1].value["a"], 8);
     }
 
     #[test]

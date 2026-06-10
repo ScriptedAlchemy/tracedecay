@@ -46,6 +46,14 @@ pub struct SessionIngestHealth {
     pub last_ingest_unix: Option<i64>,
 }
 
+/// Persisted parse cursor for a transcript path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOffset {
+    pub byte_offset: u64,
+    pub mtime: u64,
+    pub file_id: u64,
+}
+
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
@@ -172,6 +180,42 @@ async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
     Some(())
 }
 
+async fn parse_offsets_column_exists(conn: &Connection, column: &str) -> bool {
+    let Ok(mut rows) = conn.query("PRAGMA table_info(parse_offsets)", ()).await else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).ok().as_deref() == Some(column) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn add_parse_offset_column_after_missing_check(
+    conn: &Connection,
+    column: &str,
+    ddl: &str,
+) -> Option<()> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Some(()),
+        Err(_) if parse_offsets_column_exists(conn, column).await => Some(()),
+        Err(_) => None,
+    }
+}
+
+async fn ensure_parse_offset_columns(conn: &Connection) -> Option<()> {
+    if !parse_offsets_column_exists(conn, "file_id").await {
+        add_parse_offset_column_after_missing_check(
+            conn,
+            "file_id",
+            "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+    }
+    Some(())
+}
+
 async fn add_session_parent_column_after_missing_check(
     conn: &Connection,
     column: &str,
@@ -257,7 +301,8 @@ impl GlobalDb {
             CREATE TABLE IF NOT EXISTS parse_offsets (
                 file_path TEXT PRIMARY KEY,
                 byte_offset INTEGER NOT NULL,
-                mtime INTEGER NOT NULL
+                mtime INTEGER NOT NULL,
+                file_id INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS savings_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,6 +383,7 @@ impl GlobalDb {
         .await
         .ok()?;
         ensure_session_parent_columns(&db.conn).await?;
+        ensure_parse_offset_columns(&db.conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
 
         Some(db)
@@ -414,8 +460,11 @@ impl GlobalDb {
             let (offset, mtime) = self.get_parse_offset(&path).await.unwrap_or((0, 0));
             if mtime > 0 {
                 let mtime = mtime as i64;
-                health.last_ingest_unix =
-                    Some(health.last_ingest_unix.map_or(mtime, |prev| prev.max(mtime)));
+                health.last_ingest_unix = Some(
+                    health
+                        .last_ingest_unix
+                        .map_or(mtime, |prev| prev.max(mtime)),
+                );
             }
             let pending = meta.len().saturating_sub(offset);
             if pending > 0 {
@@ -428,9 +477,20 @@ impl GlobalDb {
         health
     }
 
+    /// Canonical registry key for a project path. Falls back to the lossy path
+    /// string when canonicalization fails (e.g. the path no longer exists) so
+    /// upserts and lookups always agree on a single key per project, instead of
+    /// creating divergent rows for `/p`, `/p/`, and symlinked spellings (#6).
+    fn canonical_project_key(project_path: &Path) -> String {
+        std::fs::canonicalize(project_path)
+            .unwrap_or_else(|_| project_path.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let _ = self
             .conn
             .execute(
@@ -443,7 +503,7 @@ impl GlobalDb {
 
     /// Returns the stored `tokens_saved` count for a specific project, or 0 if not found.
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let Ok(mut rows) = self
             .conn
             .query(
@@ -675,13 +735,25 @@ impl GlobalDb {
             return false;
         }
 
+        if !self.upsert_session_message_in_existing_tx(message).await {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
+    }
+
+    async fn upsert_session_message_in_existing_tx(&self, message: &SessionMessageRecord) -> bool {
         let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
             &self.conn,
             &self.storage_root,
             message,
         )
         .await;
-        let projection_ok = match raw_result {
+        match raw_result {
             Ok(raw) => {
                 self.upsert_session_message_projection(
                     message,
@@ -691,9 +763,36 @@ impl GlobalDb {
                 .await
             }
             Err(_) => false,
-        };
+        }
+    }
 
-        if !projection_ok {
+    /// Atomically upserts one transcript session + all parsed messages and then
+    /// advances the parse cursor. Any failure rolls back the entire batch so a
+    /// follow-up ingest can safely replay from the previous offset.
+    pub async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return false;
+        }
+        if !self.upsert_session(session).await {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        for message in messages {
+            if !self.upsert_session_message_in_existing_tx(message).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return false;
+            }
+        }
+        if !self
+            .set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
+            .await
+        {
             let _ = self.conn.execute("ROLLBACK", ()).await;
             return false;
         }
@@ -1175,30 +1274,101 @@ impl GlobalDb {
     /// Get the saved parse offset for a JSONL file.
     /// Returns `(byte_offset, mtime)` or `None` if not tracked.
     pub async fn get_parse_offset(&self, path: &str) -> Option<(u64, u64)> {
-        let mut rows = self
+        self.get_parse_offset_with_file_id(path)
+            .await
+            .map(|cursor| (cursor.byte_offset, cursor.mtime))
+    }
+
+    /// Returns the full parse cursor, including the optional file identity id.
+    pub async fn get_parse_offset_with_file_id(&self, path: &str) -> Option<ParseOffset> {
+        let Ok(mut rows) = self
             .conn
             .query(
-                "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
                 params![path],
             )
             .await
-            .ok()?;
+        else {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                    params![path],
+                )
+                .await
+                .ok()?;
+            let row = rows.next().await.ok()??;
+            let offset: i64 = row.get(0).ok()?;
+            let mtime: i64 = row.get(1).ok()?;
+            return Some(ParseOffset {
+                byte_offset: offset as u64,
+                mtime: mtime as u64,
+                file_id: 0,
+            });
+        };
         let row = rows.next().await.ok()??;
         let offset: i64 = row.get(0).ok()?;
         let mtime: i64 = row.get(1).ok()?;
-        Some((offset as u64, mtime as u64))
+        let file_id: i64 = row.get(2).ok()?;
+        Some(ParseOffset {
+            byte_offset: offset as u64,
+            mtime: mtime as u64,
+            file_id: file_id as u64,
+        })
     }
 
     /// Save the parse offset for a JSONL file. Best-effort.
     pub async fn set_parse_offset(&self, path: &str, offset: u64, mtime: u64) {
-        let _ = self
-            .conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(file_path) DO UPDATE SET byte_offset = ?2, mtime = ?3",
-                params![path, offset as i64, mtime as i64],
+        let () = self
+            .set_parse_offset_with_file_id(
+                path,
+                ParseOffset {
+                    byte_offset: offset,
+                    mtime,
+                    file_id: 0,
+                },
             )
             .await;
+    }
+
+    /// Save the parse offset and file identity id for a transcript path.
+    pub async fn set_parse_offset_with_file_id(&self, path: &str, offset: ParseOffset) {
+        let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
+    }
+
+    async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {
+        if self
+            .conn
+            .execute(
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3,
+                    file_id = ?4",
+                params![
+                    path,
+                    offset.byte_offset as i64,
+                    offset.mtime as i64,
+                    offset.file_id as i64
+                ],
+            )
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3",
+                params![path, offset.byte_offset as i64, offset.mtime as i64],
+            )
+            .await
+            .is_ok()
     }
 
     /// Checkpoints the WAL. Best-effort.
