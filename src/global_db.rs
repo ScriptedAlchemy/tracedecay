@@ -36,8 +36,13 @@ pub struct GlobalDb {
     _db: LibsqlDatabase,
 }
 
+const GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
+
 /// Returns the path to the global database: `~/.tokensave/global.db`.
 pub fn global_db_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(GLOBAL_DB_PATH_ENV).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
     dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
 }
 

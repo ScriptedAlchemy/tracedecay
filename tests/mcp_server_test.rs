@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokensave::mcp::transport::ChannelTransport;
+use tokensave::mcp::transport::{ChannelTransport, McpTransport};
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
 
@@ -83,6 +83,33 @@ fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
 
+fn response_with_id(responses: &[String], id: Value) -> Value {
+    responses
+        .iter()
+        .map(|r| parse_response(r))
+        .find(|resp| resp.get("id") == Some(&id))
+        .unwrap_or_else(|| panic!("response with id {id}"))
+}
+
+struct ReadErrorTransport;
+
+impl McpTransport for ReadErrorTransport {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "synthetic read failure",
+        ))
+    }
+
+    async fn write_line(&mut self, _line: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1. test_initialize
 // ---------------------------------------------------------------------------
@@ -138,6 +165,76 @@ async fn test_initialized_notification() {
     );
     let resp = parse_response(ping_responses[0]);
     assert!(resp["error"].is_null(), "ping should succeed");
+}
+
+#[tokio::test]
+async fn test_any_notification_without_id_produces_no_response() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            jsonrpc_notification("ping"),
+            jsonrpc_request(json!(901), "ping", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "only the request with id=901 should produce a response, got {responses:?}"
+    );
+    let resp = parse_response(&responses[0]);
+    assert_eq!(resp["id"], 901);
+    assert!(resp["error"].is_null(), "ping request should succeed");
+}
+
+#[tokio::test]
+async fn test_explicit_null_id_is_still_a_request() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(json!(null), "ping", json!({}))],
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "explicit id=null is a request id and should receive a response"
+    );
+    let resp = parse_response(&responses[0]);
+    assert!(resp["id"].is_null(), "response should preserve null id");
+    assert!(resp["error"].is_null(), "ping request should succeed");
+}
+
+#[tokio::test]
+async fn test_tools_call_explicit_null_id_is_still_a_request() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(null),
+            "tools/call",
+            json!({
+                "name": "tokensave_status",
+                "arguments": {}
+            }),
+        )],
+    )
+    .await;
+
+    assert_eq!(
+        responses.len(),
+        1,
+        "explicit id=null is a tools/call request id and should receive a response"
+    );
+    let resp = response_with_id(&responses, json!(null));
+    assert!(resp["error"].is_null(), "tools/call request should succeed");
+    assert!(
+        resp["result"].is_object(),
+        "tools/call should return a result"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +361,79 @@ async fn test_tools_call_search() {
             .unwrap_or(false)
     });
     assert!(has_helper, "search results should contain 'helper'");
+}
+
+#[tokio::test]
+async fn test_tools_call_semantic_failure_sets_is_error() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(33),
+            "tools/call",
+            json!({
+                "name": "tokensave_str_replace",
+                "arguments": {
+                    "path": "src/main.rs",
+                    "old_str": "fn missing() {}",
+                    "new_str": "fn replaced() {}"
+                }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(33));
+    assert!(
+        resp["error"].is_null(),
+        "semantic tool failures should not become JSON-RPC errors"
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "semantic tool failure should set MCP isError=true, got {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool result text");
+    let payload: Value = serde_json::from_str(text).expect("tool result JSON");
+    assert_eq!(payload["success"], false);
+}
+
+#[tokio::test]
+async fn test_tools_call_plain_text_failure_sets_is_error() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(34),
+            "tools/call",
+            json!({
+                "name": "tokensave_changelog",
+                "arguments": {
+                    "from_ref": "HEAD~1",
+                    "to_ref": "HEAD"
+                }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(34));
+    assert!(
+        resp["error"].is_null(),
+        "plain-text semantic failures should not become JSON-RPC errors"
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "plain-text semantic failure should set MCP isError=true, got {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool result text");
+    assert!(
+        text.contains("git diff failed"),
+        "expected changelog git failure text, got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1341,21 @@ async fn test_initialize_advertises_logging_capability() {
     assert!(
         resp["result"]["capabilities"]["logging"].is_object(),
         "initialize must advertise logging capability, got: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_run_returns_transport_read_errors() {
+    let (server, _dir) = setup_server().await;
+    let mut transport = ReadErrorTransport;
+
+    let err = server
+        .run(&mut transport)
+        .await
+        .expect_err("transport read failure should be returned");
+    assert!(
+        err.to_string().contains("synthetic read failure"),
+        "unexpected error: {err}"
     );
 }
 

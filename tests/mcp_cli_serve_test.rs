@@ -1,5 +1,6 @@
+use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
@@ -16,6 +17,15 @@ async fn init_project_with_file(contents: &str) -> TempDir {
     dir
 }
 
+async fn init_project_under(parent: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = parent.join(name);
+    fs::create_dir_all(path.join("src")).unwrap();
+    fs::write(path.join("src/lib.rs"), contents).unwrap();
+    let cg = TokenSave::init(&path).await.unwrap();
+    cg.index_all().await.unwrap();
+    path
+}
+
 async fn register_global_project(home: &Path, project: &Path) {
     let db_path = home.join(".tokensave/global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
@@ -28,7 +38,8 @@ fn tokensave_command_with_home(home: &Path) -> Command {
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"));
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("TOKENSAVE_GLOBAL_DB", home.join(".tokensave/global.db"));
     command
 }
 
@@ -47,6 +58,12 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .as_str()
         .expect("runtime should include database.project_root")
         .to_string()
+}
+
+#[cfg(unix)]
+fn file_uri_localhost_percent_encoded(path: &Path) -> String {
+    let encoded = path.to_string_lossy().replace(' ', "%20");
+    format!("file://localhost{encoded}")
 }
 
 #[tokio::test]
@@ -302,5 +319,120 @@ async fn no_explicit_path_without_roots_still_uses_global_fallback() {
         "no explicit path should keep global DB fallback when MCP roots are unavailable\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let projects = TempDir::new().unwrap();
+    let stale = init_project_under(
+        projects.path(),
+        "stale-project",
+        "pub fn stale_project_marker() {}\n",
+    )
+    .await;
+    let active = init_project_under(
+        projects.path(),
+        "active project",
+        "pub fn active_project_marker() {}\n",
+    )
+    .await;
+    register_global_project(home.path(), &stale).await;
+    register_global_project(home.path(), &active).await;
+
+    let mut child = tokensave_command_with_home(home.path())
+        .arg("serve")
+        .current_dir(cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tokensave serve should start");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "roots": [{
+                        "uri": file_uri_localhost_percent_encoded(&active),
+                        "name": "active"
+                    }]
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tokensave_runtime",
+                    "arguments": {}
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tokensave serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "tokensave serve should accept encoded file://localhost MCP roots\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        runtime_project_root(&output.stdout, 2),
+        active.to_str().unwrap(),
+        "serve should use the decoded MCP root project"
+    );
+}
+
+#[tokio::test]
+async fn same_depth_descendant_global_fallback_is_ambiguous() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let alpha = init_project_under(cwd.path(), "alpha", "pub fn alpha_marker() {}\n").await;
+    let beta = init_project_under(cwd.path(), "beta", "pub fn beta_marker() {}\n").await;
+    register_global_project(home.path(), &alpha).await;
+    register_global_project(home.path(), &beta).await;
+
+    let output = tokensave_command_with_home(home.path())
+        .arg("serve")
+        .current_dir(cwd.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tokensave serve should run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "ambiguous same-depth descendants should not select an arbitrary project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(
+        stderr.contains("Multiple tokensave projects found"),
+        "stderr should explain the ambiguity:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no projects registered in the global database"),
+        "stderr should not contradict ambiguity with a no-projects error:\n{stderr}"
     );
 }

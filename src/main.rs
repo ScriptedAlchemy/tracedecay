@@ -1002,8 +1002,15 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     } else {
                         // Last resort: fall back to the global DB's registered projects.
                         match serve::resolve_serve_from_global_db().await {
-                            Some(p) => serve::ensure_initialized(&p).await?,
-                            None => {
+                            serve::ServeGlobalDbResolution::Found(p) => {
+                                serve::ensure_initialized(&p).await?
+                            }
+                            serve::ServeGlobalDbResolution::Ambiguous(paths) => {
+                                return Err(tokensave::errors::TokenSaveError::Config {
+                                    message: serve::global_db_ambiguity_message(&paths),
+                                });
+                            }
+                            serve::ServeGlobalDbResolution::None => {
                                 return Err(tokensave::errors::TokenSaveError::Config {
                                     message: format!(
                                         "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
@@ -1029,7 +1036,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let mut transport = tokensave::mcp::StdioTransport::new();
             // If we peeked at stdin to read `initialize` roots, replay that line.
             if let Some(line) = peeked_line {
-                server.handle_and_write(&line, &mut transport).await;
+                server.handle_and_write(&line, &mut transport).await?;
             }
             server.run(&mut transport).await?;
             server.shutdown().await;
