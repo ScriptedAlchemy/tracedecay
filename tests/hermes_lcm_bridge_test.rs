@@ -682,6 +682,7 @@ with tempfile.TemporaryDirectory() as tmp:
     home = pathlib.Path(tmp) / "isolated-home"
     home.mkdir()
     os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
     expected = str(home / ".hermes")
     assert not pathlib.Path(expected).exists()
 
@@ -3571,9 +3572,13 @@ spec.loader.exec_module(plugin)
 
 tools = plugin.tools
 
-def write_fake_binary(name, body):
+def write_fake_binary(name, body_posix, body_windows):
+    if os.name == "nt":
+        path = plugin_dir / f"{name}.cmd"
+        path.write_text("@echo off\n" + body_windows)
+        return str(path)
     path = plugin_dir / name
-    path.write_text('#!/bin/sh\n' + body)
+    path.write_text('#!/bin/sh\n' + body_posix)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return str(path)
 
@@ -3589,6 +3594,7 @@ assert "error" in plugin.call_tokensave_json("tokensave_lcm_status", {})
 tools.TOKENSAVE_BIN = write_fake_binary(
     "fake-tokensave-crash",
     'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
+    'echo {"content\necho handshake aborted 1>&2\nexit /b 3\n',
 )
 crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert crashed["error"] == "tokensave tool exited with status 3", crashed
@@ -3599,13 +3605,14 @@ assert crashed["stderr"] == "handshake aborted"
 tools.TOKENSAVE_BIN = write_fake_binary(
     "fake-tokensave-badjson",
     "printf 'not-json-at-all'\nexit 0\n",
+    "echo not-json-at-all\nexit /b 0\n",
 )
 malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
 assert malformed["stdout"] == "not-json-at-all"
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
-tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n")
+tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n", "exit /b 0\n")
 assert tools.call_tokensave_tool("tokensave_lcm_status", {}) == "{}"
 "#,
         "generated tool bridge should normalize subprocess failures into JSON errors",

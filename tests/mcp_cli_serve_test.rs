@@ -60,6 +60,13 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .to_string()
 }
 
+fn canonical_path_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(unix)]
 fn file_uri_localhost_percent_encoded(path: &Path) -> String {
     let encoded = path.to_string_lossy().replace(' ', "%20");
@@ -225,8 +232,8 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     );
 
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        cwd_project.path().to_str().unwrap(),
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(cwd_project.path()),
         "discovered cwd project should be preferred over MCP initialize roots"
     );
 }
