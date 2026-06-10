@@ -1009,6 +1009,16 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::Dashboard {
+            path,
+            host,
+            port,
+            open,
+        } => {
+            let project_path = tokensave::config::resolve_path_with_discovery(path);
+            let cg = serve::ensure_initialized(&project_path).await?;
+            tokensave::dashboard::run(&cg, &host, port, open).await?;
+        }
         Commands::Serve { path, timings } => {
             if std::env::var("DISABLE_TOKENSAVE").as_deref() == Ok("true") {
                 // Allow users to opt out per-project by setting

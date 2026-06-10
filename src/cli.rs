@@ -170,6 +170,21 @@ pub enum Commands {
     /// Codex PostToolUse hook handler for incremental sync (called by Codex)
     #[command(name = "hook-codex-post-tool-use", hide = true)]
     HookCodexPostToolUse,
+    /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
+    Dashboard {
+        /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Address to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on (0 = pick a free port)
+        #[arg(long, default_value_t = tokensave::dashboard::DEFAULT_PORT)]
+        port: u16,
+        /// Open the dashboard URL in the default browser after the server starts
+        #[arg(long)]
+        open: bool,
+    },
     /// Start MCP server over stdio
     Serve {
         /// Project path
