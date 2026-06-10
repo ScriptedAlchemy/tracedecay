@@ -1,0 +1,433 @@
+/**
+ * Interactive code-graph canvas.
+ *
+ * Canvas 2D rendering (not SVG) so a few hundred nodes stay at 60fps:
+ * - wheel zoom around the cursor + drag pan,
+ * - node drag with the force layout settling around the pinned node,
+ * - click to select, double-click to expand neighbors,
+ * - hover highlights the direct neighborhood and dims the rest,
+ * - labels are culled at low zoom (always shown for hubs / selection),
+ * - "+N" badges mark nodes with unexpanded (collapsed) neighbors,
+ * - an optional path id set renders a highlighted route.
+ */
+
+import React, { useEffect, useRef } from "react";
+import { createSimulation, type SimEdge, type SimNode, type Simulation } from "./simulation";
+import { colorForKind } from "./types";
+import type { GraphEdge, GraphNode } from "./types";
+
+export interface GraphCanvasProps {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  /** Node the camera should fly to (search-to-focus / expansion seed). */
+  focusId: string | null;
+  selectedId: string | null;
+  /** Node ids on the active shortest path, in order. */
+  pathIds: string[];
+  onSelect: (id: string) => void;
+  onExpand: (id: string) => void;
+}
+
+interface Camera {
+  x: number;
+  y: number;
+  k: number;
+}
+
+const EDGE_STYLES: Record<string, { color: string; dash: number[]; width: number }> = {
+  calls: { color: "rgba(247, 199, 106, 0.55)", dash: [], width: 1.4 },
+  uses: { color: "rgba(122, 167, 255, 0.45)", dash: [6, 4], width: 1.1 },
+  implements: { color: "rgba(255, 122, 182, 0.55)", dash: [3, 3], width: 1.3 },
+  extends: { color: "rgba(255, 122, 182, 0.45)", dash: [8, 3], width: 1.3 },
+  contains: { color: "rgba(168, 200, 192, 0.28)", dash: [2, 4], width: 1 },
+  type_of: { color: "rgba(122, 167, 255, 0.36)", dash: [4, 4], width: 1 },
+  returns: { color: "rgba(103, 232, 169, 0.42)", dash: [5, 3], width: 1.1 },
+  receives: { color: "rgba(103, 232, 169, 0.34)", dash: [2, 3], width: 1 },
+  derives_macro: { color: "rgba(255, 122, 182, 0.3)", dash: [1, 3], width: 1 },
+  annotates: { color: "rgba(168, 200, 192, 0.3)", dash: [1, 4], width: 1 },
+};
+const DEFAULT_EDGE_STYLE = { color: "rgba(168, 200, 192, 0.3)", dash: [], width: 1 };
+
+const DIM_ALPHA = 0.13;
+
+function edgeStyle(kind: string) {
+  return EDGE_STYLES[kind] || DEFAULT_EDGE_STYLE;
+}
+
+interface ThemeColors {
+  label: string;
+  halo: string;
+  ring: string;
+  path: string;
+}
+
+/** Samples the shell design tokens so the canvas follows light/dark themes. */
+function readTheme(el: HTMLElement): ThemeColors {
+  const styles = getComputedStyle(el);
+  const read = (name: string, fallback: string) =>
+    styles.getPropertyValue(name).trim() || fallback;
+  return {
+    label: read("--ts-text", "#e7fff9"),
+    halo: read("--ts-void", "#030607"),
+    ring: read("--ts-text", "#e7fff9"),
+    path: read("--ts-cyan", "#75f4d2"),
+  };
+}
+
+export default function GraphCanvas({
+  nodes,
+  edges,
+  focusId,
+  selectedId,
+  pathIds,
+  onSelect,
+  onExpand,
+}: GraphCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const simRef = useRef<Simulation | null>(null);
+  const cameraRef = useRef<Camera>({ x: 0, y: 0, k: 1 });
+  const hoverRef = useRef<SimNode | null>(null);
+  const dragRef = useRef<{ node: SimNode | null; panning: boolean; lastX: number; lastY: number }>(
+    { node: null, panning: false, lastX: 0, lastY: 0 },
+  );
+  const needsRenderRef = useRef(true);
+  const rafRef = useRef(0);
+  const propsRef = useRef({ selectedId, pathIds, onSelect, onExpand });
+  propsRef.current = { selectedId, pathIds, onSelect, onExpand };
+
+  // Rebuild the simulation when data changes, preserving prior positions.
+  useEffect(() => {
+    simRef.current = createSimulation(nodes, edges, simRef.current, focusId);
+    simRef.current.reheat(0.9);
+    needsRenderRef.current = true;
+  }, [nodes, edges]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fly to the focused node, then keep tracking it while the layout settles
+  // (cleared as soon as the user pans manually).
+  const followIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusId || !simRef.current) return;
+    const node = simRef.current.nodes.find((n) => n.id === focusId);
+    if (!node) return;
+    const camera = cameraRef.current;
+    camera.x = node.x;
+    camera.y = node.y;
+    camera.k = Math.max(camera.k, 0.8);
+    followIdRef.current = focusId;
+    needsRenderRef.current = true;
+  }, [focusId, nodes]);
+
+  useEffect(() => {
+    needsRenderRef.current = true;
+  }, [selectedId, pathIds]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    function toWorld(px: number, py: number) {
+      const rect = canvas.getBoundingClientRect();
+      const camera = cameraRef.current;
+      return {
+        x: (px - rect.left - rect.width / 2) / camera.k + camera.x,
+        y: (py - rect.top - rect.height / 2) / camera.k + camera.y,
+      };
+    }
+
+    function hitTest(px: number, py: number): SimNode | null {
+      const sim = simRef.current;
+      if (!sim) return null;
+      const world = toWorld(px, py);
+      let best: SimNode | null = null;
+      let bestDist = Infinity;
+      for (const node of sim.nodes) {
+        const dx = node.x - world.x;
+        const dy = node.y - world.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const reach = node.radius + 6 / cameraRef.current.k;
+        if (dist < reach && dist < bestDist) {
+          best = node;
+          bestDist = dist;
+        }
+      }
+      return best;
+    }
+
+    function neighborhood(node: SimNode | null): Set<string> | null {
+      const sim = simRef.current;
+      if (!node || !sim) return null;
+      const ids = new Set<string>([node.id]);
+      for (const edge of sim.edges) {
+        if (edge.source === node.id) ids.add(edge.target);
+        if (edge.target === node.id) ids.add(edge.source);
+      }
+      return ids;
+    }
+
+    function drawArrow(edge: SimEdge, camera: Camera) {
+      const { sourceNode: a, targetNode: b } = edge;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ux = dx / dist;
+      const uy = dy / dist;
+      const tipX = b.x - ux * (b.radius + 3);
+      const tipY = b.y - uy * (b.radius + 3);
+      const size = Math.min(7, 5.5 / Math.sqrt(camera.k) + 2);
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(tipX - ux * size - uy * size * 0.55, tipY - uy * size + ux * size * 0.55);
+      ctx.lineTo(tipX - ux * size + uy * size * 0.55, tipY - uy * size - ux * size * 0.55);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function render() {
+      const sim = simRef.current;
+      const theme = readTheme(canvas);
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+        canvas.width = Math.round(rect.width * dpr);
+        canvas.height = Math.round(rect.height * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      if (!sim) return;
+
+      const camera = cameraRef.current;
+      ctx.translate(rect.width / 2, rect.height / 2);
+      ctx.scale(camera.k, camera.k);
+      ctx.translate(-camera.x, -camera.y);
+
+      const { selectedId: selId, pathIds: path } = propsRef.current;
+      const hover = hoverRef.current;
+      const highlight = neighborhood(hover);
+      const pathSet = new Set(path);
+      const pathPairs = new Set<string>();
+      for (let i = 0; i + 1 < path.length; i++) {
+        pathPairs.add(`${path[i]}>${path[i + 1]}`);
+        pathPairs.add(`${path[i + 1]}>${path[i]}`);
+      }
+
+      // --- edges ---
+      for (const edge of sim.edges) {
+        const onPath = pathPairs.has(`${edge.source}>${edge.target}`);
+        const inHighlight =
+          !highlight || (highlight.has(edge.source) && highlight.has(edge.target));
+        const style = edgeStyle(edge.kind);
+        ctx.globalAlpha = inHighlight || onPath ? 1 : DIM_ALPHA;
+        ctx.strokeStyle = onPath ? theme.path : style.color;
+        ctx.lineWidth = (onPath ? 2.4 : style.width) / Math.sqrt(camera.k);
+        ctx.setLineDash(onPath ? [] : style.dash);
+        ctx.beginPath();
+        ctx.moveTo(edge.sourceNode.x, edge.sourceNode.y);
+        ctx.lineTo(edge.targetNode.x, edge.targetNode.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = onPath ? theme.path : style.color;
+        drawArrow(edge, camera);
+      }
+
+      // --- nodes ---
+      const labelCutoff = 14 / camera.k; // world-space radius needed for a label
+      for (const node of sim.nodes) {
+        const isSelected = node.id === selId;
+        const isHovered = hover ? node.id === hover.id : false;
+        const onPath = pathSet.has(node.id);
+        const inHighlight = !highlight || highlight.has(node.id);
+        ctx.globalAlpha = inHighlight || onPath ? 1 : DIM_ALPHA;
+
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+        ctx.fillStyle = colorForKind(node.kind);
+        ctx.fill();
+        if (isSelected || isHovered || onPath) {
+          ctx.lineWidth = (isSelected ? 3 : 2) / camera.k;
+          ctx.strokeStyle = onPath && !isSelected ? theme.path : theme.ring;
+          ctx.stroke();
+        } else {
+          ctx.lineWidth = 1.4 / camera.k;
+          ctx.strokeStyle = theme.halo;
+          ctx.stroke();
+        }
+
+        // Collapsed-neighbor badge: full degree minus visible edges.
+        const collapsed = Math.max(0, (node.degree || 0) - node.visibleDegree);
+        if (collapsed > 0 && camera.k > 0.35) {
+          const bx = node.x + node.radius * 0.85;
+          const by = node.y - node.radius * 0.85;
+          const br = Math.max(6.5, 8 / camera.k);
+          ctx.beginPath();
+          ctx.arc(bx, by, br, 0, Math.PI * 2);
+          ctx.fillStyle = theme.halo;
+          ctx.fill();
+          ctx.lineWidth = 1 / camera.k;
+          ctx.strokeStyle = theme.path;
+          ctx.stroke();
+          ctx.fillStyle = theme.path;
+          ctx.font = `${Math.max(8, 9 / camera.k)}px "IBM Plex Mono", monospace`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`+${collapsed > 99 ? "99" : collapsed}`, bx, by);
+        }
+
+        // Label culling: hubs, selection, hover neighborhood, or close zoom.
+        const wantLabel =
+          isSelected ||
+          isHovered ||
+          onPath ||
+          node.radius > labelCutoff ||
+          (highlight !== null && highlight.has(node.id)) ||
+          camera.k > 1.4;
+        if (wantLabel) {
+          const fontSize = Math.max(9, Math.min(13, 11 / Math.sqrt(camera.k)));
+          ctx.font = `${fontSize}px "IBM Plex Mono", monospace`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          const label = node.name.length > 28 ? `${node.name.slice(0, 27)}…` : node.name;
+          ctx.lineWidth = 3.5 / camera.k;
+          ctx.strokeStyle = theme.halo;
+          ctx.strokeText(label, node.x, node.y + node.radius + 4);
+          ctx.fillStyle = theme.label;
+          ctx.fillText(label, node.x, node.y + node.radius + 4);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function frame() {
+      const sim = simRef.current;
+      const simActive = sim ? sim.isActive() : false;
+      if (simActive) {
+        sim?.tick();
+        // Track the focused node while the layout is still moving.
+        const followId = followIdRef.current;
+        if (followId && sim) {
+          const node = sim.nodes.find((n) => n.id === followId);
+          if (node) {
+            const camera = cameraRef.current;
+            camera.x += (node.x - camera.x) * 0.18;
+            camera.y += (node.y - camera.y) * 0.18;
+          }
+        }
+      }
+      if (simActive || needsRenderRef.current) {
+        needsRenderRef.current = false;
+        render();
+      }
+      rafRef.current = requestAnimationFrame(frame);
+    }
+    rafRef.current = requestAnimationFrame(frame);
+
+    function onWheel(event: WheelEvent) {
+      event.preventDefault();
+      const camera = cameraRef.current;
+      const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const nextK = Math.min(5, Math.max(0.12, camera.k * factor));
+      // Zoom around the cursor: keep the world point under it fixed.
+      const before = toWorld(event.clientX, event.clientY);
+      camera.k = nextK;
+      const after = toWorld(event.clientX, event.clientY);
+      camera.x += before.x - after.x;
+      camera.y += before.y - after.y;
+      needsRenderRef.current = true;
+    }
+
+    function onPointerDown(event: PointerEvent) {
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        /* synthetic events have no active pointer to capture */
+      }
+      const node = hitTest(event.clientX, event.clientY);
+      if (!node) followIdRef.current = null;
+      dragRef.current = {
+        node,
+        panning: !node,
+        lastX: event.clientX,
+        lastY: event.clientY,
+      };
+      if (node) {
+        node.fx = node.x;
+        node.fy = node.y;
+      }
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      const drag = dragRef.current;
+      const camera = cameraRef.current;
+      if (drag.node) {
+        const world = toWorld(event.clientX, event.clientY);
+        drag.node.fx = world.x;
+        drag.node.fy = world.y;
+        simRef.current?.reheat(0.3);
+        needsRenderRef.current = true;
+      } else if (drag.panning) {
+        camera.x -= (event.clientX - drag.lastX) / camera.k;
+        camera.y -= (event.clientY - drag.lastY) / camera.k;
+        drag.lastX = event.clientX;
+        drag.lastY = event.clientY;
+        needsRenderRef.current = true;
+      } else {
+        const node = hitTest(event.clientX, event.clientY);
+        if (node !== hoverRef.current) {
+          hoverRef.current = node;
+          canvas.style.cursor = node ? "pointer" : "grab";
+          needsRenderRef.current = true;
+        }
+      }
+    }
+
+    function onPointerUp(event: PointerEvent) {
+      const drag = dragRef.current;
+      const moved =
+        Math.abs(event.clientX - drag.lastX) > 4 || Math.abs(event.clientY - drag.lastY) > 4;
+      if (drag.node) {
+        drag.node.fx = null;
+        drag.node.fy = null;
+        simRef.current?.reheat(0.25);
+        if (!moved) propsRef.current.onSelect(drag.node.id);
+      }
+      dragRef.current = { node: null, panning: false, lastX: 0, lastY: 0 };
+    }
+
+    function onDoubleClick(event: MouseEvent) {
+      const node = hitTest(event.clientX, event.clientY);
+      if (node) propsRef.current.onExpand(node.id);
+    }
+
+    function onPointerLeave() {
+      hoverRef.current = null;
+      needsRenderRef.current = true;
+    }
+
+    const onResize = () => {
+      needsRenderRef.current = true;
+    };
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(canvas);
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerLeave);
+    canvas.addEventListener("dblclick", onDoubleClick);
+
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      resizeObserver.disconnect();
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
+      canvas.removeEventListener("dblclick", onDoubleClick);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="tsg-canvas" aria-label="Code graph canvas" />;
+}

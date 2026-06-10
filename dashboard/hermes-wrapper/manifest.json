@@ -1,0 +1,18 @@
+{
+  "name": "hermes-intelligence",
+  "label": "Hermes Intelligence",
+  "description": "TokenSave-backed dashboards: holographic memory + LCM explorers (served by the tokensave engine).",
+  "icon": "Cpu",
+  "version": "0.2.0",
+  "provider": {
+    "kind": "memory",
+    "name": "hermes_intelligence"
+  },
+  "tab": {
+    "path": "/hermes-intelligence",
+    "position": "after:plugins"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

@@ -1,0 +1,1214 @@
+.hermes-lcm {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  color: var(--color-foreground);
+}
+
+.hermes-lcm-top {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.hermes-lcm-search {
+  flex: 1;
+  min-width: 220px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  background: var(--color-card);
+  color: var(--color-foreground);
+}
+
+.hermes-lcm-status {
+  font-size: 0.85rem;
+  color: var(--color-muted-foreground);
+}
+
+.hermes-lcm-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--color-muted-foreground);
+  word-break: break-all;
+}
+
+.hermes-lcm-error {
+  color: var(--color-destructive, #c33);
+  font-size: 0.85rem;
+}
+
+.hermes-lcm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.75rem;
+}
+
+.hermes-lcm-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-card);
+  padding: 0.7rem;
+}
+
+.hermes-lcm-card h3 {
+  margin: 0 0 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted-foreground);
+}
+
+.hermes-lcm-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+}
+
+.hermes-lcm-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.hermes-lcm-bar-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.hermes-lcm-k {
+  color: var(--color-muted-foreground);
+}
+
+.hermes-lcm-v {
+  font-variant-numeric: tabular-nums;
+}
+
+.hermes-lcm-bar-track {
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
+  overflow: hidden;
+}
+
+.hermes-lcm-bar-fill {
+  height: 100%;
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 65%, white 10%);
+}
+
+.hermes-lcm-empty {
+  color: var(--color-muted-foreground);
+  font-size: 0.8rem;
+}
+
+/* facet selects */
+.hermes-lcm-select {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  background: var(--color-card);
+  color: var(--color-foreground);
+  font-size: 0.82rem;
+}
+
+/* clickable affordance */
+.hermes-lcm-clk {
+  cursor: pointer;
+}
+.hermes-lcm-clk:hover {
+  color: var(--color-primary, #5a7fff);
+}
+
+/* headline stat row */
+.hermes-lcm-statrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.hermes-lcm-stat {
+  flex: 1 1 120px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-card);
+  padding: 0.55rem 0.7rem;
+}
+.hermes-lcm-stat-v {
+  font-size: 1.2rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.hermes-lcm-stat-k {
+  font-size: 0.72rem;
+  color: var(--color-muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.hermes-lcm-wide {
+  grid-column: 1 / -1;
+}
+
+/* inline SVG charts */
+.hermes-lcm-svgwrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hermes-lcm-svg {
+  display: block;
+  overflow: visible;
+}
+.hermes-lcm-svg-bar {
+  fill: color-mix(in srgb, var(--color-primary, #5a7fff) 65%, transparent);
+}
+.hermes-lcm-svg-node {
+  fill: var(--color-destructive, #e0794b);
+}
+.hermes-lcm-svg-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--color-muted-foreground);
+}
+
+/* timeline (compact CSS bar chart) — fixed-width bars in a content-width
+   container so a handful of day-buckets read as a tidy left-aligned histogram
+   instead of stretching into fat slabs across the whole card. Scrolls
+   horizontally if there are many buckets (e.g. hourly). */
+.hermes-lcm-tl {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: fit-content;
+  max-width: 100%;
+}
+.hermes-lcm-tl-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 84px;
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+.hermes-lcm-tl-col {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 3px;
+}
+.hermes-lcm-tl-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: transparent;
+}
+.hermes-lcm-tl-dot-on {
+  background: var(--color-destructive, #e0794b);
+}
+.hermes-lcm-tl-bar {
+  width: 100%;
+  min-height: 3px;
+  border-radius: 2px 2px 0 0;
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 60%, transparent);
+}
+.hermes-lcm-tl-col:hover .hermes-lcm-tl-bar {
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 90%, transparent);
+}
+
+.hermes-lcm-comp {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.hermes-lcm-comp-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+.hermes-lcm-svgbar {
+  display: block;
+}
+.hermes-lcm-svg-saved {
+  fill: color-mix(in srgb, var(--color-muted-foreground) 28%, transparent);
+}
+.hermes-lcm-svg-kept {
+  fill: color-mix(in srgb, var(--color-primary, #5a7fff) 75%, white 8%);
+}
+
+/* search results + highlight */
+.hermes-lcm-results,
+.hermes-lcm-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.hermes-lcm-result,
+.hermes-lcm-msg,
+.hermes-lcm-noderef {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  background: color-mix(in srgb, var(--color-card) 70%, transparent);
+}
+.hermes-lcm-msg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.72rem;
+}
+.hermes-lcm-tag {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.7rem;
+  color: var(--color-foreground);
+}
+.hermes-lcm-tag-src {
+  color: var(--color-muted-foreground);
+}
+.hermes-lcm-dim {
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
+}
+.hermes-lcm-msg-body {
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.35;
+}
+.hermes-lcm-mark {
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 35%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.1rem;
+}
+
+/* detail drawer */
+.hermes-lcm-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, black 45%, transparent);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 50;
+}
+.hermes-lcm-drawer {
+  width: min(640px, 92vw);
+  height: 100%;
+  background: var(--color-background, var(--color-card));
+  border-left: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.25);
+}
+.hermes-lcm-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.hermes-lcm-drawer-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hermes-lcm-drawer-body {
+  padding: 0.8rem;
+  overflow-y: auto;
+}
+.hermes-lcm-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-card);
+  color: var(--color-foreground);
+  padding: 0.3rem 0.55rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.hermes-lcm-btn:hover {
+  border-color: var(--color-primary, #5a7fff);
+}
+.hermes-lcm-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.hermes-lcm-detail h4 {
+  margin: 0.3rem 0 0;
+  font-size: 0.85rem;
+}
+.hermes-lcm-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.75rem;
+}
+.hermes-lcm-summary {
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.hermes-lcm-hint {
+  font-size: 0.8rem;
+  color: var(--color-muted-foreground);
+  border-left: 3px solid var(--color-primary, #5a7fff);
+  padding-left: 0.5rem;
+}
+
+/* markdown rendering (node summaries + message content) */
+.hermes-lcm-md {
+  white-space: normal;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.hermes-lcm-md.hermes-lcm-summary,
+.hermes-lcm-md.hermes-lcm-msg-body {
+  white-space: normal;
+}
+.hermes-lcm-md > :first-child { margin-top: 0; }
+.hermes-lcm-md > :last-child { margin-bottom: 0; }
+.hermes-lcm-md-p { margin: 0 0 0.5rem; }
+.hermes-lcm-md-h {
+  font-weight: 600;
+  margin: 0.6rem 0 0.3rem;
+  line-height: 1.3;
+}
+.hermes-lcm-md-h1 { font-size: 1.05rem; }
+.hermes-lcm-md-h2 { font-size: 0.98rem; }
+.hermes-lcm-md-h3,
+.hermes-lcm-md-h4,
+.hermes-lcm-md-h5,
+.hermes-lcm-md-h6 { font-size: 0.9rem; }
+.hermes-lcm-md-list {
+  margin: 0.2rem 0 0.5rem;
+  padding-left: 1.2rem;
+}
+.hermes-lcm-md-list .hermes-lcm-md-list { margin: 0.15rem 0; }
+.hermes-lcm-md-list li { margin: 0.12rem 0; }
+.hermes-lcm-md-code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.88em;
+  /* Explicit color so the host dashboard's global `code {}` rule (which is
+     dark and unreadable on this theme) does not bleed in. */
+  color: var(--color-foreground);
+  background: color-mix(in srgb, var(--color-muted-foreground) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-muted-foreground) 32%, transparent);
+  border-radius: 4px;
+  padding: 0.02rem 0.3rem;
+  word-break: break-word;
+}
+.hermes-lcm-md-pre {
+  background: color-mix(in srgb, var(--color-muted-foreground) 12%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  overflow-x: auto;
+  margin: 0.4rem 0;
+}
+.hermes-lcm-md-pre code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+  white-space: pre;
+  color: var(--color-foreground);
+  background: none;
+  border: none;
+  padding: 0;
+}
+.hermes-lcm-md-quote {
+  border-left: 3px solid var(--color-border);
+  margin: 0.4rem 0;
+  padding: 0.1rem 0 0.1rem 0.6rem;
+  color: var(--color-muted-foreground);
+}
+.hermes-lcm-md-link {
+  color: var(--color-primary, #5a7fff);
+  text-decoration: none;
+}
+.hermes-lcm-md-link:hover { text-decoration: underline; }
+
+/* pretty tool-result rendering */
+.hermes-lcm-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+}
+.hermes-lcm-tool-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+.hermes-lcm-tag-ok {
+  border-color: color-mix(in srgb, #46c46e 55%, transparent) !important;
+  color: color-mix(in srgb, #46c46e 75%, var(--color-foreground)) !important;
+}
+.hermes-lcm-tag-bad {
+  border-color: color-mix(in srgb, var(--color-destructive, #e0794b) 60%, transparent) !important;
+  color: var(--color-destructive, #e0794b) !important;
+}
+.hermes-lcm-tag-warn {
+  border-color: color-mix(in srgb, #e0b94b 55%, transparent) !important;
+  color: color-mix(in srgb, #e0b94b 80%, var(--color-foreground)) !important;
+}
+.hermes-lcm-tool-err {
+  color: var(--color-destructive, #e0794b);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.hermes-lcm-tool-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.hermes-lcm-tool-match {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-card) 60%, transparent);
+}
+.hermes-lcm-tool-match-loc {
+  display: flex;
+  align-items: baseline;
+  gap: 0.15rem;
+}
+.hermes-lcm-tool-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  color: var(--color-primary, #5a7fff);
+  word-break: break-all;
+}
+.hermes-lcm-tool-match-code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  color: var(--color-foreground);
+  background: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.hermes-lcm-todo {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hermes-lcm-todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  line-height: 1.35;
+}
+.hermes-lcm-todo-ic {
+  flex: 0 0 auto;
+  font-weight: 700;
+  width: 1rem;
+  text-align: center;
+}
+.hermes-lcm-todo-completed { color: var(--color-muted-foreground); }
+.hermes-lcm-todo-completed .hermes-lcm-todo-ic { color: #46c46e; }
+.hermes-lcm-todo-completed > span:last-child { text-decoration: line-through; }
+.hermes-lcm-todo-in_progress .hermes-lcm-todo-ic { color: var(--color-primary, #5a7fff); }
+.hermes-lcm-todo-cancelled { color: var(--color-muted-foreground); }
+.hermes-lcm-todo-cancelled > span:last-child { text-decoration: line-through; }
+.hermes-lcm-diff > div { white-space: pre-wrap; word-break: break-word; }
+.hermes-lcm-diff-add { color: #46c46e; }
+.hermes-lcm-diff-del { color: var(--color-destructive, #e0794b); }
+.hermes-lcm-diff-hunk { color: var(--color-primary, #5a7fff); }
+.hermes-lcm-kv {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.hermes-lcm-kv-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 25%) 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.hermes-lcm-kv-k {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  color: var(--color-muted-foreground);
+  word-break: break-word;
+}
+.hermes-lcm-kv-v {
+  word-break: break-word;
+}
+.hermes-lcm-kv-v .hermes-lcm-md-pre { margin: 0; }
+
+/* drawer load-error state */
+.hermes-lcm-derror {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-destructive, #e0794b) 45%, var(--color-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-destructive, #e0794b) 8%, transparent);
+}
+.hermes-lcm-derror-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-foreground);
+}
+.hermes-lcm-derror-msg {
+  font-size: 0.8rem;
+  color: var(--color-muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  word-break: break-word;
+}
+.hermes-lcm-derror-retry {
+  margin-top: 0.2rem;
+  cursor: pointer;
+}
+
+/* clean scrollable row lists (recent sessions / latest summaries) */
+.hermes-lcm-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 26rem;
+  overflow-y: auto;
+}
+.hermes-lcm-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-card) 55%, transparent);
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+  color: var(--color-foreground);
+  font: inherit;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.hermes-lcm-row:hover {
+  border-color: color-mix(in srgb, var(--color-primary, #5a7fff) 60%, var(--color-border));
+  background: color-mix(in srgb, var(--color-card) 92%, transparent);
+}
+.hermes-lcm-row-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.hermes-lcm-row-title {
+  font-size: 0.85rem;
+  font-weight: 500;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.hermes-lcm-row-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  color: var(--color-muted-foreground);
+  flex: 0 0 auto;
+}
+.hermes-lcm-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+}
+.hermes-lcm-row-sub {
+  font-size: 0.78rem;
+  color: var(--color-muted-foreground);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.hermes-lcm-pill {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--color-foreground);
+  white-space: nowrap;
+}
+.hermes-lcm-pill-accent {
+  border-color: color-mix(in srgb, var(--color-primary, #5a7fff) 50%, transparent);
+  color: color-mix(in srgb, var(--color-primary, #5a7fff) 85%, var(--color-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Phase-2 graphite observatory skin. Kept as semantic overrides so the same
+   unbundled plugin still runs in the standalone shell and Hermes wrapper. */
+.hermes-lcm {
+  --lcm-bg: var(--color-background, #07100f);
+  --lcm-panel: var(--color-card, rgba(13, 27, 26, 0.86));
+  --lcm-line: var(--color-border, rgba(139, 255, 218, 0.16));
+  --lcm-text: var(--color-foreground, #e7fff9);
+  --lcm-text-2: var(--text-secondary, #a8c8c0);
+  --lcm-text-3: var(--color-muted-foreground, #6f9189);
+  --lcm-primary: var(--color-primary, #75f4d2);
+  --lcm-blue: #7aa7ff;
+  --lcm-amber: var(--color-warning, #f7c76a);
+  --lcm-danger: var(--color-destructive, #ff6b7a);
+  /* Theme-derived surfaces: every translucent panel/sheen below mixes from
+     these instead of hardcoded dark rgba values, so the plugin stays legible
+     when the host shell switches to a light palette. */
+  --lcm-ink: var(--color-background, #030607);
+  --lcm-card-base: var(--color-card, #0d1b1a);
+  --lcm-sheen: var(--color-foreground, #ffffff);
+  --lcm-line-strong: color-mix(in srgb, var(--lcm-primary) 32%, transparent);
+  gap: 1rem;
+}
+
+.hermes-lcm-top {
+  align-items: stretch;
+  gap: 0.65rem;
+  padding: 0.7rem;
+  border: 1px solid var(--lcm-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lcm-ink) 30%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--lcm-sheen) 4%, transparent);
+}
+
+.hermes-lcm-search,
+.hermes-lcm-select {
+  border-color: var(--lcm-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lcm-ink) 42%, transparent);
+  color: var(--lcm-text);
+  min-height: 2.25rem;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.hermes-lcm-search::placeholder {
+  color: var(--lcm-text-3);
+}
+
+.hermes-lcm-search:focus,
+.hermes-lcm-select:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--lcm-primary) 52%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--lcm-primary) 8%, transparent);
+}
+
+.hermes-lcm-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: max-content;
+  padding: 0 0.75rem;
+  border: 1px solid var(--lcm-line);
+  border-radius: 999px;
+  color: var(--lcm-text-2);
+  background: color-mix(in srgb, var(--lcm-primary) 7%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+}
+
+.hermes-lcm-path {
+  padding: 0 0.25rem;
+  color: var(--lcm-text-3);
+}
+
+.hermes-lcm-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--color-destructive, #ff6b7a) 38%, transparent);
+  border-radius: 14px;
+  padding: 0.75rem 0.9rem;
+  background: color-mix(in srgb, var(--color-destructive, #ff6b7a) 10%, transparent);
+}
+
+.hermes-lcm-empty-panel {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 1.15rem;
+  border: 1px solid var(--lcm-line);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 10% 20%, color-mix(in srgb, var(--lcm-primary) 14%, transparent), transparent 18rem),
+    linear-gradient(135deg, color-mix(in srgb, var(--lcm-sheen) 4.5%, transparent), transparent 34%),
+    color-mix(in srgb, var(--lcm-card-base) 72%, transparent);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.hermes-lcm-empty-orb {
+  width: 4.2rem;
+  height: 4.2rem;
+  border: 1px solid rgba(117, 244, 210, 0.34);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(117, 244, 210, 0.3), transparent 58%),
+    conic-gradient(from 120deg, rgba(117, 244, 210, 0.8), rgba(122, 167, 255, 0.45), rgba(117, 244, 210, 0.8));
+  box-shadow: 0 0 46px rgba(117, 244, 210, 0.17);
+  opacity: 0.9;
+}
+
+.hermes-lcm-empty-kicker,
+.hermes-lcm-card h3,
+.hermes-lcm-stat-k {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.09em;
+}
+
+.hermes-lcm-empty-copy h2 {
+  margin: 0.1rem 0 0.3rem;
+  font-size: clamp(1.2rem, 2.4vw, 1.75rem);
+  line-height: 1.08;
+}
+
+.hermes-lcm-empty-copy p {
+  margin: 0;
+  max-width: 64rem;
+  color: var(--lcm-text-2);
+  line-height: 1.55;
+}
+
+.hermes-lcm-empty-kicker {
+  color: var(--lcm-primary);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.hermes-lcm-stat {
+  border-color: var(--lcm-line);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lcm-sheen) 4%, transparent), transparent 40%),
+    color-mix(in srgb, var(--lcm-card-base) 74%, transparent);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+  padding: 0.85rem 0.9rem;
+}
+
+.hermes-lcm-stat-v {
+  color: var(--lcm-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.hermes-lcm-stat-k {
+  margin-top: 0.4rem;
+  color: var(--lcm-text-3);
+}
+
+.hermes-lcm-card {
+  position: relative;
+  border-color: var(--lcm-line);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lcm-sheen) 3.5%, transparent), transparent 34%),
+    color-mix(in srgb, var(--lcm-card-base) 76%, transparent);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+  padding: 1rem;
+  overflow: hidden;
+}
+
+.hermes-lcm-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--lcm-primary) 7%, transparent), transparent 30%);
+}
+
+.hermes-lcm-card > * {
+  position: relative;
+}
+
+.hermes-lcm-card h3 {
+  color: var(--lcm-text-2);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.hermes-lcm-empty {
+  border: 1px dashed color-mix(in srgb, var(--lcm-primary) 20%, transparent);
+  border-radius: 14px;
+  padding: 0.95rem;
+  color: var(--lcm-text-3);
+  background: color-mix(in srgb, var(--lcm-ink) 20%, transparent);
+}
+
+.hermes-lcm-bar-row,
+.hermes-lcm-comp-row,
+.hermes-lcm-result,
+.hermes-lcm-msg,
+.hermes-lcm-noderef,
+.hermes-lcm-row {
+  border-color: var(--lcm-line);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--lcm-sheen) 3%, transparent), transparent),
+    color-mix(in srgb, var(--lcm-ink) 20%, transparent);
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.hermes-lcm-bar-row {
+  padding: 0.35rem 0.45rem;
+}
+
+.hermes-lcm-clk:hover,
+.hermes-lcm-row:hover {
+  color: var(--lcm-text);
+  border-color: var(--lcm-line-strong);
+  background: color-mix(in srgb, var(--lcm-primary) 7%, transparent);
+  transform: translateY(-1px);
+}
+
+.hermes-lcm-bar-track,
+.hermes-lcm-tl-bars {
+  background: color-mix(in srgb, var(--lcm-primary) 8%, transparent);
+  border-color: var(--lcm-line);
+}
+
+.hermes-lcm-bar-fill,
+.hermes-lcm-tl-bar,
+.hermes-lcm-svg-bar,
+.hermes-lcm-svg-kept {
+  background: linear-gradient(90deg, var(--lcm-primary), var(--lcm-blue));
+  fill: var(--lcm-primary);
+}
+
+.hermes-lcm-tl-dot-on,
+.hermes-lcm-svg-node {
+  background: var(--lcm-amber);
+  fill: var(--lcm-amber);
+  box-shadow: 0 0 12px rgba(247, 199, 106, 0.35);
+}
+
+.hermes-lcm-tag,
+.hermes-lcm-pill {
+  border-color: var(--lcm-line);
+  color: var(--lcm-text-2);
+  background: color-mix(in srgb, var(--lcm-ink) 22%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.hermes-lcm-pill-accent,
+.hermes-lcm-mark {
+  color: var(--lcm-primary);
+  border-color: color-mix(in srgb, var(--lcm-primary) 36%, transparent);
+  background: color-mix(in srgb, var(--lcm-primary) 12%, transparent);
+}
+
+.hermes-lcm-msg-body,
+.hermes-lcm-md,
+.hermes-lcm-row-sub {
+  color: var(--lcm-text-2);
+}
+
+.hermes-lcm-md-pre,
+.hermes-lcm-md-code {
+  border-color: var(--lcm-line);
+  background: color-mix(in srgb, var(--lcm-ink) 36%, transparent);
+}
+
+.hermes-lcm-drawer-overlay {
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(8px);
+}
+
+.hermes-lcm-drawer {
+  border-left-color: var(--lcm-line);
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--lcm-primary) 12%, transparent), transparent 24rem),
+    var(--lcm-bg);
+  box-shadow: -28px 0 80px rgba(0, 0, 0, 0.46);
+}
+
+.hermes-lcm-btn {
+  border-color: var(--lcm-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--lcm-ink) 28%, transparent);
+  color: var(--lcm-text-2);
+}
+
+.hermes-lcm-btn:hover {
+  border-color: var(--lcm-line-strong);
+  color: var(--lcm-text);
+}
+
+.hermes-lcm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hermes-lcm-btn:focus-visible,
+.hermes-lcm-row:focus-visible,
+.hermes-lcm-result-btn:focus-visible,
+.hermes-lcm-noderef:focus-visible,
+.hermes-lcm-search:focus-visible,
+.hermes-lcm-select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--lcm-primary) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.hermes-lcm-search-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 20rem;
+  min-width: 16rem;
+  gap: 0.45rem;
+}
+
+.hermes-lcm-clear {
+  flex: 0 0 auto;
+}
+
+.hermes-lcm-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.85rem;
+  padding: 0 0.2rem;
+  color: var(--lcm-text-3);
+  font-size: 0.72rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.hermes-lcm-shortcuts span {
+  white-space: nowrap;
+}
+
+.hermes-lcm-search-shell {
+  gap: 0.85rem;
+}
+
+.hermes-lcm-search-head,
+.hermes-lcm-section-head,
+.hermes-lcm-msg-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.hermes-lcm-search-subtitle {
+  margin-top: 0.22rem;
+  color: var(--lcm-text-3);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.hermes-lcm-badge-row,
+.hermes-lcm-actions,
+.hermes-lcm-msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.hermes-lcm-msg-actions {
+  justify-content: flex-end;
+}
+
+.hermes-lcm-copy.is-copied {
+  border-color: color-mix(in srgb, var(--lcm-primary) 48%, transparent);
+  color: var(--lcm-primary);
+}
+
+.hermes-lcm-result-btn {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hermes-lcm-result-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.45rem;
+}
+
+.hermes-lcm-selected {
+  border-color: color-mix(in srgb, var(--lcm-primary) 52%, transparent) !important;
+  background: color-mix(in srgb, var(--lcm-primary) 10%, transparent) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lcm-primary) 16%, transparent);
+}
+
+.hermes-lcm-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.65rem;
+}
+
+.hermes-lcm-detail-cell {
+  border: 1px solid var(--lcm-line);
+  border-radius: 14px;
+  padding: 0.65rem 0.75rem;
+  background: color-mix(in srgb, var(--lcm-ink) 22%, transparent);
+}
+
+.hermes-lcm-detail-k {
+  color: var(--lcm-text-3);
+  font-size: 0.68rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hermes-lcm-detail-v {
+  margin-top: 0.3rem;
+  color: var(--lcm-text);
+  font-size: 0.86rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.hermes-lcm-skeleton {
+  overflow: hidden;
+}
+
+.hermes-lcm-skeleton-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.hermes-lcm-skel-line {
+  height: 0.72rem;
+  width: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--lcm-primary) 8%, transparent),
+    color-mix(in srgb, var(--lcm-primary) 18%, transparent),
+    color-mix(in srgb, var(--lcm-primary) 8%, transparent)
+  );
+  background-size: 220% 100%;
+  animation: hermes-lcm-shimmer 1.3s linear infinite;
+}
+
+/* unreachable-server presentation: must read as an outage, not as data */
+.hermes-lcm-status-err {
+  color: var(--lcm-danger);
+  border-color: color-mix(in srgb, var(--lcm-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--lcm-danger) 10%, transparent);
+}
+
+.hermes-lcm-offline {
+  border-color: color-mix(in srgb, var(--lcm-danger) 40%, var(--lcm-line));
+  background:
+    radial-gradient(circle at 10% 20%, color-mix(in srgb, var(--lcm-danger) 12%, transparent), transparent 18rem),
+    linear-gradient(135deg, color-mix(in srgb, var(--lcm-sheen) 4.5%, transparent), transparent 34%),
+    color-mix(in srgb, var(--lcm-card-base) 72%, transparent);
+}
+
+.hermes-lcm-offline .hermes-lcm-empty-kicker {
+  color: var(--lcm-danger);
+}
+
+.hermes-lcm-offline-orb {
+  border-color: color-mix(in srgb, var(--lcm-danger) 40%, transparent);
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--lcm-danger) 30%, transparent), transparent 58%),
+    conic-gradient(from 120deg,
+      color-mix(in srgb, var(--lcm-danger) 80%, transparent),
+      color-mix(in srgb, var(--lcm-amber) 45%, transparent),
+      color-mix(in srgb, var(--lcm-danger) 80%, transparent));
+  box-shadow: 0 0 46px color-mix(in srgb, var(--lcm-danger) 17%, transparent);
+}
+
+.hermes-lcm-offline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.hermes-lcm-fetch-more {
+  justify-content: flex-end;
+  padding-top: 0.2rem;
+}
+
+.hermes-lcm-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
+.hermes-lcm-pager-status {
+  min-width: 6.5rem;
+  text-align: center;
+  color: var(--lcm-text-3);
+  font-size: 0.76rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+@keyframes hermes-lcm-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (max-width: 760px) {
+  .hermes-lcm-top {
+    border-radius: 20px;
+    flex-direction: column;
+  }
+
+  .hermes-lcm-empty-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-lcm-empty-orb {
+    width: 3rem;
+    height: 3rem;
+  }
+
+  .hermes-lcm-search-head,
+  .hermes-lcm-section-head,
+  .hermes-lcm-msg-head {
+    flex-direction: column;
+  }
+
+  .hermes-lcm-result-foot {
+    flex-direction: column;
+  }
+
+  .hermes-lcm-pager {
+    justify-content: stretch;
+  }
+}
