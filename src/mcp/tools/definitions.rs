@@ -167,6 +167,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_store(),
         def_fact_feedback(),
         def_memory_status(),
+        def_dashboard(),
         def_message_search(),
         def_lcm_status(),
         def_lcm_doctor(),
@@ -1354,6 +1355,32 @@ fn def_runtime() -> ToolDefinition {
         json!({
             "type": "object",
             "properties": {}
+        }),
+    )
+}
+
+fn def_dashboard() -> ToolDefinition {
+    def(
+        "tokensave_dashboard",
+        "Dashboard",
+        "Start (or manage) the tokensave dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. Optional host/port (defaults match `tokensave dashboard`).",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "stop"],
+                    "description": "Action to perform (default: \"start\"). \"stop\" shuts down a previously started dashboard if any."
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Host address to bind (default: \"127.0.0.1\")"
+                },
+                "port": {
+                    "type": "number",
+                    "description": "Port to listen on; 0 picks an ephemeral port (default: 7341)"
+                }
+            }
         }),
     )
 }

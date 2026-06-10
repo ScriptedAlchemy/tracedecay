@@ -98,9 +98,9 @@ fn test_tool_definitions_count() {
     // agents never receive a tool that will instantly fail.
     // LCM comparison support registers ten additional MCP tools.
     let expected = if tokensave::mcp::tools::ast_grep_available() {
-        87
+        88
     } else {
-        86
+        87
     };
     assert_eq!(tools.len(), expected);
 }

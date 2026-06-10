@@ -5,6 +5,7 @@
 //! formats the result.
 
 pub mod analysis;
+pub mod dashboard;
 pub mod edit;
 pub mod git;
 pub mod graph;
@@ -208,6 +209,7 @@ pub async fn handle_tool_call(
         "tokensave_fact_store" => memory::handle_fact_store(cg, args).await,
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
+        "tokensave_dashboard" => dashboard::handle_dashboard(cg, args).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
         "tokensave_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
         "tokensave_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
@@ -281,9 +283,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            87
+            88
         } else {
-            86
+            87
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -358,6 +360,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_store"));
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_dashboard"));
         assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_lcm_status"));
         assert!(tool_names.contains(&"tokensave_lcm_doctor"));
