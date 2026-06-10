@@ -11,9 +11,9 @@ use crate::errors::{Result, TokenSaveError};
 use crate::tokensave::TokenSave;
 
 use super::super::ToolResult;
-use super::truncate_response;
+use super::truncated_json_envelope;
 
-use crate::dashboard::{bind_dashboard, router, DashboardState, DEFAULT_PORT};
+use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
 
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
@@ -50,7 +50,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
             let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
                 }),
                 touched_files: vec![],
             })
@@ -79,26 +79,16 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
                 .unwrap_or_default();
                 return Ok(ToolResult {
                     value: json!({
-                        "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
                     }),
                     touched_files: vec![],
                 });
             }
 
-            // Build dashboard state (re-uses the same construction as CLI path)
-            let global = crate::global_db::GlobalDb::open().await;
-            let state = DashboardState {
-                mem_conn: cg.dashboard_connection(),
-                mem_db_path: cg.dashboard_db_path().display().to_string(),
-                lcm_conn: global
-                    .as_ref()
-                    .map(crate::global_db::GlobalDb::dashboard_connection),
-                lcm_db_path: crate::global_db::global_db_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-                project_root: cg.project_root().to_path_buf(),
-                curate_preview: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            };
+            // Shared construction with the CLI path: project-local LCM store
+            // selection included. No catch-up ingest spawn here — the host
+            // MCP server already swept hookless transcripts at startup.
+            let state = build_state(cg).await;
 
             let app = router(state);
             let (listener, addr) = bind_dashboard(&host, port).await?;
@@ -130,7 +120,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
 
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
                 }),
                 touched_files: vec![],
             })

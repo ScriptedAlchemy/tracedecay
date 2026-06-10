@@ -139,6 +139,21 @@
     return merged;
   }
 
+  // Merge a follow-up search page into the previous payload: scalar fields
+  // (totals, engine, …) come from the newest response, match rows append with
+  // id-dedupe. Pure so the pagination merge stays unit-testable.
+  function mergeSearchPayload(prev, json) {
+    if (!prev) return json;
+    const prevMatches = prev.matches || {};
+    const nextMatches = (json && json.matches) || {};
+    return Object.assign({}, prev, json, {
+      matches: {
+        messages: mergeRows(prevMatches.messages, nextMatches.messages, "store_id"),
+        summary_nodes: mergeRows(prevMatches.summary_nodes, nextMatches.summary_nodes, "node_id"),
+      },
+    });
+  }
+
   // Flatten markdown to readable plain text (for compact list previews/titles).
   function stripMd(s) {
     return String(s == null ? "" : s)
@@ -1022,6 +1037,34 @@
 
   function Drawer(props) {
     const panelRef = useRef(null);
+    const returnFocusRef = useRef(null);
+    const wasOpenRef = useRef(false);
+    // Restore focus to the element that opened the drawer when it closes
+    // (Escape/✕/overlay), instead of dropping focus to <body>. This effect is
+    // declared before the panel-focus effect so it captures the trigger
+    // element before the panel steals focus.
+    useEffect(function () {
+      if (props.open && !wasOpenRef.current) {
+        const active = typeof document !== "undefined" ? document.activeElement : null;
+        returnFocusRef.current = active && active !== document.body ? active : null;
+      }
+      if (!props.open && wasOpenRef.current) {
+        const target = returnFocusRef.current;
+        returnFocusRef.current = null;
+        if (
+          target &&
+          typeof target.focus === "function" &&
+          document.contains(target)
+        ) {
+          try {
+            target.focus();
+          } catch (e) {
+            /* focus restoration is best-effort */
+          }
+        }
+      }
+      wasOpenRef.current = props.open;
+    }, [props.open]);
     useEffect(function () {
       if (props.open && panelRef.current && typeof panelRef.current.focus === "function") {
         panelRef.current.focus();
@@ -1090,9 +1133,13 @@
     const [chartsError, setChartsError] = useState("");
 
     const [stack, setStack] = useState([]);
+    const rootRef = useRef(null);
     const searchInputRef = useRef(null);
     const resultRefs = useRef({});
     const searchOffsetRef = useRef(0);
+    // Bumped whenever the search inputs change; in-flight pagination fetches
+    // from an older query compare against it and drop their stale responses.
+    const searchSeqRef = useRef(0);
 
     useEffect(function () {
       const handle = setTimeout(function () {
@@ -1143,6 +1190,7 @@
     }, [reloadToken]);
 
     useEffect(function () {
+      searchSeqRef.current += 1;
       setSearchMessagePage(1);
       setSearchNodePage(1);
       setSelectedResultIndex(-1);
@@ -1177,8 +1225,12 @@
 
     // Server-offset pagination (additive backend field `total` + `offset`):
     // pulls the next window for both result lists and appends with dedupe.
+    // Responses are dropped when the query/facets changed while in flight, so
+    // an old query's page can never merge into (or overwrite the totals of) a
+    // newer query's results.
     const fetchMoreResults = useCallback(function () {
       if (!debouncedQ || !searchData || loadingMoreResults) return;
+      const seq = searchSeqRef.current;
       const nextOffset = searchOffsetRef.current + SEARCH_FETCH_LIMIT;
       setLoadingMoreResults(true);
       const params = new URLSearchParams();
@@ -1188,19 +1240,11 @@
       if (role) params.set("role", role);
       if (source) params.set("source", source);
       SDK.fetchJSON(`${API}/search?${params.toString()}`).then(function (json) {
+        if (seq !== searchSeqRef.current) return;
         searchOffsetRef.current = nextOffset;
-        setSearchData(function (prev) {
-          if (!prev) return json;
-          const prevMatches = prev.matches || {};
-          const nextMatches = (json && json.matches) || {};
-          return Object.assign({}, prev, json, {
-            matches: {
-              messages: mergeRows(prevMatches.messages, nextMatches.messages, "store_id"),
-              summary_nodes: mergeRows(prevMatches.summary_nodes, nextMatches.summary_nodes, "node_id"),
-            },
-          });
-        });
+        setSearchData(function (prev) { return mergeSearchPayload(prev, json); });
       }).catch(function (err) {
+        if (seq !== searchSeqRef.current) return;
         setSearchError(friendlyError(err));
       }).finally(function () {
         setLoadingMoreResults(false);
@@ -1466,8 +1510,16 @@
         const tag = target.tagName;
         return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
       }
+      // Keep-mounted hosts (the standalone shell) hide inactive tab panels
+      // with `display: none` instead of unmounting them; a hidden panel must
+      // not react to keystrokes meant for the visible tab.
+      function isPanelHidden() {
+        const el = rootRef.current;
+        return !!el && el.offsetParent === null;
+      }
       function onKeyDown(e) {
         if (e.defaultPrevented) return;
+        if (isPanelHidden()) return;
         if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key === "/" && !isTypingTarget(e.target)) {
           e.preventDefault();
           if (searchInputRef.current) {
@@ -1559,7 +1611,134 @@
       }
     }
 
-    return h("div", { className: "hermes-lcm" }, [
+    // Search results render directly under the toolbar (see placement below)
+    // so typing a query gives immediate visible feedback instead of appending
+    // results below the overview cards, off-screen.
+    const searchShell = searchActive ? h("div", { className: "hermes-lcm-card hermes-lcm-wide hermes-lcm-search-shell" }, [
+      h("div", { className: "hermes-lcm-search-head" }, [
+        h("div", null, [
+          h("h3", null, "Search"),
+          h("div", { className: "hermes-lcm-search-subtitle", role: "status" },
+            searchPending
+              ? "Waiting for typing to pause…"
+              : (searching
+                  ? "Searching messages and summary nodes…"
+                  : (debouncedQ && searchData
+                      ? `${fmtInt(totalSearchMatches)} matches for "${short(debouncedQ, 36)}".`
+                      : "Use / to focus and arrows to move through the current page."))),
+        ]),
+        h("div", { className: "hermes-lcm-badge-row" }, [
+          debouncedQ ? toolBadge(`"${short(debouncedQ, 36)}"`) : null,
+          searchData && searchData.engine === "fts" ? toolBadge("FTS ranked", "ok") : null,
+          searchData && searchData.engine === "like" ? toolBadge("LIKE fallback", "warn") : null,
+          (!searchPending && !searching && debouncedQ && searchData) ? toolBadge(fmtInt(totalSearchMatches) + " hits") : null,
+        ]),
+      ]),
+      searchError ? h("div", { className: "hermes-lcm-error", role: "alert" }, [
+        h("div", null, [
+          h("strong", null, "Search failed. "),
+          searchError + " — results below may be incomplete; this is not an empty result.",
+        ]),
+        h("button", {
+          type: "button",
+          className: "hermes-lcm-btn",
+          onClick: function () { setSearchRetryToken(function (n) { return n + 1; }); },
+        }, "Retry search"),
+      ]) : null,
+      (!searchPending && searching && !searchData) ? h("div", { className: "hermes-lcm-grid" }, [
+        h("div", { className: "hermes-lcm-card" }, h(SkeletonLines, { count: 5, widths: ["95%", "90%", "88%", "92%", "70%"] })),
+        h("div", { className: "hermes-lcm-card" }, h(SkeletonLines, { count: 4, widths: ["92%", "84%", "88%", "68%"] })),
+      ]) : null,
+      (!searchPending && !searching && debouncedQ && !searchError && totalSearchMatches === 0) ? h("div", { className: "hermes-lcm-empty" }, [
+        h("strong", null, "No matches found."),
+        " Try removing a facet or a punctuation-heavy query so the backend can stay on the ranked FTS path.",
+      ]) : null,
+      totalSearchMatches > 0 ? h("div", { className: "hermes-lcm-grid" }, [
+        h("div", { className: "hermes-lcm-card" }, [
+          h("div", { className: "hermes-lcm-section-head" }, [
+            h("h3", null, totalMessageCount > fetchedMessageCount
+              ? `Matching Messages (${fmtInt(fetchedMessageCount)} of ${fmtInt(totalMessageCount)})`
+              : `Matching Messages (${fmtInt(fetchedMessageCount)})`),
+            h("div", { className: "hermes-lcm-dim" }, "Click for full content and session context"),
+          ]),
+          h("div", { className: "hermes-lcm-results" },
+            visibleMessages.length
+              ? visibleMessages.map(function (m, idx) {
+                  const resultKey = "message:" + m.store_id;
+                  const selected = selectedResultIndex === idx;
+                  return h(SearchResultCard, {
+                    key: resultKey,
+                    resultRef: function (el) {
+                      if (el) resultRefs.current[resultKey] = el;
+                      else delete resultRefs.current[resultKey];
+                    },
+                    kind: "message",
+                    item: m,
+                    query: debouncedQ,
+                    selected: selected,
+                    onFocus: function () { setSelectedResultIndex(idx); },
+                    onOpen: function () { openMessage(m); },
+                  });
+                })
+              : h("div", { className: "hermes-lcm-empty" }, "No matching messages on this page.")
+          ),
+          h(Pager, {
+            page: searchMessagePage,
+            totalPages: messageTotalPages,
+            onChange: setSearchMessagePage,
+          }),
+        ]),
+        h("div", { className: "hermes-lcm-card" }, [
+          h("div", { className: "hermes-lcm-section-head" }, [
+            h("h3", null, totalNodeCount > fetchedNodeCount
+              ? `Matching Summaries (${fmtInt(fetchedNodeCount)} of ${fmtInt(totalNodeCount)})`
+              : `Matching Summaries (${fmtInt(fetchedNodeCount)})`),
+            h("div", { className: "hermes-lcm-dim" }, "Open a node to follow its source links"),
+          ]),
+          h("div", { className: "hermes-lcm-results" },
+            visibleNodes.length
+              ? visibleNodes.map(function (n, idx) {
+                  const absoluteIndex = visibleMessages.length + idx;
+                  const resultKey = "node:" + n.node_id;
+                  const selected = selectedResultIndex === absoluteIndex;
+                  return h(SearchResultCard, {
+                    key: resultKey,
+                    resultRef: function (el) {
+                      if (el) resultRefs.current[resultKey] = el;
+                      else delete resultRefs.current[resultKey];
+                    },
+                    kind: "node",
+                    item: n,
+                    query: debouncedQ,
+                    selected: selected,
+                    onFocus: function () { setSelectedResultIndex(absoluteIndex); },
+                    onOpen: function () { openNode(n.node_id); },
+                  });
+                })
+              : h("div", { className: "hermes-lcm-empty" }, "No matching summaries on this page.")
+          ),
+          h(Pager, {
+            page: searchNodePage,
+            totalPages: nodeTotalPages,
+            onChange: setSearchNodePage,
+          }),
+        ]),
+      ]) : null,
+      hasMoreServerResults ? h("div", { className: "hermes-lcm-actions hermes-lcm-fetch-more" }, [
+        h("button", {
+          type: "button",
+          className: "hermes-lcm-btn",
+          disabled: loadingMoreResults,
+          onClick: fetchMoreResults,
+        }, loadingMoreResults
+          ? "Fetching more results…"
+          : `Fetch next ${fmtInt(SEARCH_FETCH_LIMIT)} from server`),
+        h("span", { className: "hermes-lcm-dim" },
+          `${fmtInt(fetchedMessageCount + fetchedNodeCount)} of ${fmtInt(totalSearchMatches)} loaded`),
+      ]) : null,
+    ]) : null;
+
+    return h("div", { className: "hermes-lcm", ref: rootRef }, [
       h("div", { className: "hermes-lcm-top" }, [
         h("div", { className: "hermes-lcm-search-wrap" }, [
           h("input", {
@@ -1618,7 +1797,18 @@
         h("span", null, "Arrow keys browse results"),
         h("span", null, "Enter opens detail"),
       ]),
-      h("div", { className: "hermes-lcm-path" }, data ? data.path : ""),
+      // Which session store is being served (additive `storage_scope` field;
+      // older servers omit it and only the path renders).
+      h("div", { className: "hermes-lcm-path" }, data ? [
+        data.storage_scope === "project_local"
+          ? h("span", { key: "scope", className: "hermes-lcm-tag hermes-lcm-tag-src" }, "Project store")
+          : (data.storage_scope === "global"
+              ? h("span", { key: "scope", className: "hermes-lcm-tag" }, "Global store")
+              : null),
+        h("span", { key: "path" }, data.path),
+      ] : ""),
+
+      searchShell,
 
       // Unreachable server: a distinguishable error hero with retry — never
       // the zeroed stats / "No data" cards that imply an empty database.
@@ -1656,8 +1846,10 @@
         h("div", { className: "hermes-lcm-empty-orb", "aria-hidden": "true" }),
         h("div", { className: "hermes-lcm-empty-copy" }, [
           h("div", { className: "hermes-lcm-empty-kicker" }, "Lossless Context Store"),
-          h("h2", null, "Global LCM database not found"),
-          h("p", null, "The dashboard can render once a global database exists. Until then, the search, timeline, and detail views remain unavailable."),
+          h("h2", null, data.storage_scope === "project_local"
+            ? "Project session store not found"
+            : "Global LCM database not found"),
+          h("p", null, "The dashboard can render once the session store exists. Until then, the search, timeline, and detail views remain unavailable."),
         ]),
       ]) : null,
 
@@ -1666,7 +1858,9 @@
         h("div", { className: "hermes-lcm-empty-copy" }, [
           h("div", { className: "hermes-lcm-empty-kicker" }, "Lossless Context Store"),
           h("h2", null, "No LCM sessions indexed yet"),
-          h("p", null, "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns."),
+          h("p", null, data.storage_scope === "project_local"
+            ? "This project's session store (.tokensave/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh."
+            : "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns."),
         ]),
       ]) : null,
 
@@ -1799,130 +1993,6 @@
           ),
         ]),
       ]),
-
-      searchActive ? h("div", { className: "hermes-lcm-card hermes-lcm-wide hermes-lcm-search-shell" }, [
-        h("div", { className: "hermes-lcm-search-head" }, [
-          h("div", null, [
-            h("h3", null, "Search"),
-            h("div", { className: "hermes-lcm-search-subtitle", role: "status" },
-              searchPending
-                ? "Waiting for typing to pause…"
-                : (searching
-                    ? "Searching messages and summary nodes…"
-                    : (debouncedQ && searchData
-                        ? `${fmtInt(totalSearchMatches)} matches for "${short(debouncedQ, 36)}".`
-                        : "Use / to focus and arrows to move through the current page."))),
-          ]),
-          h("div", { className: "hermes-lcm-badge-row" }, [
-            debouncedQ ? toolBadge(`"${short(debouncedQ, 36)}"`) : null,
-            searchData && searchData.engine === "fts" ? toolBadge("FTS ranked", "ok") : null,
-            searchData && searchData.engine === "like" ? toolBadge("LIKE fallback", "warn") : null,
-            (!searchPending && !searching && debouncedQ && searchData) ? toolBadge(fmtInt(totalSearchMatches) + " hits") : null,
-          ]),
-        ]),
-        searchError ? h("div", { className: "hermes-lcm-error", role: "alert" }, [
-          h("div", null, [
-            h("strong", null, "Search failed. "),
-            searchError + " — results below may be incomplete; this is not an empty result.",
-          ]),
-          h("button", {
-            type: "button",
-            className: "hermes-lcm-btn",
-            onClick: function () { setSearchRetryToken(function (n) { return n + 1; }); },
-          }, "Retry search"),
-        ]) : null,
-        (!searchPending && searching && !searchData) ? h("div", { className: "hermes-lcm-grid" }, [
-          h("div", { className: "hermes-lcm-card" }, h(SkeletonLines, { count: 5, widths: ["95%", "90%", "88%", "92%", "70%"] })),
-          h("div", { className: "hermes-lcm-card" }, h(SkeletonLines, { count: 4, widths: ["92%", "84%", "88%", "68%"] })),
-        ]) : null,
-        (!searchPending && !searching && debouncedQ && !searchError && totalSearchMatches === 0) ? h("div", { className: "hermes-lcm-empty" }, [
-          h("strong", null, "No matches found."),
-          " Try removing a facet or a punctuation-heavy query so the backend can stay on the ranked FTS path.",
-        ]) : null,
-        totalSearchMatches > 0 ? h("div", { className: "hermes-lcm-grid" }, [
-          h("div", { className: "hermes-lcm-card" }, [
-            h("div", { className: "hermes-lcm-section-head" }, [
-              h("h3", null, totalMessageCount > fetchedMessageCount
-                ? `Matching Messages (${fmtInt(fetchedMessageCount)} of ${fmtInt(totalMessageCount)})`
-                : `Matching Messages (${fmtInt(fetchedMessageCount)})`),
-              h("div", { className: "hermes-lcm-dim" }, "Click for full content and session context"),
-            ]),
-            h("div", { className: "hermes-lcm-results" },
-              visibleMessages.length
-                ? visibleMessages.map(function (m, idx) {
-                    const resultKey = "message:" + m.store_id;
-                    const selected = selectedResultIndex === idx;
-                    return h(SearchResultCard, {
-                      key: resultKey,
-                      resultRef: function (el) {
-                        if (el) resultRefs.current[resultKey] = el;
-                        else delete resultRefs.current[resultKey];
-                      },
-                      kind: "message",
-                      item: m,
-                      query: debouncedQ,
-                      selected: selected,
-                      onFocus: function () { setSelectedResultIndex(idx); },
-                      onOpen: function () { openMessage(m); },
-                    });
-                  })
-                : h("div", { className: "hermes-lcm-empty" }, "No matching messages on this page.")
-            ),
-            h(Pager, {
-              page: searchMessagePage,
-              totalPages: messageTotalPages,
-              onChange: setSearchMessagePage,
-            }),
-          ]),
-          h("div", { className: "hermes-lcm-card" }, [
-            h("div", { className: "hermes-lcm-section-head" }, [
-              h("h3", null, totalNodeCount > fetchedNodeCount
-                ? `Matching Summaries (${fmtInt(fetchedNodeCount)} of ${fmtInt(totalNodeCount)})`
-                : `Matching Summaries (${fmtInt(fetchedNodeCount)})`),
-              h("div", { className: "hermes-lcm-dim" }, "Open a node to follow its source links"),
-            ]),
-            h("div", { className: "hermes-lcm-results" },
-              visibleNodes.length
-                ? visibleNodes.map(function (n, idx) {
-                    const absoluteIndex = visibleMessages.length + idx;
-                    const resultKey = "node:" + n.node_id;
-                    const selected = selectedResultIndex === absoluteIndex;
-                    return h(SearchResultCard, {
-                      key: resultKey,
-                      resultRef: function (el) {
-                        if (el) resultRefs.current[resultKey] = el;
-                        else delete resultRefs.current[resultKey];
-                      },
-                      kind: "node",
-                      item: n,
-                      query: debouncedQ,
-                      selected: selected,
-                      onFocus: function () { setSelectedResultIndex(absoluteIndex); },
-                      onOpen: function () { openNode(n.node_id); },
-                    });
-                  })
-                : h("div", { className: "hermes-lcm-empty" }, "No matching summaries on this page.")
-            ),
-            h(Pager, {
-              page: searchNodePage,
-              totalPages: nodeTotalPages,
-              onChange: setSearchNodePage,
-            }),
-          ]),
-        ]) : null,
-        hasMoreServerResults ? h("div", { className: "hermes-lcm-actions hermes-lcm-fetch-more" }, [
-          h("button", {
-            type: "button",
-            className: "hermes-lcm-btn",
-            disabled: loadingMoreResults,
-            onClick: fetchMoreResults,
-          }, loadingMoreResults
-            ? "Fetching more results…"
-            : `Fetch next ${fmtInt(SEARCH_FETCH_LIMIT)} from server`),
-          h("span", { className: "hermes-lcm-dim" },
-            `${fmtInt(fetchedMessageCount + fetchedNodeCount)} of ${fmtInt(totalSearchMatches)} loaded`),
-        ]) : null,
-      ]) : null,
 
       h(Drawer, {
         open: !!top,

@@ -51,6 +51,7 @@ struct DashboardFixture {
     _env_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
+    global_db_path: std::path::PathBuf,
     /// node_id of the summary node referencing msg-c.
     linked_node_id: String,
 }
@@ -369,6 +370,19 @@ async fn drop_raw_message_fts(global_db_path: &Path) {
     }
 }
 
+async fn corrupt_summary_node_metadata(global_db_path: &Path, node_id: &str) {
+    let conn = open_raw_conn(global_db_path).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE lcm_summary_nodes SET metadata_json = '{not-json' WHERE node_id = ?1",
+            libsql::params![node_id],
+        )
+        .await
+    {
+        panic!("failed to corrupt summary metadata fixture: {err}");
+    }
+}
+
 async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
@@ -410,6 +424,7 @@ async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
         _env_guard: env_guard,
         base_url,
         server,
+        global_db_path,
         linked_node_id,
     }
 }
@@ -425,6 +440,95 @@ fn message_by_id<'a>(messages: &'a [Value], message_id: &str) -> &'a Value {
         .iter()
         .find(|row| row["message_id"] == message_id)
         .unwrap_or_else(|| panic!("expected message {message_id} in payload"))
+}
+
+#[test]
+fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        corrupt_summary_node_metadata(&fixture.global_db_path, &fixture.linked_node_id).await;
+        let agent = http_agent();
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/overview?limit=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 422);
+        assert!(
+            overview["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("malformed metadata_json"),
+            "malformed summary metadata must surface a JSON error detail, got {overview}"
+        );
+    });
+}
+
+#[test]
+fn lcm_bad_params_and_missing_resources_return_json_errors() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, bad_query) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/search?q=shared&limit=not-a-number",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            bad_query["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("limit"),
+            "bad query rejection must be JSON with detail, got {bad_query}"
+        );
+
+        let (status, missing_session) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/session/missing-session",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 404);
+        assert!(
+            missing_session["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("missing-session"),
+            "missing session body should carry the requested id"
+        );
+
+        let (status, missing_node) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/node/missing-node",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 404);
+        assert!(
+            missing_node["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("missing-node"),
+            "missing node body should carry the requested id"
+        );
+    });
 }
 
 #[test]

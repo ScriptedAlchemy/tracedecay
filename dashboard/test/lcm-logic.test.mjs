@@ -17,7 +17,9 @@ globalThis.__LCM_TEST_EXPORTS__ = {
   sessionLabel,
   sessionTail,
   parseLeadingJSON,
-  ratioStr
+  ratioStr,
+  mergeRows,
+  mergeSearchPayload
 };
 })();
 `,
@@ -107,4 +109,50 @@ test("ratioStr returns dash for empty output and rounded ratio otherwise", () =>
   assert.equal(lcm.ratioStr(100, 0), "\u2014");
   assert.equal(lcm.ratioStr(99, 33), `3${"\u00d7"}`);
   assert.equal(lcm.ratioStr(10, 6), `1.7${"\u00d7"}`);
+});
+
+test("mergeRows appends new rows and dedupes by id", () => {
+  const merged = lcm.mergeRows(
+    [{ store_id: 1, body: "a" }, { store_id: 2, body: "b" }],
+    [{ store_id: 2, body: "b-dup" }, { store_id: 3, body: "c" }],
+    "store_id",
+  );
+  assert.deepEqual(merged.map((row) => row.store_id), [1, 2, 3]);
+  // The first-seen row wins on id collisions.
+  assert.equal(merged[1].body, "b");
+});
+
+test("mergeSearchPayload appends match rows but takes scalars from the new page", () => {
+  const prev = {
+    engine: "fts",
+    total: { messages: 448, summary_nodes: 0 },
+    matches: {
+      messages: [{ store_id: 1 }, { store_id: 2 }],
+      summary_nodes: [{ node_id: 10 }],
+    },
+  };
+  const next = {
+    engine: "fts",
+    total: { messages: 450, summary_nodes: 1 },
+    matches: {
+      messages: [{ store_id: 2 }, { store_id: 3 }],
+      summary_nodes: [{ node_id: 11 }],
+    },
+  };
+  const merged = lcm.mergeSearchPayload(prev, next);
+  assert.deepEqual(merged.total, { messages: 450, summary_nodes: 1 });
+  assert.deepEqual(merged.matches.messages.map((row) => row.store_id), [1, 2, 3]);
+  assert.deepEqual(merged.matches.summary_nodes.map((row) => row.node_id), [10, 11]);
+});
+
+test("mergeSearchPayload passes the page through when there is no previous payload", () => {
+  const next = { total: { messages: 1 }, matches: { messages: [{ store_id: 9 }] } };
+  assert.equal(lcm.mergeSearchPayload(null, next), next);
+  // Missing matches on either side degrade to empty arrays, not crashes.
+  // (JSON round-trip normalizes vm-realm arrays for deepEqual.)
+  const degenerate = lcm.mergeSearchPayload({ matches: undefined }, { matches: undefined });
+  assert.deepEqual(JSON.parse(JSON.stringify(degenerate.matches)), {
+    messages: [],
+    summary_nodes: [],
+  });
 });

@@ -1,12 +1,19 @@
-//! Small SQL→JSON helpers shared by the dashboard API handlers.
+//! Small SQL→JSON and HTTP helpers shared by the dashboard API handlers.
 //!
 //! The original Hermes plugin APIs are thin Python layers that run SQL and
 //! return row dicts; these helpers reproduce that style (`rows_to_json` is
 //! the moral equivalent of `_rowdict`) so the endpoint ports stay close to
 //! their reference implementations.
 
+use axum::extract::{FromRequestParts, Path, Query};
+use axum::http::request::Parts;
+use axum::http::StatusCode;
+use axum::Json;
 use libsql::{Connection, Rows, Value as DbValue};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Number, Value};
+
+pub(crate) type JsonError = (StatusCode, Json<Value>);
 
 pub(crate) fn db_value_to_json(value: DbValue) -> Value {
     match value {
@@ -107,6 +114,48 @@ pub(crate) fn build_fts_match(raw: &str) -> Option<String> {
 /// error paths already understand.
 pub(crate) fn http_detail(detail: &str) -> Value {
     json!({ "detail": detail })
+}
+
+pub(crate) fn json_error(status: StatusCode, detail: impl Into<String>) -> JsonError {
+    (status, Json(http_detail(&detail.into())))
+}
+
+/// Wrapper around Axum's `Path` extractor that preserves the dashboard JSON
+/// error contract instead of Axum's default text/plain rejection body.
+pub(crate) struct JsonPath<T>(pub(crate) T);
+
+impl<S, T> FromRequestParts<S> for JsonPath<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = JsonError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Path(value)| Self(value))
+            .map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))
+    }
+}
+
+/// Wrapper around Axum's `Query` extractor that preserves the dashboard JSON
+/// error contract instead of Axum's default text/plain rejection body.
+pub(crate) struct JsonQuery<T>(pub(crate) T);
+
+impl<S, T> FromRequestParts<S> for JsonQuery<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = JsonError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Query::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
+            .map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))
+    }
 }
 
 #[cfg(test)]

@@ -9,13 +9,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use super::util::{coerce_limit, collect_rows, http_detail, like_pattern, query_i64, query_rows};
+use super::util::{
+    coerce_limit, collect_rows, http_detail, like_pattern, query_i64, query_rows, JsonPath,
+    JsonQuery,
+};
 use super::DashboardState;
 
 const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
@@ -360,7 +363,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
 pub(crate) async fn search(
     State(state): State<DashboardState>,
-    Query(params): Query<SearchParams>,
+    JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 50, 200);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -438,7 +441,7 @@ pub(crate) async fn search(
 /// `GET /api/plugins/graph/node/{node_id}`
 pub(crate) async fn node(
     State(state): State<DashboardState>,
-    Path(node_id): Path<String>,
+    JsonPath(node_id): JsonPath<String>,
 ) -> (StatusCode, Json<Value>) {
     let rows = query_rows(
         &state.mem_conn,
@@ -464,10 +467,22 @@ pub(crate) async fn node(
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
 pub(crate) async fn neighbors(
     State(state): State<DashboardState>,
-    Path(node_id): Path<String>,
-    Query(params): Query<NeighborParams>,
-) -> Json<Value> {
+    JsonPath(node_id): JsonPath<String>,
+    JsonQuery(params): JsonQuery<NeighborParams>,
+) -> (StatusCode, Json<Value>) {
     let limit = coerce_limit(params.limit, 50, 200);
+    let exists = query_i64(
+        &state.mem_conn,
+        "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+        libsql::params![node_id.clone()],
+    )
+    .await;
+    if exists == 0 {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(http_detail(&format!("node not found: {node_id}"))),
+        );
+    }
     let callers = query_rows(
         &state.mem_conn,
         &format!(
@@ -531,15 +546,18 @@ pub(crate) async fn neighbors(
     let callers = attach_degrees(callers.into_iter().map(node_with_span).collect(), &degrees);
     let callees = attach_degrees(callees.into_iter().map(node_with_span).collect(), &degrees);
 
-    Json(json!({
-        "node_id": node_id,
-        "depth": 1,
-        "limit": limit,
-        "callers": callers,
-        "callees": callees,
-        "edges": edges,
-        "edges_by_kind": edges_by_kind,
-    }))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "node_id": node_id,
+            "depth": 1,
+            "limit": limit,
+            "callers": callers,
+            "callees": callees,
+            "edges": edges,
+            "edges_by_kind": edges_by_kind,
+        })),
+    )
 }
 
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
@@ -548,7 +566,7 @@ pub(crate) async fn neighbors(
 /// the UI can show how many neighbors remain unexpanded.
 pub(crate) async fn subgraph(
     State(state): State<DashboardState>,
-    Query(params): Query<SubgraphParams>,
+    JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<Value> {
     let node_limit = coerce_limit(params.limit_nodes, 80, 250);
     let edge_limit = coerce_limit(params.limit_edges, 120, 500);
@@ -622,7 +640,7 @@ pub(crate) async fn subgraph(
 /// so pathological graphs cannot stall the server.
 pub(crate) async fn path(
     State(state): State<DashboardState>,
-    Query(params): Query<PathParams>,
+    JsonQuery(params): JsonQuery<PathParams>,
 ) -> Json<Value> {
     let max_depth = coerce_limit(params.max_depth, 6, 10);
     let from = params.from.trim().to_string();

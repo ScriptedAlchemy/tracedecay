@@ -17,9 +17,10 @@
 //! - Banks are named after their category directly (no `cat:` prefix).
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
@@ -30,7 +31,9 @@ use super::memory_analysis::{
     similarity_classification, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
     SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
 };
-use super::util::{coerce_limit, http_detail, like_pattern, query_i64, query_rows};
+use super::util::{
+    coerce_limit, http_detail, like_pattern, query_i64, query_rows, JsonPath, JsonQuery,
+};
 use super::{CuratePreviewEntry, DashboardState};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::store::MemoryStore;
@@ -270,11 +273,23 @@ async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
         .filter_map(|row| row.get("count").and_then(Value::as_i64))
         .sum();
 
+    // Bank list with LIVE membership counts. `memory_banks.fact_count` is a
+    // denormalized snapshot from the last bundle rebuild, which lags inserts
+    // and deletes until the dirty-bank rebuild runs — showing it next to the
+    // live header COUNT(*) produced off-by-N confusion. The bundled snapshot
+    // stays available as `bundled_fact_count` (the staleness signal that
+    // `hrr_coverage` keys off).
     let memory_banks = query_rows(
         &state.mem_conn,
-        "SELECT bank_id, bank_name, hrr_dim AS dim, fact_count, updated_at
-         FROM memory_banks
-         ORDER BY updated_at DESC
+        "SELECT b.bank_id, b.bank_name, b.hrr_dim AS dim,
+                CASE WHEN b.bank_name = 'all'
+                     THEN (SELECT COUNT(*) FROM memory_facts)
+                     ELSE (SELECT COUNT(*) FROM memory_facts f WHERE f.category = b.bank_name)
+                END AS fact_count,
+                b.fact_count AS bundled_fact_count,
+                b.updated_at
+         FROM memory_banks b
+         ORDER BY b.updated_at DESC
          LIMIT 50",
         (),
     )
@@ -475,7 +490,7 @@ async fn graph_payload(state: &DashboardState, query: &str, limit: i64) -> Resul
 /// `GET /api/plugins/holographic/` — overview + facts + entities + graph.
 pub(crate) async fn overview(
     State(state): State<DashboardState>,
-    Query(params): Query<OverviewParams>,
+    JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 25, 100);
     let graph_limit = coerce_limit(params.graph_limit.or(Some(limit)), limit, 1000);
@@ -513,6 +528,52 @@ pub(crate) async fn overview(
         "limit": limit,
         "holographic": holographic,
     }))
+}
+
+/// `GET /api/plugins/holographic/fact/{fact_id}` — full fact detail.
+///
+/// List and projection payloads truncate `content` to 200 chars to keep them
+/// light; detail panels (e.g. the Semantic Map's pinned card) fetch the
+/// complete row — plus linked entities — from here.
+pub(crate) async fn fact_detail(
+    State(state): State<DashboardState>,
+    JsonPath(fact_id): JsonPath<i64>,
+) -> (StatusCode, Json<Value>) {
+    let rows = query_rows(
+        &state.mem_conn,
+        "SELECT fact_id, content, category, tags, trust_score,
+                retrieval_count, helpful_count, created_at, updated_at,
+                hrr_vector IS NOT NULL AS has_hrr
+         FROM memory_facts
+         WHERE fact_id = ?1
+         LIMIT 1",
+        libsql::params![fact_id],
+    )
+    .await
+    .unwrap_or_default();
+    let Some(mut fact) = rows.into_iter().next() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(http_detail(&format!("fact not found: {fact_id}"))),
+        );
+    };
+
+    let entities = query_rows(
+        &state.mem_conn,
+        "SELECT e.entity_id, e.name, e.entity_type
+         FROM memory_fact_entities fe
+         JOIN memory_entities e ON e.entity_id = fe.entity_id
+         WHERE fe.fact_id = ?1
+         ORDER BY e.name ASC",
+        libsql::params![fact_id],
+    )
+    .await
+    .unwrap_or_default();
+    if let Some(obj) = fact.as_object_mut() {
+        obj.insert("entities".into(), json!(entities));
+    }
+
+    (StatusCode::OK, Json(json!({ "fact": fact, "error": "" })))
 }
 
 /// Facts that have an HRR vector, with the decoded phase vector.
@@ -610,7 +671,7 @@ async fn vector_facts(
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
 pub(crate) async fn projection(
     State(state): State<DashboardState>,
-    Query(params): Query<ProjectionParams>,
+    JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 25, PROJECTION_POINT_CAP);
     let mut obj = Map::new();
@@ -685,25 +746,40 @@ pub(crate) async fn projection(
 /// Fingerprint of the vectored-fact state, used as the similarity-cache key.
 /// Deletes change count/sum, inserts change count, content edits bump
 /// `updated_at` — any of which invalidates the cached pair computation.
-async fn vector_state_fingerprint(state: &DashboardState) -> Result<(i64, i64, i64), String> {
+async fn vector_state_fingerprint(state: &DashboardState) -> Result<(i64, i64, i64, u64), String> {
     let mut rows = state
         .mem_conn
         .query(
-            "SELECT COUNT(*), COALESCE(MAX(updated_at), 0), COALESCE(SUM(fact_id), 0)
+            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim, hrr_vector
              FROM memory_facts
-             WHERE hrr_vector IS NOT NULL",
+             WHERE hrr_vector IS NOT NULL
+             ORDER BY fact_id ASC",
             (),
         )
         .await
         .map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
-        return Ok((0, 0, 0));
-    };
-    Ok((
-        row.get(0).unwrap_or(0),
-        row.get(1).unwrap_or(0),
-        row.get(2).unwrap_or(0),
-    ))
+    let mut count = 0_i64;
+    let mut max_updated_at = 0_i64;
+    let mut sum_fact_id = 0_i64;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+        let fact_id: i64 = row.get(0).unwrap_or(0);
+        let updated_at: i64 = row.get(1).unwrap_or(0);
+        let hrr_algebra: String = row.get(2).unwrap_or_default();
+        let hrr_dim: i64 = row.get(3).unwrap_or(0);
+        let vector = match row.get_value(4) {
+            Ok(libsql::Value::Blob(bytes)) => bytes,
+            _ => Vec::new(),
+        };
+        count += 1;
+        max_updated_at = max_updated_at.max(updated_at);
+        sum_fact_id += fact_id;
+        fact_id.hash(&mut hasher);
+        hrr_algebra.hash(&mut hasher);
+        hrr_dim.hash(&mut hasher);
+        vector.hash(&mut hasher);
+    }
+    Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
 }
 
 /// Process-wide cache of the last pairwise-similarity computation per project
@@ -756,7 +832,7 @@ async fn similarity_computation(
 /// similarity (`mean(cos(p_i − p_j))`) over all vectored facts.
 pub(crate) async fn similarity(
     State(state): State<DashboardState>,
-    Query(params): Query<SimilarityParams>,
+    JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
     let threshold = coerce_similarity_score(params.threshold, SIMILARITY_DEFAULT_THRESHOLD);
     let min_similarity = coerce_similarity_score(params.min_similarity, threshold);
@@ -874,7 +950,7 @@ pub(crate) async fn curation_status(State(state): State<DashboardState>) -> Json
 }
 
 /// `GET /api/plugins/holographic/curation/activity` — no live event stream.
-pub(crate) async fn curation_activity(Query(params): Query<LimitParams>) -> Json<Value> {
+pub(crate) async fn curation_activity(JsonQuery(params): JsonQuery<LimitParams>) -> Json<Value> {
     let limit = coerce_limit(params.limit, 100, 300);
     Json(json!({ "events": [], "count": 0, "limit": limit, "error": "" }))
 }
@@ -1007,6 +1083,7 @@ pub(crate) async fn curate(
             saved_at,
             active_facts_at_save: total,
         };
+        super::curate_preview_store::save(&state.project_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
         return (StatusCode::OK, Json(report));
     }
@@ -1029,6 +1106,7 @@ pub(crate) async fn curate(
 
     // Clear the saved preview since we've now applied changes.
     *state.curate_preview.write().await = None;
+    super::curate_preview_store::clear(&state.project_root).await;
 
     let mut applied_counts = Map::new();
     if applied > 0 {
@@ -1267,6 +1345,7 @@ pub(crate) async fn curate_apply(
     // Mutations invalidate any saved similarity-dedup preview.
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
+        super::curate_preview_store::clear(&state.project_root).await;
     }
 
     (

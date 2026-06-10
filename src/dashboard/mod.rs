@@ -8,7 +8,10 @@
 //! - `/api/plugins/holographic/*`  → project memory store
 //!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
-//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the global DB)
+//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the project-local
+//!   `.tokensave/sessions.db` where transcript ingest writes; see
+//!   [`resolve_lcm_store`] for the `TOKENSAVE_GLOBAL_DB` override and the
+//!   global-DB fallback)
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
 //! original Hermes plugin APIs (`plugins/memory/holographic_plus/dashboard/
@@ -20,10 +23,13 @@
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
 mod assets;
+mod curate_preview_store;
 mod graph_api;
 mod lcm_api;
 mod memory_analysis;
 mod memory_api;
+mod savings_api;
+mod savings_pricing;
 mod util;
 
 use std::path::PathBuf;
@@ -60,13 +66,109 @@ pub(crate) struct DashboardState {
     pub(crate) mem_conn: libsql::Connection,
     /// Display path of the project database.
     pub(crate) mem_db_path: String,
-    /// Global database (LCM session store), when available.
+    /// LCM session store (project-local `sessions.db`, or the global DB
+    /// when overridden/unavailable), when available.
     pub(crate) lcm_conn: Option<libsql::Connection>,
-    /// Display path of the global database.
+    /// Display path of the LCM session store actually being served.
     pub(crate) lcm_db_path: String,
+    /// Which store `lcm_conn` points at: `"project_local"` or `"global"`.
+    pub(crate) lcm_scope: &'static str,
+    /// Global accounting DB (savings ledger, lifetime counters, turns) used
+    /// by the Savings & Cost tab, when available.
+    pub(crate) savings_db: Option<Arc<GlobalDb>>,
+    /// Display path of the global accounting DB.
+    pub(crate) savings_db_path: String,
     pub(crate) project_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
     pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
+}
+
+/// The LCM session store the dashboard will serve.
+pub(crate) struct LcmStoreSelection {
+    pub(crate) conn: Option<libsql::Connection>,
+    pub(crate) path: String,
+    pub(crate) scope: &'static str,
+}
+
+/// Selects the LCM session store for `project_root`.
+///
+/// Transcript ingest writes per project: Cursor's end-of-turn hooks and the
+/// MCP serve startup catch-up sweep (Claude/Codex/Vibe/Cline-like) both
+/// upsert into `<project>/.tokensave/sessions.db`, never into
+/// `~/.tokensave/global.db`. So the dashboard serves the project-local store
+/// by default — opened with the same writable schema-ensuring path the MCP
+/// LCM tools use for `storage_scope = "project_local"`, creating it on first
+/// run.
+///
+/// An explicit `TOKENSAVE_GLOBAL_DB` override always wins (scope `"global"`):
+/// tests, the smoke harness, and the Hermes wrapper use it to pin the
+/// dashboard to a specific store. The legacy global DB is also the fallback
+/// if the project store cannot be opened.
+pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStoreSelection {
+    if !crate::global_db::global_db_path_is_overridden() {
+        let project_db_path = crate::sessions::cursor::project_session_db_path(project_root);
+        if let Some(db) = GlobalDb::open_at(&project_db_path).await {
+            return LcmStoreSelection {
+                conn: Some(db.dashboard_connection()),
+                path: project_db_path.display().to_string(),
+                scope: "project_local",
+            };
+        }
+    }
+    let global = GlobalDb::open().await;
+    LcmStoreSelection {
+        conn: global.as_ref().map(GlobalDb::dashboard_connection),
+        path: crate::global_db::global_db_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        scope: "global",
+    }
+}
+
+/// Builds the dashboard state shared by the CLI `run` path and the
+/// `tokensave_dashboard` MCP tool.
+pub(crate) async fn build_state(cg: &TokenSave) -> DashboardState {
+    if let Err(err) = cg.memory_status().await {
+        eprintln!("Warning: dashboard memory repair failed: {err}");
+    }
+    let lcm = resolve_lcm_store(cg.project_root()).await;
+    // Re-hydrate the last dry-run curation preview from its sidecar so it
+    // survives server restarts (staleness is recomputed on read anyway).
+    let persisted_preview = curate_preview_store::load(cg.project_root()).await;
+    let savings_db = GlobalDb::open().await.map(Arc::new);
+    let savings_db_path = crate::global_db::global_db_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    DashboardState {
+        mem_conn: cg.dashboard_connection(),
+        mem_db_path: cg.dashboard_db_path().display().to_string(),
+        lcm_conn: lcm.conn,
+        lcm_db_path: lcm.path,
+        lcm_scope: lcm.scope,
+        savings_db,
+        savings_db_path,
+        project_root: cg.project_root().to_path_buf(),
+        curate_preview: Arc::new(RwLock::new(persisted_preview)),
+    }
+}
+
+/// Detached catch-up ingest for hookless agents (Claude, Codex, Vibe,
+/// Cline-like), mirroring the MCP serve startup sweep so a standalone
+/// `tokensave dashboard` reflects transcripts written while no MCP server
+/// was running. Cursor needs no sweep — its hooks ingest at end of turn.
+/// Fail-open and incremental (`parse_offsets` makes repeats cheap no-ops).
+fn spawn_session_catch_up_ingest(project_root: PathBuf) {
+    tokio::spawn(async move {
+        if let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await {
+            let stats = crate::sessions::ingest_global_sources(&db, &project_root).await;
+            if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
+                eprintln!(
+                    "Session catch-up ingest: {} session(s), {} message(s) updated.",
+                    stats.sessions_upserted, stats.messages_upserted
+                );
+            }
+        }
+    });
 }
 
 fn config_error(message: impl Into<String>) -> TokenSaveError {
@@ -80,17 +182,10 @@ fn config_error(message: impl Into<String>) -> TokenSaveError {
 /// stderr; the URL line on stdout is stable output for wrappers to parse.
 /// Pass `open: true` to also open the URL in the default browser (CLI --open).
 pub async fn run(cg: &TokenSave, host: &str, port: u16, open: bool) -> Result<()> {
-    let global = GlobalDb::open().await;
-    let state = DashboardState {
-        mem_conn: cg.dashboard_connection(),
-        mem_db_path: cg.dashboard_db_path().display().to_string(),
-        lcm_conn: global.as_ref().map(GlobalDb::dashboard_connection),
-        lcm_db_path: crate::global_db::global_db_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-        project_root: cg.project_root().to_path_buf(),
-        curate_preview: Arc::new(RwLock::new(None)),
-    };
+    let state = build_state(cg).await;
+    if state.lcm_scope == "project_local" {
+        spawn_session_catch_up_ingest(state.project_root.clone());
+    }
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind((host, port))
@@ -150,6 +245,10 @@ pub(crate) fn router(state: DashboardState) -> Router {
         .route("/api/plugins/holographic/", get(memory_api::overview))
         .route("/api/plugins/holographic", get(memory_api::overview))
         .route(
+            "/api/plugins/holographic/fact/{fact_id}",
+            get(memory_api::fact_detail),
+        )
+        .route(
             "/api/plugins/holographic/projection",
             get(memory_api::projection),
         )
@@ -197,6 +296,12 @@ pub(crate) fn router(state: DashboardState) -> Router {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
+        // Savings & Cost API (savings ledger + session cost accounting)
+        .route("/api/plugins/savings/overview", get(savings_api::overview))
+        .route("/api/plugins/savings/ledger", get(savings_api::ledger))
+        .route("/api/plugins/savings/sessions", get(savings_api::sessions))
+        .route("/api/plugins/savings/models", get(savings_api::models))
+        .route("/api/plugins/savings/pricing", get(savings_api::pricing))
         .with_state(state)
 }
 
@@ -210,6 +315,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "project_root": state.project_root.display().to_string(),
         "memory_db": state.mem_db_path,
         "lcm_db": state.lcm_db_path,
+        "lcm_scope": state.lcm_scope,
         "features": {
             "memory": true,
             "lcm": state.lcm_conn.is_some(),
@@ -220,8 +326,11 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // an LLM planner that calls /curate/apply).
             "curation": true,
             "llm_curation": false,
+            // Savings & Cost tab: savings-ledger analytics + per-session
+            // cost accounting with OpenRouter-backed pricing.
+            "savings": true,
         },
-        "dashboards": ["holographic", "hermes-lcm", "graph"],
+        "dashboards": ["holographic", "hermes-lcm", "graph", "savings"],
     }))
 }
 
@@ -254,6 +363,16 @@ async fn plugins_list() -> Json<Value> {
             "label": "Code Graph",
             "description": "Search and explore the indexed code graph.",
             "icon": "Network",
+            "entry": "dist/index.js",
+            "css": "dist/style.css",
+            "has_api": true,
+            "source": "tokensave",
+        },
+        {
+            "name": "savings",
+            "label": "Savings & Cost",
+            "description": "Token savings ledger and session cost accounting.",
+            "icon": "PiggyBank",
             "entry": "dist/index.js",
             "css": "dist/style.css",
             "has_api": true,

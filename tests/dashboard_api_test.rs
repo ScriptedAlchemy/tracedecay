@@ -2,11 +2,13 @@ use std::ffi::OsString;
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
+use tokensave::branch;
 use tokensave::dashboard;
 use tokensave::global_db::GlobalDb;
 use tokensave::memory::encoding::HolographicEncoder;
@@ -17,6 +19,14 @@ use tokensave::tokensave::TokenSave;
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::new(());
 const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
+/// Longer than 200 chars on purpose: list/projection payloads truncate
+/// `content` at 200, so this fact proves the `/fact/{id}` detail endpoint
+/// returns the full text.
+const LONG_FACT_CONTENT: &str = "LCM dashboard empty states need explicit copy. \
+The drawer, search results, charts, and overview panels must each explain why \
+they are empty and what action will populate them, because first-run users \
+otherwise assume the integration is broken when the store simply has no rows yet.";
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -26,6 +36,14 @@ impl EnvVarGuard {
     fn set(key: &'static str, value: &Path) -> Self {
         let previous = std::env::var_os(key);
         std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    /// Removes `key` for the guard's lifetime (restoring any prior value on
+    /// drop), so store-selection tests can exercise the no-override path.
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
         Self { key, previous }
     }
 }
@@ -124,8 +142,8 @@ async fn seed_memory_fixture(cg: &TokenSave) {
     let inserts = [
         (
             "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             libsql::params![
                 101_i64,
                 "Cache invalidation policy must be explicit",
@@ -137,13 +155,14 @@ async fn seed_memory_fixture(cg: &TokenSave) {
                 1_700_000_000_i64,
                 1_700_000_100_i64,
                 blob_param(vec_a.clone()),
-                3_i64
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
             ],
         ),
         (
             "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             libsql::params![
                 102_i64,
                 "Cache invalidation policy must stay explicit",
@@ -155,16 +174,17 @@ async fn seed_memory_fixture(cg: &TokenSave) {
                 1_700_000_010_i64,
                 1_700_000_110_i64,
                 blob_param(vec_b.clone()),
-                3_i64
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
             ],
         ),
         (
             "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             libsql::params![
                 103_i64,
-                "LCM dashboard empty states need explicit copy",
+                LONG_FACT_CONTENT,
                 "tool",
                 "[\"lcm\",\"ux\"]",
                 0.76_f64,
@@ -173,7 +193,8 @@ async fn seed_memory_fixture(cg: &TokenSave) {
                 1_700_000_020_i64,
                 1_700_000_120_i64,
                 blob_param(vec_c.clone()),
-                3_i64
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64
             ],
         ),
     ];
@@ -233,7 +254,10 @@ async fn seed_memory_fixture(cg: &TokenSave) {
         }
     }
 
-    let bank_rows = [("project", bank_a, 2_i64), ("tool", bank_b, 1_i64)];
+    // The "project" bank's stored fact_count is deliberately stale (5 vs the
+    // 2 live project facts): bank counts are denormalized snapshots from the
+    // last bundle rebuild, and the overview API must report live membership.
+    let bank_rows = [("project", bank_a, 5_i64), ("tool", bank_b, 1_i64)];
     for (name, vector, fact_count) in bank_rows {
         if let Err(err) = conn
             .execute(
@@ -502,6 +526,269 @@ async fn count_in_project_db(fixture: &DashboardFixture, sql: &str, fact_id: i64
     }
 }
 
+async fn project_db_conn(fixture: &DashboardFixture) -> libsql::Connection {
+    let db = match libsql::Builder::new_local(&fixture.project_db_path)
+        .build()
+        .await
+    {
+        Ok(db) => db,
+        Err(err) => panic!("failed to open project DB directly: {err}"),
+    };
+    match db.connect() {
+        Ok(conn) => conn,
+        Err(err) => panic!("failed to connect to project DB directly: {err}"),
+    }
+}
+
+async fn set_fact_vector_without_touching_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+    phases: &[f64],
+) {
+    let conn = project_db_conn(fixture).await;
+    let vector = match HolographicEncoder::serialize(phases) {
+        Ok(vector) => vector,
+        Err(err) => panic!("failed to serialize replacement vector: {err}"),
+    };
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = ?1, hrr_algebra = 'amari_fhrr', hrr_dim = ?2
+             WHERE fact_id = ?3",
+            libsql::params![blob_param(vector), phases.len() as i64, fact_id],
+        )
+        .await
+    {
+        panic!("failed to update fact vector fixture: {err}");
+    }
+}
+
+async fn clear_fact_vector_without_touching_updated_at(fixture: &DashboardFixture, fact_id: i64) {
+    let conn = project_db_conn(fixture).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+    {
+        panic!("failed to clear fact vector fixture: {err}");
+    }
+}
+
+fn git(project: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_all(project: &Path, message: &str) {
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "-c",
+            "user.name=TokenSave Test",
+            "-c",
+            "user.email=tokensave-test@example.com",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
+#[test]
+fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, initial) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/similarity?min_similarity=0.99&limit=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            initial["pairs"].as_array().map(Vec::len),
+            Some(1),
+            "fixture starts with one near-duplicate pair"
+        );
+
+        set_fact_vector_without_touching_updated_at(&fixture, 103, &[0.20, 0.35, 0.50]).await;
+        let (status, repaired_cache) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/similarity?min_similarity=0.99&limit=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            repaired_cache["pairs"].as_array().map_or(0, Vec::len) >= 3,
+            "vector-only changes must invalidate the similarity cache, got {repaired_cache}"
+        );
+
+        clear_fact_vector_without_touching_updated_at(&fixture, 103).await;
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let project_root = fixture
+            .project_db_path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| panic!("fixture DB path should be under .tokensave"))
+            .to_path_buf();
+        let cg = match TokenSave::open(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to reopen fixture project: {err}"),
+        };
+        let server = tokio::spawn(async move {
+            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+        });
+        wait_for_dashboard(&agent, &base_url).await;
+        let (status, _capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        server.abort();
+        assert_eq!(status, 200);
+        let repaired = count_in_project_db(
+            &fixture,
+            "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1 AND hrr_vector IS NOT NULL",
+            103,
+        )
+        .await;
+        assert_eq!(
+            repaired, 1,
+            "dashboard startup should repair NULL HRR vectors before memory reads"
+        );
+    });
+}
+
+#[test]
+fn dashboard_reports_resolved_branch_db_path() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let project_root = tmp.path().join("project");
+        let global_db_path = tmp.path().join("global").join("global.db");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+
+        fs::create_dir_all(project_root.join("src"))
+            .unwrap_or_else(|err| panic!("failed to create src dir: {err}"));
+        git(&project_root, &["init", "-b", "main"]);
+        fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn main_branch_symbol() {}\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write fixture lib.rs: {err}"));
+        commit_all(&project_root, "initial commit");
+
+        let main = match TokenSave::init(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to initialize fixture project: {err}"),
+        };
+        if let Err(err) = main.index_all().await {
+            panic!("failed to index main branch fixture: {err}");
+        }
+        drop(main);
+
+        git(&project_root, &["checkout", "-b", "feature/dashboard-path"]);
+        fs::write(
+            project_root.join("src/feature.rs"),
+            "pub fn feature_branch_symbol() {}\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write feature fixture: {err}"));
+        if let Err(err) = branch::add_branch_tracking(&project_root, "feature/dashboard-path").await
+        {
+            panic!("failed to track feature branch: {err}");
+        }
+        let cg = match TokenSave::open(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to open feature branch fixture: {err}"),
+        };
+        let expected = cg.db_path().display().to_string();
+        assert!(
+            expected.contains(".tokensave/branches/"),
+            "fixture should serve a branch DB path, got {expected}"
+        );
+
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let server = tokio::spawn(async move {
+            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+        });
+        let agent = http_agent();
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        server.abort();
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["memory_db"], expected);
+    });
+}
+
+#[test]
+fn graph_bad_params_and_missing_neighbors_return_json_errors() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, bad_query) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?limit=not-a-number",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            bad_query["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("limit"),
+            "bad graph query rejection must be JSON with detail, got {bad_query}"
+        );
+
+        let (status, missing_neighbors) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/missing-node/neighbors",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 404);
+        assert!(
+            missing_neighbors["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("missing-node"),
+            "missing-neighbor body should carry the requested id"
+        );
+    });
+}
+
 #[test]
 fn holographic_dashboard_endpoints_return_seeded_payloads() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -524,6 +811,24 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 2);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
+        // Bank list counts must be live (consistent with the header fact
+        // count), not the stale stored bundle snapshot — which stays exposed
+        // as bundled_fact_count.
+        let memory_banks = overview["holographic"]["overview"]["memory_banks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected memory_banks array"));
+        let project_bank = memory_banks
+            .iter()
+            .find(|bank| bank["bank_name"] == "project")
+            .unwrap_or_else(|| panic!("expected project bank in memory_banks"));
+        assert_eq!(
+            project_bank["fact_count"], 2,
+            "bank list must report live membership counts"
+        );
+        assert_eq!(
+            project_bank["bundled_fact_count"], 5,
+            "stale bundled snapshot must stay available for staleness UIs"
+        );
         let facts = overview["holographic"]["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array in overview payload"));
@@ -707,6 +1012,89 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert!(
             curate["actions"].as_array().is_some(),
             "curate dry-run should return an actions array"
+        );
+    });
+}
+
+#[test]
+fn holographic_fact_detail_returns_full_content_and_entities() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        assert!(
+            LONG_FACT_CONTENT.chars().count() > 200,
+            "fixture must exceed the 200-char list/projection truncation"
+        );
+
+        // The projection payload truncates content at 200 chars by design.
+        let (status, projection) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/projection?limit=2000",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let truncated_point = projection["points"]
+            .as_array()
+            .and_then(|points| {
+                points
+                    .iter()
+                    .find(|point| point["fact_id"].as_i64() == Some(103))
+            })
+            .unwrap_or_else(|| panic!("expected projection point for fact 103"));
+        assert_eq!(
+            truncated_point["content"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .count(),
+            200,
+            "projection content stays truncated at 200 chars"
+        );
+
+        // The detail endpoint returns the complete row plus linked entities.
+        let (status, detail) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/fact/103", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(detail["error"], "");
+        assert_eq!(detail["fact"]["fact_id"], 103);
+        assert_eq!(detail["fact"]["category"], "tool");
+        assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
+        assert_eq!(detail["fact"]["has_hrr"], 1);
+        assert_eq!(detail["fact"]["trust_score"], 0.76);
+        let entities = detail["fact"]["entities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected entities array in fact detail"));
+        let entity_names: Vec<&str> = entities
+            .iter()
+            .filter_map(|entity| entity["name"].as_str())
+            .collect();
+        assert_eq!(
+            entity_names,
+            vec!["LCMTab", "SimilarityView"],
+            "fact detail must list linked entities sorted by name"
+        );
+
+        // Unknown ids are a 404 with the FastAPI-style detail body.
+        let (status, missing) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/fact/99999", fixture.base_url),
+        );
+        assert_eq!(status, 404);
+        assert!(
+            missing["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("99999"),
+            "404 body should carry the requested fact id"
         );
     });
 }
@@ -1017,6 +1405,10 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         );
         assert_eq!(status, 200);
         assert_eq!(overview["exists"], true);
+        assert_eq!(
+            overview["storage_scope"], "global",
+            "TOKENSAVE_GLOBAL_DB override fixtures serve the global scope"
+        );
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
         assert_eq!(overview["overview"]["summary_nodes_total"], 1);
@@ -1124,5 +1516,287 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             Value::Array(Vec::new()),
             "empty LCM store search should have zero summary-node matches"
         );
+    });
+}
+
+/// Opens (creating if needed) the project-local session store at
+/// `<project>/.tokensave/sessions.db` — the DB transcript ingest writes to.
+async fn open_project_session_store(project_root: &Path) -> GlobalDb {
+    let db_path = tokensave::sessions::cursor::project_session_db_path(project_root);
+    match GlobalDb::open_at(&db_path).await {
+        Some(db) => db,
+        None => panic!(
+            "failed to open project session store at {}",
+            db_path.display()
+        ),
+    }
+}
+
+/// Without a `TOKENSAVE_GLOBAL_DB` override the dashboard must serve the
+/// project-local `.tokensave/sessions.db` (where Cursor hooks and the
+/// catch-up sweep ingest transcripts), and report it via the additive
+/// `storage_scope` payload field.
+#[test]
+fn lcm_serves_project_session_store_without_global_override() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let project_root = tmp.path().join("project");
+        let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
+
+        let cg = setup_project(&project_root).await;
+        let session_store = open_project_session_store(&project_root).await;
+        seed_lcm_fixture(&session_store, &project_root).await;
+        drop(session_store);
+
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let server = tokio::spawn(async move {
+            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+        });
+
+        let agent = http_agent();
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["lcm_scope"], "project_local");
+        assert_eq!(capabilities["features"]["lcm"], true);
+        let lcm_db = capabilities["lcm_db"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected capabilities.lcm_db string"));
+        assert!(
+            lcm_db.ends_with(".tokensave/sessions.db"),
+            "capabilities.lcm_db should be the project session store, got {lcm_db}"
+        );
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(overview["storage_scope"], "project_local");
+        assert_eq!(overview["exists"], true);
+        assert_eq!(overview["overview"]["messages_total"], 3);
+        assert_eq!(overview["overview"]["sessions_total"], 1);
+        assert_eq!(overview["overview"]["summary_nodes_total"], 1);
+        let path = overview["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected overview.path string"));
+        assert!(
+            path.ends_with(".tokensave/sessions.db"),
+            "overview.path should be the project session store, got {path}"
+        );
+
+        let (status, search) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/hermes-lcm/search?q=vector&limit=20"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(search["storage_scope"], "project_local");
+        let search_messages = search["matches"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected search.matches.messages array"));
+        assert!(
+            !search_messages.is_empty(),
+            "project-store search should match seeded messages"
+        );
+
+        server.abort();
+    });
+}
+
+/// An explicit `TOKENSAVE_GLOBAL_DB` override pins the dashboard to that
+/// store even when the project-local session store exists and has rows —
+/// the contract the smoke harness and the Hermes wrapper rely on.
+#[test]
+fn lcm_global_override_wins_over_project_store() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let project_root = tmp.path().join("project");
+        let global_db_path = tmp.path().join("global").join("global.db");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+
+        let cg = setup_project(&project_root).await;
+        // The project store has rows; the overridden global store has none.
+        let session_store = open_project_session_store(&project_root).await;
+        seed_lcm_fixture(&session_store, &project_root).await;
+        drop(session_store);
+
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let server = tokio::spawn(async move {
+            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+        });
+
+        let agent = http_agent();
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["lcm_scope"], "global");
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(overview["storage_scope"], "global");
+        assert_eq!(overview["exists"], true);
+        assert_eq!(
+            overview["overview"]["messages_total"], 0,
+            "override must serve the pinned (empty) store, not the project store"
+        );
+        let path = overview["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected overview.path string"));
+        assert_eq!(path, global_db_path.display().to_string());
+
+        server.abort();
+    });
+}
+
+/// The dry-run curation preview must survive a dashboard restart: it is
+/// mirrored to `.tokensave/dashboard/curation_preview.json` and re-hydrated
+/// by `build_state`, and applying curation clears both the memory copy and
+/// the sidecar.
+#[test]
+fn curation_preview_persists_across_dashboard_restarts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let project_root = tmp.path().join("project");
+        let global_db_path = tmp.path().join("global").join("global.db");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+
+        let cg = setup_project(&project_root).await;
+        seed_memory_fixture(&cg).await;
+        let agent = http_agent();
+        let sidecar = project_root
+            .join(".tokensave")
+            .join("dashboard")
+            .join("curation_preview.json");
+
+        async fn start_server(cg: TokenSave) -> (String, tokio::task::JoinHandle<()>) {
+            let port = pick_free_port();
+            let base_url = format!("http://127.0.0.1:{port}");
+            let server = tokio::spawn(async move {
+                let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+            });
+            (base_url, server)
+        }
+
+        async fn stop_server(server: tokio::task::JoinHandle<()>) {
+            server.abort();
+            let _ = server.await;
+        }
+
+        async fn reopen_project(project_root: &Path) -> TokenSave {
+            match TokenSave::open(project_root).await {
+                Ok(cg) => cg,
+                Err(err) => panic!("failed to reopen fixture project: {err}"),
+            }
+        }
+
+        // Server 1: a dry-run saves the preview and writes the sidecar.
+        let (base_url, server) = start_server(cg).await;
+        wait_for_dashboard(&agent, &base_url).await;
+        let (status, curate) = post_json_body(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curate"),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(curate["dry_run"], true);
+        let (status, preview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/preview"),
+        );
+        assert_eq!(status, 200);
+        assert!(!preview["report"].is_null(), "dry-run must save a preview");
+        let saved_at = preview["saved_at"].clone();
+        assert!(saved_at.is_string(), "preview must carry saved_at");
+        stop_server(server).await;
+        assert!(
+            sidecar.exists(),
+            "dry-run must persist the preview sidecar at {}",
+            sidecar.display()
+        );
+
+        // Server 2 (fresh state): the preview is re-hydrated from disk.
+        let cg = reopen_project(&project_root).await;
+        let (base_url, server) = start_server(cg).await;
+        wait_for_dashboard(&agent, &base_url).await;
+        let (status, preview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/preview"),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            !preview["report"].is_null(),
+            "preview must survive a server restart"
+        );
+        assert_eq!(
+            preview["saved_at"], saved_at,
+            "re-hydrated preview must keep its original timestamp"
+        );
+        assert_eq!(
+            preview["stale"], false,
+            "fact count is unchanged, so the restored preview is not stale"
+        );
+        let (status, status_payload) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/status"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            status_payload["state"]["last_preview_at"], saved_at,
+            "curation status must reflect the restored preview"
+        );
+
+        // Applying curation clears both the in-memory copy and the sidecar.
+        let (status, applied) = post_json_body(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curate"),
+            &serde_json::json!({ "dry_run": false }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(applied["dry_run"], false);
+        let (status, preview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/preview"),
+        );
+        assert_eq!(status, 200);
+        assert!(preview["report"].is_null(), "apply must clear the preview");
+        assert!(
+            !sidecar.exists(),
+            "apply must remove the persisted preview sidecar"
+        );
+        stop_server(server).await;
+
+        // Server 3: nothing is restored after the apply cleared the sidecar.
+        let cg = reopen_project(&project_root).await;
+        let (base_url, server) = start_server(cg).await;
+        wait_for_dashboard(&agent, &base_url).await;
+        let (status, preview) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/curation/preview"),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            preview["report"].is_null(),
+            "no preview may reappear after curation was applied"
+        );
+        stop_server(server).await;
     });
 }

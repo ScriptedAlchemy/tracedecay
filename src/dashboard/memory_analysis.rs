@@ -313,8 +313,8 @@ pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
 /// retained — only the fact metadata needed to render pairs and plans.
 #[derive(Debug)]
 pub(crate) struct SimilarityComputation {
-    /// (vectored-fact count, max `updated_at`, sum of `fact_ids`) at compute time.
-    pub(crate) key: (i64, i64, i64),
+    /// Fingerprint of the vectored fact rows at compute time.
+    pub(crate) key: (i64, i64, i64, u64),
     pub(crate) dim: usize,
     /// Fact metadata (`fact_id`, content, category, `trust_score`, `retrieval_count`).
     pub(crate) facts: Vec<Value>,
