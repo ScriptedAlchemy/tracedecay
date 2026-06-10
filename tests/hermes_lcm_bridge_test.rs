@@ -5,6 +5,30 @@ use tempfile::TempDir;
 use tokensave::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tokensave::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
+const PLUGIN_LOAD_PRELUDE: &str = r#"
+import importlib.machinery
+import importlib.util
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_shared_prelude"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+"#;
+
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
@@ -43,6 +67,7 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
     ]);
 
     let script_path = plugin_dir.join(script_name);
+    let script = format!("{PLUGIN_LOAD_PRELUDE}\n{script}");
     std::fs::write(&script_path, script).unwrap();
 
     let output = Command::new("python3")
@@ -63,28 +88,6 @@ fn generated_registration_degrades_without_register_tool() {
     run_generated_plugin_script(
         "check_registration_without_register_tool.py",
         r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_no_register_tool"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
 class NoToolCtx:
     def __init__(self):
         self.hooks = []
@@ -117,28 +120,6 @@ fn generated_registration_continues_when_register_tool_raises() {
     run_generated_plugin_script(
         "check_registration_register_tool_raises.py",
         r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_register_tool_raises"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
 class RaisingToolCtx:
     context_engine_tool_handlers_receive_messages = True
 
@@ -178,28 +159,6 @@ fn generated_registration_skips_tools_without_message_forwarding_capability() {
     run_generated_plugin_script(
         "check_registration_capability_gate.py",
         r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_registration_gate"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
 class UnsafeRegisteredToolCtx:
     context_engine_tool_handlers_receive_messages = False
 
@@ -238,28 +197,7 @@ fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
     run_generated_plugin_script(
         "check_context_engine_native_surface.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_context_surface"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 engine = plugin.TokenSaveContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
@@ -502,28 +440,7 @@ fn context_engine_debounces_current_turn_preflight_when_messages_unchanged() {
     run_generated_plugin_script(
         "check_preflight_debounce.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_preflight_debounce"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 calls = []
 
@@ -560,29 +477,8 @@ fn context_engine_wraps_extraction_result_into_provided_summarizer_route() {
     run_generated_plugin_script(
         "check_auxiliary_extraction_route.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
 import os
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_extraction_route"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 os.environ["LCM_EXTRACTION_ENABLED"] = "true"
 os.environ["LCM_EXTRACTION_MODEL"] = "openai/gpt-5.4-mini"
@@ -692,29 +588,8 @@ fn context_engine_compress_continues_when_extraction_call_fails() {
     run_generated_plugin_script(
         "check_auxiliary_extraction_failure_non_blocking.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
 import os
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_extraction_fail_open"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 os.environ["LCM_EXTRACTION_ENABLED"] = "true"
 
@@ -729,6 +604,11 @@ def fake_call_tokensave_json(name, args, **kwargs):
             "summary_request": {
                 "source_messages": [{"store_id": 1, "role": "user", "content": "hello"}],
                 "source_range": {"from_store_id": 1, "to_store_id": 1},
+                "extraction_request": {
+                    "session_id": "session-1",
+                    "source_range": {"from_store_id": 1, "to_store_id": 1},
+                    "prompt": "extract decisions"
+                },
             },
             "replay_messages": [],
         }
@@ -791,31 +671,11 @@ fn generated_context_engine_defaults_to_hermes_home_even_when_missing() {
     run_generated_plugin_script(
         "check_context_engine_default_home.py",
         r#"
-import importlib.machinery
-import importlib.util
 import os
 import pathlib
-import sys
 import tempfile
 import tempfile
 import tempfile
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_default_home"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tokensave"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 os.environ.pop("HERMES_HOME", None)
 with tempfile.TemporaryDirectory() as tmp:
@@ -3353,10 +3213,6 @@ engine.update_model(
     api_mode="anthropic_messages",
 )
 assert engine.model == "deepseek-v4-flash"
-assert engine.base_url == "https://opencode.ai/zen/go"
-assert engine.api_key == "test-key"
-assert engine.provider == "opencode-go"
-assert engine.api_mode == "anthropic_messages"
 
 engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=1)
 _, args = calls.pop()

@@ -467,9 +467,8 @@ fn insert_bounded_scalar_field(
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
-    let mut chars = value.chars();
-    let truncated = value.chars().count() > max_chars;
-    let text = chars.by_ref().take(max_chars).collect::<String>();
+    let truncated = value.chars().nth(max_chars).is_some();
+    let text = value.chars().take(max_chars).collect::<String>();
     (text, truncated)
 }
 
@@ -712,9 +711,8 @@ fn lcm_doctor_clean_apply_enabled(args: &Value) -> Result<bool> {
     }
 }
 
-fn lcm_clean_config(args: &Value, doctor_clean_apply_enabled: bool) -> Result<LcmCleanConfig> {
+fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
     Ok(LcmCleanConfig {
-        doctor_clean_apply_enabled,
         ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
         stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
         ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
@@ -1151,7 +1149,7 @@ pub(super) async fn handle_lcm_doctor(cg: &TokenSave, args: Value) -> Result<Too
             }
         })));
     }
-    let clean_config = lcm_clean_config(&args, clean_apply_enabled)?;
+    let clean_config = lcm_clean_config(&args)?;
     let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
     let storage = match open_lcm_storage_with_mode(cg, &args, read_only_existing).await {
         LcmStorageResolution::Available(storage) => storage,

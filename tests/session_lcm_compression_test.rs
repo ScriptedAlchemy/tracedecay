@@ -8,32 +8,25 @@ use tokensave::sessions::lcm::{
 };
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 
+mod common;
+
 fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("sessions.db")
+    common::isolated_lcm_db_path(tmp)
 }
 
 async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
-    GlobalDb::open_at(&isolated_db_path(tmp))
-        .await
-        .expect("session db open")
+    common::open_lcm_db(tmp).await
 }
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
-    SessionRecord {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        project_key: "/tmp/project".to_string(),
-        project_path: "/tmp/project".to_string(),
-        title: Some("LCM compression test".to_string()),
-        started_at: Some(1_715_000_000),
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
+    common::session_record(
+        provider,
+        session_id,
+        "/tmp/project",
+        "LCM compression test",
+        None,
+        None,
+    )
 }
 
 fn raw_message(
@@ -54,21 +47,11 @@ fn raw_message_with_role(
     ordinal: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp: Some(1_715_000_000 + ordinal),
-        ordinal,
-        text: text.to_string(),
-        kind: Some("message".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    }
+    let mut message = common::message_record(
+        provider, message_id, session_id, role, ordinal, text, "message", None, None, None, None,
+    );
+    message.timestamp = Some(1_715_000_000 + ordinal);
+    message
 }
 
 async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
@@ -2245,12 +2228,8 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
         summary_request.source_range
     );
     assert!(extraction_request.prompt.contains("NOTHING_TO_EXTRACT"));
-    assert!(extraction_request
-        .serialized_messages
-        .contains("[ASSISTANT]: old-1"));
-    assert!(extraction_request
-        .serialized_messages
-        .contains("[ASSISTANT]: old-2"));
+    assert!(extraction_request.prompt.contains("[ASSISTANT]: old-1"));
+    assert!(extraction_request.prompt.contains("[ASSISTANT]: old-2"));
     assert_eq!(response.replay_messages[0]["content"], "fresh-1");
     assert_eq!(response.replay_messages[1]["content"], "fresh-2");
 }

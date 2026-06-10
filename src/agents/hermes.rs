@@ -1077,23 +1077,17 @@ def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
             "raw_preview": _bridge_preview(raw),
         }
     content = outer.get("content")
-    if not isinstance(content, list) or not content:
+    if (
+        not isinstance(content, list)
+        or not content
+        or not isinstance(content[0], dict)
+        or not isinstance(content[0].get("text"), str)
+    ):
         return {
             "error": "tokensave tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    first = content[0]
-    if not isinstance(first, dict):
-        return {
-            "error": "tokensave tool response missing text content",
-            "raw_preview": _bridge_preview(raw),
-        }
-    text = first.get("text")
-    if not isinstance(text, str):
-        return {
-            "error": "tokensave tool response missing text content",
-            "raw_preview": _bridge_preview(raw),
-        }
+    text = content[0]["text"]
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -1131,7 +1125,7 @@ def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) ->
     }
 
 def _lcm_tool_schemas() -> list:
-    return json.loads(json.dumps(LCM_NATIVE_SCHEMAS))
+    return list(LCM_NATIVE_SCHEMAS)
 
 def _decode_tool_args(arguments):
     if arguments is None:
@@ -1221,7 +1215,7 @@ def _configured_int(config, *names, default=None):
         return None
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 def _configured_bool(config, *names, default=None):
@@ -1450,26 +1444,20 @@ def _lcm_summary_timeout_ms(config, hermes_home=None):
     return _hermes_yaml_auxiliary_compression_timeout_ms(60000, hermes_home=hermes_home)
 
 def _summary_circuit_breaker_settings(config):
-    threshold = _lcm_int_setting(
+    threshold = _lcm_clamped_int_setting(
         config,
         "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
         "summary_circuit_breaker_failure_threshold",
         default=2,
+        minimum=1,
     )
-    cooldown = _lcm_int_setting(
+    cooldown = _lcm_clamped_int_setting(
         config,
         "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
         "summary_circuit_breaker_cooldown_seconds",
         default=300,
+        minimum=0,
     )
-    try:
-        threshold = max(1, int(threshold or 1))
-    except Exception:
-        threshold = 1
-    try:
-        cooldown = max(0, int(cooldown or 0))
-    except Exception:
-        cooldown = 0
     return threshold, cooldown
 
 def _lcm_context_threshold(config, hermes_home=None):
@@ -1503,7 +1491,7 @@ def _configured_threshold_tokens(config, hermes_home=None, context_length_overri
         return None
     try:
         return int(int(context_length) * float(_lcm_context_threshold(config, hermes_home=hermes_home)))
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> dict:
@@ -1578,51 +1566,69 @@ def _lcm_expansion_model(config):
     value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
     return str(value or "").strip()
 
+def _lcm_clamped_int_setting(config, env_key, *names, default, minimum=1):
+    value = _lcm_int_setting(config, env_key, *names, default=default)
+    if value is None:
+        value = default
+    return max(minimum, int(value))
+
+def _lcm_expansion_settings(config):
+    return {
+        "model": _lcm_expansion_model(config),
+        "context_tokens": _lcm_clamped_int_setting(
+            config,
+            "LCM_EXPANSION_CONTEXT_TOKENS",
+            "expansion_context_tokens",
+            default=32000,
+            minimum=1,
+        ),
+        "timeout_ms": _lcm_clamped_int_setting(
+            config,
+            "LCM_EXPANSION_TIMEOUT_MS",
+            "expansion_timeout_ms",
+            default=120000,
+            minimum=1,
+        ),
+    }
+
 def _lcm_expansion_context_tokens(config):
-    value = _lcm_int_setting(
-        config,
-        "LCM_EXPANSION_CONTEXT_TOKENS",
-        "expansion_context_tokens",
-        default=32000,
-    )
-    try:
-        return max(1, int(value or 32000))
-    except Exception:
-        return 32000
+    return _lcm_expansion_settings(config)["context_tokens"]
 
 def _lcm_expansion_timeout_ms(config):
-    value = _lcm_int_setting(
-        config,
-        "LCM_EXPANSION_TIMEOUT_MS",
-        "expansion_timeout_ms",
-        default=120000,
-    )
-    try:
-        return max(1, int(value or 120000))
-    except Exception:
-        return 120000
+    return _lcm_expansion_settings(config)["timeout_ms"]
+
+def _lcm_extraction_settings(config):
+    return {
+        "enabled": bool(
+            _lcm_bool_setting(
+                config,
+                "LCM_EXTRACTION_ENABLED",
+                "extraction_enabled",
+                default=False,
+            )
+        ),
+        "model": str(
+            _lcm_str_setting(config, "LCM_EXTRACTION_MODEL", "extraction_model", default="") or ""
+        ).strip(),
+        "output_path": str(
+            _lcm_str_setting(
+                config,
+                "LCM_EXTRACTION_OUTPUT_PATH",
+                "extraction_output_path",
+                default="",
+            )
+            or ""
+        ).strip(),
+    }
 
 def _lcm_extraction_enabled(config):
-    value = _lcm_bool_setting(
-        config,
-        "LCM_EXTRACTION_ENABLED",
-        "extraction_enabled",
-        default=False,
-    )
-    return bool(value)
+    return _lcm_extraction_settings(config)["enabled"]
 
 def _lcm_extraction_model(config):
-    value = _lcm_str_setting(config, "LCM_EXTRACTION_MODEL", "extraction_model", default="")
-    return str(value or "").strip()
+    return _lcm_extraction_settings(config)["model"]
 
 def _lcm_extraction_output_path(config):
-    value = _lcm_str_setting(
-        config,
-        "LCM_EXTRACTION_OUTPUT_PATH",
-        "extraction_output_path",
-        default="",
-    )
-    return str(value or "").strip()
+    return _lcm_extraction_settings(config)["output_path"]
 
 def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
     for key in keys:
@@ -1644,21 +1650,6 @@ RETRY_WORTHY_AUXILIARY_ERRORS = (
     "timeout",
 )
 
-EXTRACTION_PROMPT = """Extract decisions, commitments, outcomes, and rules from this conversation segment.
-
-Format as a flat list of bullet points. Each bullet should be self-contained and understandable
-without the surrounding conversation. Include:
-- Decisions made (what was chosen, and why if stated)
-- Commitments (who will do what)
-- Outcomes (what happened as a result of an action)
-- Rules or constraints discovered
-
-Skip: greetings, meta-discussion, reasoning that led nowhere, repeated information.
-If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT
-
-CONTENT:
-{text}"""
-
 def _strip_reasoning(text: str) -> str:
     output = text or ""
     for tag in REASONING_TAGS:
@@ -1672,6 +1663,8 @@ def _strip_reasoning(text: str) -> str:
     return output.strip()
 
 def _messages_hash(messages):
+    # Keep a full-content hash to preserve debounce correctness: any message
+    # change must invalidate the signature and trigger preflight.
     try:
         payload = json.dumps(messages or [], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     except Exception:
@@ -2025,6 +2018,8 @@ def _normalize_extraction_items(text):
 def _extraction_route_payload(route, extraction_result):
     if extraction_result is None:
         return route
+    # Route-envelope contract with Rust extraction.rs:
+    # keys are `route` and `pre_compaction_extraction`.
     payload = {"pre_compaction_extraction": extraction_result}
     if route:
         payload["route"] = route
@@ -2276,10 +2271,6 @@ class TokenSaveContextEngine(ContextEngine):
         self.project_root = None
         self.agent = None
         self.model = ""
-        self.base_url = ""
-        self.api_key = ""
-        self.provider = ""
-        self.api_mode = ""
         self._runtime_context_length = None
         self._session_start_context_length = None
         self._route_failures = {}
@@ -2327,10 +2318,6 @@ class TokenSaveContextEngine(ContextEngine):
 
     def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
         self.model = str(model or "")
-        self.base_url = str(base_url or "")
-        self.api_key = str(api_key or "")
-        self.provider = str(provider or "")
-        self.api_mode = str(api_mode or "")
         try:
             self._runtime_context_length = int(context_length)
         except Exception:
@@ -2767,32 +2754,29 @@ class TokenSaveContextEngine(ContextEngine):
             fallback["auxiliary_error_classification"] = summary.get("error_classification")
         return fallback
 
-    def _run_pre_compaction_extraction(self, summary_request, source_messages, **kwargs):
+    def _run_pre_compaction_extraction(self, summary_request, source_messages):
         if not _lcm_extraction_enabled(self.config):
             return None
         if not source_messages:
             return {"status": "no_source"}
-        extraction_request = {}
-        if isinstance(summary_request, dict):
-            extraction_request = summary_request.get("extraction_request") or {}
-        serialized_messages = extraction_request.get("serialized_messages")
-        if not serialized_messages:
-            serialized_messages = _serialize_summary_messages(source_messages)
-        prompt = extraction_request.get("prompt")
-        if not prompt:
-            prompt = EXTRACTION_PROMPT.format(text=serialized_messages)
+        extraction_request = (
+            summary_request.get("extraction_request") if isinstance(summary_request, dict) else None
+        )
+        prompt = extraction_request.get("prompt") if isinstance(extraction_request, dict) else None
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {
+                "status": "failed_non_blocking",
+                "error": "LCM extraction envelope missing prompt",
+                "model": None,
+                "output_path": None,
+            }
         extraction_model = str(
-            extraction_request.get("model")
-            or _lcm_extraction_model(self.config)
+            _lcm_extraction_model(self.config)
             or _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="")
             or ""
         ).strip()
-        timeout_seconds = extraction_request.get("timeout_seconds")
-        if timeout_seconds is None:
-            timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
-        output_path = extraction_request.get("output_path")
-        if output_path is None:
-            output_path = _lcm_extraction_output_path(self.config)
+        timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
+        output_path = _lcm_extraction_output_path(self.config)
         client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
         if client is None or not callable(getattr(client, "call_llm", None)):
             return {
@@ -2895,7 +2879,6 @@ class TokenSaveContextEngine(ContextEngine):
             extraction_result = self._run_pre_compaction_extraction(
                 summary_request,
                 source_messages,
-                **kwargs,
             )
             summary = self._summarize_with_escalation(
                 source_messages,

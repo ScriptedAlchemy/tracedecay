@@ -19,7 +19,10 @@ If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT
 CONTENT:
 {text}";
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// Route-envelope contract with Hermes plugin:
+// - `route`: caller-provided summarizer route string
+// - `pre_compaction_extraction`: optional extraction result object
+#[derive(Debug, serde::Deserialize)]
 struct LcmProvidedSummaryRouteEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     route: Option<String>,
@@ -40,8 +43,6 @@ pub(crate) fn build_extraction_request(
     Some(LcmExtractionRequest {
         session_id: session_id.to_string(),
         source_range: source_range.clone(),
-        source_messages: source_messages.to_vec(),
-        serialized_messages,
         prompt,
     })
 }
@@ -53,11 +54,10 @@ pub(crate) fn split_summary_route(
     let Some(route) = route else {
         return (None, None);
     };
-    let trimmed = route.trim();
-    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+    if !(route.starts_with('{') && route.ends_with('}')) {
         return (Some(route), None);
     }
-    let parsed = serde_json::from_str::<LcmProvidedSummaryRouteEnvelope>(trimmed);
+    let parsed = serde_json::from_str::<LcmProvidedSummaryRouteEnvelope>(&route);
     if let Ok(envelope) = parsed {
         return (
             envelope

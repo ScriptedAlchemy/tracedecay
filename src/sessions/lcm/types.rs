@@ -506,8 +506,6 @@ pub struct LcmConfigStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCleanConfig {
-    #[serde(default)]
-    pub doctor_clean_apply_enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -666,8 +664,6 @@ pub struct LcmSummarySourceMessage {
 pub struct LcmExtractionRequest {
     pub session_id: String,
     pub source_range: LcmSummarySourceRange,
-    pub source_messages: Vec<LcmSummarySourceMessage>,
-    pub serialized_messages: String,
     pub prompt: String,
 }
 
