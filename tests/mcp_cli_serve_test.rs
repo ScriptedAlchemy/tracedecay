@@ -73,6 +73,17 @@ fn file_uri_localhost_percent_encoded(path: &Path) -> String {
     format!("file://localhost{encoded}")
 }
 
+/// Builds a portable `file://` URI: `/tmp/x` → `file:///tmp/x` on Unix,
+/// `C:\Users\x` → `file:///C:/Users/x` on Windows.
+fn file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else {
+        format!("file:///{normalized}")
+    }
+}
+
 #[tokio::test]
 async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -131,7 +142,7 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
                 "method": "initialize",
                 "params": {
                     "roots": [{
-                        "uri": format!("file://{}", active.path().display()),
+                        "uri": file_uri(active.path()),
                         "name": "active"
                     }]
                 }
@@ -165,8 +176,8 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     );
 
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        active.path().to_str().unwrap(),
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(active.path()),
         "serve should prefer MCP initialize roots over stale global DB fallback"
     );
 }
@@ -198,7 +209,7 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
                 "method": "initialize",
                 "params": {
                     "roots": [{
-                        "uri": format!("file://{}", active.path().display()),
+                        "uri": file_uri(active.path()),
                         "name": "active"
                     }]
                 }
@@ -265,7 +276,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
                 "method": "initialize",
                 "params": {
                     "roots": [{
-                        "uri": format!("file://{}", active.path().display()),
+                        "uri": file_uri(active.path()),
                         "name": "active"
                     }]
                 }
@@ -299,8 +310,8 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     );
 
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        explicit.path().to_str().unwrap(),
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(explicit.path()),
         "explicit --path should be authoritative over MCP initialize roots"
     );
 }
@@ -403,8 +414,8 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        runtime_project_root(&output.stdout, 2),
-        active.to_str().unwrap(),
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(&active),
         "serve should use the decoded MCP root project"
     );
 }
