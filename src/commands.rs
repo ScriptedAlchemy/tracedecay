@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use crate::cli::BranchAction;
@@ -455,6 +455,13 @@ pub(crate) async fn handle_no_command() -> tokensave::errors::Result<()> {
         );
         eprintln!();
     }
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "No TokenSave index found at '{}'. Non-interactive: skipping index creation (run `tokensave init`).",
+            project_path.display()
+        );
+        return Ok(());
+    }
     eprint!(
         "No TokenSave index found at '{}'. Create one now? [Y/n] ",
         project_path.display()
@@ -494,15 +501,21 @@ pub(crate) async fn init_and_index(
         eprintln!("Initialized TokenSave at {}", project_path.display());
         // Offer to add .tokensave to .gitignore if not already there
         if !tokensave::config::is_in_gitignore(project_path) {
-            eprint!("Add .tokensave to .gitignore? [Y/n] ");
-            io::stderr().flush().ok();
-            let mut answer = String::new();
-            if io::stdin().lock().read_line(&mut answer).is_ok() {
-                let answer = answer.trim();
-                if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    tokensave::config::add_to_gitignore(project_path);
-                    eprintln!("Added .tokensave to .gitignore");
+            if io::stdin().is_terminal() {
+                eprint!("Add .tokensave to .gitignore? [Y/n] ");
+                io::stderr().flush().ok();
+                let mut answer = String::new();
+                if io::stdin().lock().read_line(&mut answer).is_ok() {
+                    let answer = answer.trim();
+                    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+                        tokensave::config::add_to_gitignore(project_path);
+                        eprintln!("Added .tokensave to .gitignore");
+                    }
                 }
+            } else {
+                eprintln!(
+                    "Non-interactive: skipped adding .tokensave to .gitignore (run interactively to opt in)."
+                );
             }
         }
         cg

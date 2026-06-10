@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
 use tokensave::tokensave::TokenSave;
@@ -41,7 +41,9 @@ impl Spinner {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let mut idx = 0usize;
             while !stp.load(std::sync::atomic::Ordering::Relaxed) {
-                let text = msg.lock().unwrap().clone();
+                let text = msg
+                    .lock()
+                    .map_or_else(|_| String::new(), |locked| locked.clone());
                 if !text.is_empty() {
                     let frame = frames[idx % frames.len()];
                     idx += 1;
@@ -66,7 +68,9 @@ impl Spinner {
     }
 
     pub(crate) fn set_message(&self, msg: &str) {
-        *self.message.lock().unwrap() = msg.to_string();
+        if let Ok(mut locked) = self.message.lock() {
+            *locked = msg.to_string();
+        }
     }
 
     pub(crate) fn done(mut self, message: &str) {
@@ -522,6 +526,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let project_path = tokensave::config::resolve_path_with_discovery(path);
             let cg = if TokenSave::is_initialized(&project_path) {
                 TokenSave::open(&project_path).await?
+            } else if !io::stdin().is_terminal() {
+                eprintln!(
+                    "No TokenSave index found at '{}'. Non-interactive: skipping index creation (run `tokensave init`).",
+                    project_path.display()
+                );
+                return Ok(());
             } else {
                 eprint!(
                     "No TokenSave index found at '{}'. Create one now? [Y/n] ",
@@ -1499,6 +1509,7 @@ mod startup_tests {
             local: false,
             profile: None,
             all_profiles: false,
+            project_root: None,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
         assert!(should_skip_startup_maintenance(&Commands::Uninstall {
@@ -1533,6 +1544,7 @@ mod startup_tests {
             local: false,
             profile: None,
             all_profiles: false,
+            project_root: None,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {

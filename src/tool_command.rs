@@ -10,7 +10,8 @@
 //! - `-h` / `--help` — print the tool's parameters and exit.
 //! - `--json` — print the raw JSON-RPC `result.value`; default is the
 //!   human-readable text inside `content[0].text`.
-//! - `--project <path>` — project root to open. Defaults to cwd. We use
+//! - `--project <path>` — project root to open. Defaults to the nearest
+//!   initialised project walking up from cwd (falling back to cwd). We use
 //!   `--project` (not `-p`) because several MCP tools have a `path` argument
 //!   that filters files within the project.
 //! - `--args <json>` — escape hatch. Treats the JSON value as the entire
@@ -89,7 +90,10 @@ pub(crate) async fn run(
         return Ok(());
     }
 
-    let project_path = tokensave::config::resolve_path(project.or(parsed_project));
+    // Same resolution as `tokensave sync`/`status`/`serve`: an explicit
+    // --project wins; otherwise walk up from cwd to the nearest initialised
+    // project so the command works from subdirectories.
+    let project_path = tokensave::config::resolve_path_with_discovery(project.or(parsed_project));
     let cg = serve::ensure_initialized(&project_path).await?;
     let result = handle_tool_call(&cg, &def.name, tool_args, None, None).await?;
     print_tool_output(&result.value, raw_json);
