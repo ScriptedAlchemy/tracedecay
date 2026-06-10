@@ -104,6 +104,42 @@ pub fn sanitize_branch_name(name: &str) -> String {
     result.trim_matches('_').to_string()
 }
 
+/// Computes a unique, collision-free DB stem (filename without extension) for
+/// `branch_name` under `branches_dir`.
+///
+/// `sanitize_branch_name` is many-to-one: `feature/foo` and `feature_foo` both
+/// map to `feature_foo`. Returning the bare sanitized stem unconditionally let
+/// a second `branch add` `fs::copy`-overwrite the first branch's index (data
+/// loss). This returns the bare stem only when it is free; otherwise it appends
+/// a short deterministic hash of the *unsanitized* branch name so distinct
+/// branches get distinct files while a given branch always maps to the same
+/// stem. Returns `None` when the name sanitizes to empty (which would yield a
+/// hidden `branches/.db`).
+fn unique_branch_db_stem(meta: &BranchMeta, branches_dir: &Path, branch_name: &str) -> Option<String> {
+    let base = sanitize_branch_name(branch_name);
+    if base.is_empty() {
+        return None;
+    }
+    let conflicts = |stem: &str| -> bool {
+        let db_file = format!("branches/{stem}.db");
+        let meta_conflict = meta
+            .branches
+            .iter()
+            .any(|(name, entry)| name != branch_name && entry.db_file == db_file);
+        let file_conflict = branches_dir.join(format!("{stem}.db")).exists();
+        meta_conflict || file_conflict
+    };
+    if !conflicts(&base) {
+        return Some(base);
+    }
+    Some(format!("{base}-{}", short_branch_hash(branch_name)))
+}
+
+/// Short, stable hex digest of a branch name for DB-stem disambiguation.
+fn short_branch_hash(branch_name: &str) -> String {
+    crate::sync::content_hash(branch_name).chars().take(10).collect()
+}
+
 /// Resolves the DB path for a given branch.
 ///
 /// If the branch is tracked in metadata, returns its `db_file` path.
@@ -226,6 +262,16 @@ pub async fn add_branch_tracking(
         return Ok(BranchAddOutcome::AlreadyTracked);
     }
 
+    // Fail fast (before parent resolution) when the name sanitizes to empty —
+    // it would otherwise produce a hidden `branches/.db`.
+    if sanitize_branch_name(branch_name).is_empty() {
+        return Err(crate::errors::TokenSaveError::Config {
+            message: format!(
+                "cannot track branch '{branch_name}': its name sanitizes to an empty filename"
+            ),
+        });
+    }
+
     let parent = find_nearest_tracked_ancestor(project_root, branch_name, &meta)
         .unwrap_or_else(|| meta.default_branch.clone());
     let parent_db = resolve_branch_db_path(&tokensave_dir, &parent, &meta).ok_or_else(|| {
@@ -239,13 +285,21 @@ pub async fn add_branch_tracking(
         });
     }
 
-    let sanitized = sanitize_branch_name(branch_name);
     let branches_dir = branch_meta::ensure_branches_dir(&tokensave_dir)?;
-    let new_db_path = branches_dir.join(format!("{sanitized}.db"));
+    // Pick a collision-free stem so a branch whose sanitized name matches an
+    // already-tracked branch gets its own DB instead of overwriting it (#3).
+    let stem = unique_branch_db_stem(&meta, &branches_dir, branch_name).ok_or_else(|| {
+        crate::errors::TokenSaveError::Config {
+            message: format!(
+                "cannot track branch '{branch_name}': its name sanitizes to an empty filename"
+            ),
+        }
+    })?;
+    let new_db_path = branches_dir.join(format!("{stem}.db"));
     std::fs::copy(&parent_db, &new_db_path)?;
 
     // Save metadata BEFORE open() so it resolves the new branch to its DB.
-    let db_file = format!("branches/{sanitized}.db");
+    let db_file = format!("branches/{stem}.db");
     meta.add_branch(branch_name, &db_file, &parent);
     branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
 
@@ -286,5 +340,50 @@ mod tests {
         assert_eq!(sanitize_branch_name(".."), "");
         // dots and slashes become underscores, collapsed
         assert_eq!(sanitize_branch_name("foo/../bar"), "foo_bar");
+    }
+
+    #[test]
+    fn unique_stem_keeps_free_name() {
+        let meta = crate::branch_meta::BranchMeta::new("main");
+        let dir = Path::new("/nonexistent-branches-dir-for-test");
+        assert_eq!(
+            unique_branch_db_stem(&meta, dir, "feature/new").unwrap(),
+            "feature_new"
+        );
+    }
+
+    #[test]
+    fn unique_stem_disambiguates_sanitization_collision() {
+        // "feature/foo" sanitizes to the same stem as the literal "feature_foo".
+        let mut meta = crate::branch_meta::BranchMeta::new("main");
+        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+        let dir = Path::new("/nonexistent-branches-dir-for-test");
+        let stem = unique_branch_db_stem(&meta, dir, "feature_foo").unwrap();
+        assert_ne!(
+            stem, "feature_foo",
+            "second branch must not reuse the first branch's DB file"
+        );
+        assert!(stem.starts_with("feature_foo-"), "got: {stem}");
+    }
+
+    #[test]
+    fn unique_stem_is_idempotent_for_same_branch() {
+        // Recomputing for a branch already in meta must not treat its own entry
+        // as a conflict.
+        let mut meta = crate::branch_meta::BranchMeta::new("main");
+        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+        let dir = Path::new("/nonexistent-branches-dir-for-test");
+        assert_eq!(
+            unique_branch_db_stem(&meta, dir, "feature/foo").unwrap(),
+            "feature_foo"
+        );
+    }
+
+    #[test]
+    fn unique_stem_rejects_empty_sanitization() {
+        let meta = crate::branch_meta::BranchMeta::new("main");
+        let dir = Path::new("/nonexistent-branches-dir-for-test");
+        assert!(unique_branch_db_stem(&meta, dir, "..").is_none());
+        assert!(unique_branch_db_stem(&meta, dir, "///").is_none());
     }
 }
