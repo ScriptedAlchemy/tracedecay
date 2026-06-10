@@ -318,17 +318,20 @@ async fn migrate_v12(_conn: &Connection) -> Result<()> {
 /// migration drops those columns from any local development database that
 /// ran the earlier revision, and is a no-op everywhere else.
 async fn migrate_v13(conn: &Connection) -> Result<()> {
+    // table_xinfo, not table_info: the earlier revision could have left
+    // `superseded_by` as a GENERATED column, which plain table_info hides —
+    // and a skipped drop then breaks dropping the column it references.
     let existing: std::collections::HashSet<String> = {
         let mut rows = conn
-            .query("PRAGMA table_info(memory_facts)", ())
+            .query("PRAGMA table_xinfo(memory_facts)", ())
             .await
             .map_err(|e| TokenSaveError::Database {
-                message: format!("v13: failed to read table_info: {e}"),
+                message: format!("v13: failed to read table_xinfo: {e}"),
                 operation: "migrate_v13".to_string(),
             })?;
         let mut names = std::collections::HashSet::new();
         while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
-            message: format!("v13: failed to iterate table_info: {e}"),
+            message: format!("v13: failed to iterate table_xinfo: {e}"),
             operation: "migrate_v13".to_string(),
         })? {
             let name: String = row.get(1).map_err(|e| TokenSaveError::Database {
@@ -348,12 +351,17 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
             operation: "migrate_v13".to_string(),
         })?;
 
+    // Drop in REVERSE order of how the abandoned revision added them: a
+    // later-added column can be a generated column referencing an earlier
+    // one (e.g. `superseded_by` GENERATED ALWAYS AS (... merged_into ...)),
+    // and SQLite refuses to drop a column while a generated column still
+    // references it ("no such column" / "error in generated column").
     for col in [
-        "state",
-        "archived_at",
-        "archived_reason",
-        "merged_into",
         "superseded_by",
+        "merged_into",
+        "archived_reason",
+        "archived_at",
+        "state",
     ] {
         if existing.contains(col) {
             conn.execute(&format!("ALTER TABLE memory_facts DROP COLUMN {col}"), ())
