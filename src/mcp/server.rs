@@ -299,8 +299,10 @@ pub struct McpServer {
     last_flushed_tokens: AtomicU64,
     /// UNIX timestamp of last worldwide flush (0 = never).
     last_flush_at: AtomicI64,
-    /// User-level database tracking all projects (best-effort).
-    global_db: Option<GlobalDb>,
+    /// User-level database tracking all projects (best-effort). Wrapped in
+    /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
+    /// the handle instead of opening a new connection per call.
+    global_db: Option<Arc<GlobalDb>>,
     /// Cached latest-version check result.
     version_cache: std::sync::Mutex<VersionCheckState>,
     /// Pending JSON-RPC notifications to send before the next response.
@@ -328,11 +330,16 @@ pub struct McpServer {
     /// spawn at most one pair of `git rev-parse` per session no matter how
     /// many tool calls fire. See [`crate::worktree`] and #312.
     worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
-    /// Flipped to `true` once [`Self::run_startup_catch_up_sync`] finishes
-    /// (#414). Production code never reads this; tests poll it via
-    /// [`Self::wait_for_startup_catch_up`] so they can race-free assert on
-    /// the index state after the detached catch-up task completes.
+    /// Flipped to `true` once the *synchronous* portion of
+    /// [`Self::run_startup_catch_up_sync`] finishes — i.e. the file-tree
+    /// walk and index sync. The detached transcript-ingest spawn is tracked
+    /// separately by [`Self::transcript_ingest_done`].
     startup_catch_up_done: AtomicBool,
+    /// Flipped to `true` when the detached transcript-ingest task spawned
+    /// inside [`Self::run_startup_catch_up_sync`] completes (success or
+    /// timeout). Stored as `Arc<AtomicBool>` so the spawned task can hold a
+    /// cheap clone and signal completion without a raw-pointer round-trip.
+    transcript_ingest_done: Arc<AtomicBool>,
 }
 
 impl McpServer {
@@ -350,8 +357,8 @@ impl McpServer {
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
-        let global_db = if global_db_enabled() {
-            GlobalDb::open().await
+        let global_db: Option<Arc<GlobalDb>> = if global_db_enabled() {
+            GlobalDb::open().await.map(Arc::new)
         } else {
             None
         };
@@ -395,6 +402,7 @@ impl McpServer {
             last_staleness_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(false),
+            transcript_ingest_done: Arc::new(AtomicBool::new(false)),
         });
 
         // Catch-up sync (#414): pick up changes made while the server
@@ -445,41 +453,45 @@ impl McpServer {
         &self.cg
     }
 
-    /// Adds the approximate token count for the given file paths to the
-    /// running saved-tokens counter and persists it to the database.
-    /// Returns the delta (tokens saved by this call).
-    async fn accumulate_tokens_saved(&self, file_paths: &[String]) -> u64 {
+    /// Estimates the raw-file token cost ("before") for the given file
+    /// paths from the cached file-token map (indexed file bytes / 4).
+    /// Pure lookup — persists nothing.
+    fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
         if file_paths.is_empty() {
             return 0;
         }
         debug_assert!(
             file_paths.iter().all(|p| !p.is_empty()),
-            "accumulate_tokens_saved received empty file path"
+            "estimate_raw_file_tokens received empty file path"
         );
-        let delta = {
-            let Ok(map) = self.file_token_map.lock() else {
-                return 0;
-            };
-            let mut total: u64 = 0;
-            for path in file_paths {
-                if let Some(&tokens) = map.get(path.as_str()) {
-                    total += tokens;
-                }
-            }
-            total
+        let Ok(map) = self.file_token_map.lock() else {
+            return 0;
         };
-        if delta > 0 {
-            let new_total = self.tokens_saved.fetch_add(delta, Ordering::Relaxed) + delta;
-            // Persist to DB (best-effort, don't block on failure)
-            let _ = self.cg.set_tokens_saved(new_total).await;
-            // Also increment the resettable local counter
-            let _ = self.cg.add_local_counter(delta).await;
-            // Best-effort update to global DB
-            if let Some(ref gdb) = self.global_db {
-                gdb.upsert(self.cg.project_root(), new_total).await;
-            }
+        file_paths
+            .iter()
+            .filter_map(|path| map.get(path.as_str()))
+            .sum()
+    }
+
+    /// Adds `delta` saved tokens to the running counter and persists it.
+    ///
+    /// `delta` must already be the *net* saving for one call
+    /// (`before.saturating_sub(after)`), not the gross raw-file estimate:
+    /// crediting the full "before" would count a full-file read whose
+    /// response contains the entire file as 100% saved.
+    async fn persist_saved_tokens(&self, delta: u64) {
+        if delta == 0 {
+            return;
         }
-        delta
+        let new_total = self.tokens_saved.fetch_add(delta, Ordering::Relaxed) + delta;
+        // Persist to DB (best-effort, don't block on failure)
+        let _ = self.cg.set_tokens_saved(new_total).await;
+        // Also increment the resettable local counter
+        let _ = self.cg.add_local_counter(delta).await;
+        // Best-effort update to global DB
+        if let Some(ref gdb) = self.global_db {
+            gdb.upsert(self.cg.project_root(), new_total).await;
+        }
     }
 
     /// Re-read the file-to-token-count map from the DB and swap it into the
@@ -525,11 +537,13 @@ impl McpServer {
         // Best-effort transcript ingestion sweep for hookless agents (Claude,
         // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
         // agents register no hook, so their transcripts are reconciled here.
-        // Detached + timeout-guarded so it never delays MCP readiness, and
-        // independent of the catch-up completion flag below; per-file
-        // parse_offsets make repeat sweeps cheap no-ops.
+        // Detached + timeout-guarded so it never delays MCP readiness.
+        // `transcript_ingest_done` is flipped inside the spawn (via an Arc
+        // clone) so tests that assert on LCM store content can wait for both
+        // flags via `wait_for_startup_catch_up`.
         {
             let project_root = self.cg.project_root().to_path_buf();
+            let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
                     if let Some(db) =
@@ -539,28 +553,37 @@ impl McpServer {
                     }
                 })
                 .await;
+                ingest_done_flag.store(true, Ordering::Release);
             });
         }
 
         self.startup_catch_up_done.store(true, Ordering::Release);
     }
 
-    /// Returns `true` once the detached
-    /// [`Self::run_startup_catch_up_sync`] task has finished (success
-    /// or error). Production code never needs this — the MCP loop runs
-    /// regardless of catch-up state — but tests poll it to avoid
-    /// racing the catch-up task against later DB assertions.
+    /// Returns `true` once the *synchronous* portion of
+    /// [`Self::run_startup_catch_up_sync`] has finished (the file-tree walk
+    /// and index sync). See [`Self::transcript_ingest_done`] for the
+    /// detached ingest task.
     pub fn startup_catch_up_done(&self) -> bool {
         self.startup_catch_up_done.load(Ordering::Acquire)
     }
 
-    /// Polls [`Self::startup_catch_up_done`] with a 25 ms interval up
-    /// to `timeout`, returning `true` if catch-up completed within the
-    /// budget. Tests use this to make the otherwise-detached #414
-    /// task observable.
+    /// Returns `true` once the detached transcript-ingest task spawned by
+    /// [`Self::run_startup_catch_up_sync`] has completed (success, error,
+    /// or 20 s timeout).
+    pub fn transcript_ingest_done(&self) -> bool {
+        self.transcript_ingest_done.load(Ordering::Acquire)
+    }
+
+    /// Polls until both the synchronous catch-up sync *and* the detached
+    /// transcript-ingest task have completed, or until `timeout` elapses.
+    /// Returns `true` if both completed within the budget.
+    ///
+    /// Tests use this so neither the index walk nor the transcript ingest
+    /// races against later DB assertions.
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
-        while !self.startup_catch_up_done() {
+        while !self.startup_catch_up_done() || !self.transcript_ingest_done() {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
@@ -600,6 +623,18 @@ impl McpServer {
             .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            return;
+        }
+
+        // Branch-drift guard (#2): if the working tree switched branches since
+        // this server opened, the cached DB belongs to the old branch. Skip the
+        // lazy sync — `find_stale_files` would diff the new branch's files
+        // against the old branch's DB, and `ensure_branch_writable` would reject
+        // the write anyway. This self-corrects once the opened branch is checked
+        // back out; serving the correct branch DB live requires reopening the
+        // project (`TokenSave::reopen_for_current_branch`), which the owned `cg`
+        // field cannot hot-swap today.
+        if self.cg.branch_drifted() {
             return;
         }
 
@@ -752,14 +787,19 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(&self, transport: &mut impl super::transport::McpTransport) -> Result<()> {
+        // Register the SIGTERM listener once before entering the loop so
+        // there is no window between iterations where a SIGTERM is delivered
+        // but no handler is installed (which would cause silent loss of the
+        // signal and skip the shutdown() flush).
+        #[cfg(unix)]
+        #[allow(clippy::expect_used)]
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+
         loop {
             let line: String = {
                 #[cfg(unix)]
                 {
-                    #[allow(clippy::expect_used)]
-                    let mut sigterm =
-                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                            .expect("failed to register SIGTERM handler");
                     tokio::select! {
                         result = transport.read_line() => {
                             match result {
@@ -1312,17 +1352,8 @@ impl McpServer {
                         }
                     }
                 }
-                let raw_file_tokens = self.accumulate_tokens_saved(&result.touched_files).await;
-                crate::monitor::write_entry(
-                    self.cg.project_root(),
-                    "tokensave",
-                    tool_name,
-                    raw_file_tokens,
-                    raw_file_tokens,
-                );
-                self.maybe_flush_worldwide().await;
-
-                // Estimate approximate token count of the graph response.
+                // Estimate approximate token count of the graph response
+                // ("after"), before any banners/metrics lines are appended.
                 let response_tokens: u64 = result
                     .value
                     .get("content")
@@ -1335,6 +1366,21 @@ impl McpServer {
                             .sum();
                         (total_chars / 4) as u64
                     });
+
+                // "Before" counterfactual: reading every referenced file raw,
+                // in full. Counters credit only the net saving per call —
+                // before minus what this response actually delivered.
+                let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
+                let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
+                self.persist_saved_tokens(net_saved_tokens).await;
+                crate::monitor::write_entry(
+                    self.cg.project_root(),
+                    "tokensave",
+                    tool_name,
+                    net_saved_tokens,
+                    raw_file_tokens,
+                );
+                self.maybe_flush_worldwide().await;
 
                 // Append per-call token savings to the response content.
                 if raw_file_tokens > 0 {
@@ -1350,21 +1396,20 @@ impl McpServer {
                 }
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
-                if self.global_db.is_some() {
+                // Clone the Arc — no new connection is opened.
+                if let Some(gdb) = self.global_db.clone() {
                     let project_path_str = self.cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();
                     tokio::spawn(async move {
-                        if let Some(gdb) = crate::global_db::GlobalDb::open().await {
-                            gdb.record_savings(
-                                &project_path_str,
-                                &tool_name_owned,
-                                raw_file_tokens,
-                                response_tokens,
-                                ts,
-                            )
-                            .await;
-                        }
+                        gdb.record_savings(
+                            &project_path_str,
+                            &tool_name_owned,
+                            raw_file_tokens,
+                            response_tokens,
+                            ts,
+                        )
+                        .await;
                     });
                 }
 

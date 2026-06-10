@@ -18,7 +18,7 @@ pub mod workflow;
 
 use std::collections::HashSet;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
 use crate::tokensave::TokenSave;
@@ -101,6 +101,37 @@ pub(crate) fn truncate_response(s: &str) -> String {
             end -= 1;
         }
         format!("{}\n\n[... truncated at {} chars]", &s[..end], end)
+    }
+}
+
+/// Wraps a JSON string that exceeds `MAX_RESPONSE_CHARS` in a
+/// `{"truncated": true, "preview": "..."}` envelope so the result is
+/// always valid JSON, never a mid-structure cut.
+///
+/// Prefer this over [`truncate_response`] for handlers whose payload is
+/// always JSON (e.g. the dashboard handler) to avoid breaking consumers
+/// that parse the entire response text.
+pub(crate) fn truncated_json_envelope(formatted: &str) -> String {
+    if formatted.len() <= MAX_RESPONSE_CHARS {
+        return formatted.to_string();
+    }
+    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
+    loop {
+        while end > 0 && !formatted.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = &formatted[..end];
+        let envelope = json!({
+            "truncated": true,
+            "original_chars": formatted.len(),
+            "preview_chars": preview.len(),
+            "preview": preview,
+        });
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            return text;
+        }
+        end = end.saturating_sub(1024);
     }
 }
 

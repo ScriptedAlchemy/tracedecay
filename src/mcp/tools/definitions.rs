@@ -2153,13 +2153,14 @@ fn def_lcm_expand_query() -> ToolDefinition {
                 "max_tokens": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Desired synthesized answer token budget."
+                    "maximum": 8192,
+                    "description": "Desired synthesized answer token budget passed through to the LCM engine. Does not affect the retrieval context size; use context_max_tokens for that."
                 },
                 "context_max_tokens": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 65536,
-                    "description": "Maximum retrieval context budget assembled before host-side synthesis."
+                    "description": "Maximum retrieval context budget (tokens of LCM material assembled before synthesis). Defaults to 32000. Independent of max_tokens, which governs the synthesis output size."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()

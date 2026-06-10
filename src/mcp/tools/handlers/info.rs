@@ -68,8 +68,7 @@ pub(super) async fn handle_status(
         {
             let ingest = db.session_ingest_health().await;
             output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
-            if ingest.max_transcript_pending_bytes
-                > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+            if ingest.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
             {
                 output["session_ingest_warning"] = json!(format!(
                     "session transcript ingest looks stalled: a transcript has {} \

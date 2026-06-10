@@ -1364,10 +1364,15 @@ async fn test_run_returns_transport_read_errors() {
 // ---------------------------------------------------------------------------
 
 // Repeated serve-mode LCM calls must keep working while the project session
-// DB schema is ensured at most once per process: after the first call, later
-// calls (even from a fresh `McpServer` in the same process) take the
+// DB schema is ensured at most once per process: after the first write-path
+// call creates the store and runs the migrations, later write-path calls
+// (even from a fresh `McpServer` in the same process) take the
 // version-gate fast path and never re-run the LCM migrations — observable
 // via the migration row's `applied_at`, which only a migration run rewrites.
+//
+// Pure-read tools (lcm_status) no longer create the store, so each session
+// issues a write-path call (`lcm_session_boundary`, whose storage open is
+// the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let (server, dir) = setup_server().await;
@@ -1378,16 +1383,42 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             json!({ "name": "tokensave_lcm_status", "arguments": {} }),
         )
     };
+    // Write-path call: opens the session DB in write mode, creating it and
+    // ensuring the schema. With only a session_id it records nothing
+    // (`not_compression_boundary`) — its sole job here is to exercise the
+    // migration-running open in each serve session.
+    let lcm_boundary_call = |id: i64| {
+        jsonrpc_request(
+            json!(id),
+            "tools/call",
+            json!({
+                "name": "tokensave_lcm_session_boundary",
+                "arguments": { "session_id": "migration-rerun-probe" }
+            }),
+        )
+    };
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(1), "initialize", json!({})),
             jsonrpc_notification("notifications/initialized"),
+            lcm_boundary_call(4),
             lcm_status_call(2),
             lcm_status_call(3),
         ],
     )
     .await;
+    {
+        let resp = responses
+            .iter()
+            .map(|r| parse_response(r))
+            .find(|r| r["id"] == json!(4))
+            .expect("missing response for boundary call");
+        assert!(
+            resp["error"].is_null(),
+            "lcm_session_boundary should not error"
+        );
+    }
     for id in [2_i64, 3] {
         let resp = responses
             .iter()
@@ -1432,24 +1463,28 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(applied_at(db_path.clone()).await, 123);
 
     // A second serve session over the same project in the same process.
+    // The write-path boundary call is the one that would re-run migrations
+    // if the per-process ensured cache failed; the status reads must also
+    // keep working.
     let cg = TokenSave::open(dir.path()).await.unwrap();
     let server = McpServer::new(cg, None).await;
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(1), "initialize", json!({})),
+            lcm_boundary_call(4),
             lcm_status_call(2),
             lcm_status_call(3),
         ],
     )
     .await;
-    for id in [2_i64, 3] {
+    for id in [4_i64, 2, 3] {
         let resp = responses
             .iter()
             .map(|r| parse_response(r))
             .find(|r| r["id"] == json!(id))
             .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
-        assert!(resp["error"].is_null(), "second-session lcm_status id={id}");
+        assert!(resp["error"].is_null(), "second-session lcm call id={id}");
     }
     assert_eq!(
         applied_at(db_path).await,
@@ -1458,17 +1493,117 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     );
 }
 
-#[tokio::test]
-async fn search_call_writes_savings_ledger_row() {
-    let tmp_home = tempfile::tempdir().unwrap();
-    // Note: std::env::set_var is process-wide; this test relies on no parallel test
-    // simultaneously mutating HOME. If flake is observed, mark this #[serial_test::serial].
-    std::env::set_var("HOME", tmp_home.path());
+/// Serializes the savings-accounting tests below: they all mutate
+/// process-wide env vars (`HOME`, `TOKENSAVE_GLOBAL_DB`,
+/// `TOKENSAVE_ENABLE_GLOBAL_DB`). `#[tokio::test]` defaults to a
+/// current-thread runtime, so holding the guard across `.await` is fine.
+static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores an env var to its previous value on drop, so savings tests
+/// don't leak process-wide state into unrelated tests.
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Redirects HOME at an isolated temp dir (so `~/.tokensave/global.db`
+/// lands there) and enables the opt-in global DB. Deliberately does NOT
+/// set `TOKENSAVE_GLOBAL_DB`: that override also wins over project-local
+/// LCM store discovery and would leak into concurrently running tests.
+fn isolated_savings_env(tmp: &TempDir) -> Vec<EnvVarGuard> {
+    let mut guards = vec![EnvVarGuard::set("HOME", tmp.path().as_os_str())];
     #[cfg(target_os = "windows")]
-    std::env::set_var("USERPROFILE", tmp_home.path());
+    guards.push(EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str()));
     // The global DB (and thus the savings ledger) is opt-in since the
-    // holographic fact store landed; enable it for this test.
-    std::env::set_var("TOKENSAVE_ENABLE_GLOBAL_DB", "1");
+    // holographic fact store landed; enable it for these tests.
+    guards.push(EnvVarGuard::set(
+        "TOKENSAVE_ENABLE_GLOBAL_DB",
+        std::ffi::OsStr::new("1"),
+    ));
+    guards
+}
+
+/// Polls the ledger until `calls` reaches `expected_calls` (rows are written
+/// by a spawned task) and returns the final total.
+async fn await_ledger_calls(
+    db: &tokensave::global_db::GlobalDb,
+    expected_calls: u64,
+) -> tokensave::global_db::SavingsTotal {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let total = db.sum_savings(None, 0).await;
+        if total.calls >= expected_calls {
+            return total;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {expected_calls} ledger row(s) within 10s, got {}",
+            total.calls
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Creates a temp project whose `src/main.rs` is large enough that the
+/// raw-file ("before") estimate is clearly nonzero, then indexes it.
+async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    let mut source = String::from("fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n");
+    for i in 0..80 {
+        source.push_str(&format!(
+            "/// Filler documentation line {i} to inflate the raw-file estimate.\nfn filler_{i}() -> i32 {{ {i} }}\n"
+        ));
+    }
+    fs::write(project.join("src/main.rs"), source).unwrap();
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    let server = McpServer::new(cg, None).await;
+    (server, dir)
+}
+
+/// Extracts `(before, after)` from the `tokensave_metrics:` line appended
+/// to a tool response's content array.
+fn parse_metrics_line(resp: &Value) -> Option<(u64, u64)> {
+    let content = resp["result"]["content"].as_array()?;
+    let line = content
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .find(|t| t.contains("tokensave_metrics: before="))?;
+    let tail = line.split("before=").nth(1)?;
+    let (before, rest) = tail.split_once(' ')?;
+    let after = rest.strip_prefix("after=")?;
+    Some((before.trim().parse().ok()?, after.trim().parse().ok()?))
+}
+
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn search_call_writes_savings_ledger_row() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_home = tempfile::tempdir().unwrap();
+    let _env = isolated_savings_env(&tmp_home);
 
     let (server, _proj_tmp) = setup_server().await;
 
@@ -1498,17 +1633,126 @@ async fn search_call_writes_savings_ledger_row() {
     let db = tokensave::global_db::GlobalDb::open()
         .await
         .expect("global db opens at isolated HOME");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let total = db.sum_savings(None, 0).await;
-        if total.calls >= 1 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "expected at least one ledger row within 10s, got {}",
-            total.calls
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    await_ledger_calls(&db, 1).await;
+}
+
+/// A full-file read returns the entire file to the agent, so it must not
+/// credit the lifetime counters: net saving = before - after, clamped at
+/// zero. Guards against the historical bug where the counters accumulated
+/// the gross "before" estimate even when the response carried the whole file.
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn full_file_read_credits_zero_net_savings() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_home = tempfile::tempdir().unwrap();
+    let _env = isolated_savings_env(&tmp_home);
+
+    let (server, proj_tmp) = setup_savings_project().await;
+    let project_path = proj_tmp.path().to_path_buf();
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(9101),
+            "tools/call",
+            json!({
+                "name": "tokensave_read",
+                "arguments": { "file": "src/main.rs", "mode": "full" }
+            }),
+        )],
+    )
+    .await;
+
+    let resp_str = responses
+        .iter()
+        .find(|r| parse_response(r)["id"] == 9101)
+        .expect("should have a response for id=9101");
+    let resp = parse_response(resp_str);
+    assert!(resp["error"].is_null(), "read should not error");
+
+    // The metrics line must prove the raw estimate was real (before > 0)
+    // and that a full read delivers at least as much as it "saves".
+    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
+    assert!(before > 0, "raw-file estimate should be nonzero");
+    assert!(
+        after >= before,
+        "full-file response ({after}) should be at least the raw estimate ({before})"
+    );
+
+    let db = tokensave::global_db::GlobalDb::open()
+        .await
+        .expect("global db opens at isolated path");
+    let total = await_ledger_calls(&db, 1).await;
+    assert_eq!(
+        total.saved_tokens, 0,
+        "ledger must not count a full-file read as savings"
+    );
+    assert_eq!(
+        db.get_project_tokens(&project_path).await,
+        0,
+        "lifetime counter must not be credited with the gross before estimate"
+    );
+}
+
+/// The lifetime counter and the ledger must agree: both credit the net
+/// saving (before - after) per call, so after a single compressed call the
+/// per-project counter equals the ledger total.
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn lifetime_counter_matches_ledger_net_savings() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_home = tempfile::tempdir().unwrap();
+    let _env = isolated_savings_env(&tmp_home);
+
+    let (server, proj_tmp) = setup_savings_project().await;
+    let project_path = proj_tmp.path().to_path_buf();
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(9102),
+            "tools/call",
+            json!({
+                "name": "tokensave_search",
+                "arguments": { "query": "helper" }
+            }),
+        )],
+    )
+    .await;
+
+    let resp_str = responses
+        .iter()
+        .find(|r| parse_response(r)["id"] == 9102)
+        .expect("should have a response for id=9102");
+    let resp = parse_response(resp_str);
+    assert!(resp["error"].is_null(), "search should not error");
+
+    let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
+    assert!(
+        before > after,
+        "compressed search should save tokens (before={before}, after={after})"
+    );
+
+    let db = tokensave::global_db::GlobalDb::open()
+        .await
+        .expect("global db opens at isolated path");
+    let total = await_ledger_calls(&db, 1).await;
+    assert_eq!(
+        total.saved_tokens,
+        before - after,
+        "ledger net saving must match the metrics line"
+    );
+    assert_eq!(
+        db.get_project_tokens(&project_path).await,
+        total.saved_tokens,
+        "lifetime counter must equal the ledger's net saving, not the gross before"
+    );
 }
