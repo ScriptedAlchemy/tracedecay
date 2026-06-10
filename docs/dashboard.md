@@ -737,7 +737,7 @@ This command:
 
 ### Smoke Testing
 
-Playwright-based smoke tests verify tab rendering, search interaction, and viewport responsiveness:
+Playwright-based smoke tests verify tab rendering, search interaction, and viewport responsiveness. Unless `--url=` points at an already-running server, the smoke script is hermetic: it creates a throwaway temp project, runs `tokensave init` on it, and serves the dashboard from there — so it works on fresh checkouts (and CI) with no pre-existing `.tokensave/` index:
 
 ```bash
 # Empty-state LCM (default global.db has no LCM data)

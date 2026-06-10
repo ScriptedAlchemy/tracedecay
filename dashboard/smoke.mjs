@@ -1,4 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 import { chromium } from "playwright";
@@ -18,13 +21,40 @@ function withTrailingSlash(url) {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-async function startDashboardServer() {
+// The dashboard refuses to start without a TokenSave index, and CI checkouts
+// (unlike dev workspaces) have no `.tokensave/`. Build a tiny throwaway
+// project and index it so the smoke run is hermetic everywhere.
+function createSmokeWorkspace() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokensave-dashboard-smoke-"));
+  fs.writeFileSync(
+    path.join(dir, "sample.rs"),
+    "/// Fixture indexed by `tokensave init` for the dashboard smoke test.\npub fn smoke_sample() -> u32 {\n    42\n}\n",
+  );
+  // stdin is closed so init's interactive `.gitignore` prompt reads EOF and
+  // proceeds with the default instead of blocking.
+  const result = spawnSync("cargo", ["run", "--", "init", dir], {
+    cwd: workspaceRoot(),
+    env: process.env,
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  if (result.status !== 0) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error(`tokensave init failed for smoke workspace (code ${result.status})`);
+  }
+  return dir;
+}
+
+async function startDashboardServer(projectPath) {
   return new Promise((resolve, reject) => {
-    const child = spawn("cargo", ["run", "--", "dashboard", "--port", "0"], {
-      cwd: workspaceRoot(),
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      "cargo",
+      ["run", "--", "dashboard", "--port", "0", "--path", projectPath],
+      {
+        cwd: workspaceRoot(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
 
     let settled = false;
     let stderrBuffer = "";
@@ -157,14 +187,17 @@ async function main() {
     throw new Error("--expect-lcm must be one of: either, empty, non-empty");
   }
   let server = null;
+  let workspace = null;
 
   try {
     if (explicitUrl) {
       server = { baseUrl: explicitUrl, stop: async () => {} };
       console.log(`Using existing dashboard URL: ${explicitUrl}`);
     } else {
-      console.log("Starting `tokensave dashboard --port 0` for smoke test...");
-      server = await startDashboardServer();
+      console.log("Creating hermetic smoke workspace (tokensave init)...");
+      workspace = createSmokeWorkspace();
+      console.log(`Starting \`tokensave dashboard --port 0 --path ${workspace}\` for smoke test...`);
+      server = await startDashboardServer(workspace);
       console.log(`Dashboard URL: ${server.baseUrl}`);
     }
 
@@ -181,6 +214,9 @@ async function main() {
   } finally {
     if (server) {
       await server.stop();
+    }
+    if (workspace) {
+      fs.rmSync(workspace, { recursive: true, force: true });
     }
   }
 }

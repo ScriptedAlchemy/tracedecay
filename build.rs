@@ -14,11 +14,23 @@ const DASHBOARD_ASSET_FILES: &[&str] = &[
 
 fn emit_dashboard_asset_inputs() -> String {
     let mut hasher = DefaultHasher::new();
+    let mut missing = Vec::new();
     for relative in DASHBOARD_ASSET_FILES {
         println!("cargo::rerun-if-changed={relative}");
         relative.hash(&mut hasher);
-        let bytes = fs::read(relative).unwrap_or_default();
-        bytes.hash(&mut hasher);
+        match fs::read(relative) {
+            Ok(bytes) => bytes.hash(&mut hasher),
+            Err(_) => missing.push(*relative),
+        }
+    }
+    if !missing.is_empty() {
+        panic!(
+            "\n\nmissing dashboard dist assets:\n  {}\n\n\
+             The dashboard UI is embedded into the binary at compile time\n\
+             (src/dashboard/assets.rs), so the frontend must be built first:\n\n  \
+             cd dashboard && npm ci && npm run build\n",
+            missing.join("\n  ")
+        );
     }
     format!("{:016x}", hasher.finish())
 }
