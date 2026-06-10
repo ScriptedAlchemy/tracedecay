@@ -44,6 +44,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -230,6 +242,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      # The crate package ships the prebuilt dashboard dist bundles (see
+      # `package.include` in Cargo.toml), so they must exist before publish.
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -9,18 +9,29 @@ homepage = "https://github.com/ScriptedAlchemy/tokensave"
 readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
-exclude = [
-    ".mcpregistry_*",
-    ".rtk/",
-    ".claude/",
-    "CLAUDE.md",
-    "cache/",
-    "docs/LSP-INTEGRATION.md",
-    "docs/TOKENSAVE-ALTERNATIVES.md",
-    "docs/TOKENSAVIOR-REPORT.md",
-    "generated-illustrations/",
-    "local-only/",
-    ".worktrees/",
+# Explicit whitelist so `cargo package`/`cargo publish` ship everything the
+# build needs — including the PREBUILT dashboard dist bundles, which are
+# gitignored (an `exclude`-style package can never pick them up). Run
+# `cd dashboard && npm ci && npm run build` before packaging; build.rs fails
+# fast (or auto-builds from a git checkout) when they are missing.
+include = [
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/rust-toolchain.toml",
+    "/.cargo/config.toml",
+    "/build.rs",
+    "/src/**",
+    "/benches/**",
+    "/examples/**",
+    "/benchmarks/queries/default.toml",
+    "/cursor-plugin/**",
+    "/vendor/**",
+    "/dashboard/shell/dist/**",
+    "/dashboard/holographic/dist/**",
+    "/dashboard/lcm/dist/**",
+    "/dashboard/graph/dist/**",
+    "/dashboard/savings/dist/**",
 ]
 
 [features]
