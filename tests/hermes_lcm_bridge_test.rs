@@ -674,13 +674,12 @@ fn generated_context_engine_defaults_to_hermes_home_even_when_missing() {
 import os
 import pathlib
 import tempfile
-import tempfile
-import tempfile
 
 os.environ.pop("HERMES_HOME", None)
 with tempfile.TemporaryDirectory() as tmp:
     home = pathlib.Path(tmp) / "isolated-home"
     home.mkdir()
+    # expanduser reads HOME on POSIX and USERPROFILE on Windows.
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
     expected = str(home / ".hermes")
@@ -689,10 +688,15 @@ with tempfile.TemporaryDirectory() as tmp:
     engine = plugin.TokenSaveContextEngine()
     engine.initialize(session_id="session-1")
 
-    assert engine.hermes_home == expected
+    def normalized(path):
+        # Windows expanduser("~/.hermes") emits mixed separators for the same
+        # location; normalize separators only there so Unix stays byte-exact.
+        return os.path.normpath(path) if os.name == "nt" else path
+
+    assert normalized(engine.hermes_home) == normalized(expected), engine.hermes_home
     status = engine.get_status()
     assert status["storage_scope"] == "hermes_profile"
-    assert status["hermes_home"] == expected
+    assert normalized(status["hermes_home"]) == normalized(expected), status
 "#,
         "generated context engine should default to ~/.hermes even if missing",
     );
@@ -3591,15 +3595,22 @@ assert "error" in plugin.call_tokensave_json("tokensave_lcm_status", {})
 
 # Subprocess dies mid-handshake: nonzero exit with partial stdout and stderr
 # is reported with the exit status and bounded captures.
+# cmd.exe `echo` always appends a newline that POSIX printf does not, and a
+# plain `echo text 1>&2` would emit a trailing space before the redirect —
+# hence the redirect-first form (`>&2 echo`). Trim trailing newlines only on
+# Windows so Unix keeps byte-exact capture assertions.
+def trim_capture(text):
+    return text.rstrip("\r\n") if os.name == "nt" else text
+
 tools.TOKENSAVE_BIN = write_fake_binary(
     "fake-tokensave-crash",
     'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
-    'echo {"content\necho handshake aborted 1>&2\nexit /b 3\n',
+    'echo {"content\n>&2 echo handshake aborted\nexit /b 3\n',
 )
 crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert crashed["error"] == "tokensave tool exited with status 3", crashed
-assert crashed["stdout"] == '{"content'
-assert crashed["stderr"] == "handshake aborted"
+assert trim_capture(crashed["stdout"]) == '{"content', crashed
+assert trim_capture(crashed["stderr"]) == "handshake aborted", crashed
 
 # Exit 0 with malformed JSON on stdout.
 tools.TOKENSAVE_BIN = write_fake_binary(
@@ -3609,7 +3620,7 @@ tools.TOKENSAVE_BIN = write_fake_binary(
 )
 malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
-assert malformed["stdout"] == "not-json-at-all"
+assert trim_capture(malformed["stdout"]) == "not-json-at-all", malformed
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
 tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n", "exit /b 0\n")
