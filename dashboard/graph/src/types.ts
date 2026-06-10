@@ -119,15 +119,28 @@ export function kindFamily(kind: string): string {
   return "other";
 }
 
-export const KIND_FAMILY_COLORS: Record<string, string> = {
-  fn: "#75f4d2",
-  type: "#f7c76a",
-  trait: "#ff7ab6",
-  module: "#7aa7ff",
-  value: "#67e8a9",
-  impl: "#a8c8c0",
-  other: "#6f9189",
+/**
+ * Family → [design token, dark-theme fallback]. The canvas samples the token
+ * at draw time (canvas 2D can't resolve `var()`); DOM swatches use
+ * `KIND_FAMILY_COLORS` below, which rides the token directly so light theme
+ * gets the shell's higher-contrast overrides.
+ */
+export const KIND_FAMILY_TOKENS: Record<string, [string, string]> = {
+  fn: ["--ts-cyan", "#75f4d2"],
+  type: ["--ts-amber", "#f7c76a"],
+  trait: ["--ts-pink", "#ff7ab6"],
+  module: ["--ts-blue", "#7aa7ff"],
+  value: ["--ts-green", "#67e8a9"],
+  impl: ["--ts-text-2", "#a8c8c0"],
+  other: ["--ts-text-3", "#6f9189"],
 };
+
+export const KIND_FAMILY_COLORS: Record<string, string> = Object.fromEntries(
+  Object.entries(KIND_FAMILY_TOKENS).map(([family, [token, fallback]]) => [
+    family,
+    `var(${token}, ${fallback})`,
+  ]),
+);
 
 export const KIND_FAMILY_LABELS: Record<string, string> = {
   fn: "functions",

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw, X } from "lucide-react";
+import { RefreshCw, Sparkles, X } from "lucide-react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { api } from "./api";
 import { PanelError, PanelLoading } from "./viz/Status";
@@ -99,7 +99,13 @@ function DiffCard({
   );
 }
 
-function PairRow({ pair }: { pair: MemorySimilarityPair }) {
+function PairRow({
+  pair,
+  onShowOnMap,
+}: {
+  pair: MemorySimilarityPair;
+  onShowOnMap?: (pair: MemorySimilarityPair) => void;
+}) {
   const diff = useMemo(
     () => diffPair(pair.a_content, pair.b_content),
     [pair.a_content, pair.b_content],
@@ -124,6 +130,19 @@ function PairRow({ pair }: { pair: MemorySimilarityPair }) {
             HRR {pair.similarity.toFixed(4)}
           </span>
           <span title="Lexical token overlap">tok {tokenPct}%</span>
+          {onShowOnMap && (
+            <Button
+              ghost
+              size="xs"
+              className="gap-1"
+              onClick={() => onShowOnMap(pair)}
+              title="Select and zoom to both facts on the Semantic Map"
+              aria-label={`Show facts ${pair.a_id} and ${pair.b_id} on the Semantic Map`}
+            >
+              <Sparkles className="h-3 w-3" />
+              map
+            </Button>
+          )}
         </span>
       </div>
       <div className="mb-2 grid grid-cols-2 gap-2">
@@ -155,7 +174,12 @@ function PairRow({ pair }: { pair: MemorySimilarityPair }) {
 
 /* ----------------------------------------------------------------- panel */
 
-export default function SimilarityPanel() {
+export default function SimilarityPanel({
+  onShowOnMap,
+}: {
+  /** Cross-view navigation: select + zoom to a pair on the Semantic Map. */
+  onShowOnMap?: (pair: MemorySimilarityPair) => void;
+}) {
   const [data, setData] = useState<MemorySimilarityResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -165,7 +189,10 @@ export default function SimilarityPanel() {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [reloadKey, setReloadKey] = useState(0);
   const [floor, setFloor] = useState(DEFAULT_FLOOR);
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  // The sentinel is held as state (callback ref) so the observer effect
+  // re-runs when the node remounts — e.g. after scrolling to the end (sentinel
+  // unmounts) and then re-filtering to a list of the same length.
+  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null);
   const deepFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -266,8 +293,7 @@ export default function SimilarityPanel() {
   }, [filtered]);
 
   useEffect(() => {
-    const node = sentinelRef.current;
-    if (!node) return;
+    if (!sentinel) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         setVisibleCount((prev) =>
@@ -275,9 +301,9 @@ export default function SimilarityPanel() {
         );
       }
     });
-    observer.observe(node);
+    observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [filtered.length]);
+  }, [sentinel, filtered.length]);
 
   const fmt = (v: number) => (metric === "hrr" ? v.toFixed(4) : `${Math.round(v * 100)}%`);
 
@@ -394,11 +420,15 @@ export default function SimilarityPanel() {
             ) : (
               <div className="flex max-h-[36rem] flex-col gap-2 overflow-y-auto pr-1">
                 {filtered.slice(0, visibleCount).map((pair) => (
-                  <PairRow key={`${pair.a_id}-${pair.b_id}`} pair={pair} />
+                  <PairRow
+                    key={`${pair.a_id}-${pair.b_id}`}
+                    pair={pair}
+                    onShowOnMap={onShowOnMap}
+                  />
                 ))}
                 {visibleCount < filtered.length && (
                   <div
-                    ref={sentinelRef}
+                    ref={setSentinel}
                     className="py-2 text-center font-mono-ui text-[0.65rem] text-text-tertiary"
                   >
                     {filtered.length - visibleCount} more…

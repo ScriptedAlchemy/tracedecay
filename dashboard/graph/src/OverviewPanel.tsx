@@ -74,7 +74,9 @@ function HBarChart({
               width={w}
               height={rowH - 12}
               rx="4"
-              fill={colorFor(row.label)}
+              // style, not the fill attribute: presentation attributes can't
+              // resolve the var()-based token colors.
+              style={{ fill: colorFor(row.label) }}
               opacity="0.85"
             />
             <text
@@ -185,7 +187,7 @@ export default function OverviewPanel({
                 const short = row.path.split("/").slice(-2).join("/");
                 return { label: short, count: row.node_count, meta: "symbols" };
               })}
-              colorFor={() => "rgba(117, 244, 210, 0.6)"}
+              colorFor={() => "color-mix(in srgb, var(--ts-cyan, #75f4d2) 60%, transparent)"}
             />
           </ShellCardContent>
         </ShellCard>

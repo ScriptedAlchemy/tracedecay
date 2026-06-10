@@ -16,6 +16,7 @@ import type {
   MemoryCuratorPreviewResponse,
   MemoryCuratorStatusResponse,
   MemoryDashboardResponse,
+  MemoryFactDetailResponse,
   MemoryProjectionResponse,
   MemorySimilarityResponse,
 } from "./types";
@@ -36,6 +37,12 @@ export const api = {
       `${BASE}/${suffix ? `?${suffix}` : ""}`,
     );
   },
+
+  /** Full fact content + linked entities (GET /fact/{id}). */
+  getMemoryFact: (factId: number) =>
+    fetchJSON<MemoryFactDetailResponse>(
+      `${BASE}/fact/${encodeURIComponent(factId)}`,
+    ),
 
   /** 2D PCA projection of HRR vectors (GET /projection). */
   getMemoryProjection: (params: { q?: string; limit?: number } = {}) => {

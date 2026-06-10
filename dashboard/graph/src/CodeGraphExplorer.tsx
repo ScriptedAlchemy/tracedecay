@@ -156,6 +156,7 @@ export default function CodeGraphExplorer() {
   const [graphNodes, setGraphNodes] = useState<Map<string, GraphNode>>(new Map());
   const [graphEdges, setGraphEdges] = useState<Map<string, GraphEdge>>(new Map());
   const [focusId, setFocusId] = useState<string | null>(null);
+  const [fitSignal, setFitSignal] = useState(0);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [neighbors, setNeighbors] = useState<GraphNeighborsResponse | null>(null);
   const [history, setHistory] = useState<Array<{ id: string; name: string }>>([]);
@@ -168,10 +169,12 @@ export default function CodeGraphExplorer() {
   // Path-finding mode.
   const [pathMode, setPathMode] = useState(false);
   const [pathFrom, setPathFrom] = useState<GraphNode | null>(null);
+  const [pathTo, setPathTo] = useState<GraphNode | null>(null);
   const [pathResult, setPathResult] = useState<GraphPathResponse | null>(null);
 
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchSeq = useRef(0);
+  const searchBoxRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     api.overview().then(setOverview).catch((err) => setError(String(err)));
@@ -198,6 +201,7 @@ export default function CodeGraphExplorer() {
     setNeighbors(null);
     setPathResult(null);
     setPathFrom(null);
+    setPathTo(null);
     setFocusId(null);
   }, []);
 
@@ -222,16 +226,22 @@ export default function CodeGraphExplorer() {
     [graphNodes.size, mergeGraph],
   );
 
+  // Sequenced like the search dropdown: rapid clicks can resolve out of
+  // order, and a stale response must not repoint the Inspector (and the
+  // "Show callers/callees" actions) at the wrong node.
+  const inspectSeq = useRef(0);
   const inspect = useCallback(async (id: string) => {
+    const seq = ++inspectSeq.current;
     try {
       const [detail, nextNeighbors] = await Promise.all([
         api.node(id),
         api.neighbors(id, { limit: 60 }),
       ]);
+      if (seq !== inspectSeq.current) return;
       setSelected(detail.node);
       setNeighbors(nextNeighbors);
     } catch (err) {
-      setError(String(err));
+      if (seq === inspectSeq.current) setError(String(err));
     }
   }, []);
 
@@ -261,15 +271,18 @@ export default function CodeGraphExplorer() {
       const node = graphNodes.get(id);
       void inspect(id);
       if (pathMode && node) {
-        if (!pathFrom) {
+        if (!pathFrom || pathTo) {
+          // First pick, or a fresh pick after a completed run: start a new path.
           setPathFrom(node);
+          setPathTo(null);
           setPathResult(null);
         } else if (pathFrom.id !== node.id) {
+          setPathTo(node);
           void runPath(pathFrom, node);
         }
       }
     },
-    [graphNodes, inspect, pathMode, pathFrom, runPath],
+    [graphNodes, inspect, pathMode, pathFrom, pathTo, runPath],
   );
 
   /** Search-to-focus: seed the canvas at the symbol and fly the camera to it. */
@@ -285,6 +298,43 @@ export default function CodeGraphExplorer() {
       void inspect(node.id);
     },
     [expandNode, inspect],
+  );
+
+  /** Keyboard support for the search dropdown: Enter opens the top hit, arrows
+   *  move focus through the results, Escape closes the popup. */
+  const onSearchKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      const box = searchBoxRef.current;
+      if (!box) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSearchOpen(false);
+        box.querySelector<HTMLInputElement>("input")?.focus();
+        return;
+      }
+      if (!searchOpen || results.length === 0) return;
+      const buttons = Array.from(
+        box.querySelectorAll<HTMLButtonElement>(".tsg-search-pop button"),
+      );
+      const active = document.activeElement as HTMLElement | null;
+      const index = buttons.indexOf(active as HTMLButtonElement);
+      if (event.key === "Enter") {
+        // Enter from the input jumps to the top result; from a focused row it
+        // opens that row.
+        event.preventDefault();
+        if (index >= 0 && index < results.length) focusSymbol(results[index]);
+        else focusSymbol(results[0]);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        const next = index < 0 ? buttons[0] : buttons[Math.min(index + 1, buttons.length - 1)];
+        next?.focus();
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (index <= 0) box.querySelector<HTMLInputElement>("input")?.focus();
+        else buttons[index - 1]?.focus();
+      }
+    },
+    [searchOpen, results, focusSymbol],
   );
 
   const onQueryChange = useCallback((value: string) => {
@@ -388,7 +438,7 @@ export default function CodeGraphExplorer() {
             </button>
           </nav>
         </div>
-        <div className="tsg-searchbox">
+        <div className="tsg-searchbox" ref={searchBoxRef} onKeyDown={onSearchKeyDown}>
           <ShellInput
             value={query}
             onChange={(event: React.ChangeEvent<HTMLInputElement>) => onQueryChange(event.target.value)}
@@ -397,9 +447,9 @@ export default function CodeGraphExplorer() {
             aria-label="Search code graph"
           />
           {searchOpen && results.length > 0 && (
-            <div className="tsg-search-pop">
+            <div className="tsg-search-pop" role="listbox" aria-label="Search results">
               {results.map((node) => (
-                <button key={node.id} onClick={() => focusSymbol(node)}>
+                <button key={node.id} role="option" onClick={() => focusSymbol(node)}>
                   <i style={{ background: colorForKind(node.kind) }} />
                   <span>{node.name}</span>
                   <small>{node.kind} · {short(node.file_path, 40)} · {fmt(node.degree)} edges</small>
@@ -458,15 +508,30 @@ export default function CodeGraphExplorer() {
                 onClick={() => {
                   setPathMode((prev) => !prev);
                   setPathFrom(null);
+                  setPathTo(null);
                   setPathResult(null);
                 }}
-                title="Pick two nodes to find the shortest path between them"
+                title="Pick two nodes to find the shortest path between them. Click again to exit."
               >
-                {pathMode
-                  ? pathFrom
-                    ? `Path: ${short(pathFrom.name, 16)} → pick target`
-                    : "Path: pick start"
-                  : "Find path"}
+                {!pathMode
+                  ? "Find path"
+                  : !pathFrom
+                    ? "Path: pick start"
+                    : !pathTo
+                      ? `Path: ${short(pathFrom.name, 16)} → pick target`
+                      : loading
+                        ? `Path: ${short(pathFrom.name, 14)} → ${short(pathTo.name, 14)} · finding…`
+                        : pathResult?.found
+                          ? `Path: ${short(pathFrom.name, 14)} → ${short(pathTo.name, 14)} · ${Math.max(0, pathResult.path.length - 1)} hop${pathResult.path.length === 2 ? "" : "s"}`
+                          : `Path: ${short(pathFrom.name, 14)} → ${short(pathTo.name, 14)} · none`}
+              </ShellButton>
+              <ShellButton
+                size="sm"
+                variant="outline"
+                onClick={() => setFitSignal((prev) => prev + 1)}
+                title="Zoom to fit every loaded node"
+              >
+                Fit
               </ShellButton>
               <ShellButton size="sm" variant="outline" onClick={clearCanvas}>Clear</ShellButton>
             </div>
@@ -531,6 +596,7 @@ export default function CodeGraphExplorer() {
                   focusId={focusId}
                   selectedId={selected?.id || null}
                   pathIds={pathIds}
+                  fitSignal={fitSignal}
                   onSelect={selectInCanvas}
                   onExpand={(id) => void expandNode(id)}
                 />

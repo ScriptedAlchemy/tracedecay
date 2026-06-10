@@ -13,7 +13,7 @@
 
 import React, { useEffect, useRef } from "react";
 import { createSimulation, type SimEdge, type SimNode, type Simulation } from "./simulation";
-import { colorForKind } from "./types";
+import { KIND_FAMILY_TOKENS, kindFamily } from "./types";
 import type { GraphEdge, GraphNode } from "./types";
 
 export interface GraphCanvasProps {
@@ -24,6 +24,8 @@ export interface GraphCanvasProps {
   selectedId: string | null;
   /** Node ids on the active shortest path, in order. */
   pathIds: string[];
+  /** Increment to zoom-to-fit the current node set (camera reset). */
+  fitSignal?: number;
   onSelect: (id: string) => void;
   onExpand: (id: string) => void;
 }
@@ -34,24 +36,39 @@ interface Camera {
   k: number;
 }
 
-const EDGE_STYLES: Record<string, { color: string; dash: number[]; width: number }> = {
-  calls: { color: "rgba(247, 199, 106, 0.55)", dash: [], width: 1.4 },
-  uses: { color: "rgba(122, 167, 255, 0.45)", dash: [6, 4], width: 1.1 },
-  implements: { color: "rgba(255, 122, 182, 0.55)", dash: [3, 3], width: 1.3 },
-  extends: { color: "rgba(255, 122, 182, 0.45)", dash: [8, 3], width: 1.3 },
-  contains: { color: "rgba(168, 200, 192, 0.28)", dash: [2, 4], width: 1 },
-  type_of: { color: "rgba(122, 167, 255, 0.36)", dash: [4, 4], width: 1 },
-  returns: { color: "rgba(103, 232, 169, 0.42)", dash: [5, 3], width: 1.1 },
-  receives: { color: "rgba(103, 232, 169, 0.34)", dash: [2, 3], width: 1 },
-  derives_macro: { color: "rgba(255, 122, 182, 0.3)", dash: [1, 3], width: 1 },
-  annotates: { color: "rgba(168, 200, 192, 0.3)", dash: [1, 4], width: 1 },
+type EdgeAccent = "amber" | "blue" | "pink" | "green" | "muted";
+
+/** Edge styling by kind: theme accent (resolved at draw time) + alpha + dash. */
+const EDGE_STYLE_DEFS: Record<
+  string,
+  { accent: EdgeAccent; alpha: number; dash: number[]; width: number }
+> = {
+  calls: { accent: "amber", alpha: 0.55, dash: [], width: 1.4 },
+  uses: { accent: "blue", alpha: 0.45, dash: [6, 4], width: 1.1 },
+  implements: { accent: "pink", alpha: 0.55, dash: [3, 3], width: 1.3 },
+  extends: { accent: "pink", alpha: 0.45, dash: [8, 3], width: 1.3 },
+  contains: { accent: "muted", alpha: 0.28, dash: [2, 4], width: 1 },
+  type_of: { accent: "blue", alpha: 0.36, dash: [4, 4], width: 1 },
+  returns: { accent: "green", alpha: 0.42, dash: [5, 3], width: 1.1 },
+  receives: { accent: "green", alpha: 0.34, dash: [2, 3], width: 1 },
+  derives_macro: { accent: "pink", alpha: 0.3, dash: [1, 3], width: 1 },
+  annotates: { accent: "muted", alpha: 0.3, dash: [1, 4], width: 1 },
 };
-const DEFAULT_EDGE_STYLE = { color: "rgba(168, 200, 192, 0.3)", dash: [], width: 1 };
+const DEFAULT_EDGE_STYLE_DEF = {
+  accent: "muted" as EdgeAccent,
+  alpha: 0.3,
+  dash: [] as number[],
+  width: 1,
+};
 
 const DIM_ALPHA = 0.13;
 
-function edgeStyle(kind: string) {
-  return EDGE_STYLES[kind] || DEFAULT_EDGE_STYLE;
+/** `#rrggbb` → `rgba()`; non-hex values pass through untouched. */
+function withAlpha(color: string, alpha: number): string {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match) return color;
+  const n = parseInt(match[1], 16);
+  return `rgba(${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}, ${alpha})`;
 }
 
 interface ThemeColors {
@@ -59,18 +76,44 @@ interface ThemeColors {
   halo: string;
   ring: string;
   path: string;
+  accents: Record<EdgeAccent, string>;
+  family: Record<string, string>;
 }
 
-/** Samples the shell design tokens so the canvas follows light/dark themes. */
+/**
+ * Samples the shell design tokens so the canvas follows light/dark themes —
+ * canvas 2D can't resolve `var()`, so node/edge accents are read here too.
+ */
 function readTheme(el: HTMLElement): ThemeColors {
   const styles = getComputedStyle(el);
   const read = (name: string, fallback: string) =>
     styles.getPropertyValue(name).trim() || fallback;
+  const family: Record<string, string> = {};
+  for (const [key, [token, fallback]] of Object.entries(KIND_FAMILY_TOKENS)) {
+    family[key] = read(token, fallback);
+  }
   return {
     label: read("--ts-text", "#e7fff9"),
     halo: read("--ts-void", "#030607"),
     ring: read("--ts-text", "#e7fff9"),
     path: read("--ts-cyan", "#75f4d2"),
+    family,
+    accents: {
+      amber: read("--ts-amber", "#f7c76a"),
+      blue: read("--ts-blue", "#7aa7ff"),
+      pink: read("--ts-pink", "#ff7ab6"),
+      green: read("--ts-green", "#67e8a9"),
+      muted: read("--ts-text-2", "#a8c8c0"),
+    },
+  };
+}
+
+function edgeStyle(kind: string, theme: ThemeColors) {
+  const def = EDGE_STYLE_DEFS[kind] || DEFAULT_EDGE_STYLE_DEF;
+  return {
+    color: withAlpha(theme.accents[def.accent], def.alpha),
+    dash: def.dash,
+    width: def.width,
   };
 }
 
@@ -80,6 +123,7 @@ export default function GraphCanvas({
   focusId,
   selectedId,
   pathIds,
+  fitSignal = 0,
   onSelect,
   onExpand,
 }: GraphCanvasProps) {
@@ -120,6 +164,35 @@ export default function GraphCanvas({
   useEffect(() => {
     needsRenderRef.current = true;
   }, [selectedId, pathIds]);
+
+  // Zoom-to-fit: frame the bounding box of every simulated node. Recovers
+  // from zoom extremes / off-screen drift without clearing the exploration.
+  useEffect(() => {
+    if (!fitSignal) return;
+    const canvas = canvasRef.current;
+    const sim = simRef.current;
+    if (!canvas || !sim || sim.nodes.length === 0) return;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const node of sim.nodes) {
+      minX = Math.min(minX, node.x - node.radius);
+      minY = Math.min(minY, node.y - node.radius);
+      maxX = Math.max(maxX, node.x + node.radius);
+      maxY = Math.max(maxY, node.y + node.radius);
+    }
+    const rect = canvas.getBoundingClientRect();
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const fitK = Math.min(rect.width / spanX, rect.height / spanY) * 0.88;
+    const camera = cameraRef.current;
+    camera.x = (minX + maxX) / 2;
+    camera.y = (minY + maxY) / 2;
+    camera.k = Math.min(5, Math.max(0.12, fitK));
+    followIdRef.current = null;
+    needsRenderRef.current = true;
+  }, [fitSignal]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -217,7 +290,7 @@ export default function GraphCanvas({
         const onPath = pathPairs.has(`${edge.source}>${edge.target}`);
         const inHighlight =
           !highlight || (highlight.has(edge.source) && highlight.has(edge.target));
-        const style = edgeStyle(edge.kind);
+        const style = edgeStyle(edge.kind, theme);
         ctx.globalAlpha = inHighlight || onPath ? 1 : DIM_ALPHA;
         ctx.strokeStyle = onPath ? theme.path : style.color;
         ctx.lineWidth = (onPath ? 2.4 : style.width) / Math.sqrt(camera.k);
@@ -242,7 +315,7 @@ export default function GraphCanvas({
 
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-        ctx.fillStyle = colorForKind(node.kind);
+        ctx.fillStyle = theme.family[kindFamily(node.kind)] || theme.family.other;
         ctx.fill();
         if (isSelected || isHovered || onPath) {
           ctx.lineWidth = (isSelected ? 3 : 2) / camera.k;

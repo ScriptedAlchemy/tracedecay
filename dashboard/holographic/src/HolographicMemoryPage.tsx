@@ -29,8 +29,12 @@ import {
 } from "./sdk";
 import { Spinner } from "./Spinner";
 import { api } from "./api";
-import type { HolographicFact, MemoryDashboardResponse } from "./types";
-import SemanticMap from "./SemanticMap";
+import type {
+  HolographicFact,
+  MemoryDashboardResponse,
+  MemorySimilarityPair,
+} from "./types";
+import SemanticMap, { type SemanticMapFocus } from "./SemanticMap";
 import SimilarityPanel from "./SimilarityPanel";
 import AssociationGraph from "./AssociationGraph";
 import CurationPanel from "./CurationPanel";
@@ -92,9 +96,22 @@ function highlighted(snippet?: string, fallback?: string | null) {
   return parts;
 }
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+function Stat({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string | number;
+  /** Plain-language explanation surfaced as a native tooltip. */
+  hint?: string;
+}) {
   return (
-    <div className="border border-border bg-background/50 px-3 py-2">
+    <div
+      className="border border-border bg-background/50 px-3 py-2"
+      title={hint}
+      style={hint ? { cursor: "help" } : undefined}
+    >
       <div className="font-mono-ui text-lg leading-none text-foreground">
         {value}
       </div>
@@ -182,6 +199,7 @@ function SystemStrip({
   const activeMemory = provider.memory_provider || "built-in";
   const pluginEngine = provider.plugin_context_engine;
   const curatorTools = provider.curator_tools;
+  const agentToolsets = curatorTools?.agent_toolsets?.length ?? 0;
   const db = data.holographic;
 
   return (
@@ -190,10 +208,23 @@ function SystemStrip({
       <Stat label="context engine" value={provider.context_engine || "compressor"} />
       <Stat label="context engine tools" value={pluginEngine?.tools?.length ?? 0} />
       <Stat
-        label="curator evidence"
-        value={curatorTools?.enabled ? (curatorTools.count ?? 0) : "off"}
+        label="curator tools"
+        value={curatorTools?.enabled ? `${curatorTools.count ?? 0} enabled` : "not used"}
+        hint={
+          curatorTools?.enabled
+            ? "Evidence-gathering tools the memory curator can call while reviewing facts."
+            : "The memory curator runs without LLM tool calls here — duplicates are detected with built-in vector-similarity analysis instead."
+        }
       />
-      <Stat label="curator agent" value={curatorTools?.agent_toolsets?.length ?? 0} />
+      <Stat
+        label="curator agents"
+        value={agentToolsets > 0 ? agentToolsets : "none"}
+        hint={
+          agentToolsets > 0
+            ? "Agent toolsets the curator can delegate cleanup work to."
+            : "No agent-driven curation is configured. Curation previews and applies still work — they use the built-in deduplication planner."
+        }
+      />
       <Stat label="database" value={db.exists ? "ready" : "missing"} />
       <div className="min-w-0 border border-border bg-background/50 px-3 py-2 sm:col-span-2 xl:col-span-1">
         <div className="truncate font-mono-ui text-xs text-foreground">
@@ -414,6 +445,34 @@ const HRR_STATUS_TEXT: Record<string, string> = {
   stale_bank: "text-text-tertiary",
 };
 
+type HrrCoverageRow = NonNullable<
+  MemoryDashboardResponse["holographic"]["overview"]
+>["hrr_coverage"][number];
+
+/**
+ * Plain-language status explanations. Coverage (facts with HRR vectors) and
+ * bank freshness are independent, so "100% coverage" can legitimately pair
+ * with "stale bank" — spell that out instead of looking contradictory.
+ */
+function hrrStatusHint(row: HrrCoverageRow): string {
+  switch (row.status) {
+    case "ready":
+      return "The bundled bank vector is up to date with every vectored fact in this category.";
+    case "missing_vectors":
+      return "No facts in this category have HRR vectors yet, so there is nothing to bundle.";
+    case "missing_bank":
+      return "Facts here have HRR vectors, but no bundled memory bank has been built for this category yet.";
+    case "stale_bank":
+      return (
+        `Coverage means ${row.hrr_vectors} of ${row.facts} facts have HRR vectors — that can be 100% ` +
+        `while the bank is stale. "Stale bank" means the bundled bank vector was last built from ` +
+        `${row.bank_fact_count} fact(s), so it lags the current store until the next bank rebuild refreshes it automatically.`
+      );
+    default:
+      return "";
+  }
+}
+
 function CoverageGauge({ pct, status }: { pct: number; status: string }) {
   const stroke = HRR_STATUS_STROKE[status] ?? "stroke-text-tertiary";
   // r chosen so circumference ≈ 100, letting strokeDasharray = "pct 100".
@@ -467,6 +526,7 @@ function HrrCoveragePanel({ data }: { data: MemoryDashboardResponse }) {
             {rows.map((row) => {
               const pct = Math.round((row.coverage ?? 0) * 100);
               const textTone = HRR_STATUS_TEXT[row.status] ?? "text-text-tertiary";
+              const hint = hrrStatusHint(row);
               return (
                 <div
                   key={row.category}
@@ -479,6 +539,16 @@ function HrrCoveragePanel({ data }: { data: MemoryDashboardResponse }) {
                     </span>
                     <span
                       className={`truncate font-mono-ui text-[0.65rem] tracking-[0.04em] ${textTone}`}
+                      title={hint || undefined}
+                      style={
+                        hint
+                          ? {
+                              cursor: "help",
+                              textDecoration: "underline dotted",
+                              textUnderlineOffset: 2,
+                            }
+                          : undefined
+                      }
                     >
                       {row.status.replaceAll("_", " ")}
                     </span>
@@ -635,6 +705,11 @@ function OverviewBars({
     bucket: entityTypeBucketLabel(item.entity_type),
     color: slotColor(i),
   }));
+  // A chart that is 100% "unclassified" carries no information; collapse it
+  // into an explanatory empty state until real type labels exist.
+  const allUnclassified =
+    entityTypes.length > 0 && entityTypes.every((t) => t.bucket === "unclassified");
+  const totalEntities = entityTypes.reduce((sum, t) => sum + t.count, 0);
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[repeat(3,minmax(0,1fr))]">
@@ -660,24 +735,43 @@ function OverviewBars({
           />
         }
       />
-      <DataBars
-        title="Entity Types"
-        items={entityTypes}
-        getLabel={(item) => item.bucket}
-        getValue={(item) => item.count}
-        getColor={(item) => item.color}
-        header={
-          <CompositionBar
-            totalLabel="entities"
-            segments={entityTypes.map((t) => ({
-              key: t.bucket,
-              label: t.bucket,
-              value: t.count,
-              color: t.color,
-            }))}
-          />
-        }
-      />
+      {allUnclassified ? (
+        <div className="border border-border bg-background/30 p-3">
+          <h3 className="mb-3 font-mondwest text-display text-xs tracking-[0.12em] text-text-secondary">
+            Entity Types
+          </h3>
+          <p className="text-xs leading-relaxed text-text-tertiary">
+            <span className="font-mono-ui text-text-secondary">
+              {totalEntities}
+            </span>{" "}
+            linked {totalEntities === 1 ? "entity" : "entities"} — none have a
+            type label yet, so there is no breakdown to chart.
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-text-tertiary">
+            Type breakdowns appear here once entities are classified (for
+            example by a curator&apos;s entity-classification pass).
+          </p>
+        </div>
+      ) : (
+        <DataBars
+          title="Entity Types"
+          items={entityTypes}
+          getLabel={(item) => item.bucket}
+          getValue={(item) => item.count}
+          getColor={(item) => item.color}
+          header={
+            <CompositionBar
+              totalLabel="entities"
+              segments={entityTypes.map((t) => ({
+                key: t.bucket,
+                label: t.bucket,
+                value: t.count,
+                color: t.color,
+              }))}
+            />
+          }
+        />
+      )}
       <HrrCoveragePanel data={data} />
     </div>
   );
@@ -716,6 +810,21 @@ function HolographicView({
     else url.searchParams.set("view", next);
     window.history.replaceState(null, "", url);
   }, []);
+
+  // Cross-view navigation: a similarity pair jumps to the Semantic Map with
+  // both facts selected and the first one pinned.
+  const [mapFocus, setMapFocus] = useState<SemanticMapFocus | null>(null);
+  const showPairOnMap = useCallback(
+    (pair: MemorySimilarityPair) => {
+      setMapFocus({
+        ids: [pair.a_id, pair.b_id],
+        pinId: pair.a_id,
+        token: Date.now(),
+      });
+      setView("map");
+    },
+    [setView],
+  );
 
   const VIEW_TABS: Array<{ key: ViewKey; label: string; icon: ReactNode }> = [
     { key: "inspector", label: "Inspector", icon: <Table2 className="h-3.5 w-3.5" /> },
@@ -770,11 +879,11 @@ function HolographicView({
       )}
 
       {view === "map" ? (
-        <SemanticMap query={query} />
+        <SemanticMap query={query} focus={mapFocus} />
       ) : view === "graph" ? (
         <AssociationGraph graph={data.holographic.graph} />
       ) : view === "similarity" ? (
-        <SimilarityPanel />
+        <SimilarityPanel onShowOnMap={showPairOnMap} />
       ) : view === "curation" ? (
         <CurationPanel onApplied={onApplied} />
       ) : data.query ? (

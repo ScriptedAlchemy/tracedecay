@@ -75,6 +75,30 @@ function applyTheme(theme) {
 applyTheme(getInitialTheme());
 
 // ---------------------------------------------------------------------------
+// Tab ↔ URL state (?tab=<plugin>) so tabs deep-link and back/forward work
+// ---------------------------------------------------------------------------
+
+function tabFromUrl() {
+  try {
+    return new URLSearchParams(window.location.search).get("tab") || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeTabToUrl(name, { push = true } = {}) {
+  try {
+    const url = new URL(window.location);
+    if (url.searchParams.get("tab") === name) return;
+    url.searchParams.set("tab", name);
+    if (push) window.history.pushState({ tab: name }, "", url);
+    else window.history.replaceState({ tab: name }, "", url);
+  } catch {
+    /* URL state is best-effort */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Error boundary — wraps each plugin tab so one crash can't blank the shell
 // ---------------------------------------------------------------------------
 
@@ -157,12 +181,42 @@ function App() {
   const [plugins, setPlugins] = useState([]);
   const [capabilities, setCapabilities] = useState(null);
   const [active, setActive] = useState("");
+  // Tabs that have been activated at least once; their panels stay mounted
+  // (hidden) afterwards so in-progress exploration survives tab switches.
+  const [visited, setVisited] = useState(() => new Set());
   const [loadError, setLoadError] = useState("");
   const [connState, setConnState] = useState("connecting"); // "connecting" | "ok" | "error"
   const [lastRefresh, setLastRefresh] = useState(null);
   const [theme, setTheme] = useState(getInitialTheme);
   const pluginsRef = useRef([]);
   useRegistryVersion();
+
+  /** Single entry point for tab changes; keeps the URL in sync. */
+  const selectTab = useCallback((name, { push = true, writeUrl = true } = {}) => {
+    setActive(name);
+    setVisited((prev) => {
+      if (prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.add(name);
+      return next;
+    });
+    if (writeUrl) writeTabToUrl(name, { push });
+  }, []);
+
+  // Browser back/forward: restore the tab encoded in the URL. History entries
+  // without a (known) tab — e.g. ones created before this app pushed any state
+  // — fall back to the first plugin so Back never leaves the URL and UI
+  // disagreeing about the active tab.
+  useEffect(() => {
+    function onPopState() {
+      const name = tabFromUrl();
+      const list = pluginsRef.current;
+      const target = list.some((p) => p.name === name) ? name : list[0]?.name;
+      if (target) selectTab(target, { writeUrl: false });
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [selectTab]);
 
   // Keep ref in sync so keyboard handler always sees current plugins.
   useEffect(() => {
@@ -210,7 +264,13 @@ function App() {
         ]);
         if (cancelled) return;
         setPlugins(list);
-        if (list.length > 0) setActive(list[0].name);
+        if (list.length > 0) {
+          const fromUrl = tabFromUrl();
+          const initial = list.some((p) => p.name === fromUrl) ? fromUrl : list[0].name;
+          // Always write the resolved tab into the URL (replaceState) so the
+          // initial entry round-trips through back/forward like any other tab.
+          selectTab(initial, { push: false });
+        }
         for (const manifest of list) injectPluginAssets(manifest);
       } catch (err) {
         if (!cancelled) {
@@ -230,20 +290,32 @@ function App() {
     return () => clearInterval(id);
   }, [fetchCapabilities]);
 
-  // Keyboard shortcuts: digits 1–9 switch tabs.
+  // Keyboard shortcuts: digits 1–9 switch tabs. Skipped for modified
+  // keystrokes (browser/OS shortcuts) and when focus sits in a widget that
+  // owns its keyboard interaction — form fields, and svg/application/listbox
+  // surfaces like the semantic map, histogram brush, graph nodes, and fact
+  // lists, where a stray digit must not yank the user to another tab.
   useEffect(() => {
+    function ownsKeyboard(target) {
+      if (!target) return false;
+      if (target.isContentEditable) return true;
+      if (typeof target.closest !== "function") return false;
+      return !!target.closest(
+        'input, textarea, select, svg, [contenteditable="true"], [role="application"], [role="listbox"]',
+      );
+    }
     function onKeyDown(e) {
-      const tag = e.target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (ownsKeyboard(e.target)) return;
       const idx = parseInt(e.key, 10);
       if (idx >= 1 && idx <= 9) {
         const target = pluginsRef.current[idx - 1];
-        if (target) setActive(target.name);
+        if (target) selectTab(target.name);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [selectTab]);
 
   // ARIA tabs pattern: roving tabindex + arrow-key navigation on the tablist.
   const tabRefs = useRef(new Map());
@@ -265,9 +337,9 @@ function App() {
     if (nextIdx === null) return;
     e.preventDefault();
     const next = list[nextIdx];
-    setActive(next.name);
+    selectTab(next.name);
     tabRefs.current.get(next.name)?.focus();
-  }, []);
+  }, [selectTab]);
 
   // Document title reflecting the active tab.
   useEffect(() => {
@@ -321,7 +393,7 @@ function App() {
               aria-controls={`ts-tabpanel-${p.name}`}
               tabIndex={p.name === active ? 0 : -1}
               className={cn("ts-shell-tab", p.name === active && "ts-shell-tab-active")}
-              onClick={() => setActive(p.name)}
+              onClick={() => selectTab(p.name)}
               title={`${p.label || p.name} (${i + 1})`}
             >
               {p.label || p.name}
@@ -383,18 +455,27 @@ function App() {
             Loading {activeManifest.label || active}…
           </div>
         )}
-        {ActiveComponent && (
-          <div
-            role="tabpanel"
-            id={`ts-tabpanel-${active}`}
-            aria-labelledby={`ts-tab-${active}`}
-            className="ts-shell-tabpanel"
-          >
-            <ErrorBoundary key={active}>
-              <ActiveComponent />
-            </ErrorBoundary>
-          </div>
-        )}
+        {/* Visited panels stay mounted (hidden) so tab switches don't reset
+            in-progress exploration like the code-graph canvas. */}
+        {plugins
+          .filter((p) => visited.has(p.name) && registered.get(p.name))
+          .map((p) => {
+            const Component = registered.get(p.name);
+            return (
+              <div
+                key={p.name}
+                role="tabpanel"
+                id={`ts-tabpanel-${p.name}`}
+                aria-labelledby={`ts-tab-${p.name}`}
+                className="ts-shell-tabpanel"
+                hidden={p.name !== active}
+              >
+                <ErrorBoundary key={p.name}>
+                  <Component />
+                </ErrorBoundary>
+              </div>
+            );
+          })}
       </main>
     </div>
   );

@@ -15,7 +15,12 @@ import {
   type ViewBox,
   type WeightedGraphEdge,
 } from "./associationGraphTypes";
-import { coOccurrenceWeight, colorOf, linkEndpoint } from "./associationGraphUtils";
+import {
+  coOccurrenceWeight,
+  colorOf,
+  edgeStyle,
+  linkEndpoint,
+} from "./associationGraphUtils";
 import { GraphEdges, GraphLabels, GraphNodes, GraphSettleLayer } from "./GraphSvgLayers";
 import { nearestInDirection, resolveVisibleLabels } from "./graphHitTest";
 import {
@@ -196,15 +201,25 @@ export default function AssociationGraph({
     setSelectedId((cur) => (cur && !visibleIds.has(cur) ? null : cur));
   }, [visibleIds, visibleNodes]);
 
-  // Wheel zoom (Ctrl/Cmd or focused graph only — see graphViewBox).
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-    const onWheel = (event: WheelEvent) => handleWheelZoom(event, svg, setView, onInteract);
-    svg.addEventListener("wheel", onWheel, { passive: false });
-    return () => svg.removeEventListener("wheel", onWheel);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Wheel zoom (Ctrl/Cmd or focused graph only — see graphViewBox). Bound via
+  // callback ref, not a mount-once effect: the svg can mount late when the
+  // graph starts empty and data arrives on a later refresh, and a non-passive
+  // listener is required to preventDefault page scroll.
+  const wheelCleanupRef = useRef<(() => void) | null>(null);
+  const bindSvg = useCallback((node: SVGSVGElement | null) => {
+    svgRef.current = node;
+    wheelCleanupRef.current?.();
+    wheelCleanupRef.current = null;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) =>
+      handleWheelZoom(event, node, setView, () => {
+        userInteractedRef.current = true;
+        cancelViewAnimation(animRef);
+      });
+    node.addEventListener("wheel", onWheel, { passive: false });
+    wheelCleanupRef.current = () => node.removeEventListener("wheel", onWheel);
   }, []);
+  useEffect(() => () => wheelCleanupRef.current?.(), []);
 
   useEffect(() => () => cancelViewAnimation(animRef), []);
 
@@ -472,9 +487,10 @@ export default function AssociationGraph({
                     y1="4"
                     x2="19"
                     y2="4"
-                    className="stroke-border"
-                    strokeWidth={edge.bold ? 2.6 : 1}
-                    strokeOpacity={edge.bold ? 0.95 : 0.5}
+                    stroke={edgeStyle(edge.kind).color}
+                    strokeDasharray={edgeStyle(edge.kind).dash}
+                    strokeWidth={edge.bold ? 2.6 : 1.6}
+                    strokeOpacity={edge.bold ? 0.95 : 0.9}
                     strokeLinecap="round"
                   />
                 </svg>
@@ -490,7 +506,7 @@ export default function AssociationGraph({
 
           <div className="relative overflow-hidden border border-border bg-background/30 touch-none">
             <svg
-              ref={svgRef}
+              ref={bindSvg}
               role="group"
               aria-label={`Association graph: ${visibleNodes.length} nodes. Tab to enter, arrow keys to move between nodes, Enter to focus a node, Escape to clear.`}
               viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}

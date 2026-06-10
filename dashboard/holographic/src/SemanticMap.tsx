@@ -40,6 +40,8 @@ interface MapTransform {
 const IDENTITY: MapTransform = { k: 1, tx: 0, ty: 0 };
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 24;
+/** Cap for programmatic fit-zoom so tiny clusters keep some context. */
+const FIT_MAX_ZOOM = 8;
 /** Spatial-grid cell size (base px) for O(1) hover hit-testing. */
 const GRID_CELL = 48;
 /** Hover snap radius in screen px. */
@@ -178,7 +180,24 @@ function releasePointer(target: Element, pointerId: number) {
   }
 }
 
-export default function SemanticMap({ query }: { query?: string }) {
+/**
+ * Cross-view navigation payload (e.g. "show this similarity pair on the
+ * map"): facts to select, an optional fact to pin, and a token so repeat
+ * navigations to the same facts re-apply.
+ */
+export interface SemanticMapFocus {
+  ids: number[];
+  pinId?: number;
+  token: number;
+}
+
+export default function SemanticMap({
+  query,
+  focus,
+}: {
+  query?: string;
+  focus?: SemanticMapFocus | null;
+}) {
   const [data, setData] = useState<MemoryProjectionResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -381,6 +400,73 @@ export default function SemanticMap({ query }: { query?: string }) {
     },
     [applyTransform],
   );
+
+  /**
+   * Zoom/pan so the given points fill the viewport (with margin). Recovery
+   * path for deep zooms into empty space and the landing move for cross-view
+   * focus navigation.
+   */
+  const fitToPlaced = useCallback(
+    (targets: PlacedPoint[]) => {
+      if (targets.length === 0) return;
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -Infinity;
+      let y1 = -Infinity;
+      for (const p of targets) {
+        x0 = Math.min(x0, p.x);
+        y0 = Math.min(y0, p.y);
+        x1 = Math.max(x1, p.x);
+        y1 = Math.max(y1, p.y);
+      }
+      const margin = 48;
+      const spanX = Math.max(x1 - x0, 1e-6);
+      const spanY = Math.max(y1 - y0, 1e-6);
+      const fitK = Math.min(
+        (width - margin * 2) / spanX,
+        (height - margin * 2) / spanY,
+      );
+      const k = Math.min(FIT_MAX_ZOOM, Math.max(MIN_ZOOM, fitK));
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      applyTransform(
+        { k, tx: width / 2 - cx * k, ty: height / 2 - cy * k },
+        true,
+      );
+    },
+    [applyTransform, width, height],
+  );
+
+  // Apply a cross-view focus request once per token: select the facts, pin
+  // the requested one, and zoom the viewport to them.
+  const appliedFocusTokenRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focus || loading) return;
+    if (appliedFocusTokenRef.current === focus.token) return;
+    const targets = focus.ids
+      .map((id) => layout.byId.get(id))
+      .filter((p): p is PlacedPoint => !!p);
+    if (targets.length === 0) return;
+    appliedFocusTokenRef.current = focus.token;
+    setSelection(new Set(targets.map((p) => p.point.fact_id)));
+    const pin =
+      (focus.pinId != null ? layout.byId.get(focus.pinId) : undefined) ??
+      targets[0];
+    setSelected(pin.point);
+    fitToPlaced(targets);
+  }, [focus, loading, layout, fitToPlaced]);
+
+  // True when at least one plotted fact is inside the viewport for the
+  // committed transform; drives the empty-view recovery overlay.
+  const hasVisiblePoint = useMemo(() => {
+    const { k, tx, ty } = transform;
+    for (const p of layout.placed) {
+      const sx = p.x * k + tx;
+      const sy = p.y * k + ty;
+      if (sx >= 0 && sx <= width && sy >= 0 && sy <= height) return true;
+    }
+    return false;
+  }, [layout, transform, width, height]);
 
   // Wheel zoom needs a non-passive native listener to preventDefault page
   // scroll. The svg mounts late (after loading), so bind via callback ref.
@@ -849,6 +935,19 @@ export default function SemanticMap({ query }: { query?: string }) {
                   </text>
                 </svg>
                 <VizTooltip tip={tip} />
+                {!hasVisiblePoint && layout.placed.length > 0 && (
+                  <div className="hv-map-recover" role="status">
+                    <div className="hv-map-recover-panel">
+                      <p className="m-0">No facts in this view.</p>
+                      <Button
+                        size="xs"
+                        onClick={() => fitToPlaced(layout.placed)}
+                      >
+                        Re-center on data
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono-ui text-[0.65rem] text-text-tertiary">
@@ -873,6 +972,11 @@ export default function SemanticMap({ query }: { query?: string }) {
               selection={selection}
               selected={selected}
               onSelect={setSelected}
+              onShowAllCategories={
+                hiddenCats.size > 0 && points.length > 0
+                  ? () => setHiddenCats(new Set())
+                  : undefined
+              }
             />
           </div>
         ) : null}
@@ -890,14 +994,47 @@ function SidePanel({
   selection,
   selected,
   onSelect,
+  onShowAllCategories,
 }: {
   placed: PlacedPoint[];
   selection: ReadonlySet<number> | null;
   selected: MemoryProjectionPoint | null;
   onSelect: (point: MemoryProjectionPoint | null) => void;
+  /** Present when legend filters hide every point; restores all categories. */
+  onShowAllCategories?: () => void;
 }) {
   const { containerRef, onScroll, start, end, totalHeight, offsetTop } =
     useVirtualList({ count: placed.length, rowHeight: ROW_HEIGHT });
+
+  // Projection payloads truncate content at 200 chars; when the pinned fact
+  // looks truncated, fetch the full row from the fact-detail endpoint.
+  const selectedId = selected?.fact_id;
+  const maybeTruncated = (selected?.content?.length ?? 0) >= 200;
+  const [detail, setDetail] = useState<{ id: number; content: string } | null>(
+    null,
+  );
+  const [detailFailedId, setDetailFailedId] = useState<number | null>(null);
+  useEffect(() => {
+    if (selectedId == null || !maybeTruncated) return;
+    let cancelled = false;
+    setDetailFailedId((prev) => (prev === selectedId ? null : prev));
+    api
+      .getMemoryFact(selectedId)
+      .then((resp) => {
+        if (!cancelled) setDetail({ id: selectedId, content: resp.fact.content });
+      })
+      .catch(() => {
+        if (!cancelled) setDetailFailedId(selectedId);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, maybeTruncated]);
+
+  const fullContent =
+    detail && detail.id === selectedId ? detail.content : null;
+  const detailFailed = detailFailedId === selectedId;
+  const detailLoading = maybeTruncated && !fullContent && !detailFailed;
 
   // Single tab stop + arrow-key roving selection (the rows themselves stay
   // buttons for pointer users, but are skipped in the tab order).
@@ -962,7 +1099,18 @@ function SidePanel({
         }
       >
         {placed.length === 0 ? (
-          <p className="p-3 text-xs text-text-tertiary">No facts in view.</p>
+          <div className="p-3 text-xs text-text-tertiary">
+            <p>No facts in view.</p>
+            {onShowAllCategories && (
+              <button
+                type="button"
+                className="hv-chip mt-2"
+                onClick={onShowAllCategories}
+              >
+                show all categories
+              </button>
+            )}
+          </div>
         ) : (
           <div style={{ height: totalHeight, position: "relative" }}>
             <div style={{ transform: `translateY(${offsetTop}px)` }}>
@@ -1019,15 +1167,27 @@ function SidePanel({
             </Button>
           </div>
           <p className="max-h-72 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-            {selected.content}
+            {fullContent ?? selected.content}
+            {/* Make the projection payload's 200-char cut visible until the full row arrives. */}
+            {!fullContent && maybeTruncated && "…"}
           </p>
+          {detailLoading && (
+            <p className="mt-1 text-xs text-text-tertiary" role="status">
+              Loading full fact…
+            </p>
+          )}
+          {detailFailed && (
+            <p className="mt-1 text-xs text-text-tertiary">
+              Couldn't load the full fact — showing the first 200 characters.
+            </p>
+          )}
         </div>
       ) : (
         <div className="border border-border bg-background/30 p-4 text-xs text-text-tertiary">
           <p className="text-text-secondary">No fact pinned</p>
           <p className="mt-1 leading-relaxed">
-            Click a dot (or a row) to pin its full content here. Dot size and
-            color follow the active encodings above the map.
+            Click a dot (or a row) to pin it here. Dot size and color follow
+            the active encodings above the map.
           </p>
         </div>
       )}

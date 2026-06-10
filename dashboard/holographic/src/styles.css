@@ -682,6 +682,30 @@ button.hv-legend-toggle:hover {
   cursor: crosshair;
 }
 
+/* Recovery affordance when pan/zoom leaves every fact outside the viewport. */
+.hv-map-recover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.hv-map-recover-panel {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1.1rem;
+  border: 1px solid var(--hm-line-strong);
+  background: var(--hm-popover);
+  box-shadow: var(--hm-shadow);
+  color: var(--hm-text-2);
+  font-size: 0.75rem;
+}
+
 .hv-pt {
   transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
   animation: hv-fade-in 0.4s ease;

@@ -1,5 +1,10 @@
-import type { SimLink } from "./associationGraphTypes";
-import { FALLBACK_COLOR, KIND_COLORS } from "./associationGraphTypes";
+import type { EdgeStyle, SimLink } from "./associationGraphTypes";
+import {
+  EDGE_FALLBACK_STYLE,
+  EDGE_STYLES,
+  FALLBACK_COLOR,
+  KIND_COLORS,
+} from "./associationGraphTypes";
 import type { SimNode } from "./associationGraphTypes";
 
 export function displayEntityType(entityType?: string | null) {
@@ -10,6 +15,10 @@ export function displayEntityType(entityType?: string | null) {
 
 export function colorOf(kind: string): string {
   return KIND_COLORS[kind] ?? FALLBACK_COLOR;
+}
+
+export function edgeStyle(kind: string): EdgeStyle {
+  return EDGE_STYLES[kind] ?? EDGE_FALLBACK_STYLE;
 }
 
 export function radiusOf(kind: string, degree: number): number {

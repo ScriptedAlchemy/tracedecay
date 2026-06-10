@@ -5,6 +5,7 @@ import {
   coOccurrenceWeight,
   colorOf,
   edgeStrokeWidth,
+  edgeStyle,
   linkEndpoint,
   radiusOf,
 } from "./associationGraphUtils";
@@ -39,13 +40,14 @@ export const GraphEdges = memo(function GraphEdges({
         }
         const touchesSelection =
           source.id === highlightId || target.id === highlightId;
-        const baseOpacity = link.kind === "bundles" ? 0.5 : 0.22;
+        const baseOpacity = link.kind === "bundles" ? 0.55 : 0.35;
         const strokeOpacity = highlightIds
           ? touchesSelection
             ? 0.85
             : 0.04
           : baseOpacity;
         const weight = coOccurrenceWeight(link, source, target);
+        const style = edgeStyle(link.kind);
         return (
           <line
             key={`${source.id}-${target.id}-${index}`}
@@ -53,7 +55,11 @@ export const GraphEdges = memo(function GraphEdges({
             y1={source.y ?? 0}
             x2={target.x ?? 0}
             y2={target.y ?? 0}
-            className={touchesSelection ? "stroke-primary" : "stroke-border"}
+            // The `stroke-primary` class (CSS) wins over the per-kind stroke
+            // attribute, so selected edges still flash the accent color.
+            className={touchesSelection ? "stroke-primary" : undefined}
+            stroke={style.color}
+            strokeDasharray={style.dash}
             strokeOpacity={strokeOpacity}
             strokeLinecap="round"
             strokeWidth={edgeStrokeWidth(weight, maxWeight, touchesSelection)}

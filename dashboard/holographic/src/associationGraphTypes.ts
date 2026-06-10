@@ -55,6 +55,32 @@ export const EDGE_LEGEND: { kind: string; relation: string; bold?: boolean }[] =
   { kind: "bank", relation: "category → bank" },
 ];
 
+export interface EdgeStyle {
+  /** Token-driven stroke that re-resolves per theme. */
+  color: string;
+  /** SVG dash pattern — a redundant, colorblind-safe channel on top of hue. */
+  dash?: string;
+}
+
+/**
+ * Per-kind edge encoding. Colors ride the shared categorical chart tokens
+ * (`--hm-cat-*`, which carry explicit light-theme overrides), picked so the
+ * hues stay separable under deuteranopia: blue vs amber vs pink/purple, with
+ * dash patterns distinguishing kinds even in grayscale. Hue mnemonics follow
+ * the edge's anchor node: contains starts at an (amber) category, bundles at
+ * a (pink) bank.
+ */
+export const EDGE_STYLES: Record<string, EdgeStyle> = {
+  contains: { color: "var(--hm-cat-2, #f7c76a)", dash: "5 3" },
+  mentions: { color: "var(--hm-cat-1, #7aa7ff)", dash: "1.5 2.5" },
+  bundles: { color: "var(--hm-cat-3, #ff7ab6)" },
+  bank: { color: "var(--hm-cat-4, #c09bff)", dash: "7 3 1.5 3" },
+};
+
+export const EDGE_FALLBACK_STYLE: EdgeStyle = {
+  color: "var(--hm-line-strong)",
+};
+
 export const GRAPH_WIDTH = 1180;
 export const GRAPH_HEIGHT = 860;
 
