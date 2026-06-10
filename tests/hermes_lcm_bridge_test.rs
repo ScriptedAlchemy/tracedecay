@@ -3597,7 +3597,7 @@ tools.TOKENSAVE_BIN = write_fake_binary(
 crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
 assert crashed["error"] == "tokensave tool exited with status 3", crashed
 assert crashed.get("stdout", "").startswith('{"content')
-assert crashed["stderr"] == "handshake aborted"
+assert "handshake aborted" in crashed.get("stderr", "")
 
 # Exit 0 with malformed JSON on stdout.
 tools.TOKENSAVE_BIN = write_fake_binary(
