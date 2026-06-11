@@ -65,6 +65,23 @@ pub struct ParseOffset {
     pub file_id: u64,
 }
 
+/// One transcript session plus its parsed messages, for multi-session batch
+/// upserts from SQLite-backed stores where a single store file holds every
+/// session (e.g. Hermes `state.db`).
+#[derive(Debug, Clone)]
+pub struct TranscriptBatch {
+    pub session: SessionRecord,
+    pub messages: Vec<SessionMessageRecord>,
+}
+
+/// Whether a transcript batch writes the full dual store (LCM raw + searchable
+/// projection) or only the `session_messages` projection.
+#[derive(Debug, Clone, Copy)]
+enum TranscriptWriteMode {
+    Full,
+    ProjectionOnly,
+}
+
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
@@ -967,17 +984,80 @@ impl GlobalDb {
         parse_offset_path: &str,
         parse_offset: ParseOffset,
     ) -> bool {
+        let batch = TranscriptBatch {
+            session: session.clone(),
+            messages: messages.to_vec(),
+        };
+        self.upsert_transcript_batches_inner(
+            std::slice::from_ref(&batch),
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::Full,
+        )
+        .await
+    }
+
+    /// Atomically upserts several transcript sessions (and their messages),
+    /// writing only the searchable `session_messages` projection — never
+    /// `lcm_raw_messages` — and then advances one shared parse cursor.
+    ///
+    /// Used by the Hermes `state.db` sweep: Hermes already ingests its raw
+    /// conversation losslessly into the LCM store at runtime (the generated
+    /// plugin's `lcm_preflight` active-message ingest) and via the one-time
+    /// legacy-store migration, under its own message ids. Writing raw rows
+    /// again from the transcript sweep would duplicate the LCM store, so
+    /// Hermes transcripts only fill the provider-neutral projection. Any
+    /// failure rolls back the whole batch so a follow-up ingest can safely
+    /// replay from the previous cursor.
+    pub async fn upsert_transcript_projection_batches(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        self.upsert_transcript_batches_inner(
+            batches,
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::ProjectionOnly,
+        )
+        .await
+    }
+
+    async fn upsert_transcript_batches_inner(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+        mode: TranscriptWriteMode,
+    ) -> bool {
         if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
             return false;
         }
-        if !self.upsert_session(session).await {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
-            return false;
-        }
-        for message in messages {
-            if !self.upsert_session_message_in_existing_tx(message).await {
+        for batch in batches {
+            if !self.upsert_session(&batch.session).await {
                 let _ = self.conn.execute("ROLLBACK", ()).await;
                 return false;
+            }
+            for message in &batch.messages {
+                let upserted = match mode {
+                    TranscriptWriteMode::Full => {
+                        self.upsert_session_message_in_existing_tx(message).await
+                    }
+                    TranscriptWriteMode::ProjectionOnly => {
+                        let text = crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+                        self.upsert_session_message_projection(
+                            message,
+                            &text,
+                            message.metadata_json.as_deref(),
+                        )
+                        .await
+                    }
+                };
+                if !upserted {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return false;
+                }
             }
         }
         if !self

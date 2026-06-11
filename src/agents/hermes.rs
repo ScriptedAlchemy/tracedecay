@@ -238,7 +238,7 @@ fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
 /// reinstalls preserve it, and the generated Python resolves it at runtime.
-fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
+pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
     let config = std::fs::read_to_string(config_path).ok()?;
     let lines: Vec<&str> = config.lines().collect();
     let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;

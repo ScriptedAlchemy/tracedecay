@@ -9,6 +9,7 @@ pub mod claude;
 pub mod cline_like;
 pub mod codex;
 pub mod cursor;
+pub mod hermes;
 pub mod kiro;
 pub mod lcm;
 pub mod source;
@@ -44,7 +45,10 @@ pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> Transc
     if let Some(source) = kiro::KiroSource::new() {
         sources.push(Box::new(source));
     }
-    ingest_sources(db, project_root, &sources).await
+    let stats = ingest_sources(db, project_root, &sources).await;
+    // Hermes stores many sessions in one SQLite file per profile, so it plugs
+    // in beside the file-based sources rather than through `TranscriptSource`.
+    stats.merge(hermes::ingest_for_project(db, project_root).await)
 }
 
 /// Drive a set of sources against `db` for `project_root`. Separated from
