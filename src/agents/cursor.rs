@@ -30,6 +30,7 @@ impl AgentIntegration for CursorIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
+        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -52,18 +53,8 @@ impl AgentIntegration for CursorIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let cursor_dir = project_path.join(".cursor");
-        for path in [
-            cursor_dir.join("mcp.json"),
-            cursor_dir.join("rules/tokensave.mdc"),
-            cursor_dir.join("hooks.json"),
-        ] {
-            super::ensure_project_local_safe_path(project_path, &path)?;
-        }
         install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
-        uninstall_mcp_server(&cursor_dir.join("mcp.json"));
-        remove_legacy_project_hooks(&cursor_dir.join("hooks.json"))?;
-        remove_legacy_project_rule(&cursor_dir.join("rules/tokensave.mdc"))?;
+        sweep_legacy_project_artifacts(project_path)?;
 
         eprintln!();
         eprintln!("Cursor local setup uses the tokensave Cursor plugin.");
@@ -88,6 +79,7 @@ impl AgentIntegration for CursorIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
         install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
+        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
         Ok(UpdatePluginOutcome::Refreshed(vec![
             cursor_plugin_install_dir(&ctx.home),
         ]))
@@ -97,6 +89,7 @@ impl AgentIntegration for CursorIntegration {
         remove_cursor_plugin_install(&cursor_plugin_install_dir(&ctx.home))?;
         let mcp_path = ctx.home.join(".cursor/mcp.json");
         uninstall_mcp_server(&mcp_path);
+        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
 
         eprintln!();
         eprintln!("Uninstall complete. Tokensave has been removed from Cursor.");
@@ -111,7 +104,8 @@ impl AgentIntegration for CursorIntegration {
         if legacy_project_cursor_has_tokensave(&project_cursor) {
             dc.warn(
                 "legacy project Cursor MCP/hooks/rule files are present; rerun \
-                 `tokensave install --local --agent cursor` to remove tokensave-owned entries",
+                 `tokensave install --agent cursor` from this project to remove \
+                 tokensave-owned entries",
             );
         }
         doctor_check_session_ingest(dc, &ctx.project_path);
@@ -552,6 +546,69 @@ fn legacy_project_cursor_has_tokensave(cursor_dir: &Path) -> bool {
     legacy_mcp_has_tokensave(&cursor_dir.join("mcp.json"))
         || legacy_hooks_have_tokensave(&cursor_dir.join("hooks.json"))
         || legacy_rule_has_tokensave(&cursor_dir.join("rules/tokensave.mdc"))
+}
+
+/// Removes legacy PROJECT-local tokensave artifacts. Pre-plugin versions of
+/// `tokensave install --local` wrote the MCP server entry, lifecycle hooks,
+/// and the steering rule into `<project>/.cursor/`; the user-level plugin
+/// owns all three surfaces now. This is the project-level counterpart of the
+/// [`LEGACY_PLUGIN_DIRS`] sweep: detection-gated so projects without legacy
+/// artifacts are untouched, and only tokensave-owned entries are removed —
+/// user-authored config (other MCP servers, custom hooks and rules, and
+/// `permissions.json` allowlists, which the plugin README still recommends
+/// per-repo) is preserved.
+fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
+    let cursor_dir = project_path.join(".cursor");
+    let mcp_path = cursor_dir.join("mcp.json");
+    let hooks_path = cursor_dir.join("hooks.json");
+    let rule_path = cursor_dir.join("rules/tokensave.mdc");
+    let legacy_mcp = legacy_mcp_has_tokensave(&mcp_path);
+    let legacy_hooks = legacy_hooks_have_tokensave(&hooks_path);
+    let legacy_rule = legacy_rule_has_tokensave(&rule_path);
+    if !legacy_mcp && !legacy_hooks && !legacy_rule {
+        return Ok(());
+    }
+    for path in [&mcp_path, &hooks_path, &rule_path] {
+        super::ensure_project_local_safe_path(project_path, path)?;
+    }
+    if legacy_mcp {
+        uninstall_mcp_server(&mcp_path);
+    }
+    if legacy_hooks {
+        remove_legacy_project_hooks(&hooks_path)?;
+    }
+    if legacy_rule {
+        remove_legacy_project_rule(&rule_path)?;
+    }
+    Ok(())
+}
+
+/// The project directory a cwd-based legacy sweep should target, or `None`
+/// when the cwd *is* the home directory — there `.cursor/` is Cursor's
+/// user-level config tree, not a project workspace.
+fn cwd_sweep_target(cwd: PathBuf, home: &Path) -> Option<PathBuf> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    (canonical(&cwd) != canonical(home)).then_some(cwd)
+}
+
+/// Best-effort [`sweep_legacy_project_artifacts`] for global install /
+/// update-plugin / uninstall flows, which have no explicit project path: the
+/// current working directory is treated as the project. Failures only warn so
+/// a malformed `.cursor/` in an unrelated cwd can never block plugin
+/// management.
+fn sweep_legacy_project_artifacts_at_cwd(home: &Path) {
+    let Some(project_path) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cwd_sweep_target(cwd, home))
+    else {
+        return;
+    };
+    if let Err(err) = sweep_legacy_project_artifacts(&project_path) {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m could not remove legacy project Cursor artifacts in {}: {err}",
+            project_path.display()
+        );
+    }
 }
 
 /// A Cursor hook entry is tokensave-owned when its `command` runs a
@@ -1192,6 +1249,147 @@ mod tests {
         assert!(
             !install_dir.exists(),
             "pre-rename dispatcher skill dirs must be swept so the tokensave-only dir is fully removed"
+        );
+    }
+
+    /// The project-local legacy sweep must remove exactly the tokensave-owned
+    /// entries pre-plugin installs wrote (`mcp.json` server entry,
+    /// `hook-cursor-*` hooks, the steering rule) while preserving everything
+    /// the user authored alongside them.
+    #[test]
+    fn sweep_removes_legacy_project_artifacts_preserving_user_config() {
+        let project = TempDir::new().unwrap();
+        let cursor_dir = project.path().join(".cursor");
+        std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+        std::fs::write(
+            cursor_dir.join("mcp.json"),
+            serde_json::to_string_pretty(&json!({
+                "mcpServers": {
+                    "tokensave": { "command": "tokensave", "args": ["serve"] },
+                    "other": { "url": "https://example.com/mcp" }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            cursor_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "sessionStart": [
+                        { "command": "tokensave hook-cursor-session-start" },
+                        { "command": "./my-hook.sh" }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            cursor_dir.join("rules/tokensave.mdc"),
+            "Prefer tokensave MCP tools",
+        )
+        .unwrap();
+        std::fs::write(
+            cursor_dir.join("permissions.json"),
+            serde_json::to_string_pretty(&json!({
+                "mcpAllowlist": ["tokensave:tokensave_search"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
+
+        let mcp = load_json_file(&cursor_dir.join("mcp.json"));
+        assert!(
+            mcp["mcpServers"].get("tokensave").is_none(),
+            "legacy tokensave MCP entry must be removed"
+        );
+        assert!(
+            mcp["mcpServers"].get("other").is_some(),
+            "user-authored MCP servers must be preserved"
+        );
+        let hooks = load_json_file(&cursor_dir.join("hooks.json"));
+        let entries = hooks["hooks"]["sessionStart"].as_array().unwrap();
+        assert_eq!(
+            entries,
+            &[json!({ "command": "./my-hook.sh" })],
+            "only hook-cursor-* entries may be removed"
+        );
+        assert!(
+            !cursor_dir.join("rules/tokensave.mdc").exists(),
+            "the legacy steering rule must be removed"
+        );
+        let permissions = load_json_file(&cursor_dir.join("permissions.json"));
+        assert_eq!(
+            permissions["mcpAllowlist"],
+            json!(["tokensave:tokensave_search"]),
+            "per-repo permissions.json allowlists are README-endorsed user config"
+        );
+    }
+
+    /// A project whose `.cursor/` only holds user-authored config (no legacy
+    /// tokensave artifacts) must come through the sweep byte-identical — no
+    /// rewrites, no backups, no deletions.
+    #[test]
+    fn sweep_is_noop_without_legacy_tokensave_artifacts() {
+        let project = TempDir::new().unwrap();
+        let cursor_dir = project.path().join(".cursor");
+        std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+        let mcp = serde_json::to_string_pretty(&json!({
+            "mcpServers": { "other": { "url": "https://example.com/mcp" } }
+        }))
+        .unwrap();
+        std::fs::write(cursor_dir.join("mcp.json"), &mcp).unwrap();
+        // A user file that happens to use the legacy rule filename but not
+        // the tokensave-generated contents stays untouched.
+        let rule = "---\ndescription: my own rule\n---\nFollow project conventions.\n";
+        std::fs::write(cursor_dir.join("rules/tokensave.mdc"), rule).unwrap();
+
+        sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(cursor_dir.join("mcp.json")).unwrap(),
+            mcp
+        );
+        assert_eq!(
+            std::fs::read_to_string(cursor_dir.join("rules/tokensave.mdc")).unwrap(),
+            rule
+        );
+        let mut files = collect_regular_files(&cursor_dir).unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                cursor_dir.join("mcp.json"),
+                cursor_dir.join("rules/tokensave.mdc")
+            ],
+            "a no-op sweep must not create backups or new files"
+        );
+    }
+
+    /// Projects without a `.cursor/` directory at all are a silent no-op.
+    #[test]
+    fn sweep_handles_missing_cursor_dir() {
+        let project = TempDir::new().unwrap();
+        sweep_legacy_project_artifacts(project.path()).expect("sweep should succeed");
+        assert!(!project.path().join(".cursor").exists());
+    }
+
+    /// The cwd-based sweep must never treat the home directory as a project:
+    /// `~/.cursor` is Cursor's user-level config tree.
+    #[test]
+    fn cwd_sweep_target_skips_home_dir() {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        assert_eq!(
+            cwd_sweep_target(home.path().to_path_buf(), home.path()),
+            None
+        );
+        assert_eq!(
+            cwd_sweep_target(project.path().to_path_buf(), home.path()),
+            Some(project.path().to_path_buf())
         );
     }
 

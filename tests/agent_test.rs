@@ -2193,25 +2193,116 @@ fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
     );
 }
 
+/// Global `tokensave install --agent cursor` runs with the project as cwd and
+/// must sweep legacy project-local tokensave artifacts there (old installs
+/// predate the plugin), while preserving user-authored entries alongside them.
+#[test]
+fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"tokensave":{"type":"stdio","command":"/old/tokensave","args":["serve","--path","."]},"other":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tokensave.mdc"),
+        "# Prefer tokensave MCP tools\n",
+    )
+    .unwrap();
+
+    let output = tokensave_command(project.path(), home.path())
+        .arg("install")
+        .arg("--agent")
+        .arg("cursor")
+        .output()
+        .expect("run global cursor install");
+    assert!(
+        output.status.success(),
+        "global cursor install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        home.path()
+            .join(".cursor/plugins/local/tokensave/.cursor-plugin/plugin.json")
+            .exists(),
+        "the user-level plugin should be installed"
+    );
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cursor_dir.join("mcp.json")).unwrap())
+            .unwrap();
+    assert!(
+        mcp["mcpServers"].get("tokensave").is_none(),
+        "legacy project tokensave MCP entry should be swept"
+    );
+    assert!(
+        mcp["mcpServers"].get("other").is_some(),
+        "user-authored project MCP servers must be preserved"
+    );
+    assert!(
+        !cursor_dir.join("rules/tokensave.mdc").exists(),
+        "legacy project tokensave rule should be swept"
+    );
+}
+
+/// The legacy sweep must never modify files *through* a symlinked `.cursor`
+/// that escapes the project. A symlinked `.cursor` with no legacy tokensave
+/// artifacts is left alone (the plugin owns all surfaces, so there is nothing
+/// to write project-locally), but once legacy artifacts are detected behind
+/// the symlink the install refuses rather than reaching outside the project.
 #[cfg(unix)]
 #[test]
-fn test_local_install_cursor_rejects_symlinked_cursor_dir() {
+fn test_local_install_cursor_rejects_symlinked_cursor_dir_with_legacy_artifacts() {
     use std::os::unix::fs::symlink;
 
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
+    let legacy_mcp = r#"{"mcpServers":{"tokensave":{"type":"stdio","command":"/old/tokensave","args":["serve","--path","."]}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), legacy_mcp).unwrap();
     symlink(outside.path(), project.path().join(".cursor")).unwrap();
 
     let output = run_local_install("cursor", project.path(), home.path());
     assert!(
         !output.status.success(),
-        "local Cursor install should reject symlinked .cursor directories"
+        "local Cursor install should reject sweeping through a symlinked .cursor directory"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("symlink"),
         "error should explain the symlink refusal, got:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        legacy_mcp,
+        "files behind the symlink must be untouched"
+    );
+}
+
+/// A symlinked `.cursor` containing only user config is harmless now that
+/// the plugin owns MCP/hooks/rules and local install writes nothing
+/// project-local — the install succeeds and the linked tree is untouched.
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_allows_legacy_free_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let user_mcp = r#"{"mcpServers":{"other":{"url":"https://example.com/mcp"}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), user_mcp).unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        user_mcp,
+        "user config behind the symlink must be untouched"
     );
 }
 
