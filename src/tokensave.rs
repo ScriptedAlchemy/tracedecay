@@ -1519,7 +1519,8 @@ impl TokenSave {
             on_progress(0, 0, "resolving references");
             let phase_start = Instant::now();
             let (short, keys) = reindexed_symbol_scope(&sync_extractions);
-            self.reresolve_after_reindex(&to_index, &short, &keys).await?;
+            self.reresolve_after_reindex(&to_index, &short, &keys)
+                .await?;
             on_verbose(&format!(
                 "resolved references in {:.1}s",
                 phase_start.elapsed().as_secs_f64()

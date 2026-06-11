@@ -115,7 +115,11 @@ pub fn sanitize_branch_name(name: &str) -> String {
 /// branches get distinct files while a given branch always maps to the same
 /// stem. Returns `None` when the name sanitizes to empty (which would yield a
 /// hidden `branches/.db`).
-fn unique_branch_db_stem(meta: &BranchMeta, branches_dir: &Path, branch_name: &str) -> Option<String> {
+fn unique_branch_db_stem(
+    meta: &BranchMeta,
+    branches_dir: &Path,
+    branch_name: &str,
+) -> Option<String> {
     let base = sanitize_branch_name(branch_name);
     if base.is_empty() {
         return None;
@@ -137,7 +141,10 @@ fn unique_branch_db_stem(meta: &BranchMeta, branches_dir: &Path, branch_name: &s
 
 /// Short, stable hex digest of a branch name for DB-stem disambiguation.
 fn short_branch_hash(branch_name: &str) -> String {
-    crate::sync::content_hash(branch_name).chars().take(10).collect()
+    crate::sync::content_hash(branch_name)
+        .chars()
+        .take(10)
+        .collect()
 }
 
 /// Resolves the DB path for a given branch.

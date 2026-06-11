@@ -1128,7 +1128,12 @@ pub(crate) async fn timeline(
                 libsql::params![limit, params.session_id.clone()],
             )
             .await,
-            query_rows(conn, &undated_sql, libsql::params![params.session_id.clone()]).await,
+            query_rows(
+                conn,
+                &undated_sql,
+                libsql::params![params.session_id.clone()],
+            )
+            .await,
             query_rows(
                 conn,
                 &node_sql,
