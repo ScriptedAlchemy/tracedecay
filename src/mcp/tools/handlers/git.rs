@@ -36,8 +36,7 @@ pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolR
     // Pre-compute files with inline test modules for test detection.
     let files_with_inline_tests = cg
         .get_files_with_test_annotations()
-        .await
-        .unwrap_or_default();
+        .await?;
     let matches_test = |path: &str| -> bool {
         if let Some(ref g) = custom_glob {
             g.matches(path)
@@ -139,8 +138,7 @@ pub(super) async fn handle_diff_context(cg: &TokenSave, args: Value) -> Result<T
     // Pre-compute files containing inline test modules.
     let files_with_inline_tests = cg
         .get_files_with_test_annotations()
-        .await
-        .unwrap_or_default();
+        .await?;
     let has_tests =
         |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
 
@@ -656,15 +654,14 @@ pub(super) async fn handle_commit_context(cg: &TokenSave, args: Value) -> Result
     // Pre-compute files with inline test modules.
     let files_with_inline_tests = cg
         .get_files_with_test_annotations()
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let mut file_roles: Vec<Value> = Vec::new();
     let mut symbols_by_role: HashMap<&str, Vec<Value>> = HashMap::new();
 
     for file in &changed_files {
         let role = classify_file_role(file, &files_with_inline_tests);
-        let nodes = cg.get_nodes_by_file(file).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(file).await?;
         file_roles.push(json!({"file": file, "role": role, "symbols": nodes.len()}));
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
@@ -747,8 +744,7 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
     // Pre-compute files with inline test modules.
     let files_with_inline_tests = cg
         .get_files_with_test_annotations()
-        .await
-        .unwrap_or_default();
+        .await?;
     let has_tests =
         |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
 
@@ -757,7 +753,7 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
             test_files_changed.push(file.clone());
         }
 
-        let nodes = cg.get_nodes_by_file(file).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(file).await?;
 
         // Config files explode into one node per key — Cargo.toml with 50
         // dependencies blows past the response budget. Treat them as a
@@ -782,7 +778,7 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
 
             // Check if this symbol has callers outside changed files — if so, it's
             // a modification to an existing API. Otherwise it's likely new.
-            let callers = cg.get_callers(&node.id, 1).await.unwrap_or_default();
+            let callers = cg.get_callers(&node.id, 1).await?;
             let has_external_callers = callers
                 .iter()
                 .any(|(c, _)| !changed_files.contains(&c.file_path));
@@ -813,9 +809,9 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
         if has_tests(file) {
             continue;
         }
-        let nodes = cg.get_nodes_by_file(file).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(file).await?;
         for node in &nodes {
-            let impact = cg.get_impact_radius(&node.id, 2).await.unwrap_or_default();
+            let impact = cg.get_impact_radius(&node.id, 2).await?;
             for impacted in &impact.nodes {
                 if has_tests(&impacted.file_path) {
                     affected_tests.insert(impacted.file_path.clone());
@@ -1021,14 +1017,8 @@ pub(super) async fn handle_branch_diff(cg: &TokenSave, args: Value) -> Result<To
             }
         }
 
-        let base_nodes = base_cg
-            .get_nodes_by_file(file_path)
-            .await
-            .unwrap_or_default();
-        let head_nodes = head_ref
-            .get_nodes_by_file(file_path)
-            .await
-            .unwrap_or_default();
+        let base_nodes = base_cg.get_nodes_by_file(file_path).await?;
+        let head_nodes = head_ref.get_nodes_by_file(file_path).await?;
 
         // Index by qualified_name for matching
         let base_map: HashMap<&str, &crate::types::Node> = base_nodes

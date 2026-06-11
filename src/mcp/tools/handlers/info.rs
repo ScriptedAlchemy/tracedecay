@@ -64,21 +64,31 @@ pub(super) async fn handle_status(
     // any un-ingested transcript backlog from the project sessions.db.
     let session_db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
     if session_db_path.exists() {
-        if let Some(db) = crate::sessions::cursor::open_project_session_db(cg.project_root()).await
-        {
-            let ingest = db.session_ingest_health().await;
-            output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
-            if ingest.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
-            {
-                output["session_ingest_warning"] = json!(format!(
-                    "session transcript ingest looks stalled: a transcript has {} \
-                     un-ingested bytes ({} total across {} transcript(s)), exceeding \
-                     the per-transcript hook catch-up cap — session recall is missing \
-                     those turns. See `tokensave doctor --agent cursor`.",
-                    ingest.max_transcript_pending_bytes,
-                    ingest.pending_bytes,
-                    ingest.pending_transcripts
-                ));
+        match crate::sessions::cursor::open_project_session_db(cg.project_root()).await {
+            None => {
+                // The store exists but won't open — say so instead of
+                // silently dropping the section (which reads as "healthy").
+                output["session_ingest"] = json!({
+                    "status": "unavailable",
+                    "message": "session store exists but could not be opened",
+                });
+            }
+            Some(db) => {
+                let ingest = db.session_ingest_health().await;
+                output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
+                if ingest.max_transcript_pending_bytes
+                    > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+                {
+                    output["session_ingest_warning"] = json!(format!(
+                        "session transcript ingest looks stalled: a transcript has {} \
+                         un-ingested bytes ({} total across {} transcript(s)), exceeding \
+                         the per-transcript hook catch-up cap — session recall is missing \
+                         those turns. See `tokensave doctor --agent cursor`.",
+                        ingest.max_transcript_pending_bytes,
+                        ingest.pending_bytes,
+                        ingest.pending_transcripts
+                    ));
+                }
             }
         }
     }
@@ -93,8 +103,11 @@ pub(super) async fn handle_status(
         ));
     }
 
-    // File-level staleness summary (sample up to 100 files for efficiency)
-    let all_files = cg.get_all_files().await.unwrap_or_default();
+    // File-level staleness summary (sample up to 100 files for efficiency).
+    // A store failure here must surface as a tool error, not as "no stale
+    // files" — silently dropping the staleness section makes a broken store
+    // look healthy.
+    let all_files = cg.get_all_files().await?;
     let sample_paths: Vec<String> = all_files.iter().take(100).map(|f| f.path.clone()).collect();
     let stale_files = cg.check_file_staleness(&sample_paths).await;
     if !stale_files.is_empty() {
@@ -816,12 +829,14 @@ pub(super) async fn handle_simplify_scan(
     let mut coupling_warnings: Vec<Value> = Vec::new();
 
     for file in &files {
-        let nodes = cg.get_nodes_by_file(file).await.unwrap_or_default();
+        // Store errors propagate: an empty scan result must mean "no
+        // findings", never "the store query failed".
+        let nodes = cg.get_nodes_by_file(file).await?;
 
         for node in &nodes {
             // 1. Duplication: find similar symbols elsewhere
             if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
-                let similar = cg.search(&node.name, 5).await.unwrap_or_default();
+                let similar = cg.search(&node.name, 5).await?;
                 let dupes: Vec<Value> = similar
                     .iter()
                     .filter(|s| {
@@ -852,7 +867,7 @@ pub(super) async fn handle_simplify_scan(
                 && node.name != "main"
                 && !node.name.starts_with("test_")
             {
-                let incoming = cg.get_incoming_edges(&node.id).await.unwrap_or_default();
+                let incoming = cg.get_incoming_edges(&node.id).await?;
                 if incoming.is_empty() {
                     dead_introductions.push(json!({
                         "symbol": node.name,
@@ -868,8 +883,7 @@ pub(super) async fn handle_simplify_scan(
                 let lines = node.end_line.saturating_sub(node.start_line) as usize;
                 let fan_out = cg
                     .get_outgoing_edges(&node.id)
-                    .await
-                    .unwrap_or_default()
+                    .await?
                     .iter()
                     .filter(|e| matches!(e.kind, crate::types::EdgeKind::Calls))
                     .count();
@@ -888,7 +902,7 @@ pub(super) async fn handle_simplify_scan(
         }
 
         // 4. Coupling: check file fan_in
-        let file_deps = cg.get_file_dependents(file).await.unwrap_or_default();
+        let file_deps = cg.get_file_dependents(file).await?;
         if file_deps.len() > 15 {
             coupling_warnings.push(json!({
                 "file": file,
@@ -937,7 +951,7 @@ pub(super) async fn handle_type_hierarchy(cg: &TokenSave, args: Value) -> Result
     let mut all_files: Vec<String> = vec![root.file_path.clone()];
 
     // Recursively build the hierarchy
-    build_type_tree(cg, &root.id, max_depth, 0, &mut output, &mut all_files).await;
+    build_type_tree(cg, &root.id, max_depth, 0, &mut output, &mut all_files).await?;
 
     let touched_files = unique_file_paths(all_files.iter().map(std::string::String::as_str));
     Ok(ToolResult {
@@ -954,13 +968,13 @@ fn build_type_tree<'a>(
     depth: usize,
     output: &'a mut String,
     all_files: &'a mut Vec<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         if depth >= max_depth {
-            return;
+            return Ok(());
         }
 
-        let incoming = cg.get_incoming_edges(node_id).await.unwrap_or_default();
+        let incoming = cg.get_incoming_edges(node_id).await?;
         let pad = "  ".repeat(depth);
 
         for edge in &incoming {
@@ -982,9 +996,10 @@ fn build_type_tree<'a>(
                     child.start_line,
                 );
                 all_files.push(child.file_path.clone());
-                build_type_tree(cg, &child.id, max_depth, depth + 1, output, all_files).await;
+                build_type_tree(cg, &child.id, max_depth, depth + 1, output, all_files).await?;
             }
         }
+        Ok(())
     })
 }
 
@@ -1220,7 +1235,10 @@ pub(super) async fn handle_todos(
         let Ok(source) = crate::sync::read_source_file(&abs_path) else {
             continue;
         };
-        // Cache nodes per file so enclosing-symbol lookup is one DB call per file.
+        // Cache nodes per file so enclosing-symbol lookup is one DB call per
+        // file. Deliberately best-effort: the markers themselves come from
+        // reading the source, so a store failure only drops the enclosing
+        // symbol annotation — it never fakes an empty marker list.
         let nodes = cg.get_nodes_by_file(&file.path).await.unwrap_or_default();
 
         for (idx, line) in source.lines().enumerate() {

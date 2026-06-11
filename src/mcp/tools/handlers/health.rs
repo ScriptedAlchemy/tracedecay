@@ -122,10 +122,7 @@ pub(super) async fn compute_health_snapshot(
     let (modularity, modularity_components) = modularity_score(&adj);
 
     // coverage_discipline: penalise overuse of skip-test-coverage annotations.
-    let skip_coverage = cg
-        .get_skip_test_coverage_node_ids()
-        .await
-        .unwrap_or_default();
+    let skip_coverage = cg.get_skip_test_coverage_node_ids().await?;
     let skipped_in_scope = nodes
         .iter()
         .filter(|n| {
@@ -680,14 +677,8 @@ pub(super) async fn handle_test_risk(
         .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .map(|n| n.id.clone())
         .collect();
-    let test_annotated_fns = cg
-        .get_test_annotated_node_ids(&fn_ids)
-        .await
-        .unwrap_or_default();
-    let skip_coverage = cg
-        .get_skip_test_coverage_node_ids()
-        .await
-        .unwrap_or_default();
+    let test_annotated_fns = cg.get_test_annotated_node_ids(&fn_ids).await?;
+    let skip_coverage = cg.get_skip_test_coverage_node_ids().await?;
 
     // Source functions/methods (exclude test files, test-named nodes,
     // #[test]-annotated functions, functions inside #[cfg(test)] modules,
@@ -731,10 +722,7 @@ pub(super) async fn handle_test_risk(
         .filter(|e| e.kind == EdgeKind::Calls)
         .map(|e| e.source.clone())
         .collect();
-    let test_annotated_callers = cg
-        .get_test_annotated_node_ids(&call_source_ids)
-        .await
-        .unwrap_or_default();
+    let test_annotated_callers = cg.get_test_annotated_node_ids(&call_source_ids).await?;
     let mut tested: HashSet<String> = HashSet::new();
     for e in &all_edges {
         if e.kind == EdgeKind::Calls {
@@ -882,13 +870,10 @@ pub(super) async fn handle_test_map(
             continue;
         }
 
-        let callers = cg.get_callers(&node.id, 3).await.unwrap_or_default();
+        let callers = cg.get_callers(&node.id, 3).await?;
         // Batch-check which callers have #[test] annotations (inline test modules).
         let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-        let test_annotated = cg
-            .get_test_annotated_node_ids(&caller_ids)
-            .await
-            .unwrap_or_default();
+        let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
         let test_callers: Vec<Value> = callers
             .iter()
             .filter(|(n, _)| {

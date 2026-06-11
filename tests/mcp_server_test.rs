@@ -10,8 +10,10 @@ mod common;
 use common::EnvVarGuard;
 use serde_json::{json, Value};
 use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokensave::branch_meta::{save_branch_meta, BranchMeta};
 use tokensave::mcp::transport::{ChannelTransport, McpTransport};
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
@@ -1830,5 +1832,137 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         db.get_project_tokens(&project_path).await,
         total.saved_tokens,
         "lifetime counter must equal the ledger's net saving, not the gross before"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Mid-session branch switch: tool calls must reopen onto the live branch's
+// DB instead of serving the branch pinned at startup.
+// ---------------------------------------------------------------------------
+
+fn git(project: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git failed to spawn");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Drives one `tools/call` of `tokensave_search` through the JSON-RPC
+/// transport and returns the full response text for the given id.
+async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(id),
+            "tools/call",
+            json!({ "name": "tokensave_search", "arguments": { "query": query } }),
+        )],
+    )
+    .await;
+    let resp_str = responses
+        .iter()
+        .find(|r| parse_response(r)["id"] == id)
+        .unwrap_or_else(|| panic!("no response for id={id}"));
+    parse_response(resp_str)
+}
+
+#[tokio::test]
+async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+
+    // main: one committed source file, indexed into the default DB.
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() -> u32 { 1 }\n").unwrap();
+    fs::write(project.join(".gitignore"), ".tokensave/\n").unwrap();
+    git(project, &["init"]);
+    git(project, &["config", "user.email", "test@test.com"]);
+    git(project, &["config", "user.name", "Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+    git(project, &["branch", "-M", "main"]);
+
+    {
+        let cg = TokenSave::init(project).await.unwrap();
+        cg.index_all().await.unwrap();
+        cg.checkpoint().await.unwrap();
+    }
+
+    // Track main + feature, seeding feature's DB from main's.
+    let tokensave_dir = project.join(".tokensave");
+    let mut meta = BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    save_branch_meta(&tokensave_dir, &meta).unwrap();
+    fs::create_dir_all(tokensave_dir.join("branches")).unwrap();
+    fs::copy(
+        tokensave_dir.join("tokensave.db"),
+        tokensave_dir.join("branches/feature.db"),
+    )
+    .unwrap();
+
+    // feature: add a feature-only symbol and index it into feature's DB.
+    git(project, &["checkout", "-b", "feature"]);
+    fs::write(
+        project.join("src/feat.rs"),
+        "pub fn feature_only() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "feature work"]);
+    {
+        let cg = TokenSave::open(project).await.unwrap();
+        assert_eq!(cg.serving_branch(), Some("feature"));
+        cg.sync().await.unwrap();
+        cg.checkpoint().await.unwrap();
+    }
+
+    // Back on main: start the server pinned to main's DB.
+    git(project, &["checkout", "main"]);
+    let cg = TokenSave::open(project).await.unwrap();
+    assert_eq!(cg.serving_branch(), Some("main"));
+    let server = McpServer::new(cg, None).await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
+            .await,
+        "startup catch-up must settle before the mid-test checkout"
+    );
+
+    // While on main, the feature-only symbol must be invisible.
+    let resp = search_via_transport(server.clone(), 1, "feature_only").await;
+    assert!(resp["error"].is_null(), "search on main should not error");
+    assert!(
+        !resp["result"]["content"].to_string().contains("feature_only"),
+        "main's DB must not contain the feature-only symbol"
+    );
+
+    // Mid-session checkout. The next tool call must detect the drift,
+    // reopen onto feature's DB, and serve the feature-only symbol.
+    git(project, &["checkout", "feature"]);
+    let resp = search_via_transport(server.clone(), 2, "feature_only").await;
+    assert!(
+        resp["error"].is_null(),
+        "search after checkout should not error: {resp}"
+    );
+    assert!(
+        resp["result"]["content"].to_string().contains("feature_only"),
+        "after the checkout, reads must serve the feature branch's DB: {resp}"
+    );
+
+    let cg_now = server.cg().await;
+    assert_eq!(
+        cg_now.serving_branch(),
+        Some("feature"),
+        "the served instance must have been swapped onto the live branch"
+    );
+    assert!(
+        !cg_now.branch_drifted(),
+        "drift must be cleared after the reopen"
     );
 }

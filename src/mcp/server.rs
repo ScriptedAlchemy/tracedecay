@@ -287,7 +287,14 @@ struct VersionCheckState {
 /// The MCP server wrapping a `TokenSave` instance.
 // Lock ordering: file_token_map -> tool_call_counts (never nested)
 pub struct McpServer {
-    cg: TokenSave,
+    /// The served code graph. Guarded so a mid-session `git checkout` can
+    /// hot-swap the instance onto the new branch's DB
+    /// ([`Self::reopen_if_branch_drifted`]). Readers clone the `Arc` out and
+    /// drop the lock immediately — no read guard is ever held across a
+    /// handler await, so a swap never contends with in-flight calls. Calls
+    /// already running when a swap lands finish against the old snapshot;
+    /// each call is internally consistent.
+    cg: tokio::sync::RwLock<Arc<TokenSave>>,
     stats: ServerStats,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
@@ -390,7 +397,7 @@ impl McpServer {
         };
 
         let server = Arc::new(Self {
-            cg,
+            cg: tokio::sync::RwLock::new(Arc::new(cg)),
             stats: ServerStats::new(),
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             file_token_map: std::sync::Mutex::new(file_token_map),
@@ -459,8 +466,60 @@ impl McpServer {
     /// bypassing the 30 s cooldown in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
     #[doc(hidden)]
-    pub fn cg(&self) -> &TokenSave {
-        &self.cg
+    pub async fn cg(&self) -> Arc<TokenSave> {
+        self.cg_snapshot().await
+    }
+
+    /// Clones out the currently served `TokenSave` instance. The lock is
+    /// held only for the clone, never across an await on the instance.
+    async fn cg_snapshot(&self) -> Arc<TokenSave> {
+        self.cg.read().await.clone()
+    }
+
+    /// Detects mid-session branch drift and reopens the served instance
+    /// onto the live branch's DB, returning the instance the caller should
+    /// use for this request.
+    ///
+    /// Fast path: one cheap `branch_drifted` check (gix HEAD read) on the
+    /// current snapshot. On drift, the write lock serializes the swap and
+    /// the drift check is repeated under it so concurrent calls reopen at
+    /// most once. If reopening fails the previous instance is kept — the
+    /// drift guards in [`TokenSave::ensure_branch_writable`] and
+    /// [`Self::maybe_sync_if_stale`] still protect writes, exactly as
+    /// before this hot-swap existed.
+    async fn reopen_if_branch_drifted(&self) -> Arc<TokenSave> {
+        let current = self.cg_snapshot().await;
+        if !current.branch_drifted() {
+            return current;
+        }
+        let snapshot = {
+            let mut guard = self.cg.write().await;
+            if !guard.branch_drifted() {
+                // A concurrent call already swapped (or the user switched back).
+                return guard.clone();
+            }
+            match guard.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    eprintln!(
+                        "[tokensave] branch changed to '{}' — reopened the index for it",
+                        fresh.active_branch().unwrap_or("<detached>")
+                    );
+                    *guard = Arc::new(fresh);
+                    guard.clone()
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tokensave] branch drift detected but reopen failed: {e}; \
+                         continuing to serve branch '{}'",
+                        guard.serving_branch().unwrap_or("<none>")
+                    );
+                    return guard.clone();
+                }
+            }
+        };
+        // New branch DB ⇒ new file set; refresh the token accounting map.
+        self.refresh_file_token_map().await;
+        snapshot
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -494,13 +553,14 @@ impl McpServer {
             return;
         }
         let new_total = self.tokens_saved.fetch_add(delta, Ordering::Relaxed) + delta;
+        let cg = self.cg_snapshot().await;
         // Persist to DB (best-effort, don't block on failure)
-        let _ = self.cg.set_tokens_saved(new_total).await;
+        let _ = cg.set_tokens_saved(new_total).await;
         // Also increment the resettable local counter
-        let _ = self.cg.add_local_counter(delta).await;
+        let _ = cg.add_local_counter(delta).await;
         // Best-effort update to global DB
         if let Some(ref gdb) = self.global_db {
-            gdb.upsert(self.cg.project_root(), new_total).await;
+            gdb.upsert(cg.project_root(), new_total).await;
         }
     }
 
@@ -532,7 +592,7 @@ impl McpServer {
     /// tracks newly indexed / removed files.
     pub async fn refresh_file_token_map(&self) {
         // best-effort; leave stale map in place if the DB read fails
-        let Ok(fresh) = self.cg.get_file_token_map().await else {
+        let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {
             return;
         };
         if let Ok(mut guard) = self.file_token_map.lock() {
@@ -551,9 +611,10 @@ impl McpServer {
     /// The completion flag is flipped on every exit path (including
     /// errors) so [`Self::wait_for_startup_catch_up`] never hangs.
     pub async fn run_startup_catch_up_sync(&self) {
-        let stale = self.cg.find_stale_files().await;
+        let cg = self.cg_snapshot().await;
+        let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
-            if let Err(e) = self.cg.sync_if_stale_silent(&stale).await {
+            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
                 eprintln!("[tokensave] startup catch-up sync failed: {e}");
                 self.startup_catch_up_done.store(true, Ordering::Release);
                 return;
@@ -574,7 +635,7 @@ impl McpServer {
         // clone) so tests that assert on LCM store content can wait for both
         // flags via `wait_for_startup_catch_up`.
         {
-            let project_root = self.cg.project_root().to_path_buf();
+            let project_root = cg.project_root().to_path_buf();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
@@ -637,11 +698,12 @@ impl McpServer {
     /// fails, the stamp still advances — failure to walk the tree
     /// should not cause every subsequent tool call to retry.
     pub async fn maybe_sync_if_stale(&self) {
+        let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let last_sync = self.cg.last_sync_timestamp().await;
+        let last_sync = cg.last_sync_timestamp().await;
         if now.saturating_sub(last_sync) < 30 {
             return;
         }
@@ -659,20 +721,19 @@ impl McpServer {
         }
 
         // Branch-drift guard (#2): if the working tree switched branches since
-        // this server opened, the cached DB belongs to the old branch. Skip the
-        // lazy sync — `find_stale_files` would diff the new branch's files
-        // against the old branch's DB, and `ensure_branch_writable` would reject
-        // the write anyway. This self-corrects once the opened branch is checked
-        // back out; serving the correct branch DB live requires reopening the
-        // project (`TokenSave::reopen_for_current_branch`), which the owned `cg`
-        // field cannot hot-swap today.
-        if self.cg.branch_drifted() {
+        // this snapshot opened, the cached DB belongs to the old branch. Skip
+        // the lazy sync — `find_stale_files` would diff the new branch's files
+        // against the old branch's DB, and `ensure_branch_writable` would
+        // reject the write anyway. `tools/call` reopens onto the live branch
+        // via [`Self::reopen_if_branch_drifted`] *before* invoking this, so
+        // the guard only fires on a checkout racing the current call.
+        if cg.branch_drifted() {
             return;
         }
 
-        let stale = self.cg.find_stale_files().await;
+        let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
-            if let Err(e) = self.cg.sync_if_stale_silent(&stale).await {
+            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
                 eprintln!("[tokensave] lazy sync failed: {e}");
                 return;
             }
@@ -946,14 +1007,15 @@ impl McpServer {
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
         let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
 
+        let cg = self.cg_snapshot().await;
         // Persist final tokens-saved value
-        if let Err(e) = self.cg.set_tokens_saved(tokens_saved).await {
+        if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
             eprintln!("[tokensave] warning: failed to persist tokens_saved on shutdown: {e}");
         }
 
         // Update global DB with final count and checkpoint it
         if let Some(ref gdb) = self.global_db {
-            gdb.upsert(self.cg.project_root(), tokens_saved).await;
+            gdb.upsert(cg.project_root(), tokens_saved).await;
             gdb.checkpoint().await;
         }
 
@@ -977,7 +1039,7 @@ impl McpServer {
         }
 
         // Checkpoint WAL to merge it into the main database file
-        if let Err(e) = self.cg.checkpoint().await {
+        if let Err(e) = cg.checkpoint().await {
             eprintln!("[tokensave] warning: failed to checkpoint WAL on shutdown: {e}");
         }
 
@@ -1066,7 +1128,12 @@ impl McpServer {
 
     /// Handles the `tools/list` method, returning all available tool definitions.
     async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
-        let node_count = self.cg.get_stats().await.map_or(0, |s| s.node_count);
+        let node_count = self
+            .cg_snapshot()
+            .await
+            .get_stats()
+            .await
+            .map_or(0, |s| s.node_count);
         let budget = explore_call_budget(node_count);
         let tools = get_tool_definitions_with_budget(node_count, budget);
         JsonRpcResponse::success(id, json!({ "tools": tools }))
@@ -1129,7 +1196,7 @@ impl McpServer {
             "tokensave://status" => self.read_resource_status(id).await,
             "tokensave://files" => self.read_resource_files(id).await,
             "tokensave://overview" => self.read_resource_overview(id).await,
-            "tokensave://branches" => self.read_resource_branches(id),
+            "tokensave://branches" => self.read_resource_branches(id).await,
             "tokensave://schema" => Self::read_resource_schema(id),
             _ => JsonRpcResponse::error(
                 id,
@@ -1156,7 +1223,7 @@ impl McpServer {
 
     /// Returns graph statistics as a JSON resource.
     async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
-        match self.cg.get_stats().await {
+        match self.cg_snapshot().await.get_stats().await {
             Ok(stats) => {
                 let text = serde_json::to_string_pretty(&stats).unwrap_or_default();
                 JsonRpcResponse::success(
@@ -1180,7 +1247,7 @@ impl McpServer {
 
     /// Returns the file list as a text resource (grouped by directory).
     async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
-        match self.cg.get_all_files().await {
+        match self.cg_snapshot().await.get_all_files().await {
             Ok(mut files) => {
                 files.sort_by(|a, b| a.path.cmp(&b.path));
                 let mut groups: std::collections::BTreeMap<String, Vec<String>> =
@@ -1228,7 +1295,8 @@ impl McpServer {
 
     /// Returns a high-level project overview as a text resource.
     async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
-        let stats = match self.cg.get_stats().await {
+        let cg = self.cg_snapshot().await;
+        let stats = match cg.get_stats().await {
             Ok(s) => s,
             Err(e) => {
                 return JsonRpcResponse::error(
@@ -1240,7 +1308,7 @@ impl McpServer {
         };
 
         let mut lines = Vec::new();
-        lines.push(format!("Project: {}", self.cg.project_root().display()));
+        lines.push(format!("Project: {}", cg.project_root().display()));
         lines.push(format!(
             "Graph: {} nodes, {} edges, {} files",
             stats.node_count, stats.edge_count, stats.file_count
@@ -1279,9 +1347,10 @@ impl McpServer {
         )
     }
 
-    fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
-        let tokensave_dir = crate::config::get_tokensave_dir(self.cg.project_root());
-        let current = self.cg.active_branch();
+    async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
+        let cg = self.cg_snapshot().await;
+        let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
+        let current = cg.active_branch();
 
         let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tokensave_dir) {
             Some(meta) => meta
@@ -1341,6 +1410,11 @@ impl McpServer {
 
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
+        // Branch-drift hot-swap: if the working tree switched branches since
+        // the served instance opened, reopen onto the live branch's DB so
+        // this call reads the right index. Cheap no-op check when no drift.
+        let cg = self.reopen_if_branch_drifted().await;
+
         // Notification-free freshness: walk the tree and resync any stale
         // files, gated by a 30 s cooldown. Replaces the embedded watcher
         // (see McpServer::new). No-op on the hot path most of the time.
@@ -1365,7 +1439,7 @@ impl McpServer {
             None
         };
         let dispatch_outcome = handle_tool_call(
-            &self.cg,
+            &cg,
             tool_name,
             arguments,
             server_stats,
@@ -1406,7 +1480,7 @@ impl McpServer {
                 let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
                 self.persist_saved_tokens(net_saved_tokens).await;
                 crate::monitor::write_entry(
-                    self.cg.project_root(),
+                    cg.project_root(),
                     "tokensave",
                     tool_name,
                     net_saved_tokens,
@@ -1433,7 +1507,7 @@ impl McpServer {
                 // [`Self::ledger_writes_settled`] without making it awaited
                 // anywhere on the request path.
                 if let Some(gdb) = self.global_db.clone() {
-                    let project_path_str = self.cg.project_root().to_string_lossy().to_string();
+                    let project_path_str = cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();
                     self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
@@ -1483,15 +1557,15 @@ impl McpServer {
                 // Replaces the previous all-or-nothing "STALE INDEX"
                 // warning that made agents distrust the entire answer.
                 if !result.touched_files.is_empty() {
-                    let stale_files = self.cg.check_file_staleness(&result.touched_files).await;
+                    let stale_files = cg.check_file_staleness(&result.touched_files).await;
                     if !stale_files.is_empty() {
-                        let still_stale = match self.cg.sync_if_stale(&stale_files).await {
+                        let still_stale = match cg.sync_if_stale(&stale_files).await {
                             Ok(false) => false,        // sync completed; files now fresh
                             Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
                         };
                         if still_stale {
                             let banner = format_per_file_staleness_banner(
-                                self.cg.project_root(),
+                                cg.project_root(),
                                 &stale_files,
                             );
                             // Machine-readable marker. Same shape as before
@@ -1519,7 +1593,7 @@ impl McpServer {
                 }
 
                 // Warn if serving from a fallback (ancestor) branch DB.
-                if let Some(warning) = self.cg.fallback_warning() {
+                if let Some(warning) = cg.fallback_warning() {
                     let warning = format!("WARNING: {warning}");
                     if let Some(content) = result
                         .value
@@ -1537,7 +1611,7 @@ impl McpServer {
                 // so a per-file fallback fires the warning forever on quiet
                 // repos (#86).
                 {
-                    let last_time = self.cg.last_sync_timestamp().await;
+                    let last_time = cg.last_sync_timestamp().await;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()

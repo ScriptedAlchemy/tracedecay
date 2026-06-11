@@ -67,7 +67,7 @@ pub(super) async fn handle_diagnose(cg: &TokenSave, args: Value) -> Result<ToolR
         let callers_json = if include_callers {
             match &node {
                 Some(n) => {
-                    let callers = cg.get_callers(&n.id, 1).await.unwrap_or_default();
+                    let callers = cg.get_callers(&n.id, 1).await?;
                     let trimmed: Vec<Value> = callers
                         .into_iter()
                         .take(5)
@@ -185,7 +185,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
     let mut test_targets: HashMap<String, Vec<String>> = HashMap::new();
     let mut covered_sources: HashSet<String> = HashSet::new();
     for path in &changed_paths {
-        let nodes = cg.get_nodes_by_file(path).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(path).await?;
 
         // (b) Direct dispatch from changed test files.
         let path_is_test_file = is_test_file(path);
@@ -197,8 +197,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
                 .collect();
             let test_annotated_in_file = cg
                 .get_test_annotated_node_ids(&candidate_ids)
-                .await
-                .unwrap_or_default();
+                .await?;
             for node in &nodes {
                 if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
                     continue;
@@ -224,12 +223,11 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
             if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
                 continue;
             }
-            let callers = cg.get_callers(&node.id, 3).await.unwrap_or_default();
+            let callers = cg.get_callers(&node.id, 3).await?;
             let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
             let test_annotated = cg
                 .get_test_annotated_node_ids(&caller_ids)
-                .await
-                .unwrap_or_default();
+                .await?;
             for (caller, _) in callers {
                 if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
                     continue;

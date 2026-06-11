@@ -8112,12 +8112,13 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     // doesn't have to wait through the 30 s cooldown gate in
     // `maybe_sync_if_stale`.
     std::fs::write(project.join("b.rs"), "fn b() {}").unwrap();
-    let stale = server.cg().find_stale_files().await;
+    let server_cg = server.cg().await;
+    let stale = server_cg.find_stale_files().await;
     assert!(
         !stale.is_empty(),
         "find_stale_files should detect newly written b.rs"
     );
-    server.cg().sync_if_stale_silent(&stale).await.unwrap();
+    server_cg.sync_if_stale_silent(&stale).await.unwrap();
     let mut after_count = initial_count;
     for _ in 0..10 {
         server.refresh_file_token_map().await;
@@ -8750,4 +8751,59 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     );
 
     server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Store failures must surface as tool errors, not silent empty results
+// (cross-cutting audit: silent-empty handlers). Breaking the `edges` table
+// out from under the open connection makes every edge query fail while
+// node/file queries keep working — exactly the partial-store-failure case
+// the old `unwrap_or_default()` calls papered over as "no data".
+// ---------------------------------------------------------------------------
+
+/// Renames the `edges` table so every edge query on the open connection
+/// fails while node and file queries keep working.
+async fn break_edges_table(cg: &TokenSave) {
+    cg.db()
+        .conn()
+        .execute("ALTER TABLE edges RENAME TO edges_broken", ())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
+    let (cg, _dir) = setup_project().await;
+    break_edges_table(&cg).await;
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_simplify_scan",
+        json!({"files": ["src/utils.rs"]}),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a failing store query must produce a tool error, not an empty findings list"
+    );
+}
+
+#[tokio::test]
+async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
+    let (cg, _dir) = setup_project().await;
+    let node_id = find_node_id(&cg, "helper").await;
+    break_edges_table(&cg).await;
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_type_hierarchy",
+        json!({"node_id": node_id}),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a failing store query must produce a tool error, not an empty hierarchy"
+    );
 }

@@ -1420,7 +1420,7 @@ pub(super) async fn handle_unsafe_patterns(
         let Ok(source) = crate::sync::read_source_file(&abs_path) else {
             continue;
         };
-        let nodes = cg.get_nodes_by_file(&file.path).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(&file.path).await?;
 
         for (idx, line) in source.lines().enumerate() {
             let line_no = (idx as u32) + 1;
@@ -1529,7 +1529,7 @@ pub(super) async fn handle_diagnostics(cg: &TokenSave, args: Value) -> Result<To
         let nodes = if let Some(n) = nodes_by_file.get(&diag.file) {
             n
         } else {
-            let fetched = cg.get_nodes_by_file(&diag.file).await.unwrap_or_default();
+            let fetched = cg.get_nodes_by_file(&diag.file).await?;
             nodes_by_file.entry(diag.file.clone()).or_insert(fetched)
         };
         let enclosing = nodes
@@ -2003,7 +2003,7 @@ pub(super) async fn handle_field_sites(
         let Ok(source) = crate::sync::read_source_file(&abs) else {
             continue;
         };
-        let nodes = cg.get_nodes_by_file(&file.path).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(&file.path).await?;
 
         for site in find_field_references(&source, &field_name) {
             let line_text = line_at(&source, site.byte).unwrap_or("");

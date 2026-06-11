@@ -166,7 +166,7 @@ pub(super) async fn handle_context(
             if matches!(node.kind, NodeKind::Trait | NodeKind::Interface)
                 && node.visibility == Visibility::Pub
             {
-                let implementors = cg.get_callers(&node.id, 1).await.unwrap_or_default();
+                let implementors = cg.get_callers(&node.id, 1).await?;
                 let impl_count = implementors
                     .iter()
                     .filter(|(_, e)| matches!(e.kind, crate::types::EdgeKind::Implements))
@@ -200,15 +200,14 @@ pub(super) async fn handle_context(
             output.push_str("\n### Test Coverage\n");
             let mut test_files: HashSet<String> = HashSet::new();
             for file in &file_paths {
-                let nodes = cg.get_nodes_by_file(file).await.unwrap_or_default();
+                let nodes = cg.get_nodes_by_file(file).await?;
                 for node in &nodes {
-                    let callers = cg.get_callers(&node.id, 2).await.unwrap_or_default();
+                    let callers = cg.get_callers(&node.id, 2).await?;
                     let caller_ids: Vec<String> =
                         callers.iter().map(|(n, _)| n.id.clone()).collect();
                     let test_annotated = cg
                         .get_test_annotated_node_ids(&caller_ids)
-                        .await
-                        .unwrap_or_default();
+                        .await?;
                     for (caller, _) in &callers {
                         if crate::tokensave::is_test_file(&caller.file_path)
                             || test_annotated.contains(&caller.id)
@@ -573,8 +572,7 @@ pub(super) async fn handle_node(cg: &TokenSave, args: Value) -> Result<ToolResul
                     | NodeKind::PascalRecord
             ) {
                 cg.get_derives_for_node(&n.id)
-                    .await
-                    .unwrap_or_default()
+                    .await?
                     .into_iter()
                     .map(|name| {
                         let look = crate::derive_table::enrich(&name);
