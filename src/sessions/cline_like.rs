@@ -5,7 +5,8 @@
 //!
 //! * `api_conversation_history.json` (or Roo's `api_messages.json`) - the
 //!   Anthropic-compatible conversation sent to/received from the model.
-//! * `ui_messages.json` - webview-oriented messages.
+//! * `ui_messages.json` - webview-oriented messages; `say`/`api_req_started`
+//!   events carry token counters in the `text` JSON payload.
 //! * `task_metadata.json` / `history_item.json` - task metadata.
 //!
 //! The API conversation file is a **full-rewrite** JSON array, so the source uses
@@ -15,15 +16,20 @@
 //! resolves to the current tokensave project root.
 
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::sessions::source::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    read_changed_file, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
+    read_changed_with_companion, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
     TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
+
+/// Cap task-directory scans so a long VS Code globalStorage history cannot
+/// block dashboard startup.
+const MAX_TASK_DIRS_PER_ROOT: usize = 512;
 
 /// One Cline-family provider configuration.
 #[derive(Clone)]
@@ -90,21 +96,7 @@ impl TranscriptSource for ClineLikeSource {
     fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for root in &self.storage_roots {
-            let Ok(entries) = std::fs::read_dir(root) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let task_dir = entry.path();
-                if !task_dir.is_dir() {
-                    continue;
-                }
-                for name in ["api_conversation_history.json", "api_messages.json"] {
-                    let path = task_dir.join(name);
-                    if path.is_file() {
-                        out.push(path);
-                    }
-                }
-            }
+            out.extend(collect_task_api_paths(root));
         }
         out
     }
@@ -122,17 +114,31 @@ impl TranscriptSource for ClineLikeSource {
             return None;
         }
 
-        let changed = read_changed_file(path, prev)?;
+        let ui_path = task_dir.join("ui_messages.json");
+        let changed = read_changed_with_companion(path, &ui_path, prev)?;
         let document: Value = serde_json::from_str(&changed.contents).ok()?;
         let entries = document.as_array()?;
         let task_id = task_dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
+        let usage_by_assistant = usage_counters_by_assistant_index(&ui_path);
 
         let mut messages = Vec::new();
+        let mut assistant_index = 0_usize;
         for (index, entry) in entries.iter().enumerate() {
-            if let Some(message) = message_from_entry(self.provider, entry, task_id, path, index) {
+            let usage = if entry.get("role").and_then(Value::as_str) == Some("assistant")
+                || entry.get("role").and_then(Value::as_str) == Some("model")
+            {
+                let usage = usage_by_assistant.get(assistant_index).cloned();
+                assistant_index += 1;
+                usage
+            } else {
+                None
+            };
+            if let Some(message) =
+                message_from_entry(self.provider, entry, task_id, path, index, usage.as_ref())
+            {
                 messages.push(message);
             }
         }
@@ -160,6 +166,41 @@ impl TranscriptSource for ClineLikeSource {
             new_cursor: changed.new_cursor,
         })
     }
+}
+
+fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut task_dirs: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs());
+            Some((mtime, path))
+        })
+        .collect();
+    task_dirs.sort_by_key(|b| std::cmp::Reverse(b.0));
+    task_dirs.truncate(MAX_TASK_DIRS_PER_ROOT);
+
+    let mut out = Vec::new();
+    for (_, task_dir) in task_dirs {
+        for name in ["api_conversation_history.json", "api_messages.json"] {
+            let path = task_dir.join(name);
+            if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 fn read_task_metadata(task_dir: &Path) -> Option<Value> {
@@ -226,12 +267,92 @@ fn metadata_task_title(metadata: &Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Ordered usage counters extracted from `ui_messages.json` `api_req_started`
+/// events — one entry per assistant turn, in file order.
+fn usage_counters_by_assistant_index(ui_path: &Path) -> Vec<Value> {
+    let Ok(contents) = std::fs::read_to_string(ui_path) else {
+        return Vec::new();
+    };
+    let Ok(events) = serde_json::from_str::<Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(events) = events.as_array() else {
+        return Vec::new();
+    };
+
+    events
+        .iter()
+        .filter_map(|event| {
+            if event.get("type").and_then(Value::as_str) != Some("say") {
+                return None;
+            }
+            if event.get("say").and_then(Value::as_str) != Some("api_req_started") {
+                return None;
+            }
+            let text = event.get("text").and_then(Value::as_str)?;
+            usage_from_api_req_started(text)
+        })
+        .collect()
+}
+
+fn usage_from_api_req_started(text: &str) -> Option<Value> {
+    let payload: Value = serde_json::from_str(text).ok()?;
+    let mut counters = Map::new();
+    map_counter(
+        &mut counters,
+        "input_tokens",
+        &payload,
+        &["tokensIn", "tokens_in"],
+    );
+    map_counter(
+        &mut counters,
+        "output_tokens",
+        &payload,
+        &["tokensOut", "tokens_out"],
+    );
+    map_counter(
+        &mut counters,
+        "cache_read_input_tokens",
+        &payload,
+        &["cacheReads", "cache_reads"],
+    );
+    map_counter(
+        &mut counters,
+        "cache_creation_input_tokens",
+        &payload,
+        &["cacheWrites", "cache_writes"],
+    );
+    if let Some(total) = payload
+        .get("totalTokens")
+        .or_else(|| payload.get("total_tokens"))
+        .and_then(Value::as_i64)
+    {
+        counters.insert("total_tokens".to_string(), Value::from(total));
+    }
+    (!counters.is_empty()).then_some(Value::Object(counters))
+}
+
+fn map_counter(
+    counters: &mut Map<String, Value>,
+    target_key: &str,
+    payload: &Value,
+    source_keys: &[&str],
+) {
+    for key in source_keys {
+        if let Some(count) = payload.get(*key).and_then(Value::as_i64) {
+            counters.insert(target_key.to_string(), Value::from(count));
+            return;
+        }
+    }
+}
+
 fn message_from_entry(
     provider: &str,
     entry: &Value,
     task_id: &str,
     path: &Path,
     index: usize,
+    ui_usage: Option<&Value>,
 ) -> Option<SessionMessageRecord> {
     let role = match entry.get("role").and_then(Value::as_str)? {
         "user" => "user",
@@ -275,21 +396,21 @@ fn message_from_entry(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(index as i64),
-        metadata_json: serde_json::to_string(&message_metadata(provider, entry)).ok(),
+        metadata_json: serde_json::to_string(&message_metadata(provider, entry, ui_usage)).ok(),
     })
 }
 
-fn message_metadata(provider: &str, entry: &Value) -> Value {
+fn message_metadata(provider: &str, entry: &Value, ui_usage: Option<&Value>) -> Value {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String(format!("{provider}_task_history")),
     );
     append_tool_calls_metadata(&mut metadata, entry);
-    // The api_conversation_history file is the raw Anthropic-API message
-    // array and normally carries no counters (usage lives in ui_messages.json,
-    // which this source does not read); the probe catches forks that embed
-    // a `usage` object on the entry.
-    append_usage_metadata(&mut metadata, &[entry]);
+    if let Some(usage) = ui_usage {
+        metadata.insert("usage".to_string(), usage.clone());
+    } else {
+        append_usage_metadata(&mut metadata, &[entry]);
+    }
     Value::Object(metadata)
 }

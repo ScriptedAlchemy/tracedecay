@@ -9,6 +9,7 @@ pub mod claude;
 pub mod cline_like;
 pub mod codex;
 pub mod cursor;
+pub mod kiro;
 pub mod lcm;
 pub mod source;
 pub(crate) mod transcript_backfill;
@@ -38,6 +39,9 @@ pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> Transc
         sources.push(Box::new(source));
     }
     if let Some(source) = cline_like::ClineLikeSource::kilo() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = kiro::KiroSource::new() {
         sources.push(Box::new(source));
     }
     ingest_sources(db, project_root, &sources).await

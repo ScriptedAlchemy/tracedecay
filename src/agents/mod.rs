@@ -966,6 +966,32 @@ pub fn copilot_cli_dir(home: &Path) -> PathBuf {
     home.join(".copilot")
 }
 
+/// Returns the Kiro IDE user data directory (VS Code-style layout).
+pub fn kiro_data_dir(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Kiro")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        home.join(".config/Kiro")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_path = PathBuf::from(&appdata);
+            if appdata_path.starts_with(home) {
+                return appdata_path.join("Kiro");
+            }
+        }
+        home.join("AppData/Roaming/Kiro")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        home.join(".config/Kiro")
+    }
+}
+
 /// Returns agent IDs that have tokensave configured under `home` but are
 /// absent from `current`. Pure — does no I/O on the config file.
 pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<String> {

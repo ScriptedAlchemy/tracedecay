@@ -1488,9 +1488,17 @@ pub async fn hook_prompt_submit() {
 /// Kiro `userPromptSubmit` hook handler.
 ///
 /// Kiro adds successful hook stdout to context, so this handler stays silent.
+/// Resets the per-turn counter and runs a bounded catch-up ingest of Kiro IDE
+/// transcripts for the resolved workspace.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     reset_counter_for_kiro_event(&event).await;
+    ingest_kiro_transcript_for_event(
+        &event,
+        Some(KIRO_HOT_INGEST_MAX_BYTES),
+        KIRO_HOT_INGEST_BUDGET,
+    )
+    .await;
     0
 }
 
@@ -1517,6 +1525,31 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
     if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
         let _ = cg.reset_local_counter().await;
     }
+}
+
+/// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
+const KIRO_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
+/// Wall-clock budget for the Kiro prompt-submit catch-up ingest.
+const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// Incrementally ingests Kiro IDE transcripts for the workspace referenced by
+/// `event_json`. Always fails open.
+async fn ingest_kiro_transcript_for_event(
+    event_json: &str,
+    max_new_bytes: Option<u64>,
+    budget: std::time::Duration,
+) {
+    let work = async {
+        let Some(project_root) = kiro_project_root(event_json) else {
+            return;
+        };
+        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+            return;
+        };
+        let _ =
+            crate::sessions::kiro::ingest_kiro_for_project(&db, &project_root, max_new_bytes).await;
+    };
+    let _ = tokio::time::timeout(budget, work).await;
 }
 
 async fn reset_counter_for_cursor_event(event_json: &str) {

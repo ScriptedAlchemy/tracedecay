@@ -57,6 +57,25 @@ fn write_task(
         .unwrap(),
     )
     .unwrap();
+    std::fs::write(
+        dir.join("ui_messages.json"),
+        serde_json::to_string_pretty(&serde_json::json!([
+            {
+                "type": "say",
+                "say": "api_req_started",
+                "ts": 1_800_000_005_i64,
+                "text": serde_json::json!({
+                    "tokensIn": 1200,
+                    "tokensOut": 350,
+                    "cacheReads": 8000,
+                    "cacheWrites": 500,
+                    "cost": 0.12
+                }).to_string()
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
     api
 }
 
@@ -92,6 +111,12 @@ async fn assert_provider_ingests(
         .iter()
         .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
         .expect("assistant tool-use message should be searchable");
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["usage"]["input_tokens"], 1200);
+    assert_eq!(metadata["usage"]["output_tokens"], 350);
+    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
+    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
         {"type": "tool_use", "name": "read_file"}
@@ -172,6 +197,74 @@ async fn kilo_task_history_populates_searchable_messages() {
         &project,
     )
     .await;
+}
+
+#[tokio::test]
+async fn cline_ui_messages_only_change_triggers_usage_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let api = write_task(
+        &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+        &project,
+        "cline-ui-usage",
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home);
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        2
+    );
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        0
+    );
+
+    let ui_path = api.parent().unwrap().join("ui_messages.json");
+    std::fs::write(
+        &ui_path,
+        serde_json::to_string_pretty(&serde_json::json!([
+            {
+                "type": "say",
+                "say": "api_req_started",
+                "ts": 1_800_000_005_i64,
+                "text": serde_json::json!({
+                    "tokensIn": 2200,
+                    "tokensOut": 450,
+                    "cacheReads": 9000,
+                    "cacheWrites": 600
+                }).to_string()
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        2
+    );
+    let results = db
+        .search_session_messages(
+            "cline",
+            Some(project.to_string_lossy().as_ref()),
+            "billing",
+            10,
+        )
+        .await;
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .expect("assistant message");
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["usage"]["input_tokens"], 2200);
 }
 
 #[tokio::test]

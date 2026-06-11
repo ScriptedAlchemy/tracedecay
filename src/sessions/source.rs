@@ -382,6 +382,51 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor) -> Option<ChangedFile>
     })
 }
 
+/// Like [`read_changed_file`], but treats `primary` as changed when either its
+/// own content hash moves or a companion sidecar file's hash moves. The stored
+/// cursor's `position` is a combined hash of both files so a sidecar-only
+/// update (e.g. Cline `ui_messages.json` usage counters) triggers a re-ingest.
+pub(crate) fn read_changed_with_companion(
+    primary: &Path,
+    companion: &Path,
+    prev: StoredCursor,
+) -> Option<ChangedFile> {
+    let meta = std::fs::metadata(primary).ok()?;
+    let mtime = file_mtime_secs(&meta);
+    let contents = std::fs::read_to_string(primary).ok()?;
+    let primary_hash = content_hash64(&contents);
+    let (companion_hash, companion_mtime) = companion
+        .is_file()
+        .then(|| {
+            let companion_meta = std::fs::metadata(companion).ok()?;
+            let companion_contents = std::fs::read_to_string(companion).ok()?;
+            Some((
+                content_hash64(&companion_contents),
+                file_mtime_secs(&companion_meta),
+            ))
+        })
+        .flatten()
+        .unwrap_or((0, 0));
+    let combined_hash = content_hash64(&format!("{primary_hash:016x}:{companion_hash:016x}"));
+    let combined_mtime = mtime.max(companion_mtime);
+
+    if prev.position == combined_hash
+        && prev.mtime == combined_mtime
+        && (prev.position != 0 || prev.mtime != 0)
+    {
+        return None;
+    }
+
+    Some(ChangedFile {
+        contents,
+        new_cursor: StoredCursor {
+            position: combined_hash,
+            mtime: combined_mtime,
+            file_id: 0,
+        },
+    })
+}
+
 /// Mapped rows read past the stored cursor, plus the advanced cursor.
 pub struct NewRows<T> {
     pub items: Vec<T>,
@@ -531,7 +576,7 @@ fn jsonl_head_fingerprint(path: &Path) -> Option<u64> {
 
 /// Stable 64-bit content hash prefix suitable for the existing integer
 /// `parse_offsets.byte_offset` column.
-fn content_hash64(contents: &str) -> u64 {
+pub(crate) fn content_hash64(contents: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());
     let digest = hasher.finalize();
