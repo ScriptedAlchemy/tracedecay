@@ -222,7 +222,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-suffix: hermes-${{ env.HERMES_UPSTREAM_REF }}
