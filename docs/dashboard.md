@@ -115,6 +115,15 @@ becomes the default `TOKENSAVE_DASHBOARD_PROJECT`. The environment variables
 below still win at runtime. Reinstalls preserve the pin; pass
 `--no-dashboard` to skip the dashboard deploy (and remove a previous one).
 
+To refresh the deployed page after upgrading tokensave without touching any
+Hermes configuration, run `tokensave update-plugin`: it rewrites the
+generated plugin files and the dashboard page (re-baking the binary path and
+re-reading the existing pin from `config.yaml`) for every detected install —
+default profile, every `~/.hermes/profiles/*`, a `HERMES_HOME` override, and
+a project-local `.hermes` in the current directory — while leaving every
+`config.yaml` byte-for-byte intact. Profiles installed with `--no-dashboard`
+stay dashboard-free.
+
 On Hermes versions that predate dashboard-plugin discovery the deployed
 directory is inert — the agent-plugin loader only reads `plugin.yaml` and
 ignores `dashboard/`.

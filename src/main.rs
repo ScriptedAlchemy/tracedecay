@@ -910,6 +910,66 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 user_cfg.save();
             }
         }
+        Commands::UpdatePlugin => {
+            let home = tokensave::agents::home_dir().ok_or_else(|| {
+                tokensave::errors::TokenSaveError::Config {
+                    message: "could not determine home directory".to_string(),
+                }
+            })?;
+            let tokensave_bin = tokensave::agents::which_tokensave().ok_or_else(|| {
+                tokensave::errors::TokenSaveError::Config {
+                    message: "tokensave not found on PATH".to_string(),
+                }
+            })?;
+            eprintln!("Refreshing tokensave-generated plugin artifacts (agent configs are not touched)");
+
+            // Detection-driven, not `installed_agents`-driven: each
+            // integration decides whether generated artifacts exist on this
+            // machine, so stale tracking state can neither skip a real
+            // install nor install anywhere new.
+            let mut refreshed_any = false;
+            let mut config_only_installed: Vec<&'static str> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
+            for ag in tokensave::agents::all_integrations() {
+                let ctx = tokensave::agents::InstallContext {
+                    home: home.clone(),
+                    tokensave_bin: tokensave_bin.clone(),
+                    tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: None,
+                    project_root: None,
+                    dashboard: true,
+                };
+                match ag.update_plugin(&ctx) {
+                    Ok(tokensave::agents::UpdatePluginOutcome::Refreshed(paths)) => {
+                        refreshed_any = true;
+                        for path in paths {
+                            eprintln!("  \x1b[32m✔\x1b[0m {}: refreshed {}", ag.id(), path.display());
+                        }
+                    }
+                    Ok(tokensave::agents::UpdatePluginOutcome::NotInstalled) => {}
+                    Ok(tokensave::agents::UpdatePluginOutcome::ConfigOnly) => {
+                        if ag.has_tokensave(&home) {
+                            config_only_installed.push(ag.id());
+                        }
+                    }
+                    Err(e) => failures.push(format!("{}: {e}", ag.id())),
+                }
+            }
+            if !config_only_installed.is_empty() {
+                eprintln!(
+                    "  Config-managed integrations left untouched: {} (run `tokensave reinstall` to refresh their config entries)",
+                    config_only_installed.join(", ")
+                );
+            }
+            if !refreshed_any {
+                eprintln!("No generated plugin installs detected — nothing to update.");
+            }
+            if !failures.is_empty() {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: format!("update-plugin failed for {}", failures.join("; ")),
+                });
+            }
+        }
         Commands::Uninstall {
             agent,
             profile,
@@ -1437,6 +1497,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
         command,
         Commands::Install { .. }
             | Commands::Reinstall
+            | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
             | Commands::HookPreToolUse
@@ -1478,6 +1539,9 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     can blow that budget, so it must stay off `serve`.
     //   - `Install` / `Reinstall`: already perform installation — don't
     //     double-install as an implicit prelude to the explicit command.
+    //   - `UpdatePlugin`: guarantees that agent config files are not written;
+    //     an implicit silent reinstall beforehand would rewrite configs and
+    //     break that contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
     //   - `Doctor`: a read-only diagnostic — must not mutate agent configs as
@@ -1490,6 +1554,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
         Commands::Serve { .. }
             | Commands::Install { .. }
             | Commands::Reinstall
+            | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
             | Commands::Tool { .. }
@@ -1523,6 +1588,7 @@ mod startup_tests {
             no_dashboard: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
+        assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
         assert!(should_skip_startup_maintenance(&Commands::Uninstall {
             agent: Some("kiro".to_string()),
             profile: None,
@@ -1559,6 +1625,11 @@ mod startup_tests {
             no_dashboard: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
+        // `update-plugin` promises byte-identical configs; the implicit
+        // silent-reinstall prelude would rewrite them.
+        assert!(should_skip_agent_install_maintenance(
+            &Commands::UpdatePlugin
+        ));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
             project: None,
             name: Some("message_search".to_string()),

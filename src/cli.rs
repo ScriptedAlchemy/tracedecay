@@ -111,6 +111,17 @@ pub enum Commands {
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
+    /// Refresh generated plugin code/assets for detected installs without
+    /// touching agent config files.
+    ///
+    /// Rewrites only tokensave-generated artifacts — the Hermes plugin
+    /// (.py files, schemas.json, dashboard page) for every detected profile,
+    /// the Cursor plugin bundle, and the Kiro managed agent — re-baking the
+    /// current binary path and version. Config files (Hermes config.yaml and
+    /// its project_root pin, mcp.json, settings, prompt rules) are left
+    /// byte-for-byte intact; use `tokensave reinstall` to refresh those.
+    #[command(name = "update-plugin", visible_alias = "update-plugins")]
+    UpdatePlugin,
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(name = "uninstall", visible_alias = "claude-uninstall")]
     Uninstall {

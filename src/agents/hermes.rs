@@ -11,6 +11,7 @@ use crate::mcp::tools::get_tool_definitions;
 
 use super::{
     backup_config_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    UpdatePluginOutcome,
 };
 
 /// Hermes agent.
@@ -64,6 +65,15 @@ impl AgentIntegration for HermesIntegration {
             );
         }
         Ok(())
+    }
+
+    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        let refreshed = update_plugin_artifacts(&ctx.home, &ctx.tokensave_bin)?;
+        if refreshed.is_empty() {
+            Ok(UpdatePluginOutcome::NotInstalled)
+        } else {
+            Ok(UpdatePluginOutcome::Refreshed(refreshed))
+        }
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -291,24 +301,7 @@ fn install_plugin(
         Some(path) => Some(path.display().to_string()),
         None => effective_pinned_project_root(plugin_dir),
     };
-    std::fs::create_dir_all(plugin_dir).map_err(|e| TokenSaveError::Config {
-        message: format!("failed to create {}: {e}", plugin_dir.display()),
-    })?;
-    std::fs::create_dir_all(plugin_dir.join("skills/tokensave")).map_err(|e| {
-        TokenSaveError::Config {
-            message: format!(
-                "failed to create {}: {e}",
-                plugin_dir.join("skills/tokensave").display()
-            ),
-        }
-    })?;
-
-    write_text_file(&plugin_dir.join("plugin.yaml"), &plugin_manifest())?;
-    write_text_file(&plugin_dir.join("schemas.py"), &plugin_schemas())?;
-    write_text_file(&plugin_dir.join("schemas.json"), &plugin_schemas_json()?)?;
-    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tokensave_bin))?;
-    write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
-    write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)?;
+    write_plugin_files(plugin_dir, tokensave_bin)?;
     // The dashboard plugin page is part of the default install; the
     // `--no-dashboard` opt-out also removes a previously deployed page so
     // the flag is a real toggle rather than install-order dependent.
@@ -331,6 +324,88 @@ fn install_plugin(
         plugin_dir.display()
     );
     Ok(())
+}
+
+/// Writes the generated agent-plugin files (manifest, schemas, tools,
+/// entrypoint, skill). Shared by `install_plugin` and the config-preserving
+/// `update_plugin_artifacts` path; never touches config.yaml.
+fn write_plugin_files(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
+    std::fs::create_dir_all(plugin_dir).map_err(|e| TokenSaveError::Config {
+        message: format!("failed to create {}: {e}", plugin_dir.display()),
+    })?;
+    std::fs::create_dir_all(plugin_dir.join("skills/tokensave")).map_err(|e| {
+        TokenSaveError::Config {
+            message: format!(
+                "failed to create {}: {e}",
+                plugin_dir.join("skills/tokensave").display()
+            ),
+        }
+    })?;
+
+    write_text_file(&plugin_dir.join("plugin.yaml"), &plugin_manifest())?;
+    write_text_file(&plugin_dir.join("schemas.py"), &plugin_schemas())?;
+    write_text_file(&plugin_dir.join("schemas.json"), &plugin_schemas_json()?)?;
+    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tokensave_bin))?;
+    write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
+    write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)
+}
+
+/// Refreshes generated plugin artifacts for every detected Hermes install
+/// without writing to any config.yaml.
+///
+/// Detection covers the default profile (`~/.hermes`), every named profile
+/// (`~/.hermes/profiles/*`), a `HERMES_HOME` override, and a project-local
+/// `.hermes` in the current directory — a plugin install is "detected" when
+/// its generated `plugin.yaml` exists. For each install the existing
+/// `plugins.tokensave.project_root` pin is *read* from the profile config
+/// and re-baked into the refreshed dashboard deploy; the dashboard page is
+/// refreshed only where one is already deployed, so a `--no-dashboard`
+/// choice sticks.
+fn update_plugin_artifacts(home: &Path, tokensave_bin: &str) -> Result<Vec<PathBuf>> {
+    let mut refreshed = Vec::new();
+    for plugin_dir in detected_plugin_dirs(home) {
+        let pinned_project_root = effective_pinned_project_root(&plugin_dir);
+        write_plugin_files(&plugin_dir, tokensave_bin)?;
+        if plugin_dir.join("dashboard/manifest.json").is_file() {
+            super::hermes_dashboard::install_dashboard(
+                &plugin_dir,
+                tokensave_bin,
+                pinned_project_root.as_deref(),
+            )?;
+        }
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Refreshed Hermes tokensave plugin at {}",
+            plugin_dir.display()
+        );
+        refreshed.push(plugin_dir);
+    }
+    Ok(refreshed)
+}
+
+/// Plugin directories with a detected generated install (a `plugin.yaml`
+/// manifest), deduplicated across the default profile, named profiles,
+/// `HERMES_HOME`, and the current directory's project-local `.hermes`.
+fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![hermes_home(home)];
+    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
+        if !env_home.is_empty() {
+            roots.push(PathBuf::from(env_home));
+        }
+    }
+    roots.extend(hermes_profile_dirs(home));
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd.join(".hermes"));
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    roots
+        .into_iter()
+        .filter_map(|root| {
+            let plugin_dir = root.join("plugins/tokensave");
+            (plugin_dir.join("plugin.yaml").is_file() && seen.insert(plugin_dir.clone()))
+                .then_some(plugin_dir)
+        })
+        .collect()
 }
 
 fn enable_plugin(config_path: &Path, pinned_project_root: Option<&str>) -> Result<bool> {

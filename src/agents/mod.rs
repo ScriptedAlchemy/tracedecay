@@ -95,6 +95,20 @@ pub trait AgentIntegration {
         Box::pin(std::future::ready(()))
     }
 
+    /// Refresh tokensave-generated artifacts (plugin code, baked binary
+    /// paths, embedded assets) for every *detected* existing installation,
+    /// without writing to any agent config file. Pins, MCP registrations,
+    /// settings, and prompt rules are left byte-for-byte intact.
+    ///
+    /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
+    /// keep their entire tokensave integration inside shared config files
+    /// (MCP entries, hook blocks, prompt rules), so there is nothing to
+    /// refresh that would not be a config write — `tokensave reinstall`
+    /// remains the path that reconciles those.
+    fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        Ok(UpdatePluginOutcome::ConfigOnly)
+    }
+
     /// Remove everything installed by [`AgentIntegration::install`].
     fn uninstall(&self, ctx: &InstallContext) -> Result<()>;
 
@@ -124,6 +138,18 @@ pub trait AgentIntegration {
     fn primary_config_path(&self, _home: &Path) -> Option<PathBuf> {
         None
     }
+}
+
+/// Outcome of [`AgentIntegration::update_plugin`].
+pub enum UpdatePluginOutcome {
+    /// Generated artifacts were refreshed at these locations.
+    Refreshed(Vec<PathBuf>),
+    /// The integration ships generated artifacts, but none were detected on
+    /// this machine — nothing was written.
+    NotInstalled,
+    /// The integration only writes shared config files; there are no
+    /// tokensave-generated artifacts to refresh without touching config.
+    ConfigOnly,
 }
 
 /// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].

@@ -13,7 +13,7 @@ use crate::errors::{Result, TokenSaveError};
 
 use super::{
     backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
 };
 
 /// Cursor agent.
@@ -76,6 +76,21 @@ impl AgentIntegration for CursorIntegration {
         project_path: Option<&'a Path>,
     ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(track_branch_after_install(project_path))
+    }
+
+    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        // The whole plugin directory is a tokensave-generated bundle (its
+        // mcp.json / hooks.json are rendered artifacts, not user config), so
+        // refreshing it is exactly the install path. User config such as
+        // `~/.cursor/mcp.json` is never written by `install_cursor_plugin`,
+        // and unmanaged files inside the plugin dir are preserved.
+        if !cursor_plugin_manifest_path(&ctx.home).exists() {
+            return Ok(UpdatePluginOutcome::NotInstalled);
+        }
+        install_cursor_plugin(&ctx.home, &ctx.tokensave_bin)?;
+        Ok(UpdatePluginOutcome::Refreshed(vec![
+            cursor_plugin_install_dir(&ctx.home),
+        ]))
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
