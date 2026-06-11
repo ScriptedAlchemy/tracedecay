@@ -635,7 +635,7 @@ fn dashboard_reports_resolved_branch_db_path() {
         };
         let expected = cg.db_path().display().to_string();
         assert!(
-            expected.contains(".tokensave/branches/"),
+            expected.replace('\\', "/").contains(".tokensave/branches/"),
             "fixture should serve a branch DB path, got {expected}"
         );
 
@@ -1478,7 +1478,9 @@ fn lcm_serves_project_session_store_without_global_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected capabilities.lcm_db string"));
         assert!(
-            lcm_db.ends_with(".tokensave/sessions.db"),
+            lcm_db
+                .replace('\\', "/")
+                .ends_with(".tokensave/sessions.db"),
             "capabilities.lcm_db should be the project session store, got {lcm_db}"
         );
 
@@ -1496,7 +1498,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            path.ends_with(".tokensave/sessions.db"),
+            path.replace('\\', "/").ends_with(".tokensave/sessions.db"),
             "overview.path should be the project session store, got {path}"
         );
 
