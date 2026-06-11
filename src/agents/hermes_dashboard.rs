@@ -26,7 +26,7 @@ use super::hermes::write_text_file;
 
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
 const MANIFEST_JSON: &str = include_str!("../../dashboard/hermes-wrapper/manifest.json");
-/// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/hermes-intelligence/`.
+/// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/tokensave/`.
 const PLUGIN_API_PY: &str = include_str!("../../dashboard/hermes-wrapper/plugin_api.py");
 /// Wrapper entry bundle (deployed as `dist/index.js`; plain JS, no build step).
 const WRAPPER_ENTRY_JS: &str = include_str!("../../dashboard/hermes-wrapper/src/entry.js");
@@ -189,7 +189,8 @@ mod tests {
         let manifest = manifest_json().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(parsed["name"], "hermes-intelligence");
+        assert_eq!(parsed["name"], "tokensave");
+        assert_eq!(parsed["label"], "TokenSave");
         assert_eq!(parsed["api"], "plugin_api.py");
         // The provider link must match the memory provider name the installer
         // writes into config.yaml (`memory.provider: tokensave`).

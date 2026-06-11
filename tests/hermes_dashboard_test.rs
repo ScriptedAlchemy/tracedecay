@@ -60,7 +60,8 @@ fn install_deploys_dashboard_plugin_page() {
     // Manifest is discoverable and stamped with the generating version.
     let manifest: serde_json::Value =
         serde_json::from_str(&read(&dash.join("manifest.json"))).unwrap();
-    assert_eq!(manifest["name"], "hermes-intelligence");
+    assert_eq!(manifest["name"], "tokensave");
+    assert_eq!(manifest["label"], "TokenSave");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["entry"], "dist/index.js");
     assert_eq!(manifest["css"], "dist/style.css");
@@ -198,7 +199,7 @@ fn deployed_bundles_match_embedded_standalone_assets() {
     let css = read(&dist.join("style.css"));
 
     assert!(holographic.contains("tokensave holographic-memory dashboard plugin"));
-    assert!(entry.contains("hermes-intelligence"));
+    assert!(entry.contains("\"tokensave\""));
     // Wrapper chrome first, then the child stylesheets concatenated.
     assert!(css.starts_with("/* Wrapper chrome"));
     assert!(css.contains(".tsiw-tab"));

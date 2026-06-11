@@ -103,7 +103,7 @@ plugin alongside the agent plugin, into
 `plugin_api.py`, and the UI bundles — all embedded in the tokensave binary,
 no source checkout needed). Hermes' dashboard plugin discovery scans
 `plugins/*/dashboard/manifest.json` in both stock and forked Hermes, so a
-"Hermes Intelligence" tab (Memory / LCM / Code Graph / Savings) appears in
+"TokenSave" tab (Memory / LCM / Code Graph / Savings) appears in
 `hermes dashboard` after install. With `--profile <p>` the deploy lands in
 `~/.hermes/profiles/<p>/plugins/tokensave/dashboard/` and is picked up when
 Hermes runs with `HERMES_HOME` pointing at that profile.
@@ -159,7 +159,7 @@ export TOKENSAVE_DASHBOARD_URL=http://127.0.0.1:7341/
 hermes dashboard
 ```
 
-When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/hermes-intelligence/*` to the tokensave dashboard's native paths (`/holographic`, `/lcm`, `/graph`, and `/savings` map to `/api/plugins/holographic`, `/api/plugins/hermes-lcm`, `/api/plugins/graph`, and `/api/plugins/savings` respectively).
+When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/tokensave/*` to the tokensave dashboard's native paths (`/holographic`, `/lcm`, `/graph`, and `/savings` map to `/api/plugins/holographic`, `/api/plugins/hermes-lcm`, `/api/plugins/graph`, and `/api/plugins/savings` respectively).
 
 ---
 
@@ -332,7 +332,7 @@ graph (`nodes`, `edges`, `files` in `.tokensave/tokensave.db`).
   **Find path** mode that highlights the shortest path between two symbols.
 
 The backend routes live under `/api/plugins/graph/*` (proxied by the Hermes
-wrapper at `/api/plugins/hermes-intelligence/graph/*`). See
+wrapper at `/api/plugins/tokensave/graph/*`). See
 [graph-explorer.md](graph-explorer.md) for the full API table, frontend
 design, and performance notes.
 
@@ -867,7 +867,7 @@ Compression statistics.
 ### Savings & Cost API
 
 Routes under `/api/plugins/savings/*` (proxied by the Hermes wrapper at
-`/api/plugins/hermes-intelligence/savings/*`). All endpoints degrade
+`/api/plugins/tokensave/savings/*`). All endpoints degrade
 gracefully: when a backing store is unavailable they return `200` with
 `"available": false` instead of failing. `range` accepts `today`, `7d`,
 `30d`, `all` (default `all`; sessions without any timestamp — e.g. Cursor

@@ -1,5 +1,5 @@
 /**
- * Hermes Intelligence dashboard — thin wrapper over the tokensave dashboards.
+ * TokenSave dashboard for Hermes — thin wrapper over the tokensave dashboards.
  *
  * This is the Hermes-hosted variant of the canonical tokensave dashboard
  * (see the tokensave repo, `dashboard/`). It does NOT fork the UI bundles:
@@ -11,11 +11,11 @@
  *      `__HERMES_PLUGIN_SDK__.fetchJSON` rewrites the child's API base
  *      (`/api/plugins/holographic`, `/api/plugins/hermes-lcm`,
  *      `/api/plugins/graph`, `/api/plugins/savings`) onto this plugin's API
- *      prefix (`/api/plugins/hermes-intelligence/...`), which plugin_api.py
+ *      prefix (`/api/plugins/tokensave/...`), which plugin_api.py
  *      reverse-proxies to a local `tokensave dashboard` server;
  *   2. captures the components the child bundles register (without touching
  *      the real host registry, so other Hermes plugins are unaffected);
- *   3. registers one combined, tabbed page as "hermes-intelligence".
+ *   3. registers one combined, tabbed page as "tokensave".
  *
  * Future Hermes-specific capabilities should be added as extra endpoints in
  * plugin_api.py and advertised through /capabilities (see the tokensave
@@ -29,7 +29,7 @@
   const registry = realWindow.__HERMES_PLUGINS__;
   if (!SDK || !registry || typeof registry.register !== "function") return;
 
-  const PLUGIN = "hermes-intelligence";
+  const PLUGIN = "tokensave";
   const ASSET_BASE = "/dashboard-plugins/" + PLUGIN + "/dist";
   const API_REWRITES = [
     ["/api/plugins/holographic", "/api/plugins/" + PLUGIN + "/holographic"],
@@ -137,7 +137,7 @@
     ["savings", "Savings"],
   ];
 
-  function HermesIntelligencePage() {
+  function TokenSavePage() {
     const [active, setActive] = React.useState("holographic");
     const [error, setError] = React.useState("");
     const [tick, setTick] = React.useState(0);
@@ -187,5 +187,5 @@
     );
   }
 
-  registry.register(PLUGIN, HermesIntelligencePage);
+  registry.register(PLUGIN, TokenSavePage);
 })();

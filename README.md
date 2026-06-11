@@ -273,7 +273,7 @@ See [docs/graph-explorer.md](docs/graph-explorer.md) for the Code Graph tab's AP
 
 ### Dashboard with Hermes
 
-When using the Hermes agent, the dashboard can be accessed via the **Hermes Intelligence** tab. Two integration modes are supported:
+When using the Hermes agent, the dashboard can be accessed via the **TokenSave** tab. Two integration modes are supported:
 
 1. **Spawn mode** (default): Hermes automatically launches the dashboard server
 2. **External URL mode**: Point Hermes at an already-running dashboard

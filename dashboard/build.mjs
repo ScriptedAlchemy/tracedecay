@@ -147,7 +147,7 @@ async function copyLcm() {
 
 /**
  * The Hermes wrapper plugin reuses the exact bundles above: its dist gets the
- * wrapper entry (registers the combined "hermes-intelligence" tab), copies of
+ * wrapper entry (registers the combined "tokensave" tab), copies of
  * the child bundles, and a concatenated stylesheet. Deploy by copying
  * hermes-wrapper/{manifest.json,plugin_api.py,dist} into
  * hermes-agent/plugins/hermes_intelligence/dashboard/.

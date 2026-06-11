@@ -10,7 +10,7 @@ only ever renders a capped, user-grown slice, and expansion is progressive.
 
 All routes are mounted under `/api/plugins/graph/*` and read the project DB.
 Under the Hermes wrapper the same routes are reverse-proxied at
-`/api/plugins/hermes-intelligence/graph/*`.
+`/api/plugins/tokensave/graph/*`.
 
 | Route | Description |
 |---|---|

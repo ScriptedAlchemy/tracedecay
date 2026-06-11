@@ -1,7 +1,6 @@
-"""Hermes Intelligence dashboard plugin — tokensave-backed API routes.
+"""TokenSave dashboard plugin for Hermes — tokensave-backed API routes.
 
-Mounted at /api/plugins/hermes-intelligence/ by the Hermes dashboard plugin
-system.
+Mounted at /api/plugins/tokensave/ by the Hermes dashboard plugin system.
 
 This is a THIN reverse proxy onto the canonical implementation: a local
 ``tokensave dashboard`` HTTP server (see the tokensave repo, ``src/dashboard``).
@@ -81,6 +80,13 @@ DEPLOYED_PROJECT_ROOT = None
 
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _PROXY_TIMEOUT_SECONDS = 30.0
+# After the spawned server prints its URL, wait until /api/capabilities
+# actually answers before proxying anything: the listener can be bound while
+# the engine is still warming up (DB opens, graph load), and proxying into
+# that window surfaced as a cold-start 502 "connection reset by peer" on the
+# first request.
+_READY_TIMEOUT_SECONDS = 30.0
+_READY_POLL_INTERVAL_SECONDS = 0.25
 # After a failed spawn, fail fast with the cached error instead of
 # re-spawning (and re-waiting up to _SPAWN_TIMEOUT_SECONDS) on every request.
 _SPAWN_RETRY_BACKOFF_SECONDS = 30.0
@@ -247,17 +253,7 @@ def _spawn_dashboard() -> str:
     url = url_holder.get("url")
 
     if url is None:
-        # The drain threads own the pipes — never communicate() here (that
-        # would race a second reader against them on the same fd).
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
-            process.kill()
-            try:
-                process.wait(timeout=5)  # reap; a kill without wait leaves a zombie
-            except Exception:  # pragma: no cover - unkillable child
-                pass
+        _terminate_process(process)
         error_lines = list(stderr_tail)[-5:]
         raise HTTPException(
             status_code=503,
@@ -265,12 +261,74 @@ def _spawn_dashboard() -> str:
                 "tokensave dashboard failed to start for project "
                 f"{project!r}: " + (" / ".join(error_lines) or "no output")
             ),
+            headers={"Retry-After": "5"},
         )
+
+    _wait_until_ready(process, url, project, stderr_tail)
 
     global _process
     _process = process
     logger.info("tokensave dashboard started at %s (project %s)", url, project)
     return url
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    """Terminate-then-kill a spawned child without touching its pipes.
+
+    The drain threads own the pipes — never communicate() here (that would
+    race a second reader against them on the same fd).
+    """
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        process.kill()
+        try:
+            process.wait(timeout=5)  # reap; a kill without wait leaves a zombie
+        except Exception:  # pragma: no cover - unkillable child
+            pass
+
+
+def _wait_until_ready(
+    process: subprocess.Popen, url: str, project: str, stderr_tail: deque
+) -> None:
+    """Blocks until the spawned engine answers /api/capabilities.
+
+    Bounded by ``_READY_TIMEOUT_SECONDS``; on timeout (or child death) the
+    child is reaped and a 503 with Retry-After is raised so clients know the
+    engine is still warming up rather than broken.
+    """
+    deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            error_lines = list(stderr_tail)[-5:]
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "tokensave dashboard exited during startup for project "
+                    f"{project!r}: " + (" / ".join(error_lines) or "no output")
+                ),
+                headers={"Retry-After": "5"},
+            )
+        try:
+            request = urllib.request.Request(f"{url}/api/capabilities", method="GET")
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                if response.status < 500:
+                    return
+                last_error = f"HTTP {response.status}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(_READY_POLL_INTERVAL_SECONDS)
+    _terminate_process(process)
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            f"tokensave dashboard for project {project!r} did not become "
+            f"ready within {_READY_TIMEOUT_SECONDS:.0f}s: {last_error}"
+        ),
+        headers={"Retry-After": "5"},
+    )
 
 
 def _shutdown() -> None:
@@ -331,31 +389,45 @@ def _upstream_base() -> str:
 
 
 def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None) -> JSONResponse:
-    base = _upstream_base()
-    query = request.url.query
-    url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
-    req = urllib.request.Request(
-        url,
-        data=body if method == "POST" else None,
-        method=method,
-        headers={"Content-Type": "application/json"} if body else {},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310 — loopback/configured upstream only
-            payload = json.loads(resp.read().decode("utf-8"))
-            return JSONResponse(payload, status_code=resp.status)
-    except urllib.error.HTTPError as exc:
+    # Connection-level failures (reset/refused) on GETs are retried once
+    # after re-resolving the upstream: _upstream_base reaps a dead child and
+    # respawns it (then waits for readiness), so a mid-flight engine death
+    # heals transparently instead of surfacing a one-off 502. POSTs are never
+    # retried — curation applies must not run twice.
+    attempts = 2 if method == "GET" else 1
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        base = _upstream_base()
+        query = request.url.query
+        url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
+        req = urllib.request.Request(
+            url,
+            data=body if method == "POST" else None,
+            method=method,
+            headers={"Content-Type": "application/json"} if body else {},
+        )
         try:
-            payload = json.loads(exc.read().decode("utf-8"))
-        except Exception:
-            payload = {"detail": str(exc)}
-        return JSONResponse(payload, status_code=exc.code)
-    except Exception as exc:
-        logger.exception("tokensave dashboard proxy request failed")
-        raise HTTPException(status_code=502, detail=f"tokensave dashboard unreachable: {exc}")
+            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310 — loopback/configured upstream only
+                payload = json.loads(resp.read().decode("utf-8"))
+                return JSONResponse(payload, status_code=resp.status)
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {"detail": str(exc)}
+            return JSONResponse(payload, status_code=exc.code)
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "tokensave dashboard proxy request failed (%s); retrying once", exc
+                )
+                continue
+            logger.exception("tokensave dashboard proxy request failed")
+    raise HTTPException(status_code=502, detail=f"tokensave dashboard unreachable: {last_exc}")
 
 
 class _DummyRequest:

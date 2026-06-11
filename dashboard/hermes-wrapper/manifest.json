@@ -1,7 +1,7 @@
 {
-  "name": "hermes-intelligence",
-  "label": "Hermes Intelligence",
-  "description": "TokenSave-backed dashboards: holographic memory, LCM, code graph, and savings explorers (served by the tokensave engine).",
+  "name": "tokensave",
+  "label": "TokenSave",
+  "description": "TokenSave dashboards: holographic memory, LCM, code graph, and savings explorers (served by the tokensave engine).",
   "icon": "Cpu",
   "version": "0.2.0",
   "provider": {
@@ -9,7 +9,7 @@
     "name": "tokensave"
   },
   "tab": {
-    "path": "/hermes-intelligence",
+    "path": "/tokensave",
     "position": "after:plugins"
   },
   "entry": "dist/index.js",
