@@ -4,10 +4,10 @@
 //! per-profile `SQLite` store at `<profile>/state.db` (tables `sessions` +
 //! `messages`), where `<profile>` is `~/.hermes` for the default profile or
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
-//! one project through the `plugins.tokensave.project_root` pin in its
-//! `config.yaml` — the same pin the generated Hermes plugin resolves at
-//! runtime — so the sweep ingests a profile's history only into the project
-//! it is pinned to.
+//! one ingest target: the `plugins.tokensave.project_root` pin in its
+//! `config.yaml` when set (the same pin the generated Hermes plugin resolves
+//! at runtime), or — for unpinned profiles — the profile home itself, whose
+//! `.tokensave/sessions.db` is the profile-scoped store the plugin serves.
 //!
 //! Unlike the file-based adapters this source holds *many* sessions in one
 //! store, so it does not implement [`TranscriptSource`]; it drives the shared
@@ -79,10 +79,18 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Locates the `state.db` of every profile whose `plugins.tokensave`
-/// `project_root` pin matches `project_root`. Returns `(state_db_path,
-/// profile_name)`; the default profile (the home directory itself) has no
-/// profile name.
+/// Locates the `state.db` of every profile that maps to `project_root`.
+///
+/// A profile maps to a project either through its `plugins.tokensave`
+/// `project_root` pin, or — for unpinned profiles (the default since the
+/// installer stopped writing storage-home pins) — through its own profile
+/// home: sweeping with `project_root == <profile dir>` ingests that
+/// profile's history into the profile-scoped store at
+/// `<profile dir>/.tokensave/sessions.db`, which is exactly the store the
+/// generated plugin's `hermes_profile` storage scope serves.
+///
+/// Returns `(state_db_path, profile_name)`; the default profile (the home
+/// directory itself) has no profile name.
 fn pinned_state_dbs(
     hermes_homes: &[PathBuf],
     project_root: &Path,
@@ -108,11 +116,17 @@ fn pinned_state_dbs(
             }
         }
         for (profile_dir, profile_name) in candidates {
-            let Some(pin) = read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-            else {
-                continue;
+            let matches = match read_config_pinned_project_root(&profile_dir.join("config.yaml")) {
+                // An explicit pin (including the legacy home-equal pin)
+                // maps the profile to that project.
+                Some(pin) => paths_equal(Path::new(&pin), project_root),
+                // Unpinned profiles map to their own home, so sweeping
+                // `<profile dir>` as the project ingests their history
+                // into the profile-scoped store the generated plugin's
+                // `hermes_profile` storage serves.
+                None => paths_equal(&profile_dir, project_root),
             };
-            if !paths_equal(Path::new(&pin), project_root) {
+            if !matches {
                 continue;
             }
             let state_db = profile_dir.join("state.db");
