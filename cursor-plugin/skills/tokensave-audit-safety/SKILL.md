@@ -1,10 +1,10 @@
 ---
-name: tokensave-audit
-description: Sweep the repo or a directory for panic sites, risk markers, dead code, and untested high-risk symbols via the tokensave code graph.
+name: tokensave-audit-safety
+description: Audit the repo or a directory for ship-blocking risk — panic sites, risk markers, dead code, and untested high-risk symbols.
 disable-model-invocation: true
 ---
 
-# /tokensave-audit
+# /tokensave-audit-safety
 
 Apply the `tokensave:auditing-code-safety` skill.
 

@@ -1,10 +1,10 @@
 ---
-name: tokensave-impact
-description: Determine the blast radius of a change — impacted symbols, files, and the tests to run.
+name: tokensave-find-impact
+description: Find the blast radius of a change — impacted symbols, files, and the tests to run.
 disable-model-invocation: true
 ---
 
-# /tokensave-impact
+# /tokensave-find-impact
 
 Apply the `tokensave:finding-impacted-areas` skill.
 

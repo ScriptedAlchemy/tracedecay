@@ -1,10 +1,10 @@
 ---
-name: tokensave-diagnose
-description: Run or parse build/type-checker errors, map them to the enclosing symbols, then fix.
+name: tokensave-fix-build
+description: Fix build and type errors — run or parse compiler diagnostics, map each one to its enclosing symbol with callers, then fix.
 disable-model-invocation: true
 ---
 
-# /tokensave-diagnose
+# /tokensave-fix-build
 
 Apply the `tokensave:fixing-build-and-type-errors` skill.
 

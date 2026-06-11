@@ -1,10 +1,10 @@
 ---
-name: tokensave-clean
+name: tokensave-clean-dead-code
 description: Find and safely remove dead code, unused imports, and duplication via the tokensave code graph.
 disable-model-invocation: true
 ---
 
-# /tokensave-clean
+# /tokensave-clean-dead-code
 
 Apply the `tokensave:cleaning-up-dead-code` skill.
 

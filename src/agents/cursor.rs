@@ -285,53 +285,57 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         "skills/searching-for-code/SKILL.md",
         include_str!("../../cursor-plugin/skills/searching-for-code/SKILL.md"),
     ),
+    // Slash-command dispatcher skills (`disable-model-invocation: true`).
+    // Slugs keep the `tokensave-` prefix (so `/tokensave` lists them all) with
+    // a verb-phrase suffix, because Cursor uses the humanized slug as the
+    // skill's display title.
     (
-        "skills/tokensave-arch/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-arch/SKILL.md"),
+        "skills/tokensave-audit-safety/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-audit-safety/SKILL.md"),
     ),
     (
-        "skills/tokensave-audit/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-audit/SKILL.md"),
+        "skills/tokensave-check-health/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-check-health/SKILL.md"),
     ),
     (
-        "skills/tokensave-branch/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-branch/SKILL.md"),
+        "skills/tokensave-clean-dead-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-clean-dead-code/SKILL.md"),
     ),
     (
-        "skills/tokensave-clean/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-clean/SKILL.md"),
+        "skills/tokensave-compare-branches/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-compare-branches/SKILL.md"),
     ),
     (
-        "skills/tokensave-commit/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-commit/SKILL.md"),
+        "skills/tokensave-draft-commit/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-draft-commit/SKILL.md"),
     ),
     (
-        "skills/tokensave-diagnose/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-diagnose/SKILL.md"),
+        "skills/tokensave-find-impact/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-find-impact/SKILL.md"),
     ),
     (
-        "skills/tokensave-health/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-health/SKILL.md"),
+        "skills/tokensave-fix-build/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-fix-build/SKILL.md"),
     ),
     (
-        "skills/tokensave-impact/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-impact/SKILL.md"),
+        "skills/tokensave-map-architecture/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-map-architecture/SKILL.md"),
     ),
     (
-        "skills/tokensave-port/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-port/SKILL.md"),
+        "skills/tokensave-port-code/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-port-code/SKILL.md"),
     ),
     (
-        "skills/tokensave-recall/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-recall/SKILL.md"),
+        "skills/tokensave-recall-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-recall-memory/SKILL.md"),
     ),
     (
-        "skills/tokensave-review/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-review/SKILL.md"),
+        "skills/tokensave-review-diff/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-review-diff/SKILL.md"),
     ),
     (
-        "skills/tokensave-test/SKILL.md",
-        include_str!("../../cursor-plugin/skills/tokensave-test/SKILL.md"),
+        "skills/tokensave-test-changes/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tokensave-test-changes/SKILL.md"),
     ),
     (
         "skills/tracing-functions/SKILL.md",
@@ -432,8 +436,24 @@ fn cursor_plugin_hooks(raw: &str, tokensave_bin: &str) -> Result<String> {
 /// upgrades don't strand stale surfaces (managed-path removal only covers
 /// files the *current* bundle ships). `commands/` was migrated to slash
 /// skills (`disable-model-invocation: true`) when Cursor deprecated the
-/// standalone Commands surface.
-const LEGACY_PLUGIN_DIRS: &[&str] = &["commands"];
+/// standalone Commands surface; the `skills/tokensave-*` entries are the
+/// pre-rename dispatcher slugs (renamed to verb-phrase slugs because Cursor
+/// displays the humanized slug as the skill title).
+const LEGACY_PLUGIN_DIRS: &[&str] = &[
+    "commands",
+    "skills/tokensave-arch",
+    "skills/tokensave-audit",
+    "skills/tokensave-branch",
+    "skills/tokensave-clean",
+    "skills/tokensave-commit",
+    "skills/tokensave-diagnose",
+    "skills/tokensave-health",
+    "skills/tokensave-impact",
+    "skills/tokensave-port",
+    "skills/tokensave-recall",
+    "skills/tokensave-review",
+    "skills/tokensave-test",
+];
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
@@ -919,7 +939,9 @@ mod tests {
             "the code-explorer agent should be embedded"
         );
         assert!(
-            install_dir.join("skills/tokensave-arch/SKILL.md").exists(),
+            install_dir
+                .join("skills/tokensave-map-architecture/SKILL.md")
+                .exists(),
             "a representative slash-dispatcher skill should be embedded"
         );
         assert!(
@@ -1146,6 +1168,30 @@ mod tests {
         assert!(
             !install_dir.exists(),
             "legacy commands/ must be swept so the tokensave-only dir is fully removed"
+        );
+    }
+
+    /// Upgrading over an install that shipped the pre-rename dispatcher slugs
+    /// (`skills/tokensave-arch` → `skills/tokensave-map-architecture`, …) must
+    /// sweep the old skill directories instead of leaving Cursor listing both
+    /// the old and new command skills.
+    #[test]
+    fn reinstall_sweeps_pre_rename_dispatcher_skills() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tokensave");
+        write_embedded_plugin(&install_dir, "tokensave").expect("embedded install should succeed");
+        // Simulate a pre-rename install that shipped skills/tokensave-arch/.
+        std::fs::create_dir_all(install_dir.join("skills/tokensave-arch")).unwrap();
+        std::fs::write(
+            install_dir.join("skills/tokensave-arch/SKILL.md"),
+            "legacy dispatcher skill",
+        )
+        .unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("replace should succeed");
+        assert!(
+            !install_dir.exists(),
+            "pre-rename dispatcher skill dirs must be swept so the tokensave-only dir is fully removed"
         );
     }
 

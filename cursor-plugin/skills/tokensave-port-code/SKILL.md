@@ -1,10 +1,10 @@
 ---
-name: tokensave-port
-description: Port/migrate code between directories in dependency-safe order and track progress.
+name: tokensave-port-code
+description: Port or migrate code between directories in dependency-safe order and track progress.
 disable-model-invocation: true
 ---
 
-# /tokensave-port
+# /tokensave-port-code
 
 Apply the `tokensave:porting-code` skill.
 

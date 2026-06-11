@@ -1,10 +1,10 @@
 ---
-name: tokensave-test
-description: Run only the tests affected by the current changes and map failures back to source.
+name: tokensave-test-changes
+description: Test the current changes — run only the affected tests and map failures back to source.
 disable-model-invocation: true
 ---
 
-# /tokensave-test
+# /tokensave-test-changes
 
 Apply the `tokensave:running-impacted-tests` skill.
 

@@ -1,10 +1,10 @@
 ---
-name: tokensave-arch
-description: Generate a high-level architecture overview of the repo or a directory.
+name: tokensave-map-architecture
+description: Map the architecture of the repo or a directory — layered module map, dependency hotspots, and structural risks.
 disable-model-invocation: true
 ---
 
-# /tokensave-arch
+# /tokensave-map-architecture
 
 Apply the `tokensave:architecture-overview` skill.
 

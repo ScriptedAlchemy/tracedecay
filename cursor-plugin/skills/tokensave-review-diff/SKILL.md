@@ -1,10 +1,10 @@
 ---
-name: tokensave-review
+name: tokensave-review-diff
 description: Review the current PR/diff for impact, risk, and quality via the tokensave code graph.
 disable-model-invocation: true
 ---
 
-# /tokensave-review
+# /tokensave-review-diff
 
 Apply the `tokensave:reviewing-a-diff` skill.
 

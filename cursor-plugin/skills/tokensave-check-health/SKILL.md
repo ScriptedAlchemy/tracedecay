@@ -1,10 +1,10 @@
 ---
-name: tokensave-health
-description: Produce a code-health scorecard for the repo or a directory via the tokensave code graph.
+name: tokensave-check-health
+description: Check code health — a scorecard for the repo or a directory with the worst offenders and a prioritized fix list.
 disable-model-invocation: true
 ---
 
-# /tokensave-health
+# /tokensave-check-health
 
 Apply the `tokensave:code-health-report` skill.
 

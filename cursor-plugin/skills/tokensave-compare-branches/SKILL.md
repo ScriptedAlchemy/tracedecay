@@ -1,10 +1,10 @@
 ---
-name: tokensave-branch
-description: Search or diff another git branch's code graph without switching your checkout.
+name: tokensave-compare-branches
+description: Compare or search another git branch's code graph without switching your checkout.
 disable-model-invocation: true
 ---
 
-# /tokensave-branch
+# /tokensave-compare-branches
 
 Apply the `tokensave:cross-branch-investigation` skill.
 

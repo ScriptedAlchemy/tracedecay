@@ -1,6 +1,6 @@
 ---
 name: atomic-code-edits
-description: Apply safe, anchored source edits with tokensave's atomic edit primitives (unique-match string replace, atomic multi-replace, anchored insert, symbol-level rewrite) that auto re-index after writing. Use to apply precise/anchored edits or rewrite a whole symbol without regex/shell-quoting hazards.
+description: Apply safe, anchored source edits — unique-match string replace, all-or-nothing multi-replace, anchored insert, whole-symbol rewrite, and structural pattern rewrite — each auto re-indexing the graph after writing. Use when editing code ("replace this function", "insert after X", "rewrite every call site"), for multi-part edits that must land atomically, or instead of sed/awk and regex/shell-quoting hazards.
 ---
 
 # Atomic code edits

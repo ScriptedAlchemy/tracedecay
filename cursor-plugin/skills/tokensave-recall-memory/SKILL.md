@@ -1,10 +1,10 @@
 ---
-name: tokensave-recall
+name: tokensave-recall-memory
 description: Recall prior decisions, durable facts, and past session conversations for this project.
 disable-model-invocation: true
 ---
 
-# /tokensave-recall
+# /tokensave-recall-memory
 
 Apply the `tokensave:recalling-project-memory` skill, and for raw conversation recall the `tokensave:recalling-session-context` skill.
 
