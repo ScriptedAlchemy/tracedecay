@@ -197,12 +197,7 @@ pub async fn run(cg: &TokenSave, host: &str, port: u16, open: bool) -> Result<()
     }
 
     let app = router(state);
-    let listener = tokio::net::TcpListener::bind((host, port))
-        .await
-        .map_err(|e| config_error(format!("failed to bind {host}:{port}: {e}")))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| config_error(format!("failed to read local address: {e}")))?;
+    let (listener, addr) = bind_dashboard(host, port).await?;
 
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).

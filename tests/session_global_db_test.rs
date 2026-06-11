@@ -520,9 +520,14 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
     }
 
     // drained: offset == file size; backlogged: 200 of 500 bytes ingested.
-    db.set_parse_offset(&drained.to_string_lossy(), 100, 1_000)
+    let cursor = |byte_offset, mtime| tokensave::global_db::ParseOffset {
+        byte_offset,
+        mtime,
+        file_id: 0,
+    };
+    db.set_parse_offset(&drained.to_string_lossy(), cursor(100, 1_000))
         .await;
-    db.set_parse_offset(&backlogged.to_string_lossy(), 200, 2_000)
+    db.set_parse_offset(&backlogged.to_string_lossy(), cursor(200, 2_000))
         .await;
 
     let health = db.session_ingest_health().await;

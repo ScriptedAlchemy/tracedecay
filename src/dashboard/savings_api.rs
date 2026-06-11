@@ -40,41 +40,13 @@ use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::token_count::{counting_available, encoder_for_model, MessageTokens};
-use super::util::{coerce_limit, query_i64, query_rows, JsonQuery};
+use super::token_count::{
+    counting_available, encoder_for_model, MessageTokens, MESSAGE_TOKENS_CTE,
+};
+use super::util::{coerce_limit, i64_field, query_i64, query_rows, str_field, JsonQuery};
 use super::{savings_pricing, token_count, DashboardState};
 use crate::accounting::metrics::parse_range;
 use crate::global_db::GlobalDb;
-
-/// Per-message provenance + token columns, derived once and reused by every
-/// aggregate below. Usage fields accept both the Anthropic
-/// (`input_tokens`/`output_tokens`) and `OpenAI` (`prompt_tokens`/
-/// `completion_tokens`) transcript shapes; `json_valid` guards keep one
-/// malformed `metadata_json` row from failing the whole query.
-pub(super) const MESSAGE_TOKENS_CTE: &str = "
-    SELECT provider,
-           message_id,
-           session_id,
-           role,
-           timestamp,
-           COALESCE(NULLIF(TRIM(COALESCE(model, '')), ''), '') AS model,
-           LENGTH(COALESCE(text, '')) AS msg_len,
-           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.input_tokens'),
-                             json_extract(metadata_json, '$.usage.prompt_tokens')) AS INTEGER)
-           END AS usage_in,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.output_tokens'),
-                             json_extract(metadata_json, '$.usage.completion_tokens')) AS INTEGER)
-           END AS usage_out,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_read_input_tokens') AS INTEGER)
-           END AS usage_cache_read,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
-           END AS usage_cache_write
-    FROM session_messages";
 
 /// Aggregate SELECT list shared by the per-session and per-model rollups.
 /// "Actual" sums only count usage-bearing messages; estimated sums only count
@@ -106,14 +78,6 @@ fn range_since(range: Option<&str>) -> (String, i64) {
     let range = range.unwrap_or("all").to_string();
     let since = parse_range(&range) as i64;
     (range, since)
-}
-
-fn i64_of(row: &Value, key: &str) -> i64 {
-    row.get(key).and_then(Value::as_i64).unwrap_or(0)
-}
-
-fn str_of<'a>(row: &'a Value, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
 /// `""` (no model recorded) → JSON null so the UI can render an explicit
@@ -196,12 +160,12 @@ where
 /// the overlay fold for the same group; when `None` (overlay unavailable)
 /// the SQL chars/4 sums serve, which is exactly the legacy two-tier shape.
 fn token_block(row: &Value, tiers: Option<&TierSums>) -> Value {
-    let messages = i64_of(row, "messages");
-    let usage_messages = i64_of(row, "usage_messages");
+    let messages = i64_field(row, "messages");
+    let usage_messages = i64_field(row, "usage_messages");
     let fallback = TierSums {
         estimated_messages: messages - usage_messages,
-        estimated_input: i64_of(row, "estimated_input_tokens"),
-        estimated_output: i64_of(row, "estimated_output_tokens"),
+        estimated_input: i64_field(row, "estimated_input_tokens"),
+        estimated_output: i64_field(row, "estimated_output_tokens"),
         ..TierSums::default()
     };
     let tiers = tiers.copied().unwrap_or(fallback);
@@ -212,10 +176,10 @@ fn token_block(row: &Value, tiers: Option<&TierSums>) -> Value {
         "estimated_messages": tiers.estimated_messages,
         "cost_basis": basis_label(usage_messages, tiers.tokenized_messages, messages),
         "actual": {
-            "input_tokens": i64_of(row, "actual_input_tokens"),
-            "output_tokens": i64_of(row, "actual_output_tokens"),
-            "cache_read_tokens": i64_of(row, "cache_read_tokens"),
-            "cache_write_tokens": i64_of(row, "cache_write_tokens"),
+            "input_tokens": i64_field(row, "actual_input_tokens"),
+            "output_tokens": i64_field(row, "actual_output_tokens"),
+            "cache_read_tokens": i64_field(row, "cache_read_tokens"),
+            "cache_write_tokens": i64_field(row, "cache_write_tokens"),
         },
         "tokenized": {
             "input_tokens": tiers.tokenized_input,
@@ -337,8 +301,8 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
         "lifetime_counters": {
             "total_tokens_saved": lifetime_total,
             "projects": lifetime_projects.iter().map(|row| json!({
-                "path": str_of(row, "path"),
-                "tokens_saved": i64_of(row, "tokens_saved"),
+                "path": str_field(row, "path"),
+                "tokens_saved": i64_field(row, "tokens_saved"),
             })).collect::<Vec<_>>(),
         },
     })
@@ -372,8 +336,8 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
             "db": state.lcm_db_path,
             "scope": state.lcm_scope,
             "session_count": session_count,
-            "model_count": i64_of(&agg, "model_count"),
-            "unknown_model_messages": i64_of(&agg, "unknown_model_messages"),
+            "model_count": i64_field(&agg, "model_count"),
+            "unknown_model_messages": i64_field(&agg, "unknown_model_messages"),
             "token_counting": counting_available(),
         }),
     )
@@ -445,14 +409,14 @@ pub(crate) async fn ledger(
             "calls": day.calls,
         })).collect::<Vec<_>>(),
         "by_tool": by_tool.iter().map(|row| json!({
-            "tool": str_of(row, "tool_name"),
-            "saved_tokens": i64_of(row, "saved_tokens"),
-            "calls": i64_of(row, "calls"),
+            "tool": str_field(row, "tool_name"),
+            "saved_tokens": i64_field(row, "saved_tokens"),
+            "calls": i64_field(row, "calls"),
         })).collect::<Vec<_>>(),
         "by_project": by_project.iter().map(|row| json!({
-            "project": str_of(row, "project_path"),
-            "saved_tokens": i64_of(row, "saved_tokens"),
-            "calls": i64_of(row, "calls"),
+            "project": str_field(row, "project_path"),
+            "saved_tokens": i64_field(row, "saved_tokens"),
+            "calls": i64_field(row, "calls"),
         })).collect::<Vec<_>>(),
     }))
 }
@@ -514,18 +478,50 @@ pub(crate) async fn sessions(
         })
     });
 
+    // One grouped aggregate over the page's (provider, session_id) pairs —
+    // previously each page row ran its own aggregate query (N+1, up to 100
+    // round-trips re-running the json_extract CTE per page render). The
+    // VALUES list joins as the outer loop so each pair stays an indexed
+    // probe of session_messages (a row-value `IN (VALUES …)` predicate does
+    // not get pushed into the index and full-scans instead). The global
+    // `messages DESC` order keeps each session's model rows descending after
+    // bucketing, matching the old per-session ORDER BY.
+    let mut model_rows_by_session: HashMap<(String, String), Vec<Value>> = HashMap::new();
+    if !page.is_empty() {
+        let tuples = vec!["(?, ?)"; page.len()].join(", ");
+        let agg_sql = format!(
+            "SELECT provider, session_id, model, {TOKEN_AGG_COLUMNS}
+             FROM (VALUES {tuples}) pairs
+             JOIN ({MESSAGE_TOKENS_CTE}) ON provider = pairs.column1
+                                        AND session_id = pairs.column2
+             GROUP BY provider, session_id, model
+             ORDER BY messages DESC"
+        );
+        let mut agg_params: Vec<libsql::Value> = Vec::with_capacity(page.len() * 2);
+        for row in &page {
+            agg_params.push(libsql::Value::Text(str_field(row, "provider").to_string()));
+            agg_params.push(libsql::Value::Text(
+                str_field(row, "session_id").to_string(),
+            ));
+        }
+        let rows = query_rows(conn, &agg_sql, libsql::params_from_iter(agg_params))
+            .await
+            .unwrap_or_default();
+        for row in rows {
+            let key = (
+                str_field(&row, "provider").to_string(),
+                str_field(&row, "session_id").to_string(),
+            );
+            model_rows_by_session.entry(key).or_default().push(row);
+        }
+    }
+
     let mut sessions_json = Vec::with_capacity(page.len());
     for row in &page {
-        let provider = str_of(row, "provider");
-        let session_id = str_of(row, "session_id");
-        let agg_sql = format!(
-            "SELECT model, {TOKEN_AGG_COLUMNS}
-             FROM ({MESSAGE_TOKENS_CTE})
-             WHERE provider = ?1 AND session_id = ?2
-             GROUP BY model ORDER BY messages DESC"
-        );
-        let model_rows = query_rows(conn, &agg_sql, libsql::params![provider, session_id])
-            .await
+        let provider = str_field(row, "provider");
+        let session_id = str_field(row, "session_id");
+        let model_rows = model_rows_by_session
+            .remove(&(provider.to_string(), session_id.to_string()))
             .unwrap_or_default();
 
         let mut messages = 0;
@@ -535,7 +531,7 @@ pub(crate) async fn sessions(
         let models: Vec<Value> = model_rows
             .iter()
             .map(|model_row| {
-                let model = str_of(model_row, "model");
+                let model = str_field(model_row, "model");
                 let tiers = session_model_tiers.as_ref().and_then(|map| {
                     map.get(&(
                         provider.to_string(),
@@ -544,10 +540,10 @@ pub(crate) async fn sessions(
                     ))
                 });
                 let block = token_block(model_row, tiers);
-                messages += i64_of(&block, "messages");
-                usage_messages += i64_of(&block, "usage_messages");
-                tokenized_messages += i64_of(&block, "tokenized_messages");
-                estimated_messages += i64_of(&block, "estimated_messages");
+                messages += i64_field(&block, "messages");
+                usage_messages += i64_field(&block, "usage_messages");
+                tokenized_messages += i64_field(&block, "tokenized_messages");
+                estimated_messages += i64_field(&block, "estimated_messages");
                 merge(
                     block,
                     json!({
@@ -564,7 +560,7 @@ pub(crate) async fn sessions(
             "title": row.get("title").cloned().unwrap_or(Value::Null),
             "started_at": row.get("started_at").cloned().unwrap_or(Value::Null),
             "last_message_at": row.get("last_message_at").cloned().unwrap_or(Value::Null),
-            "is_subagent": i64_of(row, "is_subagent") != 0,
+            "is_subagent": i64_field(row, "is_subagent") != 0,
             "messages": messages,
             "usage_messages": usage_messages,
             "tokenized_messages": tokenized_messages,
@@ -636,7 +632,7 @@ pub(crate) async fn models(
             model_rows
                 .iter()
                 .map(|row| {
-                    let model = str_of(row, "model");
+                    let model = str_field(row, "model");
                     let tiers = model_tiers
                         .as_ref()
                         .and_then(|map| map.get(&model.to_string()));
@@ -644,7 +640,7 @@ pub(crate) async fn models(
                         token_block(row, tiers),
                         json!({
                             "model": model_value(model),
-                            "sessions": i64_of(row, "session_count"),
+                            "sessions": i64_field(row, "session_count"),
                             "tokenizer": tokenizer_block(model),
                         }),
                     )
@@ -665,7 +661,7 @@ pub(crate) async fn models(
             daily_rows
                 .iter()
                 .map(|row| {
-                    let day = i64_of(row, "day");
+                    let day = i64_field(row, "day");
                     let tiers = day_tiers.as_ref().and_then(|map| map.get(&day));
                     merge(token_block(row, tiers), json!({ "day": day }))
                 })
@@ -705,9 +701,9 @@ pub(crate) async fn models(
                 .iter()
                 .map(|row| {
                     json!({
-                        "day": i64_of(row, "day"),
+                        "day": i64_field(row, "day"),
                         "cost_usd": row.get("cost_usd").cloned().unwrap_or(Value::Null),
-                        "total_tokens": i64_of(row, "total_tokens"),
+                        "total_tokens": i64_field(row, "total_tokens"),
                     })
                 })
                 .collect(),

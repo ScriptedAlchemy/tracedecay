@@ -16,6 +16,16 @@
 //! fuzzy model-id → `OpenRouter`-slug resolution lives in the frontend
 //! (`dashboard/savings/src/pricing.ts`), which labels unknown models as
 //! "no price data" instead of guessing.
+//!
+//! # Two pricing tables exist on purpose — know which one you are reading
+//!
+//! This table prices **client-side estimates in the Savings & Cost tab**
+//! only. Server-side cost accounting (`tokensave cost` / `tokensave gain` /
+//! the `turns` table the dashboard reports as `cost_basis: "actual"`) is
+//! priced by `accounting/pricing.rs` — a separate Claude-only `LiteLLM`
+//! table with its own cache. The two sources can quote different USD for
+//! the same model, so dashboard estimates and `tokensave gain` output are
+//! not guaranteed to match to the cent.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

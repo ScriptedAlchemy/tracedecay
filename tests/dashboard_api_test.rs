@@ -3,10 +3,10 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
 
 use common::{
-    get_json, http_agent, pick_free_port, response_to_json, wait_for_dashboard, EnvVarGuard,
+    create_runtime, get_json, http_agent, pick_free_port, response_to_json, tempdir_or_panic,
+    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -17,9 +17,6 @@ use tokensave::memory::encoding::HolographicEncoder;
 use tokensave::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
-
-static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::new(());
-const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate
 /// `content` at 200, so this fact proves the `/fact/{id}` detail endpoint
@@ -40,24 +37,6 @@ struct DashboardFixture {
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
-    }
-}
-
-fn tempdir_or_panic() -> TempDir {
-    match TempDir::new() {
-        Ok(dir) => dir,
-        Err(err) => panic!("failed to create temp dir: {err}"),
-    }
-}
-
-fn create_runtime() -> tokio::runtime::Runtime {
-    match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(err) => panic!("failed to create tokio runtime: {err}"),
     }
 }
 
@@ -452,13 +431,24 @@ async fn project_db_conn(fixture: &DashboardFixture) -> libsql::Connection {
         Ok(db) => db,
         Err(err) => panic!("failed to open project DB directly: {err}"),
     };
-    match db.connect() {
+    let conn = match db.connect() {
         Ok(conn) => conn,
         Err(err) => panic!("failed to connect to project DB directly: {err}"),
+    };
+    // The running dashboard can write to this store concurrently; wait out
+    // transient write locks instead of failing the fixture mutation.
+    if let Err(err) = conn.execute_batch("PRAGMA busy_timeout = 5000;").await {
+        panic!("failed to set busy_timeout on project DB connection: {err}");
     }
+    conn
 }
 
-async fn set_fact_vector_without_touching_updated_at(
+/// Swaps a fact's vector the way every production re-encode does: alongside
+/// an `updated_at` bump (`update_fact` / `update_fact_vector` always bump it;
+/// the startup repair only fills NULL vectors, which changes the vectored
+/// count instead). The similarity cache fingerprint is metadata-only and
+/// relies on exactly that contract.
+async fn set_fact_vector_and_bump_updated_at(
     fixture: &DashboardFixture,
     fact_id: i64,
     phases: &[f64],
@@ -471,7 +461,8 @@ async fn set_fact_vector_without_touching_updated_at(
     if let Err(err) = conn
         .execute(
             "UPDATE memory_facts
-             SET hrr_vector = ?1, hrr_algebra = 'amari_fhrr', hrr_dim = ?2
+             SET hrr_vector = ?1, hrr_algebra = 'amari_fhrr', hrr_dim = ?2,
+                 updated_at = updated_at + 1
              WHERE fact_id = ?3",
             libsql::params![blob_param(vector), phases.len() as i64, fact_id],
         )
@@ -550,7 +541,7 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             "fixture starts with one near-duplicate pair"
         );
 
-        set_fact_vector_without_touching_updated_at(&fixture, 103, &[0.20, 0.35, 0.50]).await;
+        set_fact_vector_and_bump_updated_at(&fixture, 103, &[0.20, 0.35, 0.50]).await;
         let (status, repaired_cache) = get_json(
             &agent,
             &format!(
@@ -561,7 +552,7 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
         assert_eq!(status, 200);
         assert!(
             repaired_cache["pairs"].as_array().map_or(0, Vec::len) >= 3,
-            "vector-only changes must invalidate the similarity cache, got {repaired_cache}"
+            "re-encoded vectors (updated_at bump) must invalidate the similarity cache, got {repaired_cache}"
         );
 
         clear_fact_vector_without_touching_updated_at(&fixture, 103).await;

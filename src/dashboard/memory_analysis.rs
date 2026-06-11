@@ -7,9 +7,13 @@ use serde_json::{json, Value};
 
 pub(crate) const SIMILARITY_FACT_CAP: i64 = 2000;
 pub(crate) const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;
-/// Lowest score retained in the cached pair set. Keeping all finite phase
-/// cosine pairs lets the UI brush below its default duplicate-review floor
-/// without recomputing O(n²) similarities.
+/// Most pairs any single `/similarity` response can return (`limit` is
+/// clamped to this), and therefore the deepest prefix of the sorted pair set
+/// a request can ever read.
+pub(crate) const SIMILARITY_PAIR_CAP: i64 = 2000;
+/// Lowest score *scored* per computation. All finite phase-cosine pairs feed
+/// the score distribution; only the serveable prefix is retained afterwards
+/// (see [`build_similarity_computation`]).
 pub(crate) const SIMILARITY_PAIR_FLOOR: f64 = -1.0;
 pub(crate) const SIMILARITY_SCORE_MIN: f64 = -1.0;
 pub(crate) const SIMILARITY_SCORE_MAX: f64 = 1.0;
@@ -21,8 +25,10 @@ const TOKEN_STOPWORDS: &[&str] = &[
 ];
 
 /// Top-2 principal components of the centered feature matrix, computed via
-/// power iteration on the (n × n) Gram matrix — n is capped at 200, so this
-/// is cheap regardless of HRR dimension.
+/// power iteration on the (n × n) Gram matrix. Callers cap n at
+/// `PROJECTION_POINT_CAP` (2000), so the Gram build is O(n²·d) — far too
+/// expensive for the async runtime; run this on the blocking pool and cache
+/// the result (see `memory_api::projection`).
 pub(crate) fn pca_scores(features: &[Vec<f64>]) -> Option<Vec<[f64; 2]>> {
     let n = features.len();
     let d = features.first()?.len();
@@ -216,21 +222,23 @@ fn round_bin_edge(edge: f64) -> f64 {
 /// the computed pairs (adaptive, not a fixed `[-1, 1]` window — real HRR data
 /// clusters tightly and a fixed window collapses into one bin). A degenerate
 /// range (all scores equal) yields a single bin.
+///
+/// Two passes over the slice, no intermediate allocation: at n = 2000 facts
+/// the input is ~2M pairs, and a per-request copy would be ~16 MB.
 pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
     let mut min_seen = f64::INFINITY;
     let mut max_seen = f64::NEG_INFINITY;
     let mut sum = 0.0_f64;
-    let mut finite: Vec<f64> = Vec::with_capacity(scored.len());
+    let mut total_pairs = 0_i64;
     for (score, _, _) in scored {
         if !score.is_finite() {
             continue;
         }
-        finite.push(*score);
+        total_pairs += 1;
         min_seen = min_seen.min(*score);
         max_seen = max_seen.max(*score);
         sum += *score;
     }
-    let total_pairs = finite.len() as i64;
 
     if total_pairs == 0 {
         return json!({
@@ -260,7 +268,10 @@ pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
     }
 
     let mut counts = vec![0_i64; SIMILARITY_DISTRIBUTION_BINS];
-    for score in &finite {
+    for (score, _, _) in scored {
+        if !score.is_finite() {
+            continue;
+        }
         let mut idx =
             ((score - min_seen) / range * SIMILARITY_DISTRIBUTION_BINS as f64).floor() as usize;
         if idx >= SIMILARITY_DISTRIBUTION_BINS {
@@ -305,11 +316,52 @@ pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
     })
 }
 
+/// One retained similarity pair with its lexical-overlap analysis, computed
+/// once per [`SimilarityComputation`] instead of per request (the overlap
+/// tokenization used to re-run for up to 2000 pairs on every `/similarity`
+/// call and again for every planner pair on `/curate`).
+#[derive(Debug)]
+pub(crate) struct ScoredPair {
+    pub(crate) similarity: f64,
+    /// Indices into [`SimilarityComputation::facts`].
+    pub(crate) a: usize,
+    pub(crate) b: usize,
+    /// Lexical-overlap payload keys merged into the pair JSON
+    /// (`token_overlap`, `overlap_coefficient`, `shared_tokens`, …).
+    pub(crate) overlap: Value,
+    pub(crate) classification: &'static str,
+}
+
+impl ScoredPair {
+    /// Builds the pair from a raw score by running the lexical-overlap
+    /// analysis on the two fact contents.
+    pub(crate) fn analyze(facts: &[Value], similarity: f64, a: usize, b: usize) -> Self {
+        let a_content = facts[a]
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let b_content = facts[b]
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (overlap, token_overlap, overlap_coefficient) = lexical_overlap(a_content, b_content);
+        Self {
+            similarity,
+            a,
+            b,
+            overlap,
+            classification: similarity_classification(
+                similarity,
+                token_overlap,
+                overlap_coefficient,
+            ),
+        }
+    }
+}
+
 /// A cached O(n²·d) pairwise-similarity computation over the vectored facts.
 ///
-/// `key` fingerprints the underlying fact-vector state; `scored` holds every
-/// finite pair sorted by similarity descending, so per-request threshold
-/// filtering is a cheap prefix scan. Vectors are not
+/// `key` fingerprints the underlying fact-vector state. Vectors are not
 /// retained — only the fact metadata needed to render pairs and plans.
 #[derive(Debug)]
 pub(crate) struct SimilarityComputation {
@@ -318,8 +370,48 @@ pub(crate) struct SimilarityComputation {
     pub(crate) dim: usize,
     /// Fact metadata (`fact_id`, content, category, `trust_score`, `retrieval_count`).
     pub(crate) facts: Vec<Value>,
-    /// (similarity, index into `facts`, index into `facts`), sorted descending.
-    pub(crate) scored: Vec<(f64, usize, usize)>,
+    /// Retained pairs, sorted by similarity descending: every pair at or
+    /// above [`SIMILARITY_DEFAULT_THRESHOLD`] (the dedup planner walks them
+    /// all) plus the top [`SIMILARITY_PAIR_CAP`] overall (the deepest prefix
+    /// any `/similarity` request can return). Pairs below that horizon only
+    /// contribute to `total_pairs` and `distribution`, so the cache holds
+    /// O(cap) pairs instead of all O(n²) (~48 MB at n = 2000).
+    pub(crate) pairs: Vec<ScoredPair>,
+    /// Count of all finite pairs scored, retained or not.
+    pub(crate) total_pairs: i64,
+    /// [`score_distribution`] over all scored pairs, precomputed so requests
+    /// never re-bin the full pair set.
+    pub(crate) distribution: Value,
+}
+
+/// Finalizes a similarity computation from the full scored pair set:
+/// distribution + total over everything, lexical overlap only for the
+/// retained serveable prefix. Runs on the blocking pool with the scoring.
+pub(crate) fn build_similarity_computation(
+    key: (i64, i64, i64, u64),
+    dim: usize,
+    facts: Vec<Value>,
+    scored: Vec<(f64, usize, usize)>,
+) -> SimilarityComputation {
+    let distribution = score_distribution(&scored);
+    let total_pairs = scored.iter().filter(|(s, _, _)| s.is_finite()).count() as i64;
+    let mut retain = scored.len().min(SIMILARITY_PAIR_CAP as usize);
+    while retain < scored.len() && scored[retain].0 >= SIMILARITY_DEFAULT_THRESHOLD {
+        retain += 1;
+    }
+    let pairs = scored
+        .into_iter()
+        .take(retain)
+        .map(|(similarity, a, b)| ScoredPair::analyze(&facts, similarity, a, b))
+        .collect();
+    SimilarityComputation {
+        key,
+        dim,
+        facts,
+        pairs,
+        total_pairs,
+        distribution,
+    }
 }
 
 /// Propose hard-delete actions for `likely_duplicate` pairs from pre-scored facts.
@@ -329,21 +421,19 @@ pub(crate) struct SimilarityComputation {
 /// reference) for a later pair, so an applied plan never deletes a fact that
 /// another action in the same plan points at. Residual duplicate relations
 /// surface again on the next preview.
-pub(crate) fn propose_dedup_actions(facts: &[Value], scored: &[(f64, usize, usize)]) -> Vec<Value> {
+pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut actions: Vec<Value> = Vec::new();
 
-    for (sim, i, j) in scored {
-        let a = &facts[*i];
-        let b = &facts[*j];
-        let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
-        let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
-        let (_, token_overlap, overlap_coefficient) = lexical_overlap(a_content, b_content);
-        let classification = similarity_classification(*sim, token_overlap, overlap_coefficient);
-
-        if classification != "likely_duplicate" {
+    for pair in pairs {
+        if pair.classification != "likely_duplicate" {
             continue;
         }
+        let sim = &pair.similarity;
+        let a = &facts[pair.a];
+        let b = &facts[pair.b];
+        let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
+        let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
 
         let a_id = a.get("fact_id").and_then(Value::as_i64).unwrap_or(0);
         let b_id = b.get("fact_id").and_then(Value::as_i64).unwrap_or(0);
@@ -505,8 +595,8 @@ mod tests {
             json!({"fact_id": 1, "content": "same text here", "trust_score": 0.9}),
             json!({"fact_id": 2, "content": "same text here", "trust_score": 0.5}),
         ];
-        let scored = vec![(0.99, 0, 1)];
-        let actions = propose_dedup_actions(&facts, &scored);
+        let pairs = vec![ScoredPair::analyze(&facts, 0.99, 0, 1)];
+        let actions = propose_dedup_actions(&facts, &pairs);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0]["op"], "delete");
         assert_eq!(actions[0]["fact_id"], 2);
@@ -523,10 +613,31 @@ mod tests {
             json!({"fact_id": 11, "content": "duplicate fact body", "trust_score": 0.7}),
             json!({"fact_id": 12, "content": "duplicate fact body", "trust_score": 0.5}),
         ];
-        let scored = vec![(0.99, 0, 1), (0.98, 1, 2)];
-        let actions = propose_dedup_actions(&facts, &scored);
+        let pairs = vec![
+            ScoredPair::analyze(&facts, 0.99, 0, 1),
+            ScoredPair::analyze(&facts, 0.98, 1, 2),
+        ];
+        let actions = propose_dedup_actions(&facts, &pairs);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0]["fact_id"], 11);
         assert_eq!(actions[0]["duplicate_of"], 10);
+    }
+
+    #[test]
+    fn build_similarity_computation_retains_serveable_prefix_only() {
+        let facts: Vec<Value> = (0..3)
+            .map(|id| json!({"fact_id": id, "content": format!("fact body {id}"), "trust_score": 0.5}))
+            .collect();
+        // Descending scores: all three are scored, all three fit the cap.
+        let scored = vec![(0.99, 0, 1), (0.5, 0, 2), (-0.2, 1, 2)];
+        let computation = build_similarity_computation((3, 0, 3, 7), 4, facts, scored);
+        assert_eq!(computation.total_pairs, 3);
+        assert_eq!(computation.pairs.len(), 3);
+        assert_eq!(computation.distribution["total_pairs"], 3);
+        // The distribution covers the full scored range even when pairs
+        // below the retention horizon would be dropped.
+        assert_eq!(computation.distribution["min"], -0.2);
+        assert_eq!(computation.distribution["max"], 0.99);
+        assert!(computation.pairs[0].similarity >= computation.pairs[1].similarity);
     }
 }

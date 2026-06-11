@@ -1,7 +1,9 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
+mod common;
 
+use std::path::Path;
+use std::process::Command;
+
+use common::pyyaml_shim_pythonpath;
 use tempfile::TempDir;
 use tokensave::agents::*;
 use tokensave::branch_meta;
@@ -176,147 +178,6 @@ fn read_json(path: &Path) -> serde_json::Value {
 
 fn expected_tokensave_bin() -> String {
     env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
-}
-
-/// Minimal PyYAML stand-in covering only the YAML subset the generated
-/// Hermes configs use: nested block mappings, block lists of scalars, and
-/// plain/quoted scalars. Hermes itself always ships PyYAML; CI's system
-/// python3 on macOS/Windows has no third-party packages, so checks that
-/// exercise the plugin's config.yaml paths get this shim via PYTHONPATH.
-const PYYAML_SHIM: &str = r##""""Minimal PyYAML stand-in for tokensave agent tests.
-
-Implements safe_load/dump for the simple block-style YAML the generated
-Hermes config files use. Only used when the system python3 lacks PyYAML.
-"""
-
-import json
-import re
-
-_PLAIN_SCALAR = re.compile(r"^[A-Za-z0-9_./~+-]+$")
-
-
-def safe_load(stream):
-    text = stream if isinstance(stream, str) else stream.read()
-    items = []
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        items.append((len(raw) - len(raw.lstrip(" ")), stripped))
-    if not items:
-        return None
-    value, index = _parse_block(items, 0, items[0][0])
-    if index != len(items):
-        raise ValueError(f"unsupported yaml structure near: {items[index][1]!r}")
-    return value
-
-
-def _parse_scalar(token):
-    if token in ("", "null", "~"):
-        return None
-    if token == "true":
-        return True
-    if token == "false":
-        return False
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
-        return token[1:-1]
-    for parse in (int, float):
-        try:
-            return parse(token)
-        except ValueError:
-            pass
-    return token
-
-
-def _parse_block(items, index, indent):
-    if items[index][1].startswith("- "):
-        result = []
-        while index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
-            result.append(_parse_scalar(items[index][1][2:].strip()))
-            index += 1
-        return result, index
-    mapping = {}
-    while index < len(items) and items[index][0] == indent and not items[index][1].startswith("- "):
-        line = items[index][1]
-        if ":" not in line:
-            raise ValueError(f"unsupported yaml line: {line!r}")
-        key, _, rest = line.partition(":")
-        index += 1
-        rest = rest.strip()
-        if rest:
-            mapping[_parse_scalar(key.strip())] = _parse_scalar(rest)
-            continue
-        child = None
-        if index < len(items) and items[index][0] > indent:
-            child, index = _parse_block(items, index, items[index][0])
-        elif index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
-            child, index = _parse_block(items, index, indent)
-        mapping[_parse_scalar(key.strip())] = child
-    return mapping, index
-
-
-def _dump_scalar(value):
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    return text if _PLAIN_SCALAR.match(text) else json.dumps(text)
-
-
-def _dump_lines(value, indent, lines):
-    pad = " " * indent
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if isinstance(child, (dict, list)) and child:
-                lines.append(f"{pad}{_dump_scalar(key)}:")
-                _dump_lines(child, indent + 2, lines)
-            else:
-                child_repr = "{}" if child == {} else "[]" if child == [] else _dump_scalar(child)
-                lines.append(f"{pad}{_dump_scalar(key)}: {child_repr}")
-    elif isinstance(value, list):
-        for item in value:
-            lines.append(f"{pad}- {_dump_scalar(item)}")
-    else:
-        lines.append(f"{pad}{_dump_scalar(value)}")
-
-
-def dump(data, stream=None, default_flow_style=False, **kwargs):
-    lines = []
-    _dump_lines(data, 0, lines)
-    text = "\n".join(lines) + "\n"
-    if stream is None:
-        return text
-    stream.write(text)
-    return None
-"##;
-
-fn python3_has_real_yaml() -> bool {
-    static HAS_YAML: OnceLock<bool> = OnceLock::new();
-    *HAS_YAML.get_or_init(|| {
-        Command::new("python3")
-            .args(["-c", "import yaml"])
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    })
-}
-
-/// Returns a PYTHONPATH entry providing the `yaml` shim when the system
-/// python3 has no real PyYAML, so config.yaml-dependent checks run on every
-/// OS instead of failing on bare CI runners.
-fn pyyaml_shim_pythonpath(scratch: &Path) -> Option<PathBuf> {
-    if python3_has_real_yaml() {
-        return None;
-    }
-    let shim_dir = scratch.join("pyyaml-shim");
-    std::fs::create_dir_all(&shim_dir).unwrap();
-    std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
-    Some(shim_dir)
 }
 
 fn assert_python_compiles(paths: &[&Path]) {
@@ -715,8 +576,12 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("kwargs.get(\"project_root\")"));
     assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
     assert!(
-        tools_py.contains("or PINNED_PROJECT_ROOT"),
-        "tool dispatch must fall back to the install-time project pin"
+        tools_py.contains("or config_pinned_project_root()"),
+        "tool dispatch must fall back to the config-block project pin"
+    );
+    assert!(
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "the install-time pin lives only in plugins.tokensave.project_root"
     );
     assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
     assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
@@ -4924,10 +4789,12 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
 
     let tools_path = home.path().join(".hermes/plugins/tokensave/tools.py");
     let config_path = home.path().join(".hermes/config.yaml");
+    // The config block is the single pin home; the generated tools.py
+    // carries no install-time pin constant.
     let tools_py = std::fs::read_to_string(&tools_path).unwrap();
     assert!(
-        tools_py.contains("PINNED_PROJECT_ROOT = \"/pinned/project\""),
-        "install --project-root must write the pin into tools.py:\n{tools_py}"
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "tools.py must not carry a pin constant (the config block owns the pin):\n{tools_py}"
     );
     let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(
@@ -4939,27 +4806,23 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
-    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
-    assert!(
-        tools_py.contains("PINNED_PROJECT_ROOT = \"/pinned/project\""),
-        "reinstall without --project-root must preserve the existing pin:\n{tools_py}"
-    );
     let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(
         config.contains("    project_root: \"/pinned/project\""),
         "reinstall must preserve the plugins.tokensave config pin:\n{config}"
     );
 
-    // The config block is the authoritative pin home: a reinstall must
-    // restore the pin even when the generated tools.py was deleted.
+    // A reinstall after the generated tools.py was deleted still keeps the
+    // config pin (the pin never lived in the generated Python).
     std::fs::remove_file(&tools_path).unwrap();
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
-    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
+    assert!(tools_path.is_file(), "reinstall must regenerate tools.py");
+    let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        tools_py.contains("PINNED_PROJECT_ROOT = \"/pinned/project\""),
-        "reinstall must restore the pin from plugins.tokensave.project_root:\n{tools_py}"
+        config.contains("    project_root: \"/pinned/project\""),
+        "reinstall must keep the plugins.tokensave.project_root pin:\n{config}"
     );
 
     // Uninstall removes the generated pin from the config block.
@@ -4977,13 +4840,6 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
     HermesIntegration
         .install(&make_install_ctx(fresh_home.path()))
         .unwrap();
-    let tools_py =
-        std::fs::read_to_string(fresh_home.path().join(".hermes/plugins/tokensave/tools.py"))
-            .unwrap();
-    assert!(
-        tools_py.contains("PINNED_PROJECT_ROOT = None"),
-        "fresh install without --project-root must leave the plugin unpinned:\n{tools_py}"
-    );
     let fresh_config =
         std::fs::read_to_string(fresh_home.path().join(".hermes/config.yaml")).unwrap();
     assert!(
@@ -5042,9 +4898,9 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
-# The subprocess dispatch path resolves the pin from the config block even
-# though tools.py was generated without a PINNED_PROJECT_ROOT.
-assert plugin.tools.PINNED_PROJECT_ROOT is None
+# The subprocess dispatch path resolves the pin from the config block; the
+# generated tools.py carries no pin constant at all.
+assert not hasattr(plugin.tools, "PINNED_PROJECT_ROOT")
 assert plugin.tools.config_pinned_project_root() == "/config/block/project"
 
 captured = {}

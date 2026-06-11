@@ -117,8 +117,20 @@ impl AccountingMode {
     }
 }
 
-fn env_truthy(value: &str) -> bool {
-    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES")
+/// Canonical truthy-env-value test shared by every boolean env flag: trims,
+/// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
+/// coexist with diverging semantics — e.g. `TOKENSAVE_DISABLE_GLOBAL_DB=on`
+/// was silently ignored while the LCM doctor flag honored it.)
+pub fn env_value_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// True when the named env var is set to a truthy value.
+pub fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
 }
 
 /// Whether user-level global accounting (the cross-project `savings_ledger`
@@ -136,13 +148,13 @@ fn env_truthy(value: &str) -> bool {
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
     if let Ok(value) = std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB") {
-        return if env_truthy(&value) {
+        return if env_value_truthy(&value) {
             AccountingMode::EnabledByEnv
         } else {
             AccountingMode::DisabledByEnv
         };
     }
-    if std::env::var("TOKENSAVE_DISABLE_GLOBAL_DB").is_ok_and(|value| env_truthy(&value)) {
+    if env_flag("TOKENSAVE_DISABLE_GLOBAL_DB") {
         return AccountingMode::DisabledByEnv;
     }
     AccountingMode::Default
@@ -337,7 +349,29 @@ impl GlobalDb {
 
     /// Opens (or creates) the global database at an explicit path. Returns
     /// `None` if the directory cannot be created or the DB fails to open.
+    ///
+    /// Concurrent first opens of the same fresh store used to race each
+    /// other's `PRAGMA journal_mode = WAL`, DDL batch, and migration
+    /// transactions: all but one connection silently got `None`, which
+    /// disabled global accounting (ledger recording) for the unlucky
+    /// callers' entire session. Opens are rare, so they are serialized
+    /// in-process and retried briefly to also cover a racing *external*
+    /// process (e.g. two MCP servers starting simultaneously).
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
+        static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = OPEN_ENSURE_LOCK.lock().await;
+        for attempt in 0..3_u64 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            if let Some(db) = Self::open_at_unsynchronized(db_path).await {
+                return Some(db);
+            }
+        }
+        None
+    }
+
+    async fn open_at_unsynchronized(db_path: &std::path::Path) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
@@ -536,16 +570,16 @@ impl GlobalDb {
                 continue;
             };
             health.tracked_transcripts += 1;
-            let (offset, mtime) = self.get_parse_offset(&path).await.unwrap_or((0, 0));
-            if mtime > 0 {
-                let mtime = mtime as i64;
+            let cursor = self.get_parse_offset(&path).await.unwrap_or_default();
+            if cursor.mtime > 0 {
+                let mtime = cursor.mtime as i64;
                 health.last_ingest_unix = Some(
                     health
                         .last_ingest_unix
                         .map_or(mtime, |prev| prev.max(mtime)),
                 );
             }
-            let pending = meta.len().saturating_sub(offset);
+            let pending = meta.len().saturating_sub(cursor.byte_offset);
             if pending > 0 {
                 health.pending_transcripts += 1;
                 health.pending_bytes = health.pending_bytes.saturating_add(pending);
@@ -1428,16 +1462,9 @@ impl GlobalDb {
 
     // ── Accounting: parse_offsets table ────────────────────────────────
 
-    /// Get the saved parse offset for a JSONL file.
-    /// Returns `(byte_offset, mtime)` or `None` if not tracked.
-    pub async fn get_parse_offset(&self, path: &str) -> Option<(u64, u64)> {
-        self.get_parse_offset_with_file_id(path)
-            .await
-            .map(|cursor| (cursor.byte_offset, cursor.mtime))
-    }
-
-    /// Returns the full parse cursor, including the optional file identity id.
-    pub async fn get_parse_offset_with_file_id(&self, path: &str) -> Option<ParseOffset> {
+    /// Returns the saved parse cursor for a JSONL file, including the
+    /// optional file identity id, or `None` if the path is not tracked.
+    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
         let Ok(mut rows) = self
             .conn
             .query(
@@ -1474,22 +1501,8 @@ impl GlobalDb {
         })
     }
 
-    /// Save the parse offset for a JSONL file. Best-effort.
-    pub async fn set_parse_offset(&self, path: &str, offset: u64, mtime: u64) {
-        let () = self
-            .set_parse_offset_with_file_id(
-                path,
-                ParseOffset {
-                    byte_offset: offset,
-                    mtime,
-                    file_id: 0,
-                },
-            )
-            .await;
-    }
-
-    /// Save the parse offset and file identity id for a transcript path.
-    pub async fn set_parse_offset_with_file_id(&self, path: &str, offset: ParseOffset) {
+    /// Saves the parse cursor for a transcript path. Best-effort.
+    pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
         let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
     }
 

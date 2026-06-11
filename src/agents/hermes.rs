@@ -223,24 +223,11 @@ fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
     profiles
 }
 
-/// Reads the `PINNED_PROJECT_ROOT = "..."` line from an existing generated
-/// `tools.py`, so reinstalls without `--project-root` keep the pin.
-fn read_pinned_project_root(plugin_dir: &Path) -> Option<String> {
-    let tools = std::fs::read_to_string(plugin_dir.join("tools.py")).ok()?;
-    let line = tools
-        .lines()
-        .find_map(|line| line.strip_prefix("PINNED_PROJECT_ROOT = "))?;
-    if line.trim() == "None" {
-        return None;
-    }
-    serde_json::from_str::<String>(line.trim()).ok()
-}
-
 /// Reads `plugins.tokensave.project_root` from a Hermes profile config.yaml.
 ///
-/// This is the conventional config home for the pin (the same
-/// `plugins.<name>` block bundled Hermes plugins use); the generated
-/// `tools.py` constant is kept as a fallback for configs edited by hand.
+/// This is the single source of truth for the pin (the same
+/// `plugins.<name>` block bundled Hermes plugins use): install writes it,
+/// reinstalls preserve it, and the generated Python resolves it at runtime.
 fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
     let config = std::fs::read_to_string(config_path).ok()?;
     let lines: Vec<&str> = config.lines().collect();
@@ -274,12 +261,11 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// The pin currently in effect for a generated plugin: the conventional
-/// `plugins.tokensave.project_root` config key wins over the `tools.py`
-/// constant written for backward compatibility.
+/// The pin currently in effect for a generated plugin: the
+/// `plugins.tokensave.project_root` key of the profile config.yaml.
 fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
     let config_path = plugin_dir.parent()?.parent()?.join("config.yaml");
-    read_config_pinned_project_root(&config_path).or_else(|| read_pinned_project_root(plugin_dir))
+    read_config_pinned_project_root(&config_path)
 }
 
 /// Reads the `version:` field from a generated plugin.yaml manifest.
@@ -299,8 +285,8 @@ fn install_plugin(
     deploy_dashboard: bool,
 ) -> Result<()> {
     // An explicit pin wins; otherwise preserve whatever pin a previous
-    // install wrote (config block first, generated tools.py fallback), so
-    // `tokensave reinstall` does not silently unpin.
+    // install wrote to the config block, so `tokensave reinstall` does not
+    // silently unpin.
     let pinned_project_root = match project_root {
         Some(path) => Some(path.display().to_string()),
         None => effective_pinned_project_root(plugin_dir),
@@ -320,10 +306,7 @@ fn install_plugin(
     write_text_file(&plugin_dir.join("plugin.yaml"), &plugin_manifest())?;
     write_text_file(&plugin_dir.join("schemas.py"), &plugin_schemas())?;
     write_text_file(&plugin_dir.join("schemas.json"), &plugin_schemas_json()?)?;
-    write_text_file(
-        &plugin_dir.join("tools.py"),
-        &plugin_tools(tokensave_bin, pinned_project_root.as_deref()),
-    )?;
+    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tokensave_bin))?;
     write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
     write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)?;
     // The dashboard plugin page is part of the default install; the
@@ -1166,12 +1149,8 @@ fn plugin_schemas_json() -> Result<String> {
         })
 }
 
-fn plugin_tools(tokensave_bin: &str, project_root: Option<&str>) -> String {
+fn plugin_tools(tokensave_bin: &str) -> String {
     let bin = serde_json::to_string(tokensave_bin).unwrap_or_else(|_| "\"tokensave\"".to_string());
-    let pin = match project_root {
-        Some(path) => serde_json::to_string(path).unwrap_or_else(|_| "None".to_string()),
-        None => "None".to_string(),
-    };
     format!(
         r#""""Generated tokensave tool handlers for Hermes."""
 import json
@@ -1179,12 +1158,6 @@ import os
 import subprocess
 
 TOKENSAVE_BIN = {bin}
-# Install-time project pin (tokensave install --agent hermes --project-root).
-# When set, every tool call resolves this project's .tokensave/ stores
-# regardless of the Hermes process working directory. The conventional
-# config home `plugins.tokensave.project_root` in the profile config.yaml
-# takes precedence; this constant is the fallback.
-PINNED_PROJECT_ROOT = {pin}
 TOKENSAVE_TIMEOUT_SECONDS = 600
 MAX_CAPTURE_CHARS = 4000
 
@@ -1262,11 +1235,15 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
         payload = json.dumps(tool_args)
+        # Install-time project pins (tokensave install --agent hermes
+        # --project-root) live in the profile config.yaml under
+        # plugins.tokensave.project_root; when set, every tool call resolves
+        # that project's .tokensave/ stores regardless of the Hermes process
+        # working directory.
         project_root = (
             kwargs.get("project_root")
             or tool_args.get("project_root")
             or config_pinned_project_root()
-            or PINNED_PROJECT_ROOT
         )
         argv = [TOKENSAVE_BIN, "tool"]
         if project_root:
@@ -1690,10 +1667,9 @@ PLUGIN_CONFIG_DEFAULTS = {
 }
 
 def _plugin_config_defaults():
-    defaults = dict(PLUGIN_CONFIG_DEFAULTS)
-    if tools.PINNED_PROJECT_ROOT:
-        defaults["project_root"] = tools.PINNED_PROJECT_ROOT
-    return defaults
+    # The install-time pin lives in the profile config.yaml itself
+    # (plugins.tokensave.project_root), so the defaults carry no pin.
+    return dict(PLUGIN_CONFIG_DEFAULTS)
 
 class _ConfigChain:
     """Attribute-style config wrapper layering plugins.tokensave under a host config object."""
@@ -2325,8 +2301,10 @@ def _token_encoder():
     return _TOKEN_ENCODER
 
 def _count_tokens(text):
-    # Mirrors hermes-lcm tokens.count_tokens: tiktoken when available with a
-    # 4-chars-per-token estimate fallback.
+    # tiktoken when available; otherwise the same ceil(len/4) chars-per-token
+    # estimate the Rust side uses everywhere ((len+3)//4 — see
+    # dashboard/token_count.rs chars_estimate), so token numbers reported
+    # from Hermes reconcile with dashboard numbers.
     if not text:
         return 0
     encoder = _token_encoder()
@@ -2335,7 +2313,7 @@ def _count_tokens(text):
             return len(encoder.encode(text))
         except Exception:
             pass
-    return len(text) // 4 + 1
+    return (len(text) + 3) // 4
 
 def _tool_call_arguments_text(arguments):
     if isinstance(arguments, str):
@@ -2852,7 +2830,7 @@ class TokenSaveContextEngine(ContextEngine):
         self._host_config = config
         self.hermes_home = _resolve_hermes_home(config, hermes_home)
         self.config = _with_plugin_block(config, self.hermes_home)
-        self.project_root = _configured_project_root(self.config) or tools.PINNED_PROJECT_ROOT
+        self.project_root = _configured_project_root(self.config)
         self.agent = None
         self.model = ""
         self.last_prompt_tokens = 0
@@ -2898,7 +2876,6 @@ class TokenSaveContextEngine(ContextEngine):
             project_root
             or kwargs.get("project_root")
             or _configured_project_root(self.config)
-            or tools.PINNED_PROJECT_ROOT
             or kwargs.get("cwd")
         )
         if next_project_root:
@@ -3579,7 +3556,7 @@ class TokensaveMemoryProvider(MemoryProvider):
             {
                 "key": "project_root",
                 "description": "Absolute path of the project tokensave serves (install-time pin)",
-                "default": tools.PINNED_PROJECT_ROOT or "",
+                "default": tools.config_pinned_project_root() or "",
             },
         ]
 

@@ -71,7 +71,10 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
 
     // Re-derive per-line facts file by file *before* opening the write
     // transaction; transcripts that no longer exist drop out here and their
-    // rows simply stay as they are.
+    // rows simply stay as they are. The first run after an upgrade re-reads
+    // every affected transcript from byte 0 — easily hundreds of MB of
+    // JSONL — so the pure read+parse loop runs on the blocking pool instead
+    // of pinning the async runtime worker that called `open_at`.
     let mut by_file: HashMap<(String, String), Vec<(String, i64)>> = HashMap::new();
     for (provider, message_id, source_path, source_offset) in candidates {
         by_file
@@ -79,19 +82,24 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
             .or_default()
             .push((message_id, source_offset));
     }
-    let mut updates: Vec<(String, String, LineFacts)> = Vec::new();
-    for ((provider, path), rows) in by_file {
-        let Some(mut line_facts) = derive_line_facts(&provider, Path::new(&path)) else {
-            continue;
-        };
-        for (message_id, source_offset) in rows {
-            if let Some(facts) = line_facts.remove(&source_offset) {
-                if facts.timestamp.is_some() || facts.usage.is_some() {
-                    updates.push((provider.clone(), message_id, facts));
+    let updates = tokio::task::spawn_blocking(move || {
+        let mut updates: Vec<(String, String, LineFacts)> = Vec::new();
+        for ((provider, path), rows) in by_file {
+            let Some(mut line_facts) = derive_line_facts(&provider, Path::new(&path)) else {
+                continue;
+            };
+            for (message_id, source_offset) in rows {
+                if let Some(facts) = line_facts.remove(&source_offset) {
+                    if facts.timestamp.is_some() || facts.usage.is_some() {
+                        updates.push((provider.clone(), message_id, facts));
+                    }
                 }
             }
         }
-    }
+        updates
+    })
+    .await
+    .ok()?;
 
     conn.execute("BEGIN IMMEDIATE", ()).await.ok()?;
     let applied = apply_updates(conn, &updates).await;

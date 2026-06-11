@@ -18,6 +18,9 @@
 //! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
 //! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -25,12 +28,15 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::util::{
-    build_fts_match, coerce_limit, http_detail, json_error, like_pattern, query_i64, query_rows,
-    JsonPath, JsonQuery,
+    build_fts_match, coerce_limit, http_detail, json_error, json_object, like_pattern, qmarks,
+    query_i64, query_rows, JsonPath, JsonQuery,
 };
 use super::DashboardState;
 
 type LcmResponse = (StatusCode, Json<Value>);
+/// Handlers return `Result` so query failures propagate with `?`; Axum
+/// renders `Ok` and `Err` identically (both are status + JSON body).
+type LcmResult = Result<LcmResponse, LcmResponse>;
 
 /// Message SELECT list shared by every route that returns message rows.
 ///
@@ -125,8 +131,8 @@ fn ratio(src: i64, out: i64) -> f64 {
     }
 }
 
-fn ok(payload: Value) -> LcmResponse {
-    (StatusCode::OK, Json(payload))
+fn ok(payload: Map<String, Value>) -> LcmResponse {
+    (StatusCode::OK, Json(Value::Object(payload)))
 }
 
 fn query_error(context: &str, err: &str) -> LcmResponse {
@@ -147,10 +153,26 @@ async fn query_lcm_rows(
         .map_err(|err| query_error(context, &err))
 }
 
+/// LCM store paths whose summary metadata has already validated clean this
+/// process. Validation is a full `lcm_summary_nodes` scan; the invariant is
+/// writer-enforced, so a store that passed once is not re-scanned on every
+/// request. Failures are NOT cached — a store with a malformed row keeps
+/// returning 422 until it is repaired.
+static VALIDATED_METADATA_STORES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
 async fn ensure_valid_summary_metadata(
+    state: &DashboardState,
     conn: &libsql::Connection,
     context: &str,
 ) -> Result<(), LcmResponse> {
+    let validated = VALIDATED_METADATA_STORES.get_or_init(|| Mutex::new(HashSet::new()));
+    if validated
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&state.lcm_db_path)
+    {
+        return Ok(());
+    }
     let mut rows = conn
         .query(
             "SELECT node_id
@@ -173,6 +195,10 @@ async fn ensure_valid_summary_metadata(
             format!("{context}: malformed metadata_json for summary node {node_id}"),
         ));
     }
+    validated
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(state.lcm_db_path.clone());
     Ok(())
 }
 
@@ -187,9 +213,9 @@ pub(crate) struct OverviewParams {
 pub(crate) async fn overview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<OverviewParams>,
-) -> LcmResponse {
+) -> LcmResult {
     let limit = coerce_limit(params.limit, 25, 200);
-    let mut payload = json!({
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
@@ -199,16 +225,11 @@ pub(crate) async fn overview(
         "matches": { "messages": [], "summary_nodes": [] },
         "query": params.q,
         "limit": limit,
-    });
+    }));
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
-    };
-    if let Err(response) = ensure_valid_summary_metadata(conn, "overview").await {
-        return response;
-    }
+    ensure_valid_summary_metadata(&state, conn, "overview").await?;
 
     let mut overview = Map::new();
     overview.insert(
@@ -228,38 +249,34 @@ pub(crate) async fn overview(
     );
     overview.insert(
         "role_counts".into(),
-        json!(match query_lcm_rows(
-            conn,
-            "overview role counts",
-            "SELECT role, COUNT(*) AS count
-             FROM lcm_raw_messages
-             GROUP BY role
-             ORDER BY count DESC, role ASC",
-            (),
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }),
+        json!(
+            query_lcm_rows(
+                conn,
+                "overview role counts",
+                "SELECT role, COUNT(*) AS count
+                 FROM lcm_raw_messages
+                 GROUP BY role
+                 ORDER BY count DESC, role ASC",
+                (),
+            )
+            .await?
+        ),
     );
     overview.insert(
         "source_counts".into(),
-        json!(match query_lcm_rows(
-            conn,
-            "overview source counts",
-            "SELECT CASE WHEN provider IS NULL OR TRIM(provider) = '' THEN 'unknown' ELSE provider END AS source,
-                    COUNT(*) AS count
-             FROM lcm_raw_messages
-             GROUP BY source
-             ORDER BY count DESC, source ASC",
-            (),
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }),
+        json!(
+            query_lcm_rows(
+                conn,
+                "overview source counts",
+                "SELECT CASE WHEN provider IS NULL OR TRIM(provider) = '' THEN 'unknown' ELSE provider END AS source,
+                        COUNT(*) AS count
+                 FROM lcm_raw_messages
+                 GROUP BY source
+                 ORDER BY count DESC, source ASC",
+                (),
+            )
+            .await?
+        ),
     );
     overview.insert(
         "summary_nodes_total".into(),
@@ -289,20 +306,18 @@ pub(crate) async fn overview(
     );
     overview.insert(
         "depth_counts".into(),
-        json!(match query_lcm_rows(
-            conn,
-            "overview depth counts",
-            "SELECT depth, COUNT(*) AS count
-             FROM lcm_summary_nodes
-             GROUP BY depth
-             ORDER BY depth ASC",
-            (),
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }),
+        json!(
+            query_lcm_rows(
+                conn,
+                "overview depth counts",
+                "SELECT depth, COUNT(*) AS count
+                 FROM lcm_summary_nodes
+                 GROUP BY depth
+                 ORDER BY depth ASC",
+                (),
+            )
+            .await?
+        ),
     );
     let src_tok = query_i64(
         conn,
@@ -326,47 +341,43 @@ pub(crate) async fn overview(
             "node_count": node_count,
         }),
     );
-    obj.insert("overview".into(), Value::Object(overview));
+    payload.insert("overview".into(), Value::Object(overview));
 
-    obj.insert(
+    payload.insert(
         "latest_sessions".into(),
-        json!(match query_lcm_rows(
-            conn,
-            "latest_sessions",
-            "SELECT session_id,
-                    COUNT(*) AS message_count,
-                    MAX(store_id) AS last_store_id,
-                    MAX(timestamp) AS last_timestamp
-             FROM lcm_raw_messages
-             GROUP BY session_id
-             ORDER BY last_timestamp DESC
-             LIMIT ?1",
-            libsql::params![limit],
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }),
+        json!(
+            query_lcm_rows(
+                conn,
+                "latest_sessions",
+                "SELECT session_id,
+                        COUNT(*) AS message_count,
+                        MAX(store_id) AS last_store_id,
+                        MAX(timestamp) AS last_timestamp
+                 FROM lcm_raw_messages
+                 GROUP BY session_id
+                 ORDER BY last_timestamp DESC
+                 LIMIT ?1",
+                libsql::params![limit],
+            )
+            .await?
+        ),
     );
-    obj.insert(
+    payload.insert(
         "latest_summary_nodes".into(),
-        json!(match query_lcm_rows(
-            conn,
-            "latest_summary_nodes",
-            &format!(
-                "SELECT {NODE_COLUMNS}
-                 FROM lcm_summary_nodes n
-                 ORDER BY COALESCE(n.source_time_end, n.created_at) DESC, n.rowid DESC
-                 LIMIT ?1"
-            ),
-            libsql::params![limit],
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }),
+        json!(
+            query_lcm_rows(
+                conn,
+                "latest_summary_nodes",
+                &format!(
+                    "SELECT {NODE_COLUMNS}
+                     FROM lcm_summary_nodes n
+                     ORDER BY COALESCE(n.source_time_end, n.created_at) DESC, n.rowid DESC
+                     LIMIT ?1"
+                ),
+                libsql::params![limit],
+            )
+            .await?
+        ),
     );
 
     let query = params.q.trim();
@@ -375,7 +386,7 @@ pub(crate) async fn overview(
         // Match against index_text/snippet_text/content like the canonical
         // LIKE fallback in sessions/lcm/query.rs (externalized rows have
         // content = NULL and are only findable via the derived columns).
-        let mut message_matches = match query_lcm_rows(
+        let mut message_matches = query_lcm_rows(
             conn,
             "overview message matches",
             &format!(
@@ -389,13 +400,9 @@ pub(crate) async fn overview(
             ),
             libsql::params![like.clone(), limit],
         )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        };
+        .await?;
         parse_summary_node_ids(&mut message_matches);
-        let node_matches = match query_lcm_rows(
+        let node_matches = query_lcm_rows(
             conn,
             "overview summary node matches",
             &format!(
@@ -409,18 +416,14 @@ pub(crate) async fn overview(
             ),
             libsql::params![like, limit],
         )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        };
-        obj.insert(
+        .await?;
+        payload.insert(
             "matches".into(),
             json!({ "messages": message_matches, "summary_nodes": node_matches }),
         );
     }
 
-    ok(payload)
+    Ok(ok(payload))
 }
 
 #[derive(Deserialize)]
@@ -453,12 +456,12 @@ fn parse_epoch(value: &str) -> Option<f64> {
 pub(crate) async fn search(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SearchParams>,
-) -> LcmResponse {
+) -> LcmResult {
     let limit = coerce_limit(params.limit, 25, 200);
     let offset = params.offset.unwrap_or(0).max(0);
     let since = parse_epoch(&params.since);
     let until = parse_epoch(&params.until);
-    let mut payload = json!({
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
@@ -476,20 +479,15 @@ pub(crate) async fn search(
             "until": until,
         },
         "matches": { "messages": [], "summary_nodes": [] },
-    });
+    }));
     let query = params.q.trim().to_string();
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
     if query.is_empty() {
-        return ok(payload);
+        return Ok(ok(payload));
     }
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
-    };
-    if let Err(response) = ensure_valid_summary_metadata(conn, "search").await {
-        return response;
-    }
+    ensure_valid_summary_metadata(&state, conn, "search").await?;
 
     // Message facets, shared between the FTS and LIKE paths.
     let mut facet_clauses: Vec<String> = Vec::new();
@@ -589,10 +587,7 @@ pub(crate) async fn search(
              LIMIT ? OFFSET ?",
             where_clauses.join(" AND ")
         );
-        match query_lcm_rows(conn, "search message LIKE fallback", &sql, like_params).await {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }
+        query_lcm_rows(conn, "search message LIKE fallback", &sql, like_params).await?
     };
     parse_summary_node_ids(&mut message_matches);
 
@@ -679,10 +674,7 @@ pub(crate) async fn search(
              LIMIT ? OFFSET ?",
             where_clauses.join(" AND ")
         );
-        match query_lcm_rows(conn, "search summary node LIKE fallback", &sql, like_params).await {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        }
+        query_lcm_rows(conn, "search summary node LIKE fallback", &sql, like_params).await?
     };
 
     // Worst-case engine: only report "fts" when both sections used FTS, so
@@ -692,20 +684,20 @@ pub(crate) async fn search(
     } else {
         "like"
     };
-    obj.insert("engine".into(), json!(engine));
-    obj.insert(
+    payload.insert("engine".into(), json!(engine));
+    payload.insert(
         "engine_detail".into(),
         json!({ "messages": message_engine, "summary_nodes": node_engine }),
     );
-    obj.insert(
+    payload.insert(
         "total".into(),
         json!({ "messages": message_total, "summary_nodes": node_total }),
     );
-    obj.insert(
+    payload.insert(
         "matches".into(),
         json!({ "messages": message_matches, "summary_nodes": node_matches }),
     );
-    ok(payload)
+    Ok(ok(payload))
 }
 
 #[derive(Deserialize)]
@@ -721,7 +713,7 @@ pub(crate) async fn session(
     State(state): State<DashboardState>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
-) -> LcmResponse {
+) -> LcmResult {
     let limit = coerce_limit(params.limit, 200, 1000);
     let offset = params.offset.unwrap_or(0).max(0);
     let order = if params.order.eq_ignore_ascii_case("desc") {
@@ -729,7 +721,7 @@ pub(crate) async fn session(
     } else {
         "ASC"
     };
-    let mut payload = json!({
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
@@ -749,16 +741,11 @@ pub(crate) async fn session(
         "has_more": false,
         "has_more_messages": false,
         "has_more_summary_nodes": false,
-    });
+    }));
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
-    };
-    if let Err(response) = ensure_valid_summary_metadata(conn, "session").await {
-        return response;
-    }
+    ensure_valid_summary_metadata(&state, conn, "session").await?;
 
     let message_count = query_i64(
         conn,
@@ -773,10 +760,10 @@ pub(crate) async fn session(
     )
     .await;
     if message_count == 0 && summary_node_count == 0 {
-        return (
+        return Ok((
             StatusCode::NOT_FOUND,
             Json(http_detail(&format!("session not found: {session_id}"))),
-        );
+        ));
     }
     let token_estimate_total = query_i64(
         conn,
@@ -787,7 +774,7 @@ pub(crate) async fn session(
     .await;
     // Ordinal is the ingest order (NOT NULL in the schema); timestamp alone
     // can transpose same-second messages, so it is only a tie-breaker here.
-    let mut messages = match query_lcm_rows(
+    let mut messages = query_lcm_rows(
         conn,
         "session messages",
         &format!(
@@ -799,11 +786,7 @@ pub(crate) async fn session(
         ),
         libsql::params![session_id.clone(), limit + 1, offset],
     )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    .await?;
     let has_more_messages = messages.len() as i64 > limit;
     messages.truncate(limit as usize);
     parse_summary_node_ids(&mut messages);
@@ -820,7 +803,7 @@ pub(crate) async fn session(
         libsql::params![session_id.clone()],
     )
     .await;
-    let mut summary_nodes = match query_lcm_rows(
+    let mut summary_nodes = query_lcm_rows(
         conn,
         "session summary nodes",
         &format!(
@@ -833,16 +816,12 @@ pub(crate) async fn session(
         ),
         libsql::params![session_id.clone(), limit + 1, offset],
     )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    .await?;
     let has_more_summary_nodes = summary_nodes.len() as i64 > limit;
     summary_nodes.truncate(limit as usize);
     let has_more = has_more_messages || has_more_summary_nodes;
 
-    obj.insert(
+    payload.insert(
         "counts".into(),
         json!({
             "message_count": message_count,
@@ -852,15 +831,15 @@ pub(crate) async fn session(
             "source_token_count": source_token_count,
         }),
     );
-    obj.insert("messages".into(), json!(messages));
-    obj.insert("summary_nodes".into(), json!(summary_nodes));
-    obj.insert("has_more".into(), json!(has_more));
-    obj.insert("has_more_messages".into(), json!(has_more_messages));
-    obj.insert(
+    payload.insert("messages".into(), json!(messages));
+    payload.insert("summary_nodes".into(), json!(summary_nodes));
+    payload.insert("has_more".into(), json!(has_more));
+    payload.insert("has_more_messages".into(), json!(has_more_messages));
+    payload.insert(
         "has_more_summary_nodes".into(),
         json!(has_more_summary_nodes),
     );
-    ok(payload)
+    Ok(ok(payload))
 }
 
 /// `GET /api/plugins/hermes-lcm/node/{node_id}` — a summary node plus the
@@ -868,26 +847,21 @@ pub(crate) async fn session(
 pub(crate) async fn node(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
-) -> LcmResponse {
-    let mut payload = json!({
+) -> LcmResult {
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
         "node_id": node_id,
         "node": null,
         "sources": { "type": null, "ids": [], "messages": [], "nodes": [] },
-    });
+    }));
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
-    };
-    if let Err(response) = ensure_valid_summary_metadata(conn, "node").await {
-        return response;
-    }
+    ensure_valid_summary_metadata(&state, conn, "node").await?;
 
-    let node_rows = match query_lcm_rows(
+    let node_rows = query_lcm_rows(
         conn,
         "node lookup",
         &format!(
@@ -906,20 +880,16 @@ pub(crate) async fn node(
         ),
         libsql::params![node_id.clone()],
     )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    .await?;
     let Some(node_row) = node_rows.into_iter().next() else {
-        return (
+        return Ok((
             StatusCode::NOT_FOUND,
             Json(http_detail(&format!("summary node not found: {node_id}"))),
-        );
+        ));
     };
-    obj.insert("node".into(), node_row);
+    payload.insert("node".into(), node_row);
 
-    let source_rows = match query_lcm_rows(
+    let source_rows = query_lcm_rows(
         conn,
         "node sources",
         "SELECT source_kind, source_id
@@ -928,11 +898,7 @@ pub(crate) async fn node(
          ORDER BY ordinal ASC",
         libsql::params![node_id.clone()],
     )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    .await?;
 
     let mut message_ids: Vec<i64> = Vec::new();
     let mut child_node_ids: Vec<String> = Vec::new();
@@ -968,16 +934,12 @@ pub(crate) async fn node(
     sources_obj.insert("nodes".into(), json!([]));
 
     if source_type == "nodes" && !child_node_ids.is_empty() {
-        let placeholders = child_node_ids
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = qmarks(child_node_ids.len());
         let params: Vec<libsql::Value> = child_node_ids
             .iter()
             .map(|id| libsql::Value::Text(id.clone()))
             .collect();
-        let rows = match query_lcm_rows(
+        let rows = query_lcm_rows(
             conn,
             "node child summary nodes",
             &format!(
@@ -989,23 +951,15 @@ pub(crate) async fn node(
             ),
             params,
         )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        };
+        .await?;
         sources_obj.insert("nodes".into(), json!(rows));
     } else if !message_ids.is_empty() {
-        let placeholders = message_ids
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = qmarks(message_ids.len());
         let params: Vec<libsql::Value> = message_ids
             .iter()
             .map(|id| libsql::Value::Integer(*id))
             .collect();
-        let mut rows = match query_lcm_rows(
+        let mut rows = query_lcm_rows(
             conn,
             "node source messages",
             &format!(
@@ -1015,14 +969,10 @@ pub(crate) async fn node(
             ),
             params,
         )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(response) => return response,
-        };
+        .await?;
         parse_summary_node_ids(&mut rows);
         // Preserve the node's recorded source order.
-        let order: std::collections::HashMap<i64, usize> = message_ids
+        let order: HashMap<i64, usize> = message_ids
             .iter()
             .enumerate()
             .map(|(i, id)| (*id, i))
@@ -1035,8 +985,8 @@ pub(crate) async fn node(
         });
         sources_obj.insert("messages".into(), json!(rows));
     }
-    obj.insert("sources".into(), Value::Object(sources_obj));
-    ok(payload)
+    payload.insert("sources".into(), Value::Object(sources_obj));
+    Ok(ok(payload))
 }
 
 #[derive(Deserialize)]
@@ -1052,11 +1002,11 @@ pub(crate) struct TimelineParams {
 pub(crate) async fn timeline(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<TimelineParams>,
-) -> LcmResponse {
+) -> LcmResult {
     let limit = coerce_limit(params.limit, 400, 2000);
     let hour = params.bucket.eq_ignore_ascii_case("hour");
     let fmt = if hour { "%Y-%m-%dT%H:00" } else { "%Y-%m-%d" };
-    let mut payload = json!({
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
@@ -1065,12 +1015,9 @@ pub(crate) async fn timeline(
         "buckets": [],
         "node_buckets": [],
         "undated": {"count": 0, "token_estimate": 0},
-    });
+    }));
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
-    };
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
 
     // NULL timestamps would otherwise collapse into one NULL group rendered
@@ -1116,56 +1063,57 @@ pub(crate) async fn timeline(
     );
     let (buckets, undated, node_buckets) = if params.session_id.is_empty() {
         (
-            query_rows(conn, &msg_sql, libsql::params![limit]).await,
-            query_rows(conn, &undated_sql, ()).await,
-            query_rows(conn, &node_sql, libsql::params![limit]).await,
+            query_lcm_rows(
+                conn,
+                "timeline message buckets",
+                &msg_sql,
+                libsql::params![limit],
+            )
+            .await?,
+            query_lcm_rows(conn, "timeline undated messages", &undated_sql, ()).await?,
+            query_lcm_rows(
+                conn,
+                "timeline summary buckets",
+                &node_sql,
+                libsql::params![limit],
+            )
+            .await?,
         )
     } else {
         (
-            query_rows(
+            query_lcm_rows(
                 conn,
+                "timeline message buckets",
                 &msg_sql,
                 libsql::params![limit, params.session_id.clone()],
             )
-            .await,
-            query_rows(
+            .await?,
+            query_lcm_rows(
                 conn,
+                "timeline undated messages",
                 &undated_sql,
                 libsql::params![params.session_id.clone()],
             )
-            .await,
-            query_rows(
+            .await?,
+            query_lcm_rows(
                 conn,
+                "timeline summary buckets",
                 &node_sql,
                 libsql::params![limit, params.session_id.clone()],
             )
-            .await,
+            .await?,
         )
     };
-    obj.insert(
-        "buckets".into(),
-        json!(match buckets {
-            Ok(rows) => rows,
-            Err(err) => return query_error("timeline message buckets", &err),
-        }),
-    );
-    obj.insert(
+    payload.insert("buckets".into(), json!(buckets));
+    payload.insert(
         "undated".into(),
-        match undated {
-            Ok(mut rows) => rows
-                .pop()
-                .unwrap_or_else(|| json!({"count": 0, "token_estimate": 0})),
-            Err(err) => return query_error("timeline undated messages", &err),
-        },
+        undated
+            .into_iter()
+            .next_back()
+            .unwrap_or_else(|| json!({"count": 0, "token_estimate": 0})),
     );
-    obj.insert(
-        "node_buckets".into(),
-        json!(match node_buckets {
-            Ok(rows) => rows,
-            Err(err) => return query_error("timeline summary buckets", &err),
-        }),
-    );
-    ok(payload)
+    payload.insert("node_buckets".into(), json!(node_buckets));
+    Ok(ok(payload))
 }
 
 #[derive(Deserialize)]
@@ -1179,10 +1127,10 @@ pub(crate) struct CompressionParams {
 pub(crate) async fn compression(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<CompressionParams>,
-) -> LcmResponse {
+) -> LcmResult {
     let limit = coerce_limit(params.limit, 50, 500);
     let by_node = params.by.eq_ignore_ascii_case("node");
-    let mut payload = json!({
+    let mut payload = json_object(json!({
         "path": state.lcm_db_path,
         "storage_scope": state.lcm_scope,
         "exists": state.lcm_conn.is_some(),
@@ -1195,12 +1143,9 @@ pub(crate) async fn compression(
             "node_count": 0,
         },
         "groups": [],
-    });
+    }));
     let Some(conn) = state.lcm_conn.as_ref() else {
-        return ok(payload);
-    };
-    let Some(obj) = payload.as_object_mut() else {
-        return ok(payload);
+        return Ok(ok(payload));
     };
 
     let src = query_i64(
@@ -1216,7 +1161,7 @@ pub(crate) async fn compression(
     )
     .await;
     let n = query_i64(conn, "SELECT COUNT(*) FROM lcm_summary_nodes", ()).await;
-    obj.insert(
+    payload.insert(
         "overall".into(),
         json!({
             "source_token_count": src,
@@ -1245,17 +1190,13 @@ pub(crate) async fn compression(
          ORDER BY source_token_count DESC, session_id ASC
          LIMIT ?1"
     };
-    let mut groups = match query_lcm_rows(
+    let mut groups = query_lcm_rows(
         conn,
         "compression groups",
         groups_sql,
         libsql::params![limit],
     )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    .await?;
     for group in &mut groups {
         let src = group
             .get("source_token_count")
@@ -1269,6 +1210,6 @@ pub(crate) async fn compression(
             obj.insert("ratio".into(), json!(ratio(src, out)));
         }
     }
-    obj.insert("groups".into(), json!(groups));
-    ok(payload)
+    payload.insert("groups".into(), json!(groups));
+    Ok(ok(payload))
 }

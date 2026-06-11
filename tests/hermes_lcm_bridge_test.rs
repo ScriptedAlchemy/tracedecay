@@ -1,6 +1,9 @@
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
+use common::pyyaml_shim_pythonpath;
 use tempfile::TempDir;
 use tokensave::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tokensave::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
@@ -4016,7 +4019,10 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
 tools = plugin.tools
-assert tools.PINNED_PROJECT_ROOT == "/pinned/project", tools.PINNED_PROJECT_ROOT
+# The pin lives in the profile config.yaml (plugins.tokensave.project_root);
+# the generated tools.py carries no pin constant.
+assert not hasattr(tools, "PINNED_PROJECT_ROOT")
+assert tools.config_pinned_project_root() == "/pinned/project", tools.config_pinned_project_root()
 
 # Every CLI dispatch picks up the pin when no explicit project is given.
 captured = []
@@ -4060,11 +4066,17 @@ assert explicit.project_root == "/explicit/root", explicit.project_root
     )
     .unwrap();
 
-    let output = Command::new("python3")
+    let mut check = Command::new("python3");
+    check
         .arg(&script)
         .arg(&plugin_dir)
         .env("HOME", home.path())
-        .env_remove("HERMES_HOME")
+        .env_remove("HERMES_HOME");
+    // Reading the config-block pin requires a yaml module.
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
         .output()
         .expect("python3 should run generated Hermes plugin check");
     assert!(

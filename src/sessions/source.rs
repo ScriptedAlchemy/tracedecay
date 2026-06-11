@@ -159,10 +159,7 @@ async fn ingest_one(
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
     let path_str = path.to_string_lossy().to_string();
-    let prev_offset = db
-        .get_parse_offset_with_file_id(&path_str)
-        .await
-        .unwrap_or_default();
+    let prev_offset = db.get_parse_offset(&path_str).await.unwrap_or_default();
     let prev = StoredCursor {
         position: prev_offset.byte_offset,
         mtime: prev_offset.mtime,
@@ -175,7 +172,7 @@ async fn ingest_one(
     if parsed.messages.is_empty() {
         // Non-message append (e.g. blank/undecodable rows) still advances the
         // cursor so the next ingest only sees genuinely new content.
-        db.set_parse_offset_with_file_id(
+        db.set_parse_offset(
             &path_str,
             ParseOffset {
                 byte_offset: parsed.new_cursor.position,

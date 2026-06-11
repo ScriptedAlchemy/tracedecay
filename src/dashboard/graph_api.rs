@@ -8,6 +8,7 @@
 //! even on graphs with tens of thousands of nodes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -16,8 +17,8 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::util::{
-    coerce_limit, collect_rows, http_detail, like_pattern, query_i64, query_rows, JsonPath,
-    JsonQuery,
+    coerce_limit, collect_rows, http_detail, i64_field, like_pattern, qmarks, query_i64,
+    query_rows, str_field, JsonPath, JsonQuery,
 };
 use super::DashboardState;
 
@@ -102,14 +103,6 @@ fn language_for_path(path: &str) -> &'static str {
     }
 }
 
-fn i64_field(row: &Value, key: &str) -> i64 {
-    row.get(key).and_then(Value::as_i64).unwrap_or(0)
-}
-
-fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
 fn rows_by_language(files: &[Value]) -> Vec<Value> {
     let mut counts: BTreeMap<&'static str, i64> = BTreeMap::new();
     for file in files {
@@ -168,10 +161,6 @@ async fn first_node_for_query(state: &DashboardState, query: &str) -> Option<Str
         .and_then(|row| row.get("id"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-}
-
-fn qmarks(count: usize) -> String {
-    vec!["?"; count].join(",")
 }
 
 async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Vec<Value> {
@@ -266,6 +255,108 @@ async fn degrees_for_ids(state: &DashboardState, ids: &[String]) -> BTreeMap<Str
     degrees
 }
 
+/// Cap on the cached top-degree pool: the default subgraph's candidate pool
+/// is at most `node_limit * 2 = 500`, and the overview needs the top 12.
+const DEGREE_POOL_CAP: i64 = 500;
+
+/// Cached whole-graph degree aggregation feeding the overview's
+/// `top_connected` and the default subgraph's candidate pool. Both used to
+/// double-scan the full `edges` table (UNION ALL + GROUP BY) on every Graph
+/// tab open/reset, for a result that only changes when the index is synced.
+struct DegreeSummary {
+    /// `(COUNT(*), MAX(id))` of `edges` at compute time. Edge ids are
+    /// AUTOINCREMENT (never reused), so inserts raise the max and deletes
+    /// shrink the count; node-only edits without any edge change are not
+    /// detected until the next sync rewrites edges.
+    fingerprint: (i64, i64),
+    /// Top [`DEGREE_POOL_CAP`] `(node_id, degree)` rows, ordered by degree
+    /// descending then qualified name ascending (zero-degree nodes included,
+    /// like the pool query they replace).
+    pool: Vec<(String, i64)>,
+    /// Overview `top_connected` rows (top 12 by degree, joined to `nodes`).
+    top_connected: Vec<Value>,
+}
+
+static DEGREE_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<DegreeSummary>>>> =
+    OnceLock::new();
+
+async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
+    let fingerprint = (
+        query_i64(&state.mem_conn, "SELECT COUNT(*) FROM edges", ()).await,
+        query_i64(
+            &state.mem_conn,
+            "SELECT COALESCE(MAX(id), 0) FROM edges",
+            (),
+        )
+        .await,
+    );
+    let cache = DEGREE_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    // Held across the rebuild so concurrent requests share one aggregation.
+    let mut guard = cache.lock().await;
+    if let Some(existing) = guard.get(&state.mem_db_path) {
+        if existing.fingerprint == fingerprint {
+            return existing.clone();
+        }
+    }
+
+    let pool_rows = query_rows(
+        &state.mem_conn,
+        "SELECT n.id, COALESCE(d.degree, 0) AS degree
+         FROM nodes n
+         LEFT JOIN (
+             SELECT node_id, COUNT(*) AS degree
+             FROM (
+                 SELECT source AS node_id FROM edges
+                 UNION ALL
+                 SELECT target AS node_id FROM edges
+             )
+             GROUP BY node_id
+         ) d ON d.node_id = n.id
+         ORDER BY degree DESC, n.qualified_name ASC
+         LIMIT ?1",
+        libsql::params![DEGREE_POOL_CAP],
+    )
+    .await
+    .unwrap_or_default();
+    let pool: Vec<(String, i64)> = pool_rows
+        .iter()
+        .filter_map(|row| {
+            row.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), i64_field(row, "degree")))
+        })
+        .collect();
+
+    let top_connected = query_rows(
+        &state.mem_conn,
+        "SELECT n.id, n.name, n.kind, n.file_path, d.degree
+         FROM (
+             SELECT node_id, COUNT(*) AS degree
+             FROM (
+                 SELECT source AS node_id FROM edges
+                 UNION ALL
+                 SELECT target AS node_id FROM edges
+             )
+             GROUP BY node_id
+             ORDER BY degree DESC
+             LIMIT 12
+         ) d
+         JOIN nodes n ON n.id = d.node_id
+         ORDER BY d.degree DESC, n.qualified_name ASC",
+        (),
+    )
+    .await
+    .unwrap_or_default();
+
+    let summary = Arc::new(DegreeSummary {
+        fingerprint,
+        pool,
+        top_connected,
+    });
+    guard.insert(state.mem_db_path.clone(), summary.clone());
+    summary
+}
+
 fn attach_degrees(nodes: Vec<Value>, degrees: &BTreeMap<String, i64>) -> Vec<Value> {
     nodes
         .into_iter()
@@ -302,6 +393,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     )
     .await
     .unwrap_or_default();
+    let summary = degree_summary(&state).await;
 
     Json(json!({
         "path": state.mem_db_path,
@@ -331,26 +423,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         .await
         .unwrap_or_default(),
         "files_by_language": rows_by_language(&files),
-        "top_connected": query_rows(
-            &state.mem_conn,
-            "SELECT n.id, n.name, n.kind, n.file_path, d.degree
-             FROM (
-                 SELECT node_id, COUNT(*) AS degree
-                 FROM (
-                     SELECT source AS node_id FROM edges
-                     UNION ALL
-                     SELECT target AS node_id FROM edges
-                 )
-                 GROUP BY node_id
-                 ORDER BY degree DESC
-                 LIMIT 12
-             ) d
-             JOIN nodes n ON n.id = d.node_id
-             ORDER BY d.degree DESC, n.qualified_name ASC",
-            (),
-        )
-        .await
-        .unwrap_or_default(),
+        "top_connected": summary.top_connected,
         "largest_files": query_rows(
             &state.mem_conn,
             "SELECT path, node_count, size
@@ -579,35 +652,16 @@ const DEFAULT_POOL_EDGE_CAP: i64 = 4_000;
 /// nothing touches the selection, and let isolated nodes fill whatever
 /// capacity is left (which also keeps tiny or edge-free indexes non-empty).
 async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i64) -> Json<Value> {
-    // Candidate pool: 2x the node budget so selection has room to work with.
-    let pool_limit = (node_limit * 2).min(500);
-    let pool_rows = query_rows(
-        &state.mem_conn,
-        "SELECT n.id, COALESCE(d.degree, 0) AS degree
-         FROM nodes n
-         LEFT JOIN (
-             SELECT node_id, COUNT(*) AS degree
-             FROM (
-                 SELECT source AS node_id FROM edges
-                 UNION ALL
-                 SELECT target AS node_id FROM edges
-             )
-             GROUP BY node_id
-         ) d ON d.node_id = n.id
-         ORDER BY degree DESC, n.qualified_name ASC
-         LIMIT ?1",
-        libsql::params![pool_limit],
-    )
-    .await
-    .unwrap_or_default();
+    // Candidate pool: 2x the node budget so selection has room to work with,
+    // served as a prefix of the cached top-degree summary.
+    let pool_limit = usize::try_from((node_limit * 2).min(DEGREE_POOL_CAP)).unwrap_or(0);
+    let summary = degree_summary(state).await;
 
     let mut pool_ids = Vec::new();
     let mut degrees: BTreeMap<String, i64> = BTreeMap::new();
-    for row in &pool_rows {
-        if let Some(id) = row.get("id").and_then(Value::as_str) {
-            pool_ids.push(id.to_string());
-            degrees.insert(id.to_string(), i64_field(row, "degree"));
-        }
+    for (id, degree) in summary.pool.iter().take(pool_limit) {
+        pool_ids.push(id.clone());
+        degrees.insert(id.clone(), *degree);
     }
 
     let pool_edges = edges_for_ids(state, &pool_ids, DEFAULT_POOL_EDGE_CAP).await;

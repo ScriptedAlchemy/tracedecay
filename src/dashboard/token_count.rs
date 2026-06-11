@@ -21,16 +21,46 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use super::util::query_rows;
+use super::util::{qmarks, query_rows};
 use super::DashboardState;
 use crate::global_db::TokenCountUpsert;
 
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
+
+/// Per-message provenance + token columns, derived once and reused by every
+/// savings aggregate. Usage fields accept both the Anthropic
+/// (`input_tokens`/`output_tokens`) and `OpenAI` (`prompt_tokens`/
+/// `completion_tokens`) transcript shapes; `json_valid` guards keep one
+/// malformed `metadata_json` row from failing the whole query.
+pub(super) const MESSAGE_TOKENS_CTE: &str = "
+    SELECT provider,
+           message_id,
+           session_id,
+           role,
+           timestamp,
+           TRIM(COALESCE(model, '')) AS model,
+           LENGTH(COALESCE(text, '')) AS msg_len,
+           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens,
+           CASE WHEN json_valid(metadata_json) THEN
+               CAST(COALESCE(json_extract(metadata_json, '$.usage.input_tokens'),
+                             json_extract(metadata_json, '$.usage.prompt_tokens')) AS INTEGER)
+           END AS usage_in,
+           CASE WHEN json_valid(metadata_json) THEN
+               CAST(COALESCE(json_extract(metadata_json, '$.usage.output_tokens'),
+                             json_extract(metadata_json, '$.usage.completion_tokens')) AS INTEGER)
+           END AS usage_out,
+           CASE WHEN json_valid(metadata_json) THEN
+               CAST(json_extract(metadata_json, '$.usage.cache_read_input_tokens') AS INTEGER)
+           END AS usage_cache_read,
+           CASE WHEN json_valid(metadata_json) THEN
+               CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
+           END AS usage_cache_write
+    FROM session_messages";
 
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
 /// is exact (the model's real tokenizer) or a labeled approximation.
@@ -112,10 +142,24 @@ struct CachedCount {
     tokens: i64,
 }
 
+/// Cached non-usage overlay plus the `session_messages` fingerprint it was
+/// built from.
+struct OverlayCache {
+    /// `(COUNT(*), MAX(rowid))` of `session_messages` at build time. Inserts
+    /// change both; deletes change the count. (In-place row rewrites that
+    /// keep count and rowid are not detected — ingest only inserts.)
+    fingerprint: (i64, i64),
+    overlay: Arc<Vec<MessageTokens>>,
+}
+
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub(crate) struct TokenCountCache {
     map: Mutex<HashMap<(String, String), CachedCount>>,
     hydrated: AtomicBool,
+    /// Last built non-usage overlay; `/overview`, `/sessions`, and `/models`
+    /// all need it, so without this every Savings-tab interaction re-ran the
+    /// full `session_messages` scan + fold three times.
+    overlay: tokio::sync::Mutex<Option<OverlayCache>>,
 }
 
 impl TokenCountCache {
@@ -123,6 +167,7 @@ impl TokenCountCache {
         Self {
             map: Mutex::new(HashMap::new()),
             hydrated: AtomicBool::new(false),
+            overlay: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -153,14 +198,56 @@ fn row_str(row: &Value, key: &str) -> String {
 /// Builds the non-usage overlay: every stored message lacking transcript
 /// usage data, with cached-or-computed token counts. Returns `None` when no
 /// session store is being served (callers fall back to the SQL estimates).
-pub(crate) async fn non_usage_message_tokens(state: &DashboardState) -> Option<Vec<MessageTokens>> {
+///
+/// The result is cached on [`TokenCountCache`] keyed by a cheap
+/// `(COUNT(*), MAX(rowid))` fingerprint of `session_messages`; the cache
+/// lock is held across a rebuild so the three savings endpoints firing
+/// concurrently share one scan instead of racing three.
+pub(crate) async fn non_usage_message_tokens(
+    state: &DashboardState,
+) -> Option<Arc<Vec<MessageTokens>>> {
     let conn = state.lcm_conn.as_ref()?;
 
+    let fingerprint = overlay_fingerprint(conn).await?;
+    let mut cached = state.token_counts.overlay.lock().await;
+    if let Some(existing) = cached.as_ref() {
+        if existing.fingerprint == fingerprint {
+            return Some(existing.overlay.clone());
+        }
+    }
+
+    let overlay = Arc::new(build_overlay(state, conn).await?);
+    *cached = Some(OverlayCache {
+        fingerprint,
+        overlay: overlay.clone(),
+    });
+    Some(overlay)
+}
+
+/// `(COUNT(*), MAX(rowid))` of `session_messages` — see [`OverlayCache`].
+async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<(i64, i64)> {
+    let rows = query_rows(
+        conn,
+        "SELECT COUNT(*) AS count, COALESCE(MAX(rowid), 0) AS max_rowid FROM session_messages",
+        (),
+    )
+    .await
+    .ok()?;
+    let row = rows.first()?;
+    Some((
+        row.get("count").and_then(Value::as_i64).unwrap_or(0),
+        row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
+    ))
+}
+
+async fn build_overlay(
+    state: &DashboardState,
+    conn: &libsql::Connection,
+) -> Option<Vec<MessageTokens>> {
     // Metadata only — text never leaves SQLite unless a count is missing.
     let sql = format!(
         "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
-         FROM ({cte}) WHERE usage_in IS NULL AND usage_out IS NULL",
-        cte = super::savings_api::MESSAGE_TOKENS_CTE
+         FROM ({MESSAGE_TOKENS_CTE}) WHERE usage_in IS NULL AND usage_out IS NULL"
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
 
@@ -241,32 +328,39 @@ async fn hydrate_cache(state: &DashboardState) {
     }
 }
 
-/// Fetches the text of `misses` in chunks, counts off the async runtime,
-/// then updates both cache levels.
+/// Fetches the text of `misses` in per-provider chunks, counts off the async
+/// runtime, then updates both cache levels.
+///
+/// Chunks are keyed `(provider, message_id)` so the lookup can use the
+/// table's composite primary key — a `message_id IN (…)` filter alone cannot,
+/// and full-scanned the text-heavy table once per 200-row chunk (a 15k-message
+/// first warm paid ~75 full scans).
 async fn count_and_store(
     state: &DashboardState,
     conn: &libsql::Connection,
-    misses: Vec<(String, String, String, i64)>,
+    mut misses: Vec<(String, String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
     let mut computed: Vec<TokenCountUpsert> = Vec::with_capacity(misses.len());
 
-    for chunk in misses.chunks(CHUNK) {
-        let placeholders = (1..=chunk.len())
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+    misses.sort_by(|a, b| a.0.cmp(&b.0));
+    for chunk in misses
+        .chunk_by(|a, b| a.0 == b.0)
+        .flat_map(|group| group.chunks(CHUNK))
+    {
+        let placeholders = qmarks(chunk.len());
         let sql = format!(
             "SELECT provider, message_id, COALESCE(text, '') AS text
-             FROM session_messages WHERE message_id IN ({placeholders})"
+             FROM session_messages WHERE provider = ? AND message_id IN ({placeholders})"
         );
-        let params = libsql::params_from_iter(
+        let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() + 1);
+        params.push(libsql::Value::Text(chunk[0].0.clone()));
+        params.extend(
             chunk
                 .iter()
-                .map(|(_, message_id, _, _)| libsql::Value::Text(message_id.clone()))
-                .collect::<Vec<_>>(),
+                .map(|(_, message_id, _, _)| libsql::Value::Text(message_id.clone())),
         );
-        let Ok(rows) = query_rows(conn, &sql, params).await else {
+        let Ok(rows) = query_rows(conn, &sql, libsql::params_from_iter(params)).await else {
             continue;
         };
         let mut texts: HashMap<(String, String), String> = rows

@@ -4,7 +4,7 @@ use super::{raw, LcmRawMessage, LcmStorageKind};
 
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 3;
+pub const LCM_SCHEMA_VERSION: i64 = 4;
 
 const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKER: &str = "\n[truncated by tokensave]";
@@ -123,6 +123,12 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_order
             ON lcm_raw_messages(provider, session_id, store_id);
+        -- Schema v4: the dashboard session view filters by session_id alone
+        -- (no provider), which the (provider, session_id, …) index cannot
+        -- serve; without this index every session click full-scans the
+        -- text-heavy table three times (count, token estimate, page).
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_id
+            ON lcm_raw_messages(session_id);
         CREATE TABLE IF NOT EXISTS lcm_external_payloads (
             payload_ref TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -232,12 +238,25 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
     .ok()?;
 
     // Schema v3: the raw-message FTS index dropped the role and
-    // metadata_json columns (see RAW_FTS_DDL). Rebuilding unconditionally
-    // here keeps the step idempotent — this code only runs while the stored
-    // version is behind LCM_SCHEMA_VERSION, the index is fully derived from
-    // lcm_raw_messages, and a retry after a partially applied earlier run
-    // converges on the current structure.
-    rebuild_raw_fts(conn).await?;
+    // metadata_json columns (see RAW_FTS_DDL). The rebuild is gated on the
+    // stored structure so later version bumps (e.g. the v4 index above)
+    // don't re-pay a full FTS rebuild; a retry after a partially applied
+    // earlier run still converges because the index is fully derived from
+    // lcm_raw_messages. A fresh store has no FTS objects at all (they are
+    // created by the rebuild, not the DDL batch above), so presence is
+    // checked too — `raw_fts_structure_is_current` deliberately counts a
+    // missing table as current.
+    let fts_exists = util::fetch_i64(
+        conn,
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lcm_raw_messages_fts'",
+        (),
+        "raw FTS presence query returned no rows",
+    )
+    .await
+    .is_ok_and(|count| count > 0);
+    if !fts_exists || !raw_fts_structure_is_current(conn).await.unwrap_or(false) {
+        rebuild_raw_fts(conn).await?;
+    }
 
     // Schema v2: lifecycle rows gained the compression-boundary cooldown
     // marker. Databases created before the column existed need the ALTER;

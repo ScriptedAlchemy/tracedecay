@@ -2,17 +2,16 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
 
-use common::{get_json, http_agent, pick_free_port, wait_for_dashboard, EnvVarGuard};
+use common::{
+    create_runtime, get_json, http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard,
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::dashboard;
 use tokensave::tokensave::TokenSave;
 use tokensave::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
-
-static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::new(());
-const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -24,24 +23,6 @@ struct DashboardFixture {
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
-    }
-}
-
-fn tempdir_or_panic() -> TempDir {
-    match TempDir::new() {
-        Ok(dir) => dir,
-        Err(err) => panic!("failed to create temp dir: {err}"),
-    }
-}
-
-fn create_runtime() -> tokio::runtime::Runtime {
-    match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(err) => panic!("failed to create tokio runtime: {err}"),
     }
 }
 

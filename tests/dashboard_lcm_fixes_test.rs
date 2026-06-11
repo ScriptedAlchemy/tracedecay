@@ -6,9 +6,11 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Mutex;
 
-use common::{get_json, http_agent, pick_free_port, wait_for_dashboard, EnvVarGuard};
+use common::{
+    create_runtime, get_json, http_agent, message_record_at, pick_free_port, tempdir_or_panic,
+    wait_for_dashboard, EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::dashboard;
@@ -17,8 +19,6 @@ use tokensave::sessions::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
 use tokensave::tokensave::TokenSave;
 
-static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::new(());
-const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 const PROVIDER: &str = "cursor";
 const SESSION_ID: &str = "sess-lcm-fixes";
 const NEEDLE: &str = "zebraneedle";
@@ -36,24 +36,6 @@ struct DashboardFixture {
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
-    }
-}
-
-fn tempdir_or_panic() -> TempDir {
-    match TempDir::new() {
-        Ok(dir) => dir,
-        Err(err) => panic!("failed to create temp dir: {err}"),
-    }
-}
-
-fn create_runtime() -> tokio::runtime::Runtime {
-    match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(err) => panic!("failed to create tokio runtime: {err}"),
     }
 }
 
@@ -80,21 +62,21 @@ fn message(
     timestamp: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: message_id.to_string(),
-        session_id: SESSION_ID.to_string(),
-        role: role.to_string(),
-        timestamp: Some(timestamp),
+    message_record_at(
+        PROVIDER,
+        message_id,
+        SESSION_ID,
+        role,
         ordinal,
-        text: text.to_string(),
-        kind: Some("chat".to_string()),
-        model: Some("test-model".to_string()),
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: None,
-    }
+        Some(timestamp),
+        text,
+        "chat",
+        Some("test-model"),
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 async fn store_id_of(global_db: &GlobalDb, message_id: &str) -> i64 {
@@ -255,10 +237,17 @@ async fn open_raw_conn(global_db_path: &Path) -> libsql::Connection {
         Ok(db) => db,
         Err(err) => panic!("failed to open global db directly: {err}"),
     };
-    match db.connect() {
+    let conn = match db.connect() {
         Ok(conn) => conn,
         Err(err) => panic!("failed to connect to global db directly: {err}"),
+    };
+    // The running dashboard writes to this same store (e.g. the token-count
+    // warm task's sidecar upserts); wait out transient write locks instead
+    // of failing the fixture mutation.
+    if let Err(err) = conn.execute_batch("PRAGMA busy_timeout = 5000;").await {
+        panic!("failed to set busy_timeout on raw connection: {err}");
     }
+    conn
 }
 
 /// Rewrites the externalized message's derived text columns to contain the

@@ -202,7 +202,8 @@ pub async fn ingest(gdb: &GlobalDb) -> IngestStats {
             .map_or(0, |d| d.as_secs());
 
         // Check if we've already parsed this file up to this mtime
-        let (prev_offset, prev_mtime) = gdb.get_parse_offset(&path_str).await.unwrap_or((0, 0));
+        let prev = gdb.get_parse_offset(&path_str).await.unwrap_or_default();
+        let (prev_offset, prev_mtime) = (prev.byte_offset, prev.mtime);
 
         if mtime == prev_mtime && prev_offset > 0 {
             // File hasn't changed since last parse
@@ -257,8 +258,16 @@ pub async fn ingest(gdb: &GlobalDb) -> IngestStats {
             }
         }
 
-        // Save the new offset
-        gdb.set_parse_offset(&path_str, current_offset, mtime).await;
+        // Save the new offset (this parser tracks no file identity id).
+        gdb.set_parse_offset(
+            &path_str,
+            crate::global_db::ParseOffset {
+                byte_offset: current_offset,
+                mtime,
+                file_id: 0,
+            },
+        )
+        .await;
     }
 
     IngestStats {

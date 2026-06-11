@@ -674,21 +674,12 @@ fn lcm_doctor_mode(args: &Value) -> Result<&str> {
     }
 }
 
-fn parse_bool_flag_from_env(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
 fn lcm_doctor_clean_apply_enabled(args: &Value) -> Result<bool> {
     match args.get("doctor_clean_apply_enabled") {
         Some(value) => value
             .as_bool()
             .ok_or_else(|| argument_error("doctor_clean_apply_enabled must be a boolean")),
-        None => Ok(parse_bool_flag_from_env("LCM_DOCTOR_CLEAN_APPLY_ENABLED")),
+        None => Ok(crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED")),
     }
 }
 
@@ -848,94 +839,44 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
     Ok(canonical)
 }
 
-async fn open_lcm_storage(project_root: Option<&Path>, args: &Value) -> LcmStorageResolution {
-    open_lcm_storage_with_mode(project_root, args, false).await
-}
-
-/// Read-or-missing variant for pure-read tools: opens the sessions DB in
-/// read-only mode if it already exists, or returns a distinguishable
-/// `not_ingested` result without creating the file. This prevents
-/// `readOnlyHint` tools from ghost-creating an empty sessions.db that
-/// makes "nothing ingested yet" look like "ok, 0 rows".
-async fn open_lcm_storage_readonly(
-    project_root: Option<&Path>,
-    args: &Value,
-) -> LcmStorageResolution {
-    let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
-    match storage_scope {
-        "project_local" => {
-            let Some(project_root) = project_root else {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
-            };
-            let db_path = crate::sessions::cursor::project_session_db_path(project_root);
-            if !db_path.is_file() {
-                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested("project_local"));
-            }
-            let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
-                return LcmStorageResolution::Unavailable(lcm_unavailable());
-            };
-            LcmStorageResolution::Available(Box::new(LcmStorage {
-                db,
-                scope: "project_local",
-            }))
-        }
-        "hermes_profile" => {
-            let hermes_home = match hermes_profile_home(args) {
-                Ok(hermes_home) => hermes_home,
-                Err(result) => return LcmStorageResolution::Unavailable(result),
-            };
-            let db_path = match crate::sessions::cursor::resolve_hermes_profile_session_db_readonly(
-                &hermes_home,
-            ) {
-                HermesProfileDbReadOnly::Exists(p) => p,
-                HermesProfileDbReadOnly::NotIngested => {
-                    return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
-                        "hermes_profile",
-                    ))
-                }
-                HermesProfileDbReadOnly::ConfigError(msg) => {
-                    return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(msg))
-                }
-            };
-            let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
-                return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                    "could not open hermes_profile tokensave session database",
-                ));
-            };
-            LcmStorageResolution::Available(Box::new(LcmStorage {
-                db,
-                scope: "hermes_profile",
-            }))
-        }
-        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(other)),
-    }
+/// How an LCM storage open treats the backing sessions.db.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LcmOpenMode {
+    /// Writable open: creates the store and ensures schema as needed.
+    Writable,
+    /// Read-only: a missing store is a hard error.
+    ReadOnlyExisting,
+    /// Read-only: a missing store is a distinguishable `not_ingested`
+    /// result, without creating the file. Use this for every `readOnlyHint`
+    /// LCM handler so "nothing ingested yet" never looks like "ok, 0 rows"
+    /// (and the tool never ghost-creates an empty sessions.db).
+    ReadOnlyOrMissing,
 }
 
 macro_rules! lcm_open_storage {
     ($project_root:expr, $args:expr) => {
-        match open_lcm_storage($project_root, $args).await {
+        match open_lcm_storage($project_root, $args, LcmOpenMode::Writable).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
     };
 }
 
-/// Like `lcm_open_storage!` but uses read-or-missing semantics: returns a
-/// `not_ingested` result (without creating the file) when sessions.db does
-/// not exist yet. Use this in every `readOnlyHint` LCM handler.
+/// Like `lcm_open_storage!` but with [`LcmOpenMode::ReadOnlyOrMissing`]
+/// semantics for `readOnlyHint` handlers.
 macro_rules! lcm_open_storage_ro {
     ($project_root:expr, $args:expr) => {
-        match open_lcm_storage_readonly($project_root, $args).await {
+        match open_lcm_storage($project_root, $args, LcmOpenMode::ReadOnlyOrMissing).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
     };
 }
 
-async fn open_lcm_storage_with_mode(
+async fn open_lcm_storage(
     project_root: Option<&Path>,
     args: &Value,
-    read_only_existing: bool,
+    mode: LcmOpenMode,
 ) -> LcmStorageResolution {
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
@@ -944,10 +885,17 @@ async fn open_lcm_storage_with_mode(
                 return LcmStorageResolution::Unavailable(project_local_storage_without_project());
             };
             let db_path = crate::sessions::cursor::project_session_db_path(project_root);
-            let db = if read_only_existing {
-                GlobalDb::open_read_only_at(&db_path).await
-            } else {
-                open_session_db_with_cached_ensure(&db_path).await
+            let db = match mode {
+                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
+                LcmOpenMode::ReadOnlyExisting => GlobalDb::open_read_only_at(&db_path).await,
+                LcmOpenMode::ReadOnlyOrMissing => {
+                    if !db_path.is_file() {
+                        return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
+                            "project_local",
+                        ));
+                    }
+                    GlobalDb::open_read_only_at(&db_path).await
+                }
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
@@ -962,32 +910,48 @@ async fn open_lcm_storage_with_mode(
                 Ok(hermes_home) => hermes_home,
                 Err(result) => return LcmStorageResolution::Unavailable(result),
             };
-            let db_path = if read_only_existing {
-                match crate::sessions::cursor::resolve_existing_hermes_profile_session_db_path(
-                    &hermes_home,
-                ) {
-                    Ok(db_path) => db_path,
-                    Err(message) => {
-                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                            message,
-                        ))
+            let db_path = match mode {
+                LcmOpenMode::Writable => {
+                    match crate::sessions::cursor::resolve_hermes_profile_session_db_path(
+                        &hermes_home,
+                    ) {
+                        Ok(db_path) => db_path,
+                        Err(message) => {
+                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                                message,
+                            ))
+                        }
                     }
                 }
-            } else {
-                match crate::sessions::cursor::resolve_hermes_profile_session_db_path(&hermes_home)
-                {
-                    Ok(db_path) => db_path,
-                    Err(message) => {
-                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                            message,
-                        ))
+                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
+                    match crate::sessions::cursor::resolve_hermes_profile_session_db_readonly(
+                        &hermes_home,
+                    ) {
+                        HermesProfileDbReadOnly::Exists(db_path) => db_path,
+                        HermesProfileDbReadOnly::NotIngested(db_path) => {
+                            return LcmStorageResolution::Unavailable(match mode {
+                                LcmOpenMode::ReadOnlyOrMissing => {
+                                    lcm_not_yet_ingested("hermes_profile")
+                                }
+                                _ => invalid_hermes_profile_home(format!(
+                                    "hermes_profile LCM storage requires an existing session database: {}",
+                                    db_path.display()
+                                )),
+                            })
+                        }
+                        HermesProfileDbReadOnly::ConfigError(msg) => {
+                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                                msg,
+                            ))
+                        }
                     }
                 }
             };
-            let db = if read_only_existing {
-                GlobalDb::open_read_only_at(&db_path).await
-            } else {
-                open_session_db_with_cached_ensure(&db_path).await
+            let db = match mode {
+                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
+                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
+                    GlobalDb::open_read_only_at(&db_path).await
+                }
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
@@ -1241,8 +1205,12 @@ pub(super) async fn handle_lcm_doctor(
         })));
     }
     let clean_config = lcm_clean_config(&args)?;
-    let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
-    let storage = match open_lcm_storage_with_mode(project_root, &args, read_only_existing).await {
+    let open_mode = if matches!(mode, "repair" | "clean") && apply {
+        LcmOpenMode::Writable
+    } else {
+        LcmOpenMode::ReadOnlyExisting
+    };
+    let storage = match open_lcm_storage(project_root, &args, open_mode).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };

@@ -38,27 +38,14 @@ pub fn resolve_hermes_profile_session_db_path(
     Ok(resolve_hermes_profile_tokensave_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
 }
 
-pub fn resolve_existing_hermes_profile_session_db_path(
-    hermes_home: &Path,
-) -> std::result::Result<PathBuf, String> {
-    let db_path =
-        resolve_hermes_profile_tokensave_dir(hermes_home, false)?.join(PROJECT_SESSION_DB_FILENAME);
-    if !db_path.is_file() {
-        return Err(format!(
-            "hermes_profile LCM storage requires an existing session database: {}",
-            db_path.display()
-        ));
-    }
-    Ok(db_path)
-}
-
 /// Typed outcome of [`resolve_hermes_profile_session_db_readonly`].
 pub enum HermesProfileDbReadOnly {
     /// sessions.db exists and is ready to open read-only.
     Exists(PathBuf),
     /// The `.tokensave` dir and path are valid but sessions.db is absent —
-    /// nothing has been ingested yet.
-    NotIngested,
+    /// nothing has been ingested yet. Carries the path the store would live
+    /// at so callers can report it.
+    NotIngested(PathBuf),
     /// A security or configuration error (symlink escape, bad path, etc.)
     /// that should be surfaced as a hard error.
     ConfigError(String),
@@ -76,7 +63,7 @@ pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesP
     if db_path.is_file() {
         HermesProfileDbReadOnly::Exists(db_path)
     } else {
-        HermesProfileDbReadOnly::NotIngested
+        HermesProfileDbReadOnly::NotIngested(db_path)
     }
 }
 

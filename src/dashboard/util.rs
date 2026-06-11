@@ -74,6 +74,31 @@ pub(crate) fn coerce_limit(value: Option<i64>, default: i64, maximum: i64) -> i6
     value.unwrap_or(default).clamp(1, maximum)
 }
 
+/// `?,?,…` placeholder list for a SQL `IN (…)` clause with `count` entries.
+pub(crate) fn qmarks(count: usize) -> String {
+    vec!["?"; count].join(",")
+}
+
+/// Integer field of a `query_rows` JSON row; missing/non-integer → 0.
+pub(crate) fn i64_field(row: &Value, key: &str) -> i64 {
+    row.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+/// String field of a `query_rows` JSON row; missing/non-string → `""`.
+pub(crate) fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
+    row.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Unwraps the `Map` inside a `json!({…})` object literal so handlers can
+/// mutate payload keys directly instead of guarding `as_object_mut()` calls
+/// that cannot fail. Non-object input yields an empty map.
+pub(crate) fn json_object(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
 /// Escapes `%`/`_`/`\` for a `LIKE ? ESCAPE '\'` pattern.
 pub(crate) fn like_pattern(query: &str) -> String {
     let escaped = query

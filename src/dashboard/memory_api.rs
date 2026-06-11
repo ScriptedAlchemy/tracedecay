@@ -27,9 +27,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::memory_analysis::{
-    lexical_overlap, pca_scores, propose_dedup_actions, score_distribution, score_similar_pairs,
-    similarity_classification, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
-    SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
+    build_similarity_computation, pca_scores, propose_dedup_actions, score_distribution,
+    score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_FACT_CAP,
+    SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
 };
 use super::util::{
     coerce_limit, http_detail, like_pattern, query_i64, query_rows, JsonPath, JsonQuery,
@@ -56,7 +56,6 @@ pub(crate) struct ProjectionParams {
 
 #[derive(Deserialize)]
 pub(crate) struct SimilarityParams {
-    threshold: Option<f64>,
     min_similarity: Option<f64>,
     limit: Option<i64>,
 }
@@ -67,7 +66,6 @@ pub(crate) struct LimitParams {
 }
 
 const PROJECTION_POINT_CAP: i64 = 2000;
-const SIMILARITY_PAIR_CAP: i64 = 2000;
 
 fn providers_stub() -> Value {
     json!({
@@ -152,22 +150,29 @@ async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
             })
         })
         .collect();
+    // Bucketing happens in SQL (clamp to [0, 1], scale, truncate, cap at 9 —
+    // the same arithmetic the previous per-row Rust loop did) so the query
+    // returns ≤10 aggregate rows instead of every trust score.
     if let Ok(rows) = query_rows(
         &state.mem_conn,
-        "SELECT trust_score FROM memory_facts WHERE trust_score IS NOT NULL",
+        "SELECT MIN(CAST(MAX(MIN(trust_score, 1.0), 0.0) * 10.0 AS INTEGER), 9) AS bucket,
+                COUNT(*) AS count
+         FROM memory_facts
+         WHERE trust_score IS NOT NULL
+         GROUP BY bucket",
         (),
     )
     .await
     {
         for row in rows {
-            let score = row
-                .get("trust_score")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
-            let idx = ((score * 10.0) as usize).min(9);
+            let idx = row
+                .get("bucket")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 9) as usize;
+            let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
             if let Some(count) = buckets[idx].get_mut("count") {
-                *count = json!(count.as_i64().unwrap_or(0) + 1);
+                *count = json!(count.as_i64().unwrap_or(0) + added);
             }
         }
     }
@@ -295,6 +300,10 @@ async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
     )
     .await?;
 
+    // `cumulative_facts` is a window-function running total over the daily
+    // buckets plus a one-time count of pre-window facts — the previous
+    // correlated COUNT re-scanned `memory_facts` once per day row (up to
+    // ~181 full scans per overview request).
     let growth = query_rows(
         &state.mem_conn,
         "WITH bounds AS (
@@ -309,16 +318,19 @@ async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
                AND bounds.max_date IS NOT NULL
                AND date(f.created_at, 'unixepoch') >= date(bounds.max_date, '-180 days')
              GROUP BY date
+         ),
+         prior AS (
+             SELECT COUNT(*) AS facts
+             FROM memory_facts f, bounds
+             WHERE f.created_at > 0
+               AND bounds.max_date IS NOT NULL
+               AND date(f.created_at, 'unixepoch') < date(bounds.max_date, '-180 days')
          )
          SELECT daily.date,
                 daily.facts,
-                (
-                    SELECT COUNT(*)
-                    FROM memory_facts prior
-                    WHERE prior.created_at > 0
-                      AND date(prior.created_at, 'unixepoch') <= daily.date
-                ) AS cumulative_facts
-         FROM daily
+                prior.facts + SUM(daily.facts) OVER (ORDER BY daily.date ASC)
+                    AS cumulative_facts
+         FROM daily, prior
          ORDER BY daily.date ASC",
         (),
     )
@@ -493,7 +505,7 @@ pub(crate) async fn overview(
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 25, 100);
-    let graph_limit = coerce_limit(params.graph_limit.or(Some(limit)), limit, 1000);
+    let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
 
     let mut obj = Map::new();
     obj.insert("path".into(), json!(state.mem_db_path));
@@ -667,6 +679,106 @@ async fn vector_facts(
     Ok(out)
 }
 
+/// A cached 2D PCA projection of the vectored facts for one query.
+struct ProjectionComputation {
+    /// `(query, limit, vector-state fingerprint)` at compute time.
+    key: (String, i64, VectorStateFingerprint),
+    dim: usize,
+    method: &'static str,
+    error: &'static str,
+    points: Vec<Value>,
+}
+
+/// Process-wide cache of the last PCA projection per project DB. The Gram
+/// matrix build is O(n²·d) with n capped at [`PROJECTION_POINT_CAP`] and
+/// d = 2 × HRR dim — seconds of pinned CPU at scale — so it runs on the
+/// blocking pool (mirroring the similarity path) and is reused across the
+/// UI's debounced search keystrokes via the `(query, limit, fingerprint)`
+/// key.
+static PROJECTION_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<ProjectionComputation>>>> =
+    OnceLock::new();
+
+fn projection_point(meta: &Value, x: f64, y: f64) -> Value {
+    json!({
+        "fact_id": meta.get("fact_id").cloned().unwrap_or(json!(0)),
+        "x": (x * 1e6).round() / 1e6,
+        "y": (y * 1e6).round() / 1e6,
+        "category": meta.get("category").cloned().unwrap_or(json!("general")),
+        "content": meta.get("content").and_then(Value::as_str).map(|s| s.chars().take(200).collect::<String>()).unwrap_or_default(),
+        "trust_score": meta.get("trust_score").cloned().unwrap_or(json!(0.0)),
+        "retrieval_count": meta.get("retrieval_count").cloned().unwrap_or(json!(0)),
+        "bank_id": meta.get("bank_id").cloned().unwrap_or(Value::Null),
+        "bank_name": meta.get("bank_name").cloned().unwrap_or(Value::Null),
+        "entity_count": meta.get("entity_count").cloned().unwrap_or(json!(0)),
+        "connection_count": meta.get("connection_count").cloned().unwrap_or(json!(0)),
+    })
+}
+
+/// CPU-bound projection body, run on the blocking pool.
+fn compute_projection(
+    key: (String, i64, VectorStateFingerprint),
+    rows: Vec<(Value, Vec<f64>)>,
+) -> ProjectionComputation {
+    let dim = rows.iter().map(|(_, v)| v.len()).next().unwrap_or(0);
+    let rows: Vec<_> = rows.into_iter().filter(|(_, v)| v.len() == dim).collect();
+
+    if rows.len() < 2 {
+        let points = rows
+            .first()
+            .map(|(meta, _)| vec![projection_point(meta, 0.0, 0.0)])
+            .unwrap_or_default();
+        return ProjectionComputation {
+            key,
+            dim,
+            method: "none",
+            error: "",
+            points,
+        };
+    }
+
+    let features: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|(_, phases)| {
+            phases
+                .iter()
+                .map(|p| p.cos())
+                .chain(phases.iter().map(|p| p.sin()))
+                .collect()
+        })
+        .collect();
+    match pca_scores(&features) {
+        Some(scores) => ProjectionComputation {
+            key,
+            dim,
+            method: "pca",
+            error: "",
+            points: rows
+                .iter()
+                .zip(&scores)
+                .map(|((meta, _), s)| projection_point(meta, s[0], s[1]))
+                .collect(),
+        },
+        None => ProjectionComputation {
+            key,
+            dim,
+            method: "none",
+            error: "projection failed",
+            points: Vec::new(),
+        },
+    }
+}
+
+fn projection_response(
+    computation: &ProjectionComputation,
+    mut obj: Map<String, Value>,
+) -> Json<Value> {
+    obj.insert("dim".into(), json!(computation.dim));
+    obj.insert("method".into(), json!(computation.method));
+    obj.insert("points".into(), json!(computation.points));
+    obj.insert("error".into(), json!(computation.error));
+    Json(Value::Object(obj))
+}
+
 /// `GET /api/plugins/holographic/projection` — 2D PCA of phase vectors,
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
 pub(crate) async fn projection(
@@ -682,6 +794,25 @@ pub(crate) async fn projection(
     obj.insert("points".into(), json!([]));
     obj.insert("error".into(), json!(""));
 
+    let fingerprint = match vector_state_fingerprint(&state).await {
+        Ok(fingerprint) => fingerprint,
+        Err(e) => {
+            obj.insert("error".into(), json!(e));
+            return Json(Value::Object(obj));
+        }
+    };
+    let key = (params.q.trim().to_string(), limit, fingerprint);
+
+    let cache = PROJECTION_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    // Held across the computation so concurrent requests do not burn the
+    // blocking pool computing the same projection twice.
+    let mut guard = cache.lock().await;
+    if let Some(existing) = guard.get(&state.mem_db_path) {
+        if existing.key == key {
+            return projection_response(&existing.clone(), obj);
+        }
+    }
+
     let rows = match vector_facts(&state, &params.q, limit).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -689,68 +820,39 @@ pub(crate) async fn projection(
             return Json(Value::Object(obj));
         }
     };
-    let dim = rows.iter().map(|(_, v)| v.len()).next().unwrap_or(0);
-    let rows: Vec<_> = rows.into_iter().filter(|(_, v)| v.len() == dim).collect();
-    obj.insert("dim".into(), json!(dim));
-
-    let point = |meta: &Value, x: f64, y: f64| {
-        json!({
-            "fact_id": meta.get("fact_id").cloned().unwrap_or(json!(0)),
-            "x": (x * 1e6).round() / 1e6,
-            "y": (y * 1e6).round() / 1e6,
-            "category": meta.get("category").cloned().unwrap_or(json!("general")),
-            "content": meta.get("content").and_then(Value::as_str).map(|s| s.chars().take(200).collect::<String>()).unwrap_or_default(),
-            "trust_score": meta.get("trust_score").cloned().unwrap_or(json!(0.0)),
-            "retrieval_count": meta.get("retrieval_count").cloned().unwrap_or(json!(0)),
-            "bank_id": meta.get("bank_id").cloned().unwrap_or(Value::Null),
-            "bank_name": meta.get("bank_name").cloned().unwrap_or(Value::Null),
-            "entity_count": meta.get("entity_count").cloned().unwrap_or(json!(0)),
-            "connection_count": meta.get("connection_count").cloned().unwrap_or(json!(0)),
-        })
+    let computed = match tokio::task::spawn_blocking(move || compute_projection(key, rows)).await {
+        Ok(computed) => Arc::new(computed),
+        Err(e) => {
+            obj.insert(
+                "error".into(),
+                json!(format!("projection task failed: {e}")),
+            );
+            return Json(Value::Object(obj));
+        }
     };
-
-    if rows.len() < 2 {
-        if let Some((meta, _)) = rows.first() {
-            obj.insert("points".into(), json!([point(meta, 0.0, 0.0)]));
-        }
-        return Json(Value::Object(obj));
-    }
-
-    let features: Vec<Vec<f64>> = rows
-        .iter()
-        .map(|(_, phases)| {
-            phases
-                .iter()
-                .map(|p| p.cos())
-                .chain(phases.iter().map(|p| p.sin()))
-                .collect()
-        })
-        .collect();
-    match pca_scores(&features) {
-        Some(scores) => {
-            obj.insert("method".into(), json!("pca"));
-            let points: Vec<Value> = rows
-                .iter()
-                .zip(&scores)
-                .map(|((meta, _), s)| point(meta, s[0], s[1]))
-                .collect();
-            obj.insert("points".into(), json!(points));
-        }
-        None => {
-            obj.insert("error".into(), json!("projection failed"));
-        }
-    }
-    Json(Value::Object(obj))
+    guard.insert(state.mem_db_path.clone(), computed.clone());
+    projection_response(&computed, obj)
 }
 
-/// Fingerprint of the vectored-fact state, used as the similarity-cache key.
-/// Deletes change count/sum, inserts change count, content edits bump
-/// `updated_at` — any of which invalidates the cached pair computation.
-async fn vector_state_fingerprint(state: &DashboardState) -> Result<(i64, i64, i64, u64), String> {
+/// `(count, max_updated_at, sum_fact_id, metadata_hash)` of the vectored
+/// fact rows; the shared cache key for similarity and projection.
+type VectorStateFingerprint = (i64, i64, i64, u64);
+
+/// Fingerprint of the vectored-fact state, used as the similarity- and
+/// projection-cache key. Metadata-only — the HRR blobs are never read or
+/// hashed (at the 2000-fact cap that was ~32 MB pulled out of `SQLite` per
+/// request, paying most of what the cache exists to avoid). Inserts and
+/// deletes change `count`/`sum_fact_id`, content edits re-encode through the
+/// store paths that bump `updated_at` (hashed per row), the startup NULL-
+/// vector repair changes `count`, and algebra/dimension migrations hash
+/// differently.
+async fn vector_state_fingerprint(
+    state: &DashboardState,
+) -> Result<VectorStateFingerprint, String> {
     let mut rows = state
         .mem_conn
         .query(
-            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim, hrr_vector
+            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim
              FROM memory_facts
              WHERE hrr_vector IS NOT NULL
              ORDER BY fact_id ASC",
@@ -767,17 +869,13 @@ async fn vector_state_fingerprint(state: &DashboardState) -> Result<(i64, i64, i
         let updated_at: i64 = row.get(1).unwrap_or(0);
         let hrr_algebra: String = row.get(2).unwrap_or_default();
         let hrr_dim: i64 = row.get(3).unwrap_or(0);
-        let vector = match row.get_value(4) {
-            Ok(libsql::Value::Blob(bytes)) => bytes,
-            _ => Vec::new(),
-        };
         count += 1;
         max_updated_at = max_updated_at.max(updated_at);
         sum_fact_id += fact_id;
         fact_id.hash(&mut hasher);
+        updated_at.hash(&mut hasher);
         hrr_algebra.hash(&mut hasher);
         hrr_dim.hash(&mut hasher);
-        vector.hash(&mut hasher);
     }
     Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
 }
@@ -813,12 +911,7 @@ async fn similarity_computation(
             score_similar_pairs(&decoded, SIMILARITY_PAIR_FLOOR)
         };
         let facts: Vec<Value> = decoded.into_iter().map(|(meta, _)| meta).collect();
-        SimilarityComputation {
-            key,
-            dim,
-            facts,
-            scored,
-        }
+        build_similarity_computation(key, dim, facts, scored)
     })
     .await
     .map_err(|e| format!("similarity computation task failed: {e}"))?;
@@ -830,19 +923,23 @@ async fn similarity_computation(
 
 /// `GET /api/plugins/holographic/similarity` — pairwise phase-cosine
 /// similarity (`mean(cos(p_i − p_j))`) over all vectored facts.
+///
+/// `min_similarity` is the single floor parameter; the response still emits
+/// the same value under both the `min_similarity` and legacy `threshold`
+/// keys so the payload shape is unchanged.
 pub(crate) async fn similarity(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
-    let threshold = coerce_similarity_score(params.threshold, SIMILARITY_DEFAULT_THRESHOLD);
-    let min_similarity = coerce_similarity_score(params.min_similarity, threshold);
+    let min_similarity =
+        coerce_similarity_score(params.min_similarity, SIMILARITY_DEFAULT_THRESHOLD);
     let pair_cap = coerce_limit(params.limit, 25, SIMILARITY_PAIR_CAP) as usize;
     let mut obj = Map::new();
     obj.insert("exists".into(), json!(true));
     obj.insert("dim".into(), json!(0));
     obj.insert("count".into(), json!(0));
     obj.insert("limit".into(), json!(pair_cap));
-    obj.insert("threshold".into(), json!(threshold));
+    obj.insert("threshold".into(), json!(min_similarity));
     obj.insert("min_similarity".into(), json!(min_similarity));
     obj.insert("total_pairs".into(), json!(0));
     obj.insert("score_distribution".into(), score_distribution(&[]));
@@ -858,34 +955,28 @@ pub(crate) async fn similarity(
     };
     obj.insert("dim".into(), json!(computation.dim));
     obj.insert("count".into(), json!(computation.facts.len()));
-    obj.insert("total_pairs".into(), json!(computation.scored.len()));
+    obj.insert("total_pairs".into(), json!(computation.total_pairs));
     obj.insert(
         "score_distribution".into(),
-        score_distribution(&computation.scored),
+        computation.distribution.clone(),
     );
     if computation.facts.len() < 2 || computation.dim == 0 {
         return Json(Value::Object(obj));
     }
 
-    // The cached pair set is pre-sorted descending across all finite scores;
-    // per-request filtering is a cheap prefix scan.
-    let scored: Vec<(f64, usize, usize)> = computation
-        .scored
+    // The cached pair set is pre-sorted descending with overlap and
+    // classification already analyzed; per-request filtering is a cheap
+    // prefix scan plus JSON assembly.
+    let pairs: Vec<Value> = computation
+        .pairs
         .iter()
-        .take_while(|(sim, _, _)| *sim >= min_similarity)
+        .take_while(|pair| pair.similarity >= min_similarity)
         .take(pair_cap)
-        .copied()
-        .collect();
-
-    let pairs: Vec<Value> = scored
-        .into_iter()
-        .map(|(sim, i, j)| {
-            let a = &computation.facts[i];
-            let b = &computation.facts[j];
+        .map(|scored_pair| {
+            let a = &computation.facts[scored_pair.a];
+            let b = &computation.facts[scored_pair.b];
             let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
             let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
-            let (overlap, token_overlap, overlap_coefficient) =
-                lexical_overlap(a_content, b_content);
             let mut pair = json!({
                 "a_id": a.get("fact_id").cloned().unwrap_or(json!(0)),
                 "b_id": b.get("fact_id").cloned().unwrap_or(json!(0)),
@@ -893,10 +984,12 @@ pub(crate) async fn similarity(
                 "b_content": b_content.chars().take(200).collect::<String>(),
                 "a_category": a.get("category").cloned().unwrap_or(json!("general")),
                 "b_category": b.get("category").cloned().unwrap_or(json!("general")),
-                "similarity": sim,
-                "classification": similarity_classification(sim, token_overlap, overlap_coefficient),
+                "similarity": scored_pair.similarity,
+                "classification": scored_pair.classification,
             });
-            if let (Some(obj), Some(extra)) = (pair.as_object_mut(), overlap.as_object()) {
+            if let (Some(obj), Some(extra)) =
+                (pair.as_object_mut(), scored_pair.overlap.as_object())
+            {
                 for (k, v) in extra {
                     obj.insert(k.clone(), v.clone());
                 }
@@ -1008,13 +1101,14 @@ async fn build_delete_plan(
         return Ok((Vec::new(), Map::new(), total));
     }
 
-    let planner_pairs: Vec<(f64, usize, usize)> = computation
-        .scored
+    // The retained pair set always covers every pair at or above the
+    // planner threshold (see `build_similarity_computation`).
+    let planner_len = computation
+        .pairs
         .iter()
-        .take_while(|(sim, _, _)| *sim >= SIMILARITY_DEFAULT_THRESHOLD)
-        .copied()
-        .collect();
-    let actions = propose_dedup_actions(&computation.facts, &planner_pairs);
+        .take_while(|pair| pair.similarity >= SIMILARITY_DEFAULT_THRESHOLD)
+        .count();
+    let actions = propose_dedup_actions(&computation.facts, &computation.pairs[..planner_len]);
 
     let mut counts = Map::new();
     if !actions.is_empty() {
@@ -1077,7 +1171,7 @@ pub(crate) async fn curate(
     });
 
     if dry_run {
-        let saved_at = chrono_now_iso();
+        let saved_at = crate::timeutil::now_iso_utc();
         let entry = CuratePreviewEntry {
             report: report.clone(),
             saved_at,
@@ -1355,40 +1449,4 @@ pub(crate) async fn curate_apply(
             "counts": { "deleted": deleted, "merged": merged, "errors": errors },
         })),
     )
-}
-
-/// Returns the current UTC time as an ISO 8601 string.
-fn chrono_now_iso() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Format as yyyy-mm-ddThh:mm:ssZ using manual epoch arithmetic.
-    let mut rem = secs;
-    let sec = rem % 60;
-    rem /= 60;
-    let min = rem % 60;
-    rem /= 60;
-    let hour = rem % 24;
-    rem /= 24;
-    // Days since 1970-01-01 → Gregorian calendar.
-    let (year, month, day) = days_to_ymd(rem);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
-fn days_to_ymd(days: u64) -> (u32, u32, u32) {
-    // Gregorian calendar algorithm (Fliegel & Van Flandern, truncated).
-    let jd = days + 2_440_588; // Julian Day Number for 1970-01-01 = 2440588
-    let l_a = jd + 68_569;
-    let n = 4 * l_a / 146_097;
-    let l_b = l_a - (146_097 * n).div_ceil(4);
-    let ii = 4_000 * (l_b + 1) / 1_461_001;
-    let l_c = l_b - 1_461 * ii / 4 + 31;
-    let jj = 80 * l_c / 2_447;
-    let d = (l_c - 2_447 * jj / 80) as u32;
-    let l_d = jj / 11;
-    let m = (jj + 2 - 12 * l_d) as u32;
-    let y = (100 * (n - 49) + ii + l_d) as u32;
-    (y, m, d)
 }

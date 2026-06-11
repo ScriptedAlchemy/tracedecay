@@ -12,7 +12,10 @@ mod common;
 use std::path::Path;
 use std::sync::Mutex;
 
-use common::{get_json, http_agent, pick_free_port, wait_for_dashboard, EnvVarGuard};
+use common::{
+    create_runtime, get_json, http_agent, message_record_at, pick_free_port, wait_for_dashboard,
+    EnvVarGuard,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::dashboard;
@@ -46,14 +49,6 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
-fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-}
-
 fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> SessionRecord {
     SessionRecord {
         provider: "cursor".to_string(),
@@ -83,21 +78,21 @@ fn message(
     model: Option<&str>,
     metadata_json: Option<&str>,
 ) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: "cursor".to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp: Some(timestamp),
+    message_record_at(
+        "cursor",
+        message_id,
+        session_id,
+        role,
         ordinal,
-        text: text.to_string(),
-        kind: Some("message".to_string()),
-        model: model.map(ToString::to_string),
-        tool_names: None,
-        source_path: None,
-        source_offset: None,
-        metadata_json: metadata_json.map(ToString::to_string),
-    }
+        Some(timestamp),
+        text,
+        "message",
+        model,
+        None,
+        None,
+        None,
+        metadata_json,
+    )
 }
 
 /// Chars/4 estimate matching the backend SQL `(LENGTH(text)+3)/4`.
