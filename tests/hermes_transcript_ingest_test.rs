@@ -327,7 +327,12 @@ async fn unpinned_profile_maps_to_its_own_home_store() {
     // (`<profile>/.tokensave/sessions.db`) — the store the generated
     // plugin's hermes_profile storage scope serves.
     let profile_db = open_project_session_db(&profile_dir).await.unwrap();
-    let stats = ingest_homes(&profile_db, std::slice::from_ref(&hermes_home), &profile_dir).await;
+    let stats = ingest_homes(
+        &profile_db,
+        std::slice::from_ref(&hermes_home),
+        &profile_dir,
+    )
+    .await;
     assert_eq!(stats.messages_upserted, 4);
     assert_eq!(stats.sessions_upserted, 1);
     let session = profile_db
