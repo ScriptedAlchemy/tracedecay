@@ -629,7 +629,10 @@ pub(crate) fn append_usage_metadata(
     if map.contains_key("usage") {
         return;
     }
-    if let Some(usage) = candidates.iter().find_map(|value| usage_counters_from(value)) {
+    if let Some(usage) = candidates
+        .iter()
+        .find_map(|value| usage_counters_from(value))
+    {
         map.insert("usage".to_string(), usage);
     }
 }

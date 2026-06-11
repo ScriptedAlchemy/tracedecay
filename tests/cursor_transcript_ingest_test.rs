@@ -561,7 +561,10 @@ async fn cursor_transcript_ingest_derives_timestamps_from_timestamp_tags() {
     for hit in &hits {
         let metadata: serde_json::Value =
             serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert!(metadata.get("usage").is_none(), "cursor rows are usage-free");
+        assert!(
+            metadata.get("usage").is_none(),
+            "cursor rows are usage-free"
+        );
     }
 }
 

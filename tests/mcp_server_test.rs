@@ -5,6 +5,9 @@
 
 #![cfg(feature = "test-transport")]
 
+mod common;
+
+use common::EnvVarGuard;
 use serde_json::{json, Value};
 use std::fs;
 use std::sync::Arc;
@@ -1499,36 +1502,6 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
 /// current-thread runtime, so holding the guard across `.await` is fine.
 static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Restores an env var to its previous value on drop, so savings tests
-/// don't leak process-wide state into unrelated tests.
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    fn remove(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(previous) => std::env::set_var(self.key, previous),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 /// Redirects HOME at an isolated temp dir (so `~/.tokensave/global.db`
 /// lands there) and enables the global DB. Deliberately does NOT set
 /// `TOKENSAVE_GLOBAL_DB`: that override also wins over project-local
@@ -1662,8 +1635,8 @@ async fn ledger_records_by_default_without_env_opt_in() {
     env.push(EnvVarGuard::set("USERPROFILE", tmp_home.path().as_os_str()));
     // Simulate a real (non-cargo) launch: neither the legacy opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
-    env.push(EnvVarGuard::remove("TOKENSAVE_ENABLE_GLOBAL_DB"));
-    env.push(EnvVarGuard::remove("TOKENSAVE_DISABLE_GLOBAL_DB"));
+    env.push(EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB"));
+    env.push(EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB"));
     assert!(tokensave::global_db::global_accounting_enabled());
 
     let (server, _proj_tmp) = setup_server().await;
@@ -1704,8 +1677,8 @@ fn global_accounting_env_overrides() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     use tokensave::global_db::{global_accounting_mode, AccountingMode};
 
-    let _clear_enable = EnvVarGuard::remove("TOKENSAVE_ENABLE_GLOBAL_DB");
-    let _clear_disable = EnvVarGuard::remove("TOKENSAVE_DISABLE_GLOBAL_DB");
+    let _clear_enable = EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB");
+    let _clear_disable = EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB");
     assert_eq!(global_accounting_mode(), AccountingMode::Default);
     assert!(global_accounting_mode().enabled());
 

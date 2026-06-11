@@ -211,11 +211,7 @@ async fn apply_updates(
                                     OR NOT json_valid(metadata_json)
                                     OR json_extract(metadata_json, '$.usage') IS NULL)"
                         ),
-                        params![
-                            usage_json.as_str(),
-                            provider.as_str(),
-                            message_id.as_str()
-                        ],
+                        params![usage_json.as_str(), provider.as_str(), message_id.as_str()],
                     )
                     .await
                     .ok()?;

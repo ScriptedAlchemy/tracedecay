@@ -2,9 +2,12 @@
 //! Follows conventions from mcp_handler_test.rs: real TokenSave + handle_tool_call,
 //! plus live HTTP probe of /api/capabilities on the returned URL.
 
+mod common;
+
 use std::fs;
 use std::time::Duration;
 
+use common::http_agent;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokensave::mcp::handle_tool_call;
@@ -13,15 +16,6 @@ use tokensave::tokensave::TokenSave;
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Matches the ureq 3.x agent construction used by the other dashboard tests.
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into()
-}
 
 async fn setup_minimal_project() -> (TokenSave, TempDir) {
     let dir = TempDir::new().unwrap();

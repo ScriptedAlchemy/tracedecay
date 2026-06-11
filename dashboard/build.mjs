@@ -49,42 +49,17 @@ async function buildShell() {
   );
 }
 
-async function buildHolographic() {
-  const srcDir = path.join(root, "holographic/src");
+/**
+ * Builds one plugin bundle (`<dir>/src/entry.tsx` → `<dir>/dist/index.js`),
+ * externalizing React onto the host SDK (Hermes or the standalone shell) via
+ * the shims; everything else (@observablehq/plot, d3-force, lucide-react) is
+ * bundled.
+ */
+async function buildPlugin(dir, bannerLabel) {
+  const srcDir = path.join(root, dir, "src");
   await esbuild.build({
     entryPoints: [path.join(srcDir, "entry.tsx")],
-    outfile: path.join(root, "holographic/dist/index.js"),
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: ["es2020"],
-    jsx: "automatic",
-    minify: true,
-    legalComments: "none",
-    define: { "process.env.NODE_ENV": '"production"' },
-    // Externalize React onto the host SDK (Hermes or the standalone shell);
-    // bundle everything else (@observablehq/plot, d3-force, lucide-react).
-    alias: {
-      react: path.join(srcDir, "react-shim.ts"),
-      "react/jsx-runtime": path.join(srcDir, "jsx-runtime.ts"),
-      "react/jsx-dev-runtime": path.join(srcDir, "jsx-runtime.ts"),
-    },
-    banner: {
-      js: "/* tokensave holographic-memory dashboard plugin — bundled with esbuild. Do not edit; see src/. */",
-    },
-    logLevel: "warning",
-  });
-  await fs.copyFile(
-    path.join(srcDir, "styles.css"),
-    path.join(root, "holographic/dist/style.css"),
-  );
-}
-
-async function buildGraph() {
-  const srcDir = path.join(root, "graph/src");
-  await esbuild.build({
-    entryPoints: [path.join(srcDir, "entry.tsx")],
-    outfile: path.join(root, "graph/dist/index.js"),
+    outfile: path.join(root, dir, "dist/index.js"),
     bundle: true,
     format: "iife",
     platform: "browser",
@@ -99,42 +74,13 @@ async function buildGraph() {
       "react/jsx-dev-runtime": path.join(srcDir, "jsx-runtime.ts"),
     },
     banner: {
-      js: "/* tokensave code graph dashboard plugin — bundled with esbuild. Do not edit; see src/. */",
+      js: `/* tokensave ${bannerLabel} dashboard plugin — bundled with esbuild. Do not edit; see src/. */`,
     },
     logLevel: "warning",
   });
   await fs.copyFile(
     path.join(srcDir, "styles.css"),
-    path.join(root, "graph/dist/style.css"),
-  );
-}
-
-async function buildSavings() {
-  const srcDir = path.join(root, "savings/src");
-  await esbuild.build({
-    entryPoints: [path.join(srcDir, "entry.tsx")],
-    outfile: path.join(root, "savings/dist/index.js"),
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: ["es2020"],
-    jsx: "automatic",
-    minify: true,
-    legalComments: "none",
-    define: { "process.env.NODE_ENV": '"production"' },
-    alias: {
-      react: path.join(srcDir, "react-shim.ts"),
-      "react/jsx-runtime": path.join(srcDir, "jsx-runtime.ts"),
-      "react/jsx-dev-runtime": path.join(srcDir, "jsx-runtime.ts"),
-    },
-    banner: {
-      js: "/* tokensave savings & cost dashboard plugin — bundled with esbuild. Do not edit; see src/. */",
-    },
-    logLevel: "warning",
-  });
-  await fs.copyFile(
-    path.join(srcDir, "styles.css"),
-    path.join(root, "savings/dist/style.css"),
+    path.join(root, dir, "dist/style.css"),
   );
 }
 
@@ -178,7 +124,13 @@ async function buildHermesWrapper() {
 
 async function main() {
   await fs.mkdir(path.join(root, "shell/dist"), { recursive: true });
-  await Promise.all([buildShell(), buildHolographic(), buildGraph(), buildSavings(), copyLcm()]);
+  await Promise.all([
+    buildShell(),
+    buildPlugin("holographic", "holographic-memory"),
+    buildPlugin("graph", "code graph"),
+    buildPlugin("savings", "savings & cost"),
+    copyLcm(),
+  ]);
   await buildHermesWrapper();
   for (const f of [
     "shell/dist/shell.js",

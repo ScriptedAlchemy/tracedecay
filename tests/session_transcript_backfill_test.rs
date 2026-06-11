@@ -320,7 +320,14 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
                 Some(&gone),
                 Some(0),
             ),
-            legacy_message("cursor", "m-nopath", 1, "Never had a source path.", None, None),
+            legacy_message(
+                "cursor",
+                "m-nopath",
+                1,
+                "Never had a source path.",
+                None,
+                None,
+            ),
         ],
     )
     .await;

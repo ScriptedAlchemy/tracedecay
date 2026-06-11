@@ -1,8 +1,97 @@
 #![allow(dead_code)]
 
+use std::ffi::{OsStr, OsString};
+use std::net::TcpListener;
+use std::time::Duration;
+
+use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+
+/// Sets (or removes) an environment variable for its lifetime, restoring the
+/// previous value on drop.
+pub struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    /// Removes `key` for the guard's lifetime, so tests can exercise the
+    /// no-override path.
+    pub fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+pub fn pick_free_port() -> u16 {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) => panic!("failed to bind free local port: {err}"),
+    };
+    match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(err) => panic!("failed to read bound local address: {err}"),
+    }
+}
+
+pub fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(4)))
+        .build()
+        .into()
+}
+
+pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {
+    let status = response.status().as_u16();
+    let body = match response.body_mut().read_to_string() {
+        Ok(body) => body,
+        Err(err) => panic!("failed to read response body: {err}"),
+    };
+    let parsed = match serde_json::from_str::<Value>(&body) {
+        Ok(value) => value,
+        Err(err) => panic!("failed to decode JSON body `{body}`: {err}"),
+    };
+    (status, parsed)
+}
+
+pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
+    let response = match agent.get(url).call() {
+        Ok(response) => response,
+        Err(err) => panic!("GET {url} failed: {err}"),
+    };
+    response_to_json(response)
+}
+
+pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
+    let probe = format!("{base_url}/api/capabilities");
+    for _ in 0..80 {
+        if agent.get(&probe).call().is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("dashboard server did not become ready at {base_url}");
+}
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join(".tokensave").join("sessions.db")

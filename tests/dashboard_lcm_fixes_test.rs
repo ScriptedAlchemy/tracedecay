@@ -3,12 +3,12 @@
 //! session pagination + ordinal ordering, accurate engine reporting, and the
 //! additive search pagination / message-enrichment fields.
 
-use std::ffi::OsString;
-use std::net::TcpListener;
+mod common;
+
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
 
+use common::{get_json, http_agent, pick_free_port, wait_for_dashboard, EnvVarGuard};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::dashboard;
@@ -22,29 +22,6 @@ const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 const PROVIDER: &str = "cursor";
 const SESSION_ID: &str = "sess-lcm-fixes";
 const NEEDLE: &str = "zebraneedle";
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -271,55 +248,6 @@ async fn seed_lcm_fixture(
         }
     }
     node_1
-}
-
-fn pick_free_port() -> u16 {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(err) => panic!("failed to bind free local port: {err}"),
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => panic!("failed to read bound local address: {err}"),
-    };
-    drop(listener);
-    port
-}
-
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into()
-}
-
-fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let mut response = match agent.get(url).call() {
-        Ok(response) => response,
-        Err(err) => panic!("GET {url} failed: {err}"),
-    };
-    let status = response.status().as_u16();
-    let body = match response.body_mut().read_to_string() {
-        Ok(body) => body,
-        Err(err) => panic!("failed to read response body: {err}"),
-    };
-    let parsed = match serde_json::from_str::<Value>(&body) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to decode JSON body `{body}`: {err}"),
-    };
-    (status, parsed)
-}
-
-async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
-    let probe = format!("{base_url}/api/capabilities");
-    for _ in 0..80 {
-        if agent.get(&probe).call().is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("dashboard server did not become ready at {base_url}");
 }
 
 async fn open_raw_conn(global_db_path: &Path) -> libsql::Connection {

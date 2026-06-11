@@ -7,12 +7,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::ffi::OsString;
-use std::net::TcpListener;
+mod common;
+
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
 
+use common::{get_json, http_agent, pick_free_port, wait_for_dashboard, EnvVarGuard};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::dashboard;
@@ -23,29 +23,6 @@ use tokensave::types::CostTurn;
 
 /// Serializes tests in this binary: they mutate process-wide env vars.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 struct Fixture {
     _tmp: TempDir,
@@ -75,28 +52,6 @@ fn create_runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("tokio runtime")
-}
-
-fn pick_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
-}
-
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into()
-}
-
-fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let mut response = agent.get(url).call().expect("http call");
-    let status = response.status().as_u16();
-    let body = response.body_mut().read_to_string().expect("body");
-    let parsed = serde_json::from_str::<Value>(&body)
-        .unwrap_or_else(|err| panic!("bad JSON body `{body}`: {err}"));
-    (status, parsed)
 }
 
 fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> SessionRecord {
@@ -362,7 +317,7 @@ async fn start_fixture() -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guards = vec![
-        EnvVarGuard::set("TOKENSAVE_GLOBAL_DB", &global_db_path.display().to_string()),
+        EnvVarGuard::set("TOKENSAVE_GLOBAL_DB", &global_db_path),
         // `.cargo/config.toml` disables global accounting for cargo-launched
         // processes; opt back in so the recording state reads "enabled".
         EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", "1"),
@@ -371,7 +326,7 @@ async fn start_fixture() -> Fixture {
         // fallback snapshot must serve.
         EnvVarGuard::set(
             "TOKENSAVE_MODEL_PRICES_PATH",
-            &tmp.path().join("no-such-prices.json").display().to_string(),
+            tmp.path().join("no-such-prices.json"),
         ),
     ];
 
@@ -388,14 +343,7 @@ async fn start_fixture() -> Fixture {
         let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
     });
 
-    let agent = http_agent();
-    let probe = format!("{base_url}/api/capabilities");
-    for _ in 0..80 {
-        if agent.get(&probe).call().is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_dashboard(&http_agent(), &base_url).await;
 
     Fixture {
         _tmp: tmp,

@@ -1,11 +1,13 @@
-use std::ffi::OsString;
+mod common;
+
 use std::fs;
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::Duration;
 
+use common::{
+    get_json, http_agent, pick_free_port, response_to_json, wait_for_dashboard, EnvVarGuard,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokensave::branch;
@@ -26,37 +28,6 @@ const LONG_FACT_CONTENT: &str = "LCM dashboard empty states need explicit copy. 
 The drawer, search results, charts, and overview panels must each explain why \
 they are empty and what action will populate them, because first-run users \
 otherwise assume the integration is broken when the store simply has no rows yet.";
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    /// Removes `key` for the guard's lifetime (restoring any prior value on
-    /// drop), so store-selection tests can exercise the no-override path.
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -390,48 +361,6 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
     }
 }
 
-fn pick_free_port() -> u16 {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(err) => panic!("failed to bind free local port: {err}"),
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(err) => panic!("failed to read bound local address: {err}"),
-    };
-    drop(listener);
-    port
-}
-
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into()
-}
-
-fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {
-    let status = response.status().as_u16();
-    let body = match response.body_mut().read_to_string() {
-        Ok(body) => body,
-        Err(err) => panic!("failed to read response body: {err}"),
-    };
-    let parsed = match serde_json::from_str::<Value>(&body) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to decode JSON body `{body}`: {err}"),
-    };
-    (status, parsed)
-}
-
-fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = match agent.get(url).call() {
-        Ok(response) => response,
-        Err(err) => panic!("GET {url} failed: {err}"),
-    };
-    response_to_json(response)
-}
-
 fn post_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
     let response = match agent.post(url).send_empty() {
         Ok(response) => response,
@@ -446,17 +375,6 @@ fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) 
         Err(err) => panic!("POST {url} (with body) failed: {err}"),
     };
     response_to_json(response)
-}
-
-async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
-    let probe = format!("{base_url}/api/capabilities");
-    for _ in 0..80 {
-        if agent.get(&probe).call().is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("dashboard server did not become ready at {base_url}");
 }
 
 async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
