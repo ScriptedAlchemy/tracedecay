@@ -273,9 +273,17 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
 
 /// The pin currently in effect for a generated plugin: the
 /// `plugins.tokensave.project_root` key of the profile config.yaml.
+///
+/// A pin pointing at the profile home itself is the legacy storage-home
+/// conflation (storage is profile-scoped now and code tools resolve per
+/// cwd), so it is treated — and re-propagated on reinstall — as no pin.
 fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
-    let config_path = plugin_dir.parent()?.parent()?.join("config.yaml");
-    read_config_pinned_project_root(&config_path)
+    let profile_dir = plugin_dir.parent()?.parent()?;
+    let pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))?;
+    if crate::sessions::source::paths_equal(Path::new(&pin), profile_dir) {
+        return None;
+    }
+    Some(pin)
 }
 
 /// Reads the `version:` field from a generated plugin.yaml manifest.
@@ -1231,12 +1239,45 @@ fn plugin_tools(tokensave_bin: &str) -> String {
 import json
 import os
 import subprocess
+import tempfile
 
 TOKENSAVE_BIN = {bin}
-TOKENSAVE_TIMEOUT_SECONDS = 600
+# Default per-call ceiling. Long-running verbs (LCM ingest/compression over
+# long transcripts, doctor/diagnose repair passes) keep a higher ceiling.
+TOKENSAVE_TIMEOUT_SECONDS = 120
+TOKENSAVE_LONG_TIMEOUT_SECONDS = 600
+LONG_RUNNING_TOOLS = frozenset((
+    "tokensave_lcm_compress",
+    "tokensave_lcm_preflight",
+    "tokensave_lcm_doctor",
+    "tokensave_diagnose",
+))
 MAX_CAPTURE_CHARS = 4000
+# Linux caps a single argv string at MAX_ARG_STRLEN (128 KiB). Payloads at or
+# above this threshold spill to a tempfile passed as `--args @<path>` so
+# compression of exactly the long sessions it exists for cannot fail with
+# E2BIG/EFAULT at exec time.
+ARGS_FILE_THRESHOLD_BYTES = 100000
+
+# Profile-global state tools: memory facts and transcript search are owned by
+# the Hermes profile, not by whichever code project the agent's cwd happens
+# to resolve. Without an explicit project pin these anchor at the Hermes
+# home so results never shard per working directory.
+PROFILE_STORE_TOOLS = frozenset((
+    "tokensave_fact_store",
+    "tokensave_fact_feedback",
+    "tokensave_memory_status",
+    "tokensave_message_search",
+))
 
 _PLUGIN_CONFIG_CACHE = {{}}
+
+def hermes_home_dir(hermes_home=None):
+    return str(
+        hermes_home
+        or os.environ.get("HERMES_HOME")
+        or os.path.join(os.path.expanduser("~"), ".hermes")
+    )
 
 def plugin_config_block(hermes_home=None):
     """Return the `plugins.tokensave` mapping from the profile config.yaml.
@@ -1245,12 +1286,8 @@ def plugin_config_block(hermes_home=None):
     `plugins.<name>` block bundled plugins use). Cached per config file
     mtime so the hot tool-dispatch path stays cheap.
     """
-    home = (
-        hermes_home
-        or os.environ.get("HERMES_HOME")
-        or os.path.join(os.path.expanduser("~"), ".hermes")
-    )
-    path = os.path.join(str(home), "config.yaml")
+    home = hermes_home_dir(hermes_home)
+    path = os.path.join(home, "config.yaml")
     try:
         stat = os.stat(path)
         cache_key = (stat.st_mtime_ns, stat.st_size)
@@ -1275,9 +1312,19 @@ def plugin_config_block(hermes_home=None):
 
 def config_pinned_project_root(hermes_home=None):
     value = plugin_config_block(hermes_home).get("project_root")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    if not (isinstance(value, str) and value.strip()):
+        return None
+    pin = value.strip()
+    # Legacy installs pinned the Hermes home itself as the "project" — that
+    # was a storage-home conflation, not a code project. Storage is
+    # profile-scoped now and code tools resolve per cwd, so a home-equal pin
+    # is treated as no pin at all.
+    try:
+        if os.path.realpath(pin) == os.path.realpath(hermes_home_dir(hermes_home)):
+            return None
+    except OSError:
+        pass
+    return pin
 
 def normalize_output(value) -> str:
     if value is None:
@@ -1304,32 +1351,50 @@ def error_payload(message: str, result=None) -> str:
     return json.dumps(payload)
 
 def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
+    args_file = None
     try:
         tool_args = args or {{}}
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
         payload = json.dumps(tool_args)
-        # Install-time project pins (tokensave install --agent hermes
-        # --project-root) live in the profile config.yaml under
-        # plugins.tokensave.project_root; when set, every tool call resolves
-        # that project's .tokensave/ stores regardless of the Hermes process
-        # working directory.
-        project_root = (
-            kwargs.get("project_root")
-            or tool_args.get("project_root")
-            or config_pinned_project_root()
-        )
+        # Project routing:
+        #   1. An explicit project_root (call kwarg / tool arg / install-time
+        #      pin to a real code project) wins for every tool — a pinned
+        #      profile is bound to that project's .tokensave/ stores.
+        #   2. Otherwise profile-global state tools (facts, transcript
+        #      search) anchor at the Hermes home so memory never shards per
+        #      working directory.
+        #   3. Otherwise code-graph tools resolve per cwd: `tokensave tool`
+        #      walks up from the working directory to the nearest
+        #      initialised project.
+        project_root = kwargs.get("project_root") or tool_args.get("project_root")
+        if not project_root:
+            project_root = config_pinned_project_root()
+        if not project_root and name in PROFILE_STORE_TOOLS:
+            project_root = hermes_home_dir()
         argv = [TOKENSAVE_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
-        argv.extend([name, "--json", "--args", payload])
+        argv.extend([name, "--json", "--args"])
+        if len(payload.encode("utf-8")) >= ARGS_FILE_THRESHOLD_BYTES:
+            fd, args_file = tempfile.mkstemp(prefix="tokensave-args-", suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as args_handle:
+                args_handle.write(payload)
+            argv.append("@" + args_file)
+        else:
+            argv.append(payload)
+        timeout_seconds = (
+            TOKENSAVE_LONG_TIMEOUT_SECONDS
+            if name in LONG_RUNNING_TOOLS
+            else TOKENSAVE_TIMEOUT_SECONDS
+        )
         result = subprocess.run(
             argv,
             check=False,
             capture_output=True,
             text=True,
-            timeout=TOKENSAVE_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             shell=False,
         )
         if result.returncode != 0:
@@ -1346,6 +1411,12 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
         return error_payload("tokensave tool timed out", exc)
     except Exception as exc:
         return json.dumps({{"error": f"tokensave tool failed: {{exc}}"}})
+    finally:
+        if args_file is not None:
+            try:
+                os.unlink(args_file)
+            except OSError:
+                pass
 
 def make_handler(name: str):
     def handler(args: dict, **kwargs) -> str:
@@ -1381,6 +1452,27 @@ try:
 except Exception:
     class ContextEngine:
         pass
+
+# Hermes' centralized auxiliary LLM facade is the MODULE-LEVEL
+# agent.auxiliary_client.call_llm(task=..., messages=..., ...) — AIAgent
+# instances carry no ``auxiliary_client`` attribute and no host call site
+# hands the plugin an agent object. Guarded so the plugin still degrades
+# gracefully (deterministic fallback summaries) outside a hermes install.
+try:
+    from agent import auxiliary_client as _hermes_auxiliary_client
+except Exception:
+    _hermes_auxiliary_client = None
+
+def _resolve_auxiliary_client(agent=None):
+    """Best auxiliary LLM client: an agent-attached one, else hermes' module-level facade."""
+    client = getattr(agent, "auxiliary_client", None)
+    if client is not None and callable(getattr(client, "call_llm", None)):
+        return client
+    if _hermes_auxiliary_client is not None and callable(
+        getattr(_hermes_auxiliary_client, "call_llm", None)
+    ):
+        return _hermes_auxiliary_client
+    return None
 
 MEMORY_FACT_ACTIONS = {
     "fact_add": "add",
@@ -1591,6 +1683,20 @@ LCM_NATIVE_SCHEMAS = [
     },
 ]
 
+# Tools whose registered value depends on the host forwarding the live
+# in-memory ``messages`` list to plugin tool handlers (their schemas carry a
+# ``messages`` parameter used for lossless LCM ingest). Everything else in
+# TOOL_SCHEMAS works without that capability.
+MESSAGE_DEPENDENT_TOOLS = frozenset((
+    "tokensave_lcm_compress",
+    "tokensave_lcm_preflight",
+))
+
+# Tool names successfully registered with this host. Consulted by the
+# first-turn guidance nudge so it never advertises tools that are not
+# actually registered.
+_REGISTERED_TOOL_NAMES = set()
+
 def _make_wrapped_lcm_handler(tool_name: str, engine):
     def _wrapped(args: dict, **kwargs) -> str:
         return engine.handle_tool_call(tool_name, args, **kwargs)
@@ -1606,6 +1712,15 @@ def _host_forwards_registered_tool_messages(ctx) -> bool:
     return bool(capability)
 
 def _pre_llm_call(*args, **kwargs):
+    # Inject guidance ONLY on the first turn: the hook result is appended to
+    # the user message, so emitting it every turn would change every turn
+    # boundary and break the conversation's prompt-cache prefix. Skip it
+    # entirely when no tokensave tools actually registered on this host —
+    # advertising unregistered tools invites hallucinated calls.
+    if not kwargs.get("is_first_turn"):
+        return None
+    if not _REGISTERED_TOOL_NAMES:
+        return None
     return (
         "Prefer tokensave tools for codebase exploration, symbol lookup, call graphs, "
         "impact analysis, affected files, and architectural navigation before broad file reads."
@@ -1722,15 +1837,21 @@ def _tokensave_binary_available() -> bool:
     return shutil.which(tools.TOKENSAVE_BIN) is not None
 
 def _storage_args(project_root=None, hermes_home=None):
-    args = {}
-    if project_root:
-        args["storage_scope"] = "project_local"
-        args["project_root"] = str(project_root)
-    elif hermes_home:
-        args["storage_scope"] = "hermes_profile"
-        args["hermes_home"] = str(hermes_home)
-    else:
-        args["storage_scope"] = "hermes_profile"
+    """Storage args for LCM/session state: always the Hermes profile store.
+
+    Conversation state (LCM raw store, summary DAG) belongs to the profile,
+    not to whichever code project the agent happens to be exploring. The
+    legacy behavior — a ``project_root`` pin forcing ``project_local`` scope
+    for everything — conflated the storage home with the code project and
+    pointed code-graph tools at an index of the Hermes home itself, so the
+    pin no longer influences storage scope (``project_root`` is accepted for
+    call-site compatibility and ignored).
+    """
+    del project_root
+    home = hermes_home or _resolve_hermes_home()
+    args = {"storage_scope": "hermes_profile"}
+    if home:
+        args["hermes_home"] = str(home)
     return args
 
 # Conventional config home: a `plugins.tokensave` block in the profile
@@ -2713,6 +2834,18 @@ def _auxiliary_error_result(first, *, attempts, retry_status, error_classificati
         error_classification=error_classification,
     )
 
+def _replay_message_list(value):
+    """Validate a replay_messages payload as an OpenAI-format message list.
+
+    Returns a list copy when every entry is a role-tagged dict, else None.
+    """
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if not isinstance(item, dict) or not item.get("role"):
+            return None
+    return list(value)
+
 def _bounded_expand_query_answer(text: str, max_tokens: int):
     try:
         token_budget = int(max_tokens or 2000)
@@ -2755,7 +2888,7 @@ def _expand_query_degraded_payload(retrieval, reason: str, *, timeout_seconds=No
 def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
     if not isinstance(retrieval, dict) or not retrieval.get("needs_synthesis"):
         return retrieval
-    client = getattr(agent, "auxiliary_client", None)
+    client = _resolve_auxiliary_client(agent)
     if client is None or not callable(getattr(client, "call_llm", None)):
         return _expand_query_degraded_payload(
             retrieval,
@@ -2911,6 +3044,16 @@ class TokenSaveContextEngine(ContextEngine):
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
+        # Host-contract token state (run_agent.py reads these directly; the
+        # minimum-context guard in agent/agent_init.py checks context_length).
+        self.context_length = 0
+        self.threshold_tokens = 0
+        self.compression_count = 0
+        # Compression abort/diagnostic state read by
+        # agent/conversation_compression.py after each compress() call.
+        self._last_compress_aborted = False
+        self._last_summary_error = None
+        self.last_compress_result = None
         self._runtime_context_length = None
         self._session_start_context_length = None
         self._route_failures = {}
@@ -2929,10 +3072,9 @@ class TokenSaveContextEngine(ContextEngine):
         if kwargs.get("config") is not None:
             self._host_config = kwargs.get("config")
         if "context_length" in kwargs:
-            try:
-                self._session_start_context_length = int(kwargs.get("context_length"))
-            except Exception:
-                pass
+            applied_context_length = self._apply_context_length(kwargs.get("context_length"))
+            if applied_context_length is not None:
+                self._session_start_context_length = applied_context_length
         next_agent = kwargs.get("agent")
         if next_agent is not None:
             self.agent = next_agent
@@ -2964,12 +3106,36 @@ class TokenSaveContextEngine(ContextEngine):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
+    def _apply_context_length(self, context_length):
+        """Track a context length on the host-contract attrs.
+
+        run_agent.py logs ``context_length``/``threshold_tokens`` directly and
+        the minimum-context guard in agent/agent_init.py reads
+        ``context_length`` — leaving them 0 logged a bogus 0-token window and
+        silently bypassed that guard.
+        """
+        try:
+            parsed = int(context_length)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        self.context_length = parsed
+        threshold_tokens = _configured_threshold_tokens(
+            self.config,
+            hermes_home=self.hermes_home,
+            context_length_override=parsed,
+        )
+        if threshold_tokens is None:
+            threshold_tokens = int(
+                parsed * _lcm_context_threshold(self.config, hermes_home=self.hermes_home)
+            )
+        self.threshold_tokens = threshold_tokens
+        return parsed
+
     def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
         self.model = str(model or "")
-        try:
-            self._runtime_context_length = int(context_length)
-        except Exception:
-            self._runtime_context_length = None
+        self._runtime_context_length = self._apply_context_length(context_length)
 
     def update_from_response(self, usage):
         # Required by newer Hermes ContextEngine ABCs (abstract method).
@@ -3236,7 +3402,7 @@ class TokenSaveContextEngine(ContextEngine):
         return normalized
 
     def _call_auxiliary_summary(self, prompt, messages, **kwargs):
-        client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
+        client = _resolve_auxiliary_client(getattr(self, "agent", None))
         summary_request = kwargs.get("summary_request")
         allow_retry_signal = bool(kwargs.pop("allow_retry_signal", False))
         accepts_result = kwargs.pop("accepts_result", None)
@@ -3449,7 +3615,7 @@ class TokenSaveContextEngine(ContextEngine):
         # summary-node metadata instead of writing daily markdown files. We still surface
         # output_path in the extraction contract for config/API parity.
         output_path = _lcm_extraction_output_path(self.config)
-        client = getattr(getattr(self, "agent", None), "auxiliary_client", None)
+        client = _resolve_auxiliary_client(getattr(self, "agent", None))
         if client is None or not callable(getattr(client, "call_llm", None)):
             return {
                 "status": "failed_non_blocking",
@@ -3491,6 +3657,55 @@ class TokenSaveContextEngine(ContextEngine):
         }
 
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        """Compact ``messages`` and return the new message LIST.
+
+        The hermes ContextEngine ABC contract is a message list: the host
+        appends to the returned value, re-estimates tokens on it, and adopts
+        it as the live transcript (agent/conversation_compression.py). The
+        raw tokensave result dict is kept on ``self.last_compress_result``
+        for diagnostics/tests. On error or no-op the input list is returned
+        unchanged so the host takes its abort/no-op path instead of
+        corrupting the conversation.
+        """
+        original = list(messages or [])
+        self._last_compress_aborted = False
+        self._last_summary_error = None
+        try:
+            result = self._compress_to_result(
+                original,
+                current_tokens=current_tokens,
+                focus_topic=focus_topic,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("tokensave compression failed: %s", exc)
+            self._last_compress_aborted = True
+            self._last_summary_error = str(exc)
+            return original
+        self.last_compress_result = result if isinstance(result, dict) else {}
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or result.get("status") == "error"
+        ):
+            self._last_compress_aborted = True
+            if isinstance(result, dict):
+                self._last_summary_error = str(
+                    result.get("error") or result.get("reason") or "compression error"
+                )
+            else:
+                self._last_summary_error = "invalid compression result"
+            return original
+        replay = _replay_message_list(result.get("replay_messages"))
+        if replay is None or (not replay and original):
+            # No usable replay window — treat as a no-op; the host detects
+            # ``compressed == messages`` and skips session rotation.
+            return original
+        if replay != original:
+            self.compression_count += 1
+        return replay
+
+    def _compress_to_result(self, messages, current_tokens=None, focus_topic=None, **kwargs):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
         lcm_option_keys = (
@@ -3622,8 +3837,101 @@ class TokensaveMemoryProvider(MemoryProvider):
         return _tokensave_binary_available()
 
     def initialize(self, session_id=None, **kwargs):
-        self.hermes_home = kwargs.get("hermes_home")
+        self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
         self.session_id = session_id
+
+    def system_prompt_block(self):
+        # Built once per session by the host during system prompt assembly —
+        # cache-stable, unlike per-turn pre_llm_call injection.
+        return (
+            "tokensave memory is active: durable facts live in the holographic "
+            "fact store. Use fact_store(action='add') for facts worth keeping "
+            "across sessions and fact_store(action='search') for explicit "
+            "recall; relevant facts are also prefetched automatically."
+        )
+
+    def prefetch(self, query, *, session_id=""):
+        """Recall relevant facts for the upcoming turn.
+
+        The host injects the returned text cache-safely (appended to the
+        user message, never the system prompt). Empty string means nothing
+        relevant.
+        """
+        text = str(query or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = call_tokensave_json(
+                "tokensave_fact_store",
+                {"action": "search", "query": text[:512], "limit": 5},
+            )
+        except Exception as exc:
+            logger.debug("tokensave memory prefetch failed: %s", exc)
+            return ""
+        if not isinstance(payload, dict) or payload.get("error"):
+            return ""
+        facts = payload.get("facts") or payload.get("results") or []
+        lines = []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            content = str(fact.get("content") or "").strip()
+            if not content:
+                continue
+            fact_id = fact.get("fact_id")
+            prefix = f"[fact {fact_id}] " if fact_id is not None else ""
+            lines.append(f"- {prefix}{content}")
+        return "\n".join(lines)
+
+    def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
+        """Persist the completed turn into the LCM raw store.
+
+        Uses tokensave_lcm_preflight's lossless active-message ingest (the
+        same content-cursored path the context engine uses), so the raw
+        store grows every turn instead of only when compression fires.
+        """
+        sid = session_id or self.session_id
+        if not sid:
+            return
+        turn_messages = messages if isinstance(messages, list) else None
+        if not turn_messages:
+            turn_messages = []
+            if user_content:
+                turn_messages.append({"role": "user", "content": str(user_content)})
+            if assistant_content:
+                turn_messages.append({"role": "assistant", "content": str(assistant_content)})
+        if not turn_messages:
+            return
+        args = _storage_args(None, self.hermes_home)
+        args.update({"session_id": sid, "messages": turn_messages})
+        try:
+            tools.call_tokensave_tool("tokensave_lcm_preflight", args)
+        except Exception as exc:
+            logger.debug("tokensave sync_turn ingest failed: %s", exc)
+
+    def on_memory_write(self, action, target, content, metadata=None):
+        """Mirror built-in memory tool writes into the fact store."""
+        if action not in ("add", "replace"):
+            # Removals carry no stable fact identity to mirror.
+            return
+        text = str(content or "").strip()
+        if not text:
+            return
+        fact_metadata = {"hermes_action": str(action), "hermes_target": str(target)}
+        for key in ("session_id", "platform", "write_origin", "tool_name"):
+            value = (metadata or {}).get(key)
+            if value:
+                fact_metadata[key] = str(value)
+        fact_args = {
+            "action": "add",
+            "content": text,
+            "category": "user_pref" if target == "user" else "general",
+            "metadata": fact_metadata,
+        }
+        try:
+            tools.call_tokensave_tool("tokensave_fact_store", fact_args)
+        except Exception as exc:
+            logger.debug("tokensave on_memory_write mirror failed: %s", exc)
 
     def get_config_schema(self):
         # Consumed by `hermes memory setup` / `hermes memory status`.
@@ -3678,12 +3986,15 @@ class TokensaveMemoryProvider(MemoryProvider):
             logger.warning("tokensave memory provider save_config failed: %s", exc)
 
     def get_tool_schemas(self):
-        memory_schemas = [_memory_schema("tokensave_fact_store", "fact_store")]
-        for hermes_name, action in MEMORY_FACT_ACTIONS.items():
-            memory_schemas.append(_memory_schema("tokensave_fact_store", hermes_name, action))
-        memory_schemas.append(_memory_schema("tokensave_fact_feedback", "fact_feedback"))
-        memory_schemas.append(_memory_schema("tokensave_memory_status", "memory_status"))
-        return memory_schemas
+        # Collapsed surface (12 -> 3): fact_store(action=...) covers the nine
+        # fixed-action fact_* aliases, which remain dispatchable through
+        # handle_tool_call for compatibility with older transcripts/configs
+        # but no longer cost per-call schema footprint.
+        return [
+            _memory_schema("tokensave_fact_store", "fact_store"),
+            _memory_schema("tokensave_fact_feedback", "fact_feedback"),
+            _memory_schema("tokensave_memory_status", "memory_status"),
+        ]
 
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
@@ -3730,10 +4041,24 @@ def register(ctx):
     if callable(getattr(ctx, "register_context_engine", None)):
         ctx.register_context_engine(context_engine)
 
+    # Direct tool registration is split by capability:
+    #   - Code-graph / memory / transcript tools register UNCONDITIONALLY.
+    #     They work without host message forwarding, and hermes defers
+    #     registered non-core tools through its tool-search bridge
+    #     (tools/tool_search.py), so schema footprint is not a blocker.
+    #   - Only the live-ingest LCM verbs whose schemas take the in-memory
+    #     ``messages`` list (MESSAGE_DEPENDENT_TOOLS) and the context-engine
+    #     native tool mirrors stay gated behind the message-forwarding
+    #     capability flag — without forwarding their ingest piggyback can
+    #     never fire (the host still mounts the native LCM tools itself via
+    #     context_engine.get_tool_schemas()).
     register_tool = getattr(ctx, "register_tool", None)
-    if callable(register_tool) and _host_forwards_registered_tool_messages(ctx):
+    host_forwards_messages = _host_forwards_registered_tool_messages(ctx)
+    if callable(register_tool):
         for schema in schemas.TOOL_SCHEMAS:
             name = schema["name"]
+            if name in MESSAGE_DEPENDENT_TOOLS and not host_forwards_messages:
+                continue
             handler = _handle_lcm_expand_query if name == "tokensave_lcm_expand_query" else tools.make_handler(name)
             try:
                 register_tool(
@@ -3748,26 +4073,29 @@ def register(ctx):
                     name,
                     exc,
                 )
-        for schema in context_engine.get_tool_schemas():
-            name = schema["name"]
-            try:
-                register_tool(
-                    name=name,
-                    toolset="context_engine",
-                    schema=schema,
-                    handler=_make_wrapped_lcm_handler(name, context_engine),
-                    description=schema.get("description", ""),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "tokensave LCM tool registration failed for %s; continuing with context-engine schemas: %s",
-                    name,
-                    exc,
-                )
-    elif callable(register_tool):
-        logger.info(
-            "tokensave direct tool registration skipped because this Hermes host does not advertise message forwarding"
-        )
+            else:
+                _REGISTERED_TOOL_NAMES.add(name)
+        if host_forwards_messages:
+            for schema in context_engine.get_tool_schemas():
+                name = schema["name"]
+                try:
+                    register_tool(
+                        name=name,
+                        toolset="context_engine",
+                        schema=schema,
+                        handler=_make_wrapped_lcm_handler(name, context_engine),
+                        description=schema.get("description", ""),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "tokensave LCM tool registration failed for %s; continuing with context-engine schemas: %s",
+                        name,
+                        exc,
+                    )
+        else:
+            logger.info(
+                "tokensave LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
+            )
     else:
         logger.info(
             "tokensave direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"

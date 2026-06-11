@@ -64,10 +64,19 @@ def main():
     ok("pre_llm_call hook registered")
     assert "tokensave_status" in loaded.commands_registered, loaded.commands_registered
     ok("/tokensave_status command registered")
-    # Stock has no context_engine_tool_handlers_receive_messages capability;
-    # direct tool registration must degrade to a silent skip, not an error.
-    assert loaded.tools_registered == [], loaded.tools_registered
-    ok("direct tool registration degrades gracefully on stock")
+    # Code-graph / memory / transcript tools register unconditionally; only
+    # the live-ingest LCM verbs (whose schemas take the in-memory messages
+    # list) depend on the context_engine_tool_handlers_receive_messages
+    # capability, which stock does not advertise.
+    registered = set(loaded.tools_registered)
+    assert "tokensave_search" in registered, sorted(registered)
+    assert "tokensave_context" in registered, sorted(registered)
+    assert "tokensave_lcm_compress" not in registered, sorted(registered)
+    assert "tokensave_lcm_preflight" not in registered, sorted(registered)
+    ok(
+        "code-graph tools register on stock; live-ingest LCM verbs stay gated",
+        f"{len(registered)} tools",
+    )
 
     # 2. Context engine: registered through the plugin and selected the way
     #    stock agent/agent_init.py selects it (config-driven, plugin fallback).
@@ -106,8 +115,13 @@ def main():
         {"role": "assistant", "content": "hi there"},
     ]
     compressed = engine.compress(messages, current_tokens=50)
-    assert isinstance(compressed, dict) and compressed.get("status") == "ok", compressed
-    ok("compress round-trips offline", f"status={compressed.get('status')}")
+    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts
+    # as the live transcript; the raw tokensave result stays on the engine.
+    assert isinstance(compressed, list), type(compressed)
+    assert all(isinstance(m, dict) and m.get("role") for m in compressed), compressed
+    result = engine.last_compress_result
+    assert isinstance(result, dict) and result.get("status") == "ok", result
+    ok("compress returns a message list offline", f"status={result.get('status')}")
 
     # 3. Memory provider: stock discovers providers via plugins/memory and the
     #    memory.provider config key (the general PluginContext has no
@@ -128,9 +142,11 @@ def main():
 
     provider.initialize("stock-check-session", hermes_home=hermes_home)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
-    assert "fact_add" in schema_names and "memory_status" in schema_names
-    ok("memory tool schemas exposed", f"{len(schema_names)} tools")
+    assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
+    ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
 
+    # Legacy fixed-action names still dispatch even though they no longer
+    # cost schema footprint.
     added = unwrap_tool_json(
         provider.handle_tool_call(
             "fact_add",
@@ -140,10 +156,37 @@ def main():
     fact = added.get("fact") or {}
     assert fact.get("content") == "stock hermes integration verified", added
     found = unwrap_tool_json(
-        provider.handle_tool_call("fact_search", {"query": "stock hermes integration"})
+        provider.handle_tool_call(
+            "fact_store", {"action": "search", "query": "stock hermes integration"}
+        )
     )
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
+
+    # Passive-ingest / recall hooks (sync_turn, prefetch, on_memory_write).
+    prefetched = provider.prefetch("stock hermes integration")
+    assert isinstance(prefetched, str) and "stock hermes integration" in prefetched, (
+        prefetched
+    )
+    ok("prefetch recalls stored facts")
+    provider.sync_turn(
+        "hello", "hi there", session_id="stock-check-session", messages=messages
+    )
+    grep = unwrap_tool_json(
+        engine.handle_tool_call("lcm_grep", {"query": "hello", "session_scope": "all"})
+    )
+    assert isinstance(grep, dict) and "error" not in grep, grep
+    ok("sync_turn ingests the turn into the LCM raw store")
+    provider.on_memory_write(
+        "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
+    )
+    mirrored = unwrap_tool_json(
+        provider.handle_tool_call(
+            "fact_store", {"action": "search", "query": "on-memory-write mirror"}
+        )
+    )
+    assert mirrored.get("count", 0) >= 1, mirrored
+    ok("on_memory_write mirrors built-in memory writes")
 
     # 4. Graph tool dispatch through the generated tools.py against the
     #    pinned throwaway project.
