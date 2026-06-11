@@ -3873,7 +3873,9 @@ class TokensaveMemoryProvider(MemoryProvider):
 
         The host injects the returned text cache-safely (appended to the
         user message, never the system prompt). Empty string means nothing
-        relevant.
+        relevant. Kept small on purpose: the recall is injected context, and
+        the MCP envelope truncates tool payloads past 15k chars, so a low
+        limit keeps giant facts from corrupting the response JSON.
         """
         text = str(query or "").strip()
         if not text:
@@ -3881,7 +3883,7 @@ class TokensaveMemoryProvider(MemoryProvider):
         try:
             payload = call_tokensave_json(
                 "tokensave_fact_store",
-                {"action": "search", "query": text[:512], "limit": 5},
+                {"action": "search", "query": text[:512], "limit": 3},
             )
         except Exception as exc:
             logger.debug("tokensave memory prefetch failed: %s", exc)
@@ -3896,6 +3898,8 @@ class TokensaveMemoryProvider(MemoryProvider):
             content = str(fact.get("content") or "").strip()
             if not content:
                 continue
+            if len(content) > 600:
+                content = content[:600].rstrip() + "..."
             fact_id = fact.get("fact_id")
             prefix = f"[fact {fact_id}] " if fact_id is not None else ""
             lines.append(f"- {prefix}{content}")
