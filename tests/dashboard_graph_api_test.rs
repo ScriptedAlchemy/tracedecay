@@ -118,6 +118,21 @@ async fn setup_project(project_root: &Path) -> TokenSave {
     }
 }
 
+/// Extra node with no edges, for exercising the default-mode prune/fill rules.
+async fn seed_orphan_node(cg: &TokenSave) {
+    let db = cg.db();
+    let orphan = make_node(
+        "n-orphan",
+        NodeKind::Function,
+        "orphan_helper",
+        "src/dashboard/orphan.rs",
+        1,
+    );
+    if let Err(err) = db.insert_nodes(std::slice::from_ref(&orphan)).await {
+        panic!("failed to seed orphan node: {err}");
+    }
+}
+
 async fn seed_graph_fixture(cg: &TokenSave) {
     let db = cg.db();
     let nodes = [
@@ -255,6 +270,10 @@ async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
 }
 
 async fn start_dashboard_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with(false).await
+}
+
+async fn start_dashboard_fixture_with(with_orphan: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
@@ -262,6 +281,9 @@ async fn start_dashboard_fixture() -> DashboardFixture {
 
     let cg = setup_project(&project_root).await;
     seed_graph_fixture(&cg).await;
+    if with_orphan {
+        seed_orphan_node(&cg).await;
+    }
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -391,6 +413,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         );
         assert_eq!(status, 200);
         assert_eq!(subgraph["seed_id"], "n-route");
+        assert_eq!(subgraph["mode"], "seeded");
         assert_eq!(subgraph["capped"]["nodes"], true);
         let nodes = subgraph["nodes"]
             .as_array()
@@ -492,5 +515,116 @@ fn graph_api_finds_shortest_path_and_analytics() {
                 .any(|row| row["path"] == "src/dashboard/mod.rs"),
             "largest_files should include the seeded rust file"
         );
+    });
+}
+
+#[test]
+fn graph_api_seedless_subgraph_returns_default_hub_slice() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        // 4 interconnected nodes + 1 orphan with no edges.
+        let fixture = start_dashboard_fixture_with(true).await;
+        let agent = http_agent();
+
+        // No seed at all: the default overview slice. Everything fits under
+        // the default caps, so all 5 nodes come back (connected hubs first,
+        // the orphan fills leftover capacity) with all 3 edges.
+        let (status, default_slice) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/subgraph", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(default_slice["mode"], "default");
+        assert_eq!(default_slice["seed_id"], Value::Null);
+        let nodes = default_slice["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected default subgraph nodes array"));
+        assert_eq!(nodes.len(), 5);
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "n-route" && node["degree"] == 3),
+            "default slice should include the top hub with its degree"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "n-orphan" && node["degree"] == 0),
+            "isolated nodes should fill leftover capacity"
+        );
+        assert_eq!(
+            default_slice["edges"].as_array().map_or(0, |rows| rows.len()),
+            3,
+            "default slice should include every edge among the selected nodes"
+        );
+        assert_eq!(default_slice["capped"]["nodes"], false);
+        assert_eq!(default_slice["capped"]["edges"], false);
+
+        // With only 4 slots, the connected nodes win and the orphan is pruned.
+        let (status, pruned) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?limit_nodes=4",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let pruned_nodes = pruned["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected pruned subgraph nodes array"));
+        assert_eq!(pruned_nodes.len(), 4);
+        assert!(
+            pruned_nodes.iter().all(|node| node["id"] != "n-orphan"),
+            "connected hubs should win the node budget over isolated nodes"
+        );
+        assert_eq!(pruned["capped"]["nodes"], true);
+
+        // Tight budget: top-degree hub plus its best-connected peer, and only
+        // the edges among the selected nodes.
+        let (status, tight) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?limit_nodes=2",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let tight_nodes = tight["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected tight subgraph nodes array"));
+        assert_eq!(tight_nodes.len(), 2);
+        assert!(
+            tight_nodes.iter().any(|node| node["id"] == "n-route"),
+            "the top hub should always survive a tight node budget"
+        );
+        let tight_edges = tight["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected tight subgraph edges array"));
+        assert!(
+            tight_edges.iter().all(|edge| {
+                tight_nodes
+                    .iter()
+                    .any(|node| node["id"] == edge["source"])
+                    && tight_nodes.iter().any(|node| node["id"] == edge["target"])
+            }),
+            "default slice edges must stay within the selected node set"
+        );
+
+        // An explicit query that matches nothing must stay empty (it is a
+        // failed search, not a request for the default slice).
+        let (status, no_hit) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?q=zzz_no_such_symbol",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(no_hit["seed_id"], Value::Null);
+        assert_eq!(no_hit["nodes"].as_array().map_or(1, |rows| rows.len()), 0);
+        assert_eq!(no_hit["edges"].as_array().map_or(1, |rows| rows.len()), 0);
     });
 }

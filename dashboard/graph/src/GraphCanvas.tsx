@@ -12,6 +12,7 @@
  */
 
 import React, { useEffect, useRef } from "react";
+import { labelCapForArea, selectLabels, type LabelBox } from "./labelLayout";
 import { createSimulation, type SimEdge, type SimNode, type Simulation } from "./simulation";
 import { KIND_FAMILY_TOKENS, kindFamily } from "./types";
 import type { GraphEdge, GraphNode } from "./types";
@@ -117,6 +118,45 @@ function edgeStyle(kind: string, theme: ThemeColors) {
   };
 }
 
+/**
+ * Frames the bounding box of every simulated node. `smooth` lerps toward the
+ * target instead of snapping, for per-frame tracking while the layout settles.
+ */
+function fitCameraToNodes(
+  canvas: HTMLCanvasElement,
+  sim: Simulation,
+  camera: Camera,
+  smooth = false,
+) {
+  if (sim.nodes.length === 0) return;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of sim.nodes) {
+    minX = Math.min(minX, node.x - node.radius);
+    minY = Math.min(minY, node.y - node.radius);
+    maxX = Math.max(maxX, node.x + node.radius);
+    maxY = Math.max(maxY, node.y + node.radius);
+  }
+  const rect = canvas.getBoundingClientRect();
+  const spanX = Math.max(1, maxX - minX);
+  const spanY = Math.max(1, maxY - minY);
+  const fitK = Math.min(rect.width / spanX, rect.height / spanY) * 0.88;
+  const targetX = (minX + maxX) / 2;
+  const targetY = (minY + maxY) / 2;
+  const targetK = Math.min(5, Math.max(0.12, fitK));
+  if (smooth) {
+    camera.x += (targetX - camera.x) * 0.2;
+    camera.y += (targetY - camera.y) * 0.2;
+    camera.k += (targetK - camera.k) * 0.2;
+  } else {
+    camera.x = targetX;
+    camera.y = targetY;
+    camera.k = targetK;
+  }
+}
+
 export default function GraphCanvas({
   nodes,
   edges,
@@ -136,8 +176,8 @@ export default function GraphCanvas({
   );
   const needsRenderRef = useRef(true);
   const rafRef = useRef(0);
-  const propsRef = useRef({ selectedId, pathIds, onSelect, onExpand });
-  propsRef.current = { selectedId, pathIds, onSelect, onExpand };
+  const propsRef = useRef({ selectedId, pathIds, focusId, onSelect, onExpand });
+  propsRef.current = { selectedId, pathIds, focusId, onSelect, onExpand };
 
   // Rebuild the simulation when data changes, preserving prior positions.
   useEffect(() => {
@@ -149,6 +189,9 @@ export default function GraphCanvas({
   // Fly to the focused node, then keep tracking it while the layout settles
   // (cleared as soon as the user pans manually).
   const followIdRef = useRef<string | null>(null);
+  // Keep the whole graph framed while the layout settles after a fit
+  // (cleared on any manual pan/zoom or focus-follow).
+  const followFitRef = useRef(false);
   useEffect(() => {
     if (!focusId || !simRef.current) return;
     const node = simRef.current.nodes.find((n) => n.id === focusId);
@@ -158,6 +201,7 @@ export default function GraphCanvas({
     camera.y = node.y;
     camera.k = Math.max(camera.k, 0.8);
     followIdRef.current = focusId;
+    followFitRef.current = false;
     needsRenderRef.current = true;
   }, [focusId, nodes]);
 
@@ -165,32 +209,17 @@ export default function GraphCanvas({
     needsRenderRef.current = true;
   }, [selectedId, pathIds]);
 
-  // Zoom-to-fit: frame the bounding box of every simulated node. Recovers
-  // from zoom extremes / off-screen drift without clearing the exploration.
+  // Zoom-to-fit: frame the bounding box of every simulated node, and keep
+  // it framed while the layout is still settling. Recovers from zoom
+  // extremes / off-screen drift without clearing the exploration.
   useEffect(() => {
     if (!fitSignal) return;
     const canvas = canvasRef.current;
     const sim = simRef.current;
     if (!canvas || !sim || sim.nodes.length === 0) return;
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const node of sim.nodes) {
-      minX = Math.min(minX, node.x - node.radius);
-      minY = Math.min(minY, node.y - node.radius);
-      maxX = Math.max(maxX, node.x + node.radius);
-      maxY = Math.max(maxY, node.y + node.radius);
-    }
-    const rect = canvas.getBoundingClientRect();
-    const spanX = Math.max(1, maxX - minX);
-    const spanY = Math.max(1, maxY - minY);
-    const fitK = Math.min(rect.width / spanX, rect.height / spanY) * 0.88;
-    const camera = cameraRef.current;
-    camera.x = (minX + maxX) / 2;
-    camera.y = (minY + maxY) / 2;
-    camera.k = Math.min(5, Math.max(0.12, fitK));
+    fitCameraToNodes(canvas, sim, cameraRef.current);
     followIdRef.current = null;
+    followFitRef.current = true;
     needsRenderRef.current = true;
   }, [fitSignal]);
 
@@ -275,7 +304,7 @@ export default function GraphCanvas({
       ctx.scale(camera.k, camera.k);
       ctx.translate(-camera.x, -camera.y);
 
-      const { selectedId: selId, pathIds: path } = propsRef.current;
+      const { selectedId: selId, pathIds: path, focusId: focId } = propsRef.current;
       const hover = hoverRef.current;
       const highlight = neighborhood(hover);
       const pathSet = new Set(path);
@@ -305,7 +334,6 @@ export default function GraphCanvas({
       }
 
       // --- nodes ---
-      const labelCutoff = 14 / camera.k; // world-space radius needed for a label
       for (const node of sim.nodes) {
         const isSelected = node.id === selId;
         const isHovered = hover ? node.id === hover.id : false;
@@ -347,26 +375,67 @@ export default function GraphCanvas({
           ctx.fillText(`+${collapsed > 99 ? "99" : collapsed}`, bx, by);
         }
 
-        // Label culling: hubs, selection, hover neighborhood, or close zoom.
-        const wantLabel =
-          isSelected ||
-          isHovered ||
-          onPath ||
-          node.radius > labelCutoff ||
-          (highlight !== null && highlight.has(node.id)) ||
-          camera.k > 1.4;
-        if (wantLabel) {
-          const fontSize = Math.max(9, Math.min(13, 11 / Math.sqrt(camera.k)));
-          ctx.font = `${fontSize}px "IBM Plex Mono", monospace`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "top";
-          const label = node.name.length > 28 ? `${node.name.slice(0, 27)}…` : node.name;
-          ctx.lineWidth = 3.5 / camera.k;
-          ctx.strokeStyle = theme.halo;
-          ctx.strokeText(label, node.x, node.y + node.radius + 4);
-          ctx.fillStyle = theme.label;
-          ctx.fillText(label, node.x, node.y + node.radius + 4);
-        }
+      }
+
+      // --- labels (collision-aware selection at every zoom level) ---
+      // Candidates are measured in screen space and chosen greedily by
+      // priority (hover/selection always win, then path, then the hover
+      // neighborhood / focus, then hubs by degree), so dense hub-spoke
+      // clusters show the hub plus a handful of legible spoke labels
+      // instead of overlapping soup. Hover always reveals that label.
+      const screenFont = Math.max(8, Math.min(13, 11 * Math.pow(camera.k, 0.6)));
+      const fontSize = screenFont / camera.k;
+      ctx.font = `${fontSize}px "IBM Plex Mono", monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      const boxes: LabelBox[] = [];
+      const byId = new Map<string, { node: SimNode; label: string }>();
+      for (const node of sim.nodes) {
+        const isSelected = node.id === selId;
+        const isHovered = hover ? node.id === hover.id : false;
+        const onPath = pathSet.has(node.id);
+        // While hovering, only the highlighted neighborhood competes for
+        // labels (plus the selection/path, which stay visible while dimmed).
+        if (highlight && !highlight.has(node.id) && !isSelected && !onPath) continue;
+        const label = node.name.length > 28 ? `${node.name.slice(0, 27)}…` : node.name;
+        const width = ctx.measureText(label).width * camera.k;
+        const sx = (node.x - camera.x) * camera.k + rect.width / 2;
+        const sy = (node.y + node.radius + 4 - camera.y) * camera.k + rect.height / 2;
+        if (sx + width / 2 < 0 || sx - width / 2 > rect.width) continue;
+        if (sy + screenFont < 0 || sy > rect.height) continue;
+        const priority = isHovered
+          ? 0
+          : isSelected
+            ? 1
+            : onPath
+              ? 2
+              : (highlight && highlight.has(node.id)) || node.id === focId
+                ? 3
+                : 4;
+        boxes.push({
+          id: node.id,
+          priority,
+          degree: node.degree || 0,
+          left: sx - width / 2,
+          top: sy,
+          right: sx + width / 2,
+          bottom: sy + screenFont,
+          sticky: isHovered || isSelected,
+        });
+        byId.set(node.id, { node, label });
+      }
+      for (const id of selectLabels(boxes, labelCapForArea(rect.width, rect.height))) {
+        const entry = byId.get(id);
+        if (!entry) continue;
+        const { node, label } = entry;
+        const onPath = pathSet.has(id);
+        const inHighlight = !highlight || highlight.has(id);
+        ctx.globalAlpha = inHighlight || onPath ? 1 : DIM_ALPHA;
+        ctx.lineWidth = 3.5 / camera.k;
+        ctx.strokeStyle = theme.halo;
+        ctx.strokeText(label, node.x, node.y + node.radius + 4);
+        ctx.fillStyle = theme.label;
+        ctx.fillText(label, node.x, node.y + node.radius + 4);
       }
       ctx.globalAlpha = 1;
     }
@@ -385,6 +454,9 @@ export default function GraphCanvas({
             camera.x += (node.x - camera.x) * 0.18;
             camera.y += (node.y - camera.y) * 0.18;
           }
+        } else if (followFitRef.current && sim) {
+          // Keep the whole graph framed as it spreads out and settles.
+          fitCameraToNodes(canvas, sim, cameraRef.current, true);
         }
       }
       if (simActive || needsRenderRef.current) {
@@ -397,6 +469,7 @@ export default function GraphCanvas({
 
     function onWheel(event: WheelEvent) {
       event.preventDefault();
+      followFitRef.current = false;
       const camera = cameraRef.current;
       const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
       const nextK = Math.min(5, Math.max(0.12, camera.k * factor));
@@ -417,6 +490,7 @@ export default function GraphCanvas({
       }
       const node = hitTest(event.clientX, event.clientY);
       if (!node) followIdRef.current = null;
+      followFitRef.current = false;
       dragRef.current = {
         node,
         panning: !node,

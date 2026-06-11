@@ -203,10 +203,14 @@ async fn edges_for_ids(state: &DashboardState, ids: &[String], limit: i64) -> Ve
         return Vec::new();
     }
     let placeholders = qmarks(ids.len());
+    // One row per (source, target, kind): the edges table stores one row per
+    // call site, and duplicates would only burn the edge cap (the canvas
+    // dedups by that key anyway).
     let sql = format!(
-        "SELECT source, target, kind, line
+        "SELECT source, target, kind, MIN(line) AS line
          FROM edges
          WHERE source IN ({placeholders}) AND target IN ({placeholders})
+         GROUP BY source, target, kind
          ORDER BY kind ASC, source ASC, target ASC
          LIMIT ?"
     );
@@ -560,29 +564,194 @@ pub(crate) async fn neighbors(
     )
 }
 
+/// Cap on edges fetched among the default-mode candidate pool before the
+/// per-response `limit_edges` cap is applied.
+const DEFAULT_POOL_EDGE_CAP: i64 = 4_000;
+
+/// Seedless "project overview" slice: the most-connected symbols plus the
+/// edges among them, so the canvas has something informative to show before
+/// the user searches.
+///
+/// Selection grows greedily by adjacency over a top-degree candidate pool:
+/// prefer the highest-degree pool node touching the current selection
+/// (recording the edge that connects it, so the edge cap can never strand
+/// it), seed a new cluster from the highest-degree connected node when
+/// nothing touches the selection, and let isolated nodes fill whatever
+/// capacity is left (which also keeps tiny or edge-free indexes non-empty).
+async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i64) -> Json<Value> {
+    // Candidate pool: 2x the node budget so selection has room to work with.
+    let pool_limit = (node_limit * 2).min(500);
+    let pool_rows = query_rows(
+        &state.mem_conn,
+        "SELECT n.id, COALESCE(d.degree, 0) AS degree
+         FROM nodes n
+         LEFT JOIN (
+             SELECT node_id, COUNT(*) AS degree
+             FROM (
+                 SELECT source AS node_id FROM edges
+                 UNION ALL
+                 SELECT target AS node_id FROM edges
+             )
+             GROUP BY node_id
+         ) d ON d.node_id = n.id
+         ORDER BY degree DESC, n.qualified_name ASC
+         LIMIT ?1",
+        libsql::params![pool_limit],
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut pool_ids = Vec::new();
+    let mut degrees: BTreeMap<String, i64> = BTreeMap::new();
+    for row in &pool_rows {
+        if let Some(id) = row.get("id").and_then(Value::as_str) {
+            pool_ids.push(id.to_string());
+            degrees.insert(id.to_string(), i64_field(row, "degree"));
+        }
+    }
+
+    let pool_edges = edges_for_ids(state, &pool_ids, DEFAULT_POOL_EDGE_CAP).await;
+
+    // Adjacency over the pool: node id -> indices of touching edges
+    // (self-loops don't make a node "connected" for selection purposes).
+    let mut adjacency: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (idx, edge) in pool_edges.iter().enumerate() {
+        let source = str_field(edge, "source");
+        let target = str_field(edge, "target");
+        if source == target {
+            continue;
+        }
+        adjacency.entry(source).or_default().push(idx);
+        adjacency.entry(target).or_default().push(idx);
+    }
+
+    let budget = usize::try_from(node_limit).unwrap_or(0);
+    let mut selected: Vec<String> = Vec::new();
+    let mut selected_set: HashSet<&str> = HashSet::new();
+    // Edges recorded while growing the selection; emitted first so the edge
+    // cap cannot leave a selected node without any visible edge.
+    let mut connecting_edges: Vec<usize> = Vec::new();
+    while selected.len() < budget {
+        let mut adjacent_pick: Option<(&str, usize)> = None;
+        let mut seed_pick: Option<&str> = None;
+        for id in pool_ids.iter().map(String::as_str) {
+            if selected_set.contains(id) {
+                continue;
+            }
+            let Some(edge_idxs) = adjacency.get(id) else {
+                continue;
+            };
+            let touching = edge_idxs.iter().copied().find(|&idx| {
+                let edge = &pool_edges[idx];
+                let source = str_field(edge, "source");
+                let other = if source == id {
+                    str_field(edge, "target")
+                } else {
+                    source
+                };
+                selected_set.contains(other)
+            });
+            if let Some(idx) = touching {
+                adjacent_pick = Some((id, idx));
+                break;
+            }
+            if seed_pick.is_none() {
+                seed_pick = Some(id);
+            }
+        }
+        let Some(id) = adjacent_pick.map(|(id, _)| id).or(seed_pick) else {
+            break;
+        };
+        if let Some((_, edge_idx)) = adjacent_pick {
+            connecting_edges.push(edge_idx);
+        }
+        selected.push(id.to_string());
+        selected_set.insert(id);
+    }
+    if selected.len() < budget {
+        for id in &pool_ids {
+            if selected.len() >= budget {
+                break;
+            }
+            if !selected_set.contains(id.as_str()) {
+                selected.push(id.clone());
+                selected_set.insert(id);
+            }
+        }
+    }
+
+    let mut edge_order = connecting_edges;
+    let used: HashSet<usize> = edge_order.iter().copied().collect();
+    for (idx, edge) in pool_edges.iter().enumerate() {
+        if used.contains(&idx) {
+            continue;
+        }
+        if selected_set.contains(str_field(edge, "source"))
+            && selected_set.contains(str_field(edge, "target"))
+        {
+            edge_order.push(idx);
+        }
+    }
+    let capped_edges = edge_order.len() > edge_limit as usize;
+    let visible_edges: Vec<Value> = edge_order
+        .into_iter()
+        .take(edge_limit as usize)
+        .map(|idx| pool_edges[idx].clone())
+        .collect();
+
+    let nodes = attach_degrees(nodes_by_ids(state, &selected).await, &degrees);
+    let total_nodes = query_i64(&state.mem_conn, "SELECT COUNT(*) FROM nodes", ()).await;
+
+    Json(json!({
+        "seed_id": null,
+        "mode": "default",
+        "nodes": nodes,
+        "edges": visible_edges,
+        "capped": {
+            "nodes": total_nodes > selected.len() as i64,
+            "edges": capped_edges,
+        },
+        "limits": {
+            "nodes": node_limit,
+            "edges": edge_limit,
+        },
+    }))
+}
+
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
 ///
 /// One-hop neighborhood of the seed, capped, with per-node total degrees so
-/// the UI can show how many neighbors remain unexpanded.
+/// the UI can show how many neighbors remain unexpanded. Without a seed
+/// (`node_id` / `q` both absent) it returns the default overview slice
+/// instead: top-degree hubs plus the edges among them.
 pub(crate) async fn subgraph(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<Value> {
     let node_limit = coerce_limit(params.limit_nodes, 80, 250);
     let edge_limit = coerce_limit(params.limit_edges, 120, 500);
+    let query = params.q.trim();
     let seed_id = match params.node_id.filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(id),
-        None if !params.q.trim().is_empty() => first_node_for_query(&state, &params.q).await,
+        None if !query.is_empty() => {
+            let Some(id) = first_node_for_query(&state, query).await else {
+                // Explicit query with no hit: an empty payload, not the
+                // default slice, so a failed search reads as "no match".
+                return Json(json!({
+                    "seed_id": null,
+                    "mode": "seeded",
+                    "nodes": [],
+                    "edges": [],
+                    "capped": { "nodes": false, "edges": false },
+                    "limits": { "nodes": node_limit, "edges": edge_limit },
+                }));
+            };
+            Some(id)
+        }
         None => None,
     };
     let Some(seed_id) = seed_id else {
-        return Json(json!({
-            "seed_id": null,
-            "nodes": [],
-            "edges": [],
-            "capped": { "nodes": false, "edges": false },
-            "limits": { "nodes": node_limit, "edges": edge_limit },
-        }));
+        return default_subgraph(&state, node_limit, edge_limit).await;
     };
 
     let candidate_rows = query_rows(
@@ -620,6 +789,7 @@ pub(crate) async fn subgraph(
 
     Json(json!({
         "seed_id": seed_id,
+        "mode": "seeded",
         "nodes": nodes,
         "edges": visible_edges,
         "capped": {

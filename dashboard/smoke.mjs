@@ -161,6 +161,26 @@ async function runViewportSmoke(browser, baseUrl, viewport, expectLcmMode) {
     { timeout: 10000 },
   );
 
+  // --- Code Graph tab: the canvas self-populates with the seedless default
+  // slice (no search required); the empty state must not be visible.
+  const graphTab = page
+    .getByRole("tab", { name: "Code Graph", exact: true })
+    .or(page.getByRole("button", { name: "Code Graph", exact: true }));
+  await graphTab.click();
+  await page.locator(".tsg-canvas").waitFor({ state: "visible", timeout: 8000 });
+  await page.waitForFunction(
+    () => {
+      const footer = document.querySelector(".tsg-canvas-count");
+      const match = footer?.textContent?.match(/^\s*([\d,]+)\s*\/\s*([\d,]+)\s*nodes/);
+      return Boolean(match && Number(match[1].replace(/,/g, "")) > 0);
+    },
+    undefined,
+    { timeout: 8000 },
+  );
+  if (await page.locator(".tsg-graph-empty").isVisible().catch(() => false)) {
+    throw new Error("Code Graph canvas should auto-populate, but the empty state is visible");
+  }
+
   await lcmTab.click();
   const recentSessionsHeader = page.getByRole("heading", { name: "Recent Sessions" });
   const emptyStateHeader = page.getByRole("heading", { name: "No LCM sessions indexed yet" });

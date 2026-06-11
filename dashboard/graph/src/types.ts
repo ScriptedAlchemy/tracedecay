@@ -60,6 +60,8 @@ export interface GraphNeighborsResponse {
 
 export interface GraphSubgraphResponse {
   seed_id: string | null;
+  /** "seeded" for a node/query neighborhood, "default" for the seedless hub slice. */
+  mode?: "seeded" | "default";
   nodes: GraphNode[];
   edges: GraphEdge[];
   capped: { nodes: boolean; edges: boolean };

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { canvasEmptyMessage, DEFAULT_VIEW_LIMITS } from "./defaultView";
 import GraphCanvas from "./GraphCanvas";
 import OverviewPanel from "./OverviewPanel";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, cn } from "./sdk";
@@ -144,7 +145,9 @@ function DetailPanel({
 }
 
 export default function CodeGraphExplorer() {
-  const [view, setView] = useState<"overview" | "canvas">("overview");
+  // Canvas is the landing view: it self-populates with the default slice,
+  // so tab entry shows the graph immediately (Overview stays one click away).
+  const [view, setView] = useState<"overview" | "canvas">("canvas");
   const [overview, setOverview] = useState<GraphOverview | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<GraphNode[]>([]);
@@ -176,6 +179,12 @@ export default function CodeGraphExplorer() {
   const searchSeq = useRef(0);
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
 
+  // True while the canvas shows the untouched seedless default view; the
+  // first search-to-focus replaces it instead of merging into it.
+  const defaultViewRef = useRef(false);
+  // Invalidates an in-flight default load once the user takes over the canvas.
+  const defaultSeq = useRef(0);
+
   useEffect(() => {
     api.overview().then(setOverview).catch((err) => setError(String(err)));
   }, []);
@@ -193,6 +202,29 @@ export default function CodeGraphExplorer() {
     });
   }, []);
 
+  /** Loads the seedless default slice (top-connected hubs + their edges). */
+  const loadDefaultView = useCallback(async () => {
+    const seq = ++defaultSeq.current;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await api.subgraph(DEFAULT_VIEW_LIMITS);
+      if (seq !== defaultSeq.current) return;
+      mergeGraph(payload.nodes, payload.edges);
+      defaultViewRef.current = true;
+      setFitSignal((prev) => prev + 1);
+    } catch (err) {
+      if (seq === defaultSeq.current) setError(String(err));
+    } finally {
+      if (seq === defaultSeq.current) setLoading(false);
+    }
+  }, [mergeGraph]);
+
+  useEffect(() => {
+    void loadDefaultView();
+  }, [loadDefaultView]);
+
+  // Clear returns to the default view rather than an empty canvas.
   const clearCanvas = useCallback(() => {
     setGraphNodes(new Map());
     setGraphEdges(new Map());
@@ -203,7 +235,8 @@ export default function CodeGraphExplorer() {
     setPathFrom(null);
     setPathTo(null);
     setFocusId(null);
-  }, []);
+    void loadDefaultView();
+  }, [loadDefaultView]);
 
   const expandNode = useCallback(
     async (id: string, { focus = false } = {}) => {
@@ -211,6 +244,7 @@ export default function CodeGraphExplorer() {
         setError(`Canvas holds ${graphNodes.size} nodes — clear it to keep expanding.`);
         return;
       }
+      defaultViewRef.current = false;
       setLoading(true);
       setError("");
       try {
@@ -253,6 +287,7 @@ export default function CodeGraphExplorer() {
         const payload = await api.path({ from: from.id, to: to.id, max_depth: 8 });
         setPathResult(payload);
         if (payload.found) {
+          defaultViewRef.current = false;
           mergeGraph(payload.nodes, payload.edges);
         } else {
           setError(`No path within ${payload.max_depth} hops between ${from.name} and ${to.name}.`);
@@ -290,6 +325,18 @@ export default function CodeGraphExplorer() {
     (node: Pick<GraphNode, "id" | "name">) => {
       setView("canvas");
       setSearchOpen(false);
+      // Search refines rather than appends: the pristine default view is
+      // replaced by the focused neighborhood. Once the user has built up a
+      // custom exploration, focusing merges into it as before.
+      if (defaultViewRef.current) {
+        defaultViewRef.current = false;
+        defaultSeq.current++;
+        setGraphNodes(new Map());
+        setGraphEdges(new Map());
+        setPathResult(null);
+        setPathFrom(null);
+        setPathTo(null);
+      }
       setHistory((prev) => {
         const trimmed = prev.filter((entry) => entry.id !== node.id);
         return [...trimmed.slice(-7), { id: node.id, name: node.name }];
@@ -388,17 +435,13 @@ export default function CodeGraphExplorer() {
     return next;
   };
 
-  const openFilteredCanvas = useCallback(
-    (kind: string | null, language: string | null) => {
-      setView("canvas");
-      if (kind) setKindFilters(new Set([kind]));
-      if (language) setLangFilters(new Set([language]));
-      // Seed from the most connected symbol so the canvas is not empty.
-      const seed = overview?.top_connected?.[0];
-      if (seed && graphNodes.size === 0) focusSymbol(seed);
-    },
-    [overview, graphNodes.size, focusSymbol],
-  );
+  // The canvas self-populates with the default view, so opening a filter
+  // from Overview only needs to set the chips and switch views.
+  const openFilteredCanvas = useCallback((kind: string | null, language: string | null) => {
+    setView("canvas");
+    if (kind) setKindFilters(new Set([kind]));
+    if (language) setLangFilters(new Set([language]));
+  }, []);
 
   const pathIds = pathResult?.found ? pathResult.path : [];
 
@@ -412,6 +455,7 @@ export default function CodeGraphExplorer() {
           ? { source: node.id, target: selected.id, kind: "calls" }
           : { source: selected.id, target: node.id, kind: "calls" },
       );
+      defaultViewRef.current = false;
       mergeGraph([selected, ...targets], edges);
       setFocusId(selected.id);
     },
@@ -483,7 +527,9 @@ export default function CodeGraphExplorer() {
           <div className="tsg-controls">
             <div className="tsg-breadcrumbs">
               {history.length === 0 ? (
-                <span className="tsg-breadcrumb-hint">Search a symbol to start exploring.</span>
+                <span className="tsg-breadcrumb-hint">
+                  Most-connected symbols — search to focus, double-click to expand.
+                </span>
               ) : (
                 history.map((entry, index) => (
                   <React.Fragment key={entry.id}>
@@ -585,9 +631,11 @@ export default function CodeGraphExplorer() {
             <div className="tsg-canvas-shell">
               {visible.nodes.length === 0 ? (
                 <div className="tsg-graph-empty">
-                  {graphNodes.size === 0
-                    ? "The canvas is empty — search a symbol above or pick one from Overview."
-                    : "All loaded nodes are hidden by the current filters."}
+                  {canvasEmptyMessage({
+                    indexedNodes: overview ? overview.totals.nodes : null,
+                    loadedNodes: graphNodes.size,
+                    loading,
+                  })}
                 </div>
               ) : (
                 <GraphCanvas

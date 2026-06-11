@@ -18,7 +18,7 @@ Under the Hermes wrapper the same routes are reverse-proxied at
 | `GET /search?q=&limit=&offset=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped). Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. |
 | `GET /node/{id}` | Single node detail: signature, doc, visibility, span (`start_line`/`end_line`/columns), complexity counters, `degree`. 404 with a `detail` body when missing. |
 | `GET /node/{id}/neighbors?limit=` | Depth-1 neighborhood: `callers` / `callees` (calls edges, hydrated node rows + `degree`), raw `edges` touching the node, and `edges_by_kind` counts. |
-| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed). Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
+| `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them — hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |
 | `GET /path?from=&to=&max_depth=` | Undirected BFS shortest path between two node ids (depth default 6, max 10; visited-set capped at 20k). Returns `found`, ordered `path` ids, hydrated `nodes`, and the `edges` along the route. |
 
 `GET /api/capabilities` advertises `features.graph: true` and lists `graph`
@@ -35,16 +35,22 @@ beyond the host SDK; the force layout and charts are hand-rolled.
 
 ### Views
 
-- **Overview (landing)** — orientation analytics as compact SVG bar charts:
-  symbols by kind family, files by language, most-connected symbols, and
-  largest files, plus an edge-kind strip. Chart rows are clickable: a kind
-  family or language opens the canvas pre-filtered; a hub symbol focuses it.
-- **Canvas (explorer)** — canvas-2D force-directed graph:
+- **Canvas (landing, explorer)** — canvas-2D force-directed graph:
+  - *Default view*: on tab entry the canvas self-populates with the seedless
+    default slice (~100 most-connected hubs + the edges among them) and
+    zoom-to-fit tracks the layout while it settles — no search required.
+    Search is a refinement: the first search-to-focus *replaces* the
+    pristine default view; the placeholder message only appears for
+    genuinely empty (0-node) indexes.
   - *Progressive exploration*: search-to-focus seeds the canvas with the
     symbol's capped subgraph; double-click a node (or Inspector buttons) to
     expand more. A `+N` badge on each node shows how many neighbors are
     still collapsed. Accumulation is soft-capped (600 nodes) with a clear
-    message; **Clear** resets.
+    message; **Clear** returns to the default view.
+- **Overview** — orientation analytics as compact SVG bar charts:
+  symbols by kind family, files by language, most-connected symbols, and
+  largest files, plus an edge-kind strip. Chart rows are clickable: a kind
+  family or language opens the canvas pre-filtered; a hub symbol focuses it.
   - *Interaction*: wheel zoom around the cursor, drag-pan, node drag with
     the simulation settling around the pinned node, hover highlighting of
     the direct neighborhood (rest dims), label culling at low zoom (hubs,
@@ -88,5 +94,9 @@ call graph (`dashboard → route_graph → render_graph`, plus a `uses` edge and
 file records) and covers: capability flag, overview totals/kind/language
 breakdowns, search ranking, node detail + span + doc, neighbors
 (callers/callees/edge-kind grouping), subgraph node/edge caps with `capped`
-flags and per-node degrees, shortest-path success and not-found, and the
-`top_connected` / `largest_files` analytics.
+flags and per-node degrees, the seedless default slice (hub selection,
+isolated-node prune/fill, no-hit queries staying empty), shortest-path
+success and not-found, and the `top_connected` / `largest_files` analytics.
+`dashboard/test/graph-logic.test.mjs` covers the default-view budget and the
+canvas empty-state copy; `dashboard/smoke.mjs` asserts the graph tab
+auto-populates its canvas in a live browser.
