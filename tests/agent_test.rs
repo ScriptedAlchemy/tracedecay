@@ -128,6 +128,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     }
 }
 
@@ -695,6 +696,7 @@ fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1205,6 +1207,7 @@ fn test_hermes_profile_install_targets_named_profile() {
         tool_permissions: expected_tool_perms(),
         profile: Some("Work_Profile".to_string()),
         project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1387,6 +1390,7 @@ fn test_hermes_install_rejects_invalid_profile_names() {
         tool_permissions: expected_tool_perms(),
         profile: Some("_bad".to_string()),
         project_root: None,
+        dashboard: true,
     };
 
     let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
@@ -1762,6 +1766,7 @@ fn test_hermes_install_preserves_user_keys_in_tokensave_config_block() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -1835,6 +1840,7 @@ fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
             tool_permissions: expected_tool_perms(),
             profile: None,
             project_root: Some(std::path::PathBuf::from("/missing/pinned/project")),
+            dashboard: true,
         })
         .unwrap();
     let mut dc = DoctorCounters::new();
@@ -1888,6 +1894,7 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
         project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -3139,6 +3146,7 @@ fn test_antigravity_install_writes_cli_plugin() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).expect("install ok");
@@ -3190,6 +3198,7 @@ fn test_antigravity_uninstall_removes_both_locations() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).unwrap();
@@ -3357,6 +3366,7 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     }
 }
 
@@ -3497,6 +3507,7 @@ fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
         project_root: None,
+        dashboard: true,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -4548,6 +4559,7 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
     };
     HermesIntegration.install(&pinned).unwrap();
 

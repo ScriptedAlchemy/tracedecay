@@ -165,11 +165,13 @@ async function buildHermesWrapper() {
   );
   await fs.copyFile(path.join(root, "lcm/dist/index.js"), path.join(dist, "lcm.js"));
   await fs.copyFile(path.join(root, "graph/dist/index.js"), path.join(dist, "graph.js"));
+  await fs.copyFile(path.join(root, "savings/dist/index.js"), path.join(dist, "savings.js"));
   const css = await Promise.all([
     fs.readFile(path.join(root, "hermes-wrapper/src/wrapper.css"), "utf8"),
     fs.readFile(path.join(root, "holographic/dist/style.css"), "utf8"),
     fs.readFile(path.join(root, "lcm/dist/style.css"), "utf8"),
     fs.readFile(path.join(root, "graph/dist/style.css"), "utf8"),
+    fs.readFile(path.join(root, "savings/dist/style.css"), "utf8"),
   ]);
   await fs.writeFile(path.join(dist, "style.css"), css.join("\n"), "utf8");
 }
@@ -191,6 +193,7 @@ async function main() {
     "savings/dist/style.css",
     "hermes-wrapper/dist/index.js",
     "hermes-wrapper/dist/graph.js",
+    "hermes-wrapper/dist/savings.js",
     "hermes-wrapper/dist/style.css",
   ]) {
     const st = await fs.stat(path.join(root, f));

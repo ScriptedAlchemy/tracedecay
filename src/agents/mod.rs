@@ -14,6 +14,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod hermes;
+mod hermes_dashboard;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
@@ -136,6 +137,11 @@ pub struct InstallContext {
     /// host's working directory (`tokensave install --agent hermes
     /// --project-root <path>`). `None` preserves any existing pin.
     pub project_root: Option<PathBuf>,
+    /// Hermes only: deploy the dashboard wrapper plugin page alongside the
+    /// agent plugin (default; `tokensave install --agent hermes
+    /// --no-dashboard` opts out and removes a previous deploy). Other agents
+    /// ignore this field.
+    pub dashboard: bool,
 }
 
 /// Context passed to [`AgentIntegration::healthcheck`].

@@ -41,6 +41,7 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tool_permissions: Vec::new(),
         profile: None,
         project_root: None,
+        dashboard: true,
     }
 }
 
@@ -79,6 +80,11 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
     let output = Command::new("python3")
         .arg(&script_path)
         .arg(plugin_dir)
+        // Isolate from the developer's real ~/.hermes: the generated plugin
+        // resolves HERMES_HOME → ~/.hermes at runtime, and a real host
+        // config.yaml pin would override the behavior under test.
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes plugin check");
     assert!(
@@ -963,6 +969,8 @@ plugin.register(legacy)
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes context engine check");
     assert!(
@@ -1086,6 +1094,8 @@ assert args == {
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes preflight bridge check");
     assert!(
@@ -1195,6 +1205,8 @@ assert len(calls) == 1
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes session boundary bridge check");
     assert!(
@@ -1556,6 +1568,8 @@ assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lc
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes project flag bridge check");
     assert!(
@@ -3962,6 +3976,7 @@ fn generated_plugin_honors_install_time_project_root_pin() {
         tool_permissions: Vec::new(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -4048,6 +4063,8 @@ assert explicit.project_root == "/explicit/root", explicit.project_root
     let output = Command::new("python3")
         .arg(&script)
         .arg(&plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
         .output()
         .expect("python3 should run generated Hermes plugin check");
     assert!(

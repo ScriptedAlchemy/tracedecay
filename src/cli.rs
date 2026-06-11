@@ -103,6 +103,11 @@ pub enum Commands {
         /// project's .tokensave/ stores regardless of the Hermes cwd.
         #[arg(long, conflicts_with = "all_profiles")]
         project_root: Option<String>,
+        /// Skip deploying the tokensave dashboard plugin page into the
+        /// Hermes dashboard (and remove a previously deployed one; only
+        /// used with --agent hermes).
+        #[arg(long)]
+        no_dashboard: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,

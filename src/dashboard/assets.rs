@@ -25,14 +25,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
 const SHELL_JS: &[u8] = include_bytes!("../../dashboard/shell/dist/shell.js");
 const SHELL_CSS: &[u8] = include_bytes!("../../dashboard/shell/dist/shell.css");
-const HOLOGRAPHIC_JS: &[u8] = include_bytes!("../../dashboard/holographic/dist/index.js");
-const HOLOGRAPHIC_CSS: &[u8] = include_bytes!("../../dashboard/holographic/dist/style.css");
-const LCM_JS: &[u8] = include_bytes!("../../dashboard/lcm/dist/index.js");
-const LCM_CSS: &[u8] = include_bytes!("../../dashboard/lcm/dist/style.css");
-const GRAPH_JS: &[u8] = include_bytes!("../../dashboard/graph/dist/index.js");
-const GRAPH_CSS: &[u8] = include_bytes!("../../dashboard/graph/dist/style.css");
-const SAVINGS_JS: &[u8] = include_bytes!("../../dashboard/savings/dist/index.js");
-const SAVINGS_CSS: &[u8] = include_bytes!("../../dashboard/savings/dist/style.css");
+// Plugin bundles are embedded as &str (they are UTF-8 esbuild output) so the
+// Hermes installer (src/agents/hermes_dashboard.rs) can reuse the exact same
+// embedded data when writing the wrapper plugin's dist files to disk.
+pub(crate) const HOLOGRAPHIC_JS: &str = include_str!("../../dashboard/holographic/dist/index.js");
+pub(crate) const HOLOGRAPHIC_CSS: &str = include_str!("../../dashboard/holographic/dist/style.css");
+pub(crate) const LCM_JS: &str = include_str!("../../dashboard/lcm/dist/index.js");
+pub(crate) const LCM_CSS: &str = include_str!("../../dashboard/lcm/dist/style.css");
+pub(crate) const GRAPH_JS: &str = include_str!("../../dashboard/graph/dist/index.js");
+pub(crate) const GRAPH_CSS: &str = include_str!("../../dashboard/graph/dist/style.css");
+pub(crate) const SAVINGS_JS: &str = include_str!("../../dashboard/savings/dist/index.js");
+pub(crate) const SAVINGS_CSS: &str = include_str!("../../dashboard/savings/dist/style.css");
 const ASSET_STAMP: &str = env!("TOKENSAVE_DASHBOARD_ASSET_STAMP");
 
 fn static_response(body: &'static [u8], content_type: &'static str) -> Response {
@@ -65,14 +68,16 @@ pub(crate) async fn shell_asset(Path(file): Path<String>) -> Response {
 
 pub(crate) async fn plugin_asset(Path((plugin, file)): Path<(String, String)>) -> Response {
     match (plugin.as_str(), file.as_str()) {
-        ("holographic", "index.js") => static_response(HOLOGRAPHIC_JS, "application/javascript"),
-        ("holographic", "style.css") => static_response(HOLOGRAPHIC_CSS, "text/css"),
-        ("hermes-lcm", "index.js") => static_response(LCM_JS, "application/javascript"),
-        ("hermes-lcm", "style.css") => static_response(LCM_CSS, "text/css"),
-        ("graph", "index.js") => static_response(GRAPH_JS, "application/javascript"),
-        ("graph", "style.css") => static_response(GRAPH_CSS, "text/css"),
-        ("savings", "index.js") => static_response(SAVINGS_JS, "application/javascript"),
-        ("savings", "style.css") => static_response(SAVINGS_CSS, "text/css"),
+        ("holographic", "index.js") => {
+            static_response(HOLOGRAPHIC_JS.as_bytes(), "application/javascript")
+        }
+        ("holographic", "style.css") => static_response(HOLOGRAPHIC_CSS.as_bytes(), "text/css"),
+        ("hermes-lcm", "index.js") => static_response(LCM_JS.as_bytes(), "application/javascript"),
+        ("hermes-lcm", "style.css") => static_response(LCM_CSS.as_bytes(), "text/css"),
+        ("graph", "index.js") => static_response(GRAPH_JS.as_bytes(), "application/javascript"),
+        ("graph", "style.css") => static_response(GRAPH_CSS.as_bytes(), "text/css"),
+        ("savings", "index.js") => static_response(SAVINGS_JS.as_bytes(), "application/javascript"),
+        ("savings", "style.css") => static_response(SAVINGS_CSS.as_bytes(), "text/css"),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }

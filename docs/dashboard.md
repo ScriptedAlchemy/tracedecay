@@ -93,7 +93,33 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 ## Hermes Integration
 
-The dashboard is the canonical implementation; the Hermes plugin is a thin wrapper that reuses it. Two modes are supported:
+The dashboard is the canonical implementation; the Hermes plugin is a thin wrapper that reuses it.
+
+### Installation
+
+`tokensave install --agent hermes` deploys the wrapper as a Hermes dashboard
+plugin alongside the agent plugin, into
+`<hermes_home>/plugins/tokensave/dashboard/` (`manifest.json`,
+`plugin_api.py`, and the UI bundles — all embedded in the tokensave binary,
+no source checkout needed). Hermes' dashboard plugin discovery scans
+`plugins/*/dashboard/manifest.json` in both stock and forked Hermes, so a
+"Hermes Intelligence" tab (Memory / LCM / Code Graph / Savings) appears in
+`hermes dashboard` after install. With `--profile <p>` the deploy lands in
+`~/.hermes/profiles/<p>/plugins/tokensave/dashboard/` and is picked up when
+Hermes runs with `HERMES_HOME` pointing at that profile.
+
+The deployed `plugin_api.py` is pinned at install time: the installing
+binary's path becomes the default `TOKENSAVE_BIN`, and the profile's pinned
+`project_root` (from `plugins.tokensave.project_root` in `config.yaml`)
+becomes the default `TOKENSAVE_DASHBOARD_PROJECT`. The environment variables
+below still win at runtime. Reinstalls preserve the pin; pass
+`--no-dashboard` to skip the dashboard deploy (and remove a previous one).
+
+On Hermes versions that predate dashboard-plugin discovery the deployed
+directory is inert — the agent-plugin loader only reads `plugin.yaml` and
+ignores `dashboard/`.
+
+Two serving modes are supported:
 
 ### 1. Spawn Mode (Default)
 
@@ -103,8 +129,8 @@ Hermes automatically launches the dashboard server and proxies requests to it. T
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOKENSAVE_BIN` | Yes | Path to the tokensave binary |
-| `TOKENSAVE_DASHBOARD_PROJECT` | No | Project root path (defaults to Hermes' current working directory) |
+| `TOKENSAVE_BIN` | No | Path to the tokensave binary (defaults to the install-time binary baked into `plugin_api.py`, then `PATH`) |
+| `TOKENSAVE_DASHBOARD_PROJECT` | No | Project root path (defaults to the install-time pinned project root, then Hermes' current working directory) |
 
 **Example:**
 ```bash
@@ -133,7 +159,7 @@ export TOKENSAVE_DASHBOARD_URL=http://127.0.0.1:7341/
 hermes dashboard
 ```
 
-When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/hermes-intelligence/*` to the tokensave dashboard's native paths.
+When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/hermes-intelligence/*` to the tokensave dashboard's native paths (`/holographic`, `/lcm`, `/graph`, and `/savings` map to `/api/plugins/holographic`, `/api/plugins/hermes-lcm`, `/api/plugins/graph`, and `/api/plugins/savings` respectively).
 
 ---
 

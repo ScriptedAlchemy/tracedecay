@@ -17,6 +17,7 @@ fn make_ctx(home: &Path) -> InstallContext {
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
+        dashboard: true,
     }
 }
 

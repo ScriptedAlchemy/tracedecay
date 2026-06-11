@@ -22,7 +22,7 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
-mod assets;
+pub(crate) mod assets;
 mod curate_preview_store;
 mod graph_api;
 mod lcm_api;

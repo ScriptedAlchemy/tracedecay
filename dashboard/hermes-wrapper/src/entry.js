@@ -3,14 +3,16 @@
  *
  * This is the Hermes-hosted variant of the canonical tokensave dashboard
  * (see the tokensave repo, `dashboard/`). It does NOT fork the UI bundles:
- * the holographic + LCM plugin bundles shipped in this plugin's dist/ are
- * byte-identical to the ones `tokensave dashboard` serves. The wrapper:
+ * the holographic, LCM, code-graph, and savings bundles shipped in this
+ * plugin's dist/ are byte-identical to the ones `tokensave dashboard`
+ * serves. The wrapper:
  *
  *   1. evaluates each child bundle against a window Proxy whose
  *      `__HERMES_PLUGIN_SDK__.fetchJSON` rewrites the child's API base
- *      (`/api/plugins/holographic`, `/api/plugins/hermes-lcm`) onto this
- *      plugin's API prefix (`/api/plugins/hermes-intelligence/...`), which
- *      plugin_api.py reverse-proxies to a local `tokensave dashboard` server;
+ *      (`/api/plugins/holographic`, `/api/plugins/hermes-lcm`,
+ *      `/api/plugins/graph`, `/api/plugins/savings`) onto this plugin's API
+ *      prefix (`/api/plugins/hermes-intelligence/...`), which plugin_api.py
+ *      reverse-proxies to a local `tokensave dashboard` server;
  *   2. captures the components the child bundles register (without touching
  *      the real host registry, so other Hermes plugins are unaffected);
  *   3. registers one combined, tabbed page as "hermes-intelligence".
@@ -33,6 +35,7 @@
     ["/api/plugins/holographic", "/api/plugins/" + PLUGIN + "/holographic"],
     ["/api/plugins/hermes-lcm", "/api/plugins/" + PLUGIN + "/lcm"],
     ["/api/plugins/graph", "/api/plugins/" + PLUGIN + "/graph"],
+    ["/api/plugins/savings", "/api/plugins/" + PLUGIN + "/savings"],
   ];
 
   function rewriteUrl(url) {
@@ -104,7 +107,7 @@
   function loadChildren() {
     if (!loadPromise) {
       loadPromise = Promise.all(
-        ["holographic.js", "lcm.js", "graph.js"].map(function (file) {
+        ["holographic.js", "lcm.js", "graph.js", "savings.js"].map(function (file) {
           return fetch(ASSET_BASE + "/" + file, { cache: "no-store" })
             .then(function (res) {
               if (!res.ok) throw new Error(file + ": HTTP " + res.status);
@@ -131,6 +134,7 @@
     ["holographic", "Memory"],
     ["hermes-lcm", "LCM"],
     ["graph", "Code Graph"],
+    ["savings", "Savings"],
   ];
 
   function HermesIntelligencePage() {

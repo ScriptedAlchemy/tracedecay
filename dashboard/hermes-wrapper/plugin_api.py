@@ -10,8 +10,9 @@ It does not reimplement any data access. The wrapper:
 - lazily spawns ``tokensave dashboard --port 0`` bound to 127.0.0.1 (or uses
   an externally managed server via ``TOKENSAVE_DASHBOARD_URL``),
 - forwards ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
-  ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``, and
-  ``/graph/*`` -> upstream ``/api/plugins/graph/*``,
+  ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
+  ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
+  ``/savings/*`` -> upstream ``/api/plugins/savings/*``,
 - exposes upstream ``/api/capabilities`` at ``/capabilities`` so the UI (and
   future Hermes-specific extensions) can feature-detect the backend.
 
@@ -19,7 +20,7 @@ Auth: requests inherit the Hermes dashboard session-token middleware (this
 router is mounted under ``/api/plugins/...``); the upstream tokensave server
 only listens on loopback.
 
-Configuration (environment):
+Configuration (environment always wins, then deploy-time defaults below):
 
 - ``TOKENSAVE_DASHBOARD_URL``      use an existing server instead of spawning.
 - ``TOKENSAVE_BIN``                path to the tokensave binary.
@@ -35,6 +36,7 @@ the tokensave server, which itself only does similarity math. See the
 from __future__ import annotations
 
 import atexit
+import concurrent.futures
 import ctypes
 import json
 import logging
@@ -69,6 +71,14 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+# Deploy-time defaults, rewritten in the installed copy by
+# `tokensave install --agent hermes` (src/agents/hermes_dashboard.rs in the
+# tokensave repo): the installer pins the binary that performed the install
+# and the profile's pinned project root. The TOKENSAVE_BIN /
+# TOKENSAVE_DASHBOARD_PROJECT environment variables always win at runtime.
+DEPLOYED_TOKENSAVE_BIN = None
+DEPLOYED_PROJECT_ROOT = None
+
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _PROXY_TIMEOUT_SECONDS = 30.0
 # After a failed spawn, fail fast with the cached error instead of
@@ -89,6 +99,18 @@ try:
     _libc = ctypes.CDLL(None, use_errno=True) if sys.platform.startswith("linux") else None
 except Exception:  # pragma: no cover - exotic libc
     _libc = None
+
+# PR_SET_PDEATHSIG fires when the *thread* that forked the child exits, not
+# the process (prctl(2) warns about exactly this). FastAPI runs sync
+# endpoints on anyio threadpool workers that are reaped after ~10s idle, so
+# spawning from the request thread used to SIGTERM the child seconds later
+# (surfacing as random 502 "connection reset by peer" on the next request).
+# All Popen calls therefore run on this single long-lived worker thread,
+# which survives until interpreter shutdown — restoring the intended
+# "die with the Hermes host process" semantics.
+_spawn_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="tokensave-dashboard-spawn"
+)
 
 
 def _child_preexec() -> None:
@@ -124,6 +146,8 @@ def _find_tokensave_bin() -> str | None:
     explicit = os.environ.get("TOKENSAVE_BIN")
     if explicit and Path(explicit).is_file():
         return explicit
+    if DEPLOYED_TOKENSAVE_BIN and Path(DEPLOYED_TOKENSAVE_BIN).is_file():
+        return DEPLOYED_TOKENSAVE_BIN
     found = shutil.which("tokensave")
     if found:
         return found
@@ -137,7 +161,11 @@ def _find_tokensave_bin() -> str | None:
 
 
 def _project_root() -> str:
-    return os.environ.get("TOKENSAVE_DASHBOARD_PROJECT") or os.getcwd()
+    return (
+        os.environ.get("TOKENSAVE_DASHBOARD_PROJECT")
+        or DEPLOYED_PROJECT_ROOT
+        or os.getcwd()
+    )
 
 
 def _dashboard_env() -> dict[str, str]:
@@ -177,14 +205,17 @@ def _spawn_dashboard() -> str:
         "--path",
         project,
     ]
-    process = subprocess.Popen(
+    # Spawned on the dedicated long-lived thread so PDEATHSIG binds the
+    # child's lifetime to the Hermes process, not a transient request thread.
+    process = _spawn_pool.submit(
+        subprocess.Popen,
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=_dashboard_env(),
         preexec_fn=_child_preexec if _libc is not None else None,  # noqa: PLW1509 — minimal prctl-only hook
-    )
+    ).result(timeout=_SPAWN_TIMEOUT_SECONDS)
 
     # Single reader per pipe, for the child's whole lifetime: the stderr
     # drain keeps a bounded tail for error detail; the stdout reader parses
@@ -430,6 +461,28 @@ def get_graph(path: str, request: Request) -> JSONResponse:
 async def post_graph(path: str, request: Request) -> JSONResponse:
     body = await request.body()
     return _proxy("POST", f"/api/plugins/graph/{path}", request, body)
+
+
+@router.get("/savings/{path:path}")
+def get_savings(path: str, request: Request) -> JSONResponse:
+    """Catch-all GET proxy for the savings & cost API.
+
+    Maps ``/savings/<path>`` to upstream ``GET /api/plugins/savings/<path>``
+    (e.g. ``overview``, ``ledger``, ``sessions``, ``models``, ``pricing``),
+    preserving the query string.
+    """
+    return _proxy("GET", f"/api/plugins/savings/{path}", request, None)
+
+
+@router.post("/savings/{path:path}")
+async def post_savings(path: str, request: Request) -> JSONResponse:
+    """Catch-all POST proxy for the savings & cost API.
+
+    The current savings API is read-only; this exists so future write
+    endpoints proxy without changes (mirrors the LCM proxy).
+    """
+    body = await request.body()
+    return _proxy("POST", f"/api/plugins/savings/{path}", request, body)
 
 
 # ---------------------------------------------------------------------------

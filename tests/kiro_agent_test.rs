@@ -13,6 +13,7 @@ fn make_ctx(home: &Path) -> InstallContext {
         tool_permissions: Vec::new(),
         profile: None,
         project_root: None,
+        dashboard: true,
     }
 }
 

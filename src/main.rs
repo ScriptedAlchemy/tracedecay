@@ -346,6 +346,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
                             project_root: None,
+                            dashboard: true,
                         };
                         if ag.install(&ctx).is_err() {
                             all_ok = false;
@@ -701,6 +702,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             profile,
             all_profiles,
             project_root,
+            no_dashboard,
         } => {
             validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
             let pinned_project_root =
@@ -730,6 +732,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     tool_permissions: tokensave::agents::expected_tool_perms(),
                     profile: profile.clone(),
                     project_root: pinned_project_root.clone(),
+                    dashboard: !no_dashboard,
                 };
                 let mut installed_names: Vec<String> = Vec::new();
 
@@ -744,6 +747,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: target_profile,
                             project_root: pinned_project_root.clone(),
+                            dashboard: !no_dashboard,
                         };
                         ag.install_local(&ctx, &project_path)?;
                         ag.post_install(Some(&project_path)).await;
@@ -797,6 +801,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
                         project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -820,6 +825,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
                         project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.uninstall(&ctx)?;
                     removed_names.push(ag.name().to_string());
@@ -833,6 +839,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
                         project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -893,6 +900,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: None,
                         project_root: None,
+                        dashboard: true,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -927,6 +935,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
                         project_root: None,
+                        dashboard: true,
                     };
                     ag.uninstall(&ctx)?;
                 }
@@ -941,6 +950,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
                             project_root: None,
+                            dashboard: true,
                         };
                         ag.uninstall(&ctx).ok();
                     }
@@ -1510,6 +1520,7 @@ mod startup_tests {
             profile: None,
             all_profiles: false,
             project_root: None,
+            no_dashboard: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
         assert!(should_skip_startup_maintenance(&Commands::Uninstall {
@@ -1545,6 +1556,7 @@ mod startup_tests {
             profile: None,
             all_profiles: false,
             project_root: None,
+            no_dashboard: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {

@@ -31,6 +31,7 @@ impl AgentIntegration for HermesIntegration {
             &hermes_plugin_dir(&ctx.home, profile.as_deref()),
             &ctx.tokensave_bin,
             ctx.project_root.as_deref(),
+            ctx.dashboard,
         )?;
 
         eprintln!();
@@ -50,7 +51,12 @@ impl AgentIntegration for HermesIntegration {
             Some(profile) => hermes_plugin_dir(&ctx.home, Some(profile)),
             None => project_path.join(".hermes/plugins/tokensave"),
         };
-        install_plugin(&plugin_dir, &ctx.tokensave_bin, ctx.project_root.as_deref())?;
+        install_plugin(
+            &plugin_dir,
+            &ctx.tokensave_bin,
+            ctx.project_root.as_deref(),
+            ctx.dashboard,
+        )?;
         if profile.is_none() {
             eprintln!(
                 "  Launch Hermes with HERMES_HOME={} so it reads this project-local plugin and memory provider config.",
@@ -290,6 +296,7 @@ fn install_plugin(
     plugin_dir: &Path,
     tokensave_bin: &str,
     project_root: Option<&Path>,
+    deploy_dashboard: bool,
 ) -> Result<()> {
     // An explicit pin wins; otherwise preserve whatever pin a previous
     // install wrote (config block first, generated tools.py fallback), so
@@ -319,6 +326,18 @@ fn install_plugin(
     )?;
     write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
     write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)?;
+    // The dashboard plugin page is part of the default install; the
+    // `--no-dashboard` opt-out also removes a previously deployed page so
+    // the flag is a real toggle rather than install-order dependent.
+    if deploy_dashboard {
+        super::hermes_dashboard::install_dashboard(
+            plugin_dir,
+            tokensave_bin,
+            pinned_project_root.as_deref(),
+        )?;
+    } else {
+        super::hermes_dashboard::uninstall_dashboard(plugin_dir)?;
+    }
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
         let config_path = profile_dir.join("config.yaml");
         enable_plugin(&config_path, pinned_project_root.as_deref())?;
@@ -364,6 +383,7 @@ fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("skills/tokensave/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tokensave"))?;
     remove_empty_dir(&plugin_dir.join("skills"))?;
+    super::hermes_dashboard::uninstall_dashboard(plugin_dir)?;
 
     if remove_empty_dir(plugin_dir)? {
         eprintln!(
@@ -693,7 +713,10 @@ fn find_tokensave_block_in(
 /// Writes `plugins.tokensave.project_root` — the conventional config home
 /// for the install-time project pin. Expects the `plugins:` section to exist
 /// (the enable chain creates it first).
-fn set_pinned_project_root_config(existing: &str, pin: &str) -> std::result::Result<String, String> {
+fn set_pinned_project_root_config(
+    existing: &str,
+    pin: &str,
+) -> std::result::Result<String, String> {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     let had_trailing_newline = existing.ends_with('\n');
     let value = serde_json::to_string(pin).map_err(|e| format!("unencodable project pin: {e}"))?;
@@ -719,9 +742,7 @@ fn set_pinned_project_root_config(existing: &str, pin: &str) -> std::result::Res
                 .enumerate()
                 .take(end)
                 .skip(start + 1)
-                .find_map(|(idx, line)| {
-                    line.trim().starts_with("project_root:").then_some(idx)
-                });
+                .find_map(|(idx, line)| line.trim().starts_with("project_root:").then_some(idx));
             match existing_pin {
                 Some(idx) => lines[idx] = pin_line,
                 None => lines.insert(start + 1, pin_line),
@@ -995,7 +1016,7 @@ fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
     out
 }
 
-fn write_text_file(path: &Path, contents: &str) -> Result<()> {
+pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
             message: format!("failed to create {}: {e}", parent.display()),
@@ -1071,7 +1092,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_generated_file(path: &Path) -> Result<()> {
+pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
@@ -1081,7 +1102,7 @@ fn remove_generated_file(path: &Path) -> Result<()> {
     }
 }
 
-fn remove_empty_dir(path: &Path) -> Result<bool> {
+pub(super) fn remove_empty_dir(path: &Path) -> Result<bool> {
     match std::fs::remove_dir(path) {
         Ok(()) => Ok(true),
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty) => {

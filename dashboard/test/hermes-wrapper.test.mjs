@@ -123,6 +123,11 @@ window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/graph/nodes?limit=5");
 window.__HERMES_PLUGIN_SDK__.authedFetch("/api/plugins/graph/search?q=fn");
 window.__HERMES_PLUGINS__.register("graph", function Graph(){ return null; });
 `,
+    [`${assetBase}/savings.js`]: `
+window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/savings/overview");
+window.__HERMES_PLUGIN_SDK__.fetchJSON("/api/plugins/savings/ledger?range=30d");
+window.__HERMES_PLUGINS__.register("savings", function Savings(){ return null; });
+`,
   };
 
   const loaded = await loadWrapper({ scriptsByUrl: scripts });
@@ -136,7 +141,12 @@ window.__HERMES_PLUGINS__.register("graph", function Graph(){ return null; });
   assert.equal(loaded.realWindow.__boundResult, "bound");
   assert.deepEqual(
     loaded.fetchCalls.sort(),
-    [`${assetBase}/holographic.js`, `${assetBase}/lcm.js`, `${assetBase}/graph.js`].sort(),
+    [
+      `${assetBase}/holographic.js`,
+      `${assetBase}/lcm.js`,
+      `${assetBase}/graph.js`,
+      `${assetBase}/savings.js`,
+    ].sort(),
   );
 
   assert.deepEqual(
@@ -148,6 +158,8 @@ window.__HERMES_PLUGINS__.register("graph", function Graph(){ return null; });
       "/api/plugins/hermes-intelligence/lcm/overview",
       "/api/plugins/hermes-intelligence/graph",
       "/api/plugins/hermes-intelligence/graph/nodes?limit=5",
+      "/api/plugins/hermes-intelligence/savings/overview",
+      "/api/plugins/hermes-intelligence/savings/ledger?range=30d",
     ].sort(),
   );
   assert.deepEqual(loaded.authedFetchCalls.map(([url]) => url).sort(), [
