@@ -429,7 +429,7 @@ pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Ve
         if pair.classification != "likely_duplicate" {
             continue;
         }
-        let sim = &pair.similarity;
+        let sim = pair.similarity;
         let a = &facts[pair.a];
         let b = &facts[pair.b];
         let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");

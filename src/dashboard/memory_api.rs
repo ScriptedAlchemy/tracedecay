@@ -809,7 +809,7 @@ pub(crate) async fn projection(
     let mut guard = cache.lock().await;
     if let Some(existing) = guard.get(&state.mem_db_path) {
         if existing.key == key {
-            return projection_response(&existing.clone(), obj);
+            return projection_response(existing, obj);
         }
     }
 

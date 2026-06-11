@@ -183,7 +183,7 @@ export default function GraphCanvas({
   // Cached per-frame inputs: CSS-pixel canvas size (refreshed by the
   // ResizeObserver) and resolved theme tokens (dropped on data-theme flips) —
   // getBoundingClientRect/getComputedStyle are too expensive at 60fps.
-  const sizeRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
+  const sizeRef = useRef<CanvasSize>({ width: 0, height: 0 });
   const themeRef = useRef<ThemeColors | null>(null);
   const propsRef = useRef({ selectedId, pathIds, focusId, onSelect, onExpand });
   propsRef.current = { selectedId, pathIds, focusId, onSelect, onExpand };
