@@ -289,12 +289,18 @@ def run_checks(work: Path):
 
     real_json = plugin.call_tokensave_json
     try:
+        # Real search responses nest each row under "fact" (with scores
+        # beside it); flat rows must keep working too.
         plugin.call_tokensave_json = lambda name, args, **kw: {
-            "facts": [{"fact_id": 7, "content": "zack prefers rust"}],
-            "count": 1,
+            "facts": [
+                {"fact": {"fact_id": 7, "content": "zack prefers rust"}, "score": 0.9},
+                {"fact_id": 8, "content": "flat row"},
+            ],
+            "count": 2,
         }
         text = provider.prefetch("rust preferences")
         assert "zack prefers rust" in text and "[fact 7]" in text, text
+        assert "flat row" in text and "[fact 8]" in text, text
         plugin.call_tokensave_json = lambda name, args, **kw: {"error": "nope"}
         assert provider.prefetch("anything") == ""
         assert provider.prefetch("") == ""

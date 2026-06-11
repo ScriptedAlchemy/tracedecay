@@ -3892,9 +3892,12 @@ class TokensaveMemoryProvider(MemoryProvider):
             return ""
         facts = payload.get("facts") or payload.get("results") or []
         lines = []
-        for fact in facts:
-            if not isinstance(fact, dict):
+        for item in facts:
+            if not isinstance(item, dict):
                 continue
+            # Search results nest the row under "fact" (with match scores
+            # beside it); list results are flat fact rows.
+            fact = item.get("fact") if isinstance(item.get("fact"), dict) else item
             content = str(fact.get("content") or "").strip()
             if not content:
                 continue
