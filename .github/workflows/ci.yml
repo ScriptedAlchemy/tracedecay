@@ -178,3 +178,61 @@ jobs:
           done
           echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
           exit 1
+
+  hermes-integration:
+    name: Hermes integration (stock)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Stock (upstream) Hermes pin — the generated plugin must keep working
+      # against this exact upstream commit. Bump deliberately after rerunning
+      # scripts/hermes_stock_integration.sh against the new ref locally.
+      HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
+      HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-hermes-integration
+
+      - name: Build tokensave binary
+        run: cargo build --bin tokensave
+
+      - name: Clone stock Hermes at pinned ref
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/hermes-upstream"
+          git -C "$RUNNER_TEMP/hermes-upstream" remote add origin "$HERMES_UPSTREAM_REPO"
+          git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
+          git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
+
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-suffix: hermes-${{ env.HERMES_UPSTREAM_REF }}
+
+      - name: Set up stock Hermes environment
+        working-directory: ${{ runner.temp }}/hermes-upstream
+        run: uv sync --frozen --no-dev
+
+      - name: Run stock Hermes integration checks
+        env:
+          TOKENSAVE_BIN: ${{ github.workspace }}/target/debug/tokensave
+          HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
+        run: scripts/hermes_stock_integration.sh

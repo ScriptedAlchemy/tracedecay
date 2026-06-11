@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use tempfile::TempDir;
 use tokensave::agents::*;
@@ -175,6 +176,147 @@ fn read_json(path: &Path) -> serde_json::Value {
 
 fn expected_tokensave_bin() -> String {
     env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
+}
+
+/// Minimal PyYAML stand-in covering only the YAML subset the generated
+/// Hermes configs use: nested block mappings, block lists of scalars, and
+/// plain/quoted scalars. Hermes itself always ships PyYAML; CI's system
+/// python3 on macOS/Windows has no third-party packages, so checks that
+/// exercise the plugin's config.yaml paths get this shim via PYTHONPATH.
+const PYYAML_SHIM: &str = r##""""Minimal PyYAML stand-in for tokensave agent tests.
+
+Implements safe_load/dump for the simple block-style YAML the generated
+Hermes config files use. Only used when the system python3 lacks PyYAML.
+"""
+
+import json
+import re
+
+_PLAIN_SCALAR = re.compile(r"^[A-Za-z0-9_./~+-]+$")
+
+
+def safe_load(stream):
+    text = stream if isinstance(stream, str) else stream.read()
+    items = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        items.append((len(raw) - len(raw.lstrip(" ")), stripped))
+    if not items:
+        return None
+    value, index = _parse_block(items, 0, items[0][0])
+    if index != len(items):
+        raise ValueError(f"unsupported yaml structure near: {items[index][1]!r}")
+    return value
+
+
+def _parse_scalar(token):
+    if token in ("", "null", "~"):
+        return None
+    if token == "true":
+        return True
+    if token == "false":
+        return False
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    for parse in (int, float):
+        try:
+            return parse(token)
+        except ValueError:
+            pass
+    return token
+
+
+def _parse_block(items, index, indent):
+    if items[index][1].startswith("- "):
+        result = []
+        while index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
+            result.append(_parse_scalar(items[index][1][2:].strip()))
+            index += 1
+        return result, index
+    mapping = {}
+    while index < len(items) and items[index][0] == indent and not items[index][1].startswith("- "):
+        line = items[index][1]
+        if ":" not in line:
+            raise ValueError(f"unsupported yaml line: {line!r}")
+        key, _, rest = line.partition(":")
+        index += 1
+        rest = rest.strip()
+        if rest:
+            mapping[_parse_scalar(key.strip())] = _parse_scalar(rest)
+            continue
+        child = None
+        if index < len(items) and items[index][0] > indent:
+            child, index = _parse_block(items, index, items[index][0])
+        elif index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
+            child, index = _parse_block(items, index, indent)
+        mapping[_parse_scalar(key.strip())] = child
+    return mapping, index
+
+
+def _dump_scalar(value):
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    return text if _PLAIN_SCALAR.match(text) else json.dumps(text)
+
+
+def _dump_lines(value, indent, lines):
+    pad = " " * indent
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(child, (dict, list)) and child:
+                lines.append(f"{pad}{_dump_scalar(key)}:")
+                _dump_lines(child, indent + 2, lines)
+            else:
+                child_repr = "{}" if child == {} else "[]" if child == [] else _dump_scalar(child)
+                lines.append(f"{pad}{_dump_scalar(key)}: {child_repr}")
+    elif isinstance(value, list):
+        for item in value:
+            lines.append(f"{pad}- {_dump_scalar(item)}")
+    else:
+        lines.append(f"{pad}{_dump_scalar(value)}")
+
+
+def dump(data, stream=None, default_flow_style=False, **kwargs):
+    lines = []
+    _dump_lines(data, 0, lines)
+    text = "\n".join(lines) + "\n"
+    if stream is None:
+        return text
+    stream.write(text)
+    return None
+"##;
+
+fn python3_has_real_yaml() -> bool {
+    static HAS_YAML: OnceLock<bool> = OnceLock::new();
+    *HAS_YAML.get_or_init(|| {
+        Command::new("python3")
+            .args(["-c", "import yaml"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Returns a PYTHONPATH entry providing the `yaml` shim when the system
+/// python3 has no real PyYAML, so config.yaml-dependent checks run on every
+/// OS instead of failing on bare CI runners.
+fn pyyaml_shim_pythonpath(scratch: &Path) -> Option<PathBuf> {
+    if python3_has_real_yaml() {
+        return None;
+    }
+    let shim_dir = scratch.join("pyyaml-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
+    Some(shim_dir)
 }
 
 fn assert_python_compiles(paths: &[&Path]) {
@@ -1152,14 +1294,231 @@ assert "memory_status" in [schema["name"] for schema in provider.get_tool_schema
     )
     .unwrap();
 
-    let output = Command::new("python3")
-        .arg(&script)
-        .arg(hermes_home)
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(hermes_home);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
         .output()
         .expect("python3 should run Hermes memory provider discovery check");
     assert!(
         output.status.success(),
         "Hermes-style memory provider discovery should find the generated tokensave provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Stock-ABC variant harness: upstream (NousResearch/hermes-agent) Hermes
+/// differs from forks in two load-bearing ways — the ABCs enforce a fixed
+/// abstract-method set (instantiation raises `TypeError` on any miss), and
+/// the general `PluginContext` has **no** `register_memory_provider` or
+/// `register_config_defaults` (memory providers load through the
+/// `plugins/memory` `_ProviderCollector` instead). The generated plugin must
+/// keep memory + context + tools functional on that surface and skip
+/// fork-only registrations without raising.
+#[test]
+fn test_hermes_generated_python_degrades_gracefully_on_stock_hermes_api() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let script = plugin_dir.join("check_stock_abi.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+
+# Stock agent/memory_provider.py abstract surface (upstream pins these four).
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+# Stock agent/context_engine.py abstract surface. Instantiating the generated
+# engine under this ABC proves every stock-abstract method is implemented
+# (update_from_response is the one newer stock releases added).
+class ContextEngine(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def update_from_response(self, usage):
+        pass
+
+    @abc.abstractmethod
+    def should_compress(self, prompt_tokens=None):
+        pass
+
+    @abc.abstractmethod
+    def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+context_engine_module = types.ModuleType("agent.context_engine")
+context_engine_module.ContextEngine = ContextEngine
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+sys.modules["agent.context_engine"] = context_engine_module
+
+parent_name = "_hermes_stock_plugins"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# Stock general PluginContext: hooks/commands/skills/context engine/tools
+# exist; register_memory_provider, register_config_defaults, and the
+# context_engine_tool_handlers_receive_messages capability do not.
+class StockPluginContext:
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+        self.commands = []
+        self.cli_commands = []
+        self.middleware = []
+        self.skills = []
+        self.context_engine = None
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_cli_command(self, *args, **kwargs):
+        self.cli_commands.append((args, kwargs))
+
+    def register_command(self, name, handler, description="", args_hint=""):
+        self.commands.append((name, handler, description))
+
+    def register_context_engine(self, engine):
+        assert self.context_engine is None, "only one context engine is allowed"
+        self.context_engine = engine
+
+    def register_hook(self, hook_name, callback):
+        self.hooks.append((hook_name, callback))
+
+    def register_middleware(self, kind, callback):
+        self.middleware.append((kind, callback))
+
+    def register_skill(self, name, path, description=""):
+        self.skills.append((name, path))
+
+ctx = StockPluginContext()
+plugin.register(ctx)
+
+# Core registrations stay functional on the stock surface.
+assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
+assert ctx.commands and ctx.commands[0][0] == "/tokensave_status"
+assert ctx.skills and ctx.skills[0][0] == "tokensave"
+assert ctx.context_engine is not None
+assert isinstance(ctx.context_engine, ContextEngine)
+assert ctx.context_engine.name == "tokensave"
+# Stock never advertises message forwarding for registered tool handlers, so
+# direct tool registration must degrade to a silent skip — the LCM surface
+# stays reachable through the context engine schemas instead.
+assert ctx.tools == []
+lcm_names = [schema["name"] for schema in ctx.context_engine.get_tool_schemas()]
+assert "lcm_status" in lcm_names and "lcm_grep" in lcm_names
+
+# The stock-abstract ContextEngine methods round-trip.
+engine = ctx.context_engine
+engine.update_from_response({"prompt_tokens": 11, "completion_tokens": 4})
+assert engine.last_total_tokens == 15
+
+calls = []
+
+def fake_call(name, args, **kwargs):
+    calls.append((name, args))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({"should_compress": False})}]})
+
+original_call = plugin.tools.call_tokensave_tool
+plugin.tools.call_tokensave_tool = fake_call
+assert engine.should_compress(123) is False
+assert calls and calls[0][0] == "tokensave_lcm_preflight"
+plugin.tools.call_tokensave_tool = original_call
+
+# Stock memory activation: plugins/memory drives register() through its
+# _ProviderCollector (exactly these four methods — notably no
+# register_command, register_context_engine, or register_skill).
+class StockProviderCollector:
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+collector = StockProviderCollector()
+plugin.register(collector)
+assert collector.provider is not None
+assert isinstance(collector.provider, MemoryProvider)
+assert collector.provider.name == "tokensave"
+assert collector.provider.is_available() is True
+assert collector.provider.get_tool_schemas()
+
+# Stock fallback branch: when register() yields no provider, the loader
+# instantiates any module-level MemoryProvider subclass directly.
+fallback = plugin.TokensaveMemoryProvider()
+assert isinstance(fallback, MemoryProvider)
+assert fallback.name == "tokensave"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run stock Hermes API degradation check");
+    assert!(
+        output.status.success(),
+        "generated plugin should degrade gracefully on the stock Hermes plugin API\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -4731,9 +5090,12 @@ assert other_engine.project_root is None
     )
     .unwrap();
 
-    let output = Command::new("python3")
-        .arg(&script)
-        .arg(&plugin_dir)
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(&plugin_dir);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
         .output()
         .expect("python3 should run generated Hermes config block check");
     assert!(
