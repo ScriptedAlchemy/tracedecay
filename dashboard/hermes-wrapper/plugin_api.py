@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, IO
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 # Hermes' centralized auxiliary LLM client (provider/model resolution, auth,
@@ -496,9 +497,14 @@ async def post_holographic(path: str, request: Request) -> JSONResponse:
     ``POST /api/plugins/holographic/<path>`` (e.g. ``curate``,
     ``curate/apply``), forwarding the JSON request body unmodified.
     (There is no archive/restore: curation deletes are permanent.)
+
+    ``_proxy`` blocks (urllib + possible spawn/ready wait), so it runs on the
+    threadpool — a slow curate round-trip must not stall the event loop.
     """
     body = await request.body()
-    return _proxy("POST", f"/api/plugins/holographic/{path}", request, body)
+    return await run_in_threadpool(
+        _proxy, "POST", f"/api/plugins/holographic/{path}", request, body
+    )
 
 
 @router.get("/lcm/{path:path}")
@@ -521,7 +527,9 @@ async def post_lcm(path: str, request: Request) -> JSONResponse:
     read-only; this exists so future write endpoints proxy without changes.)
     """
     body = await request.body()
-    return _proxy("POST", f"/api/plugins/hermes-lcm/{path}", request, body)
+    return await run_in_threadpool(
+        _proxy, "POST", f"/api/plugins/hermes-lcm/{path}", request, body
+    )
 
 
 @router.get("/graph/{path:path}")
@@ -532,7 +540,9 @@ def get_graph(path: str, request: Request) -> JSONResponse:
 @router.post("/graph/{path:path}")
 async def post_graph(path: str, request: Request) -> JSONResponse:
     body = await request.body()
-    return _proxy("POST", f"/api/plugins/graph/{path}", request, body)
+    return await run_in_threadpool(
+        _proxy, "POST", f"/api/plugins/graph/{path}", request, body
+    )
 
 
 @router.get("/savings/{path:path}")
@@ -554,7 +564,9 @@ async def post_savings(path: str, request: Request) -> JSONResponse:
     endpoints proxy without changes (mirrors the LCM proxy).
     """
     body = await request.body()
-    return _proxy("POST", f"/api/plugins/savings/{path}", request, body)
+    return await run_in_threadpool(
+        _proxy, "POST", f"/api/plugins/savings/{path}", request, body
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +911,12 @@ async def post_curation_llm_plan(request: Request) -> JSONResponse:
         body = {}
     if not isinstance(body, dict):
         body = {}
+    # The whole pipeline blocks (upstream similarity fetch, the LLM call,
+    # the apply POST), so it runs on the threadpool off the event loop.
+    return await run_in_threadpool(_curation_llm_plan, body)
+
+
+def _curation_llm_plan(body: dict) -> JSONResponse:
     dry_run = bool(body.get("dry_run", True))
     limit = max(1, min(int(body.get("limit", 200) or 200), 500))
     max_clusters = max(1, min(int(body.get("max_clusters", _CURATION_DEFAULT_MAX_CLUSTERS) or _CURATION_DEFAULT_MAX_CLUSTERS), 50))
@@ -907,7 +925,7 @@ async def post_curation_llm_plan(request: Request) -> JSONResponse:
     similarity_path = "/api/plugins/holographic/similarity?limit=200"
     threshold = body.get("threshold")
     if threshold is not None:
-        similarity_path += f"&threshold={float(threshold)}"
+        similarity_path += f"&min_similarity={float(threshold)}"
     similarity = _get_upstream_json(similarity_path)
     pairs = similarity.get("pairs") or []
 
