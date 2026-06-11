@@ -209,7 +209,9 @@ export default function CodeGraphExplorer() {
     void loadDefaultView();
   }, [loadDefaultView]);
 
-  // Clear returns to the default view rather than an empty canvas.
+  // Clear returns to the default view rather than an empty canvas. Filters
+  // reset too: stale chips would otherwise hide the reloaded default slice
+  // and leave the canvas looking broken.
   const clearCanvas = useCallback(() => {
     setGraphNodes(new Map());
     setGraphEdges(new Map());
@@ -220,6 +222,9 @@ export default function CodeGraphExplorer() {
     setPathFrom(null);
     setPathTo(null);
     setFocusId(null);
+    setKindFilters(new Set());
+    setLangFilters(new Set());
+    setDirScope("");
     void loadDefaultView();
   }, [loadDefaultView]);
 
