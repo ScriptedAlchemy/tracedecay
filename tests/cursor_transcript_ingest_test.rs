@@ -3,9 +3,10 @@ use std::io::Write;
 use tempfile::TempDir;
 use tokensave::global_db::GlobalDb;
 use tokensave::sessions::cursor::{
-    ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped, open_project_session_db,
-    project_session_db_path,
+    cursor_project_slug, ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped,
+    open_project_session_db, project_session_db_path, CursorSweepSource,
 };
+use tokensave::sessions::source::ingest_source;
 use tokensave::sessions::SessionSearchScope;
 
 fn init_project(tmp: &TempDir) -> std::path::PathBuf {
@@ -609,6 +610,278 @@ async fn cursor_transcript_ingest_falls_back_to_file_mtime_without_tags() {
         (now - timestamp).abs() < 300,
         "mtime fallback should be near now, got {timestamp} vs {now}"
     );
+}
+
+/// Writes a parent + subagent transcript pair in the real on-disk layout the
+/// catch-up sweep scans: `<home>/.cursor/projects/<slug>/agent-transcripts/
+/// <session>/<session>.jsonl` (+ `<session>/subagents/<child>.jsonl`).
+fn write_sweep_fixture(
+    home: &std::path::Path,
+    project: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let slug = cursor_project_slug(project).unwrap();
+    let session_dir = home
+        .join(".cursor")
+        .join("projects")
+        .join(slug)
+        .join("agent-transcripts")
+        .join("sweep-session");
+    let subagent_dir = session_dir.join("subagents");
+    std::fs::create_dir_all(&subagent_dir).unwrap();
+    let parent = session_dir.join("sweep-session.jsonl");
+    std::fs::write(
+        &parent,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Historic parent message about orchard catchup."}]}}
+"#,
+    )
+    .unwrap();
+    let child = subagent_dir.join("sweep-worker.jsonl");
+    std::fs::write(
+        &child,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Historic worker message about orchard catchup."}]}}
+"#,
+    )
+    .unwrap();
+    (parent, child)
+}
+
+#[tokio::test]
+async fn cursor_sweep_ingests_historical_transcripts() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    write_sweep_fixture(&home, &project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let sweep = CursorSweepSource::with_home(&home);
+    let stats = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let parent_session = db
+        .get_session("cursor", "sweep-session")
+        .await
+        .expect("swept parent session should be stored");
+    assert_eq!(parent_session.project_path, project.to_string_lossy());
+    assert!(!parent_session.is_subagent);
+
+    let child_session = db
+        .get_session("cursor", "sweep-worker")
+        .await
+        .expect("swept subagent session should be stored");
+    assert_eq!(
+        child_session.parent_session_id.as_deref(),
+        Some("sweep-session")
+    );
+    assert!(child_session.is_subagent);
+
+    let hits = db
+        .search_session_messages("cursor", None, "orchard catchup", 10)
+        .await;
+    assert_eq!(hits.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_sweep_after_hook_ingest_is_noop() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let (parent, _child) = write_sweep_fixture(&home, &project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "sweep-session",
+        "transcript_path": parent,
+        "workspace_roots": [project],
+        "cwd": project,
+    });
+    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(hook.sessions_upserted, 2);
+    assert_eq!(hook.messages_upserted, 2);
+
+    // The sweep shares the hook path's per-file parse offsets, so everything
+    // the hook already ingested is a no-op: zero new sessions, zero new rows.
+    let sweep = CursorSweepSource::with_home(&home);
+    let stats = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 0);
+    assert_eq!(stats.messages_upserted, 0);
+
+    let hits = db
+        .search_session_messages("cursor", None, "orchard catchup", 10)
+        .await;
+    assert_eq!(hits.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_hook_after_sweep_is_noop() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let (parent, _child) = write_sweep_fixture(&home, &project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let sweep = CursorSweepSource::with_home(&home);
+    let swept = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(swept.messages_upserted, 2);
+
+    // A live hook firing on a transcript the sweep already ingested resumes
+    // from the shared offset and re-ingests nothing.
+    let event = serde_json::json!({
+        "session_id": "sweep-session",
+        "transcript_path": parent,
+        "workspace_roots": [project],
+        "cwd": project,
+    });
+    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(hook.sessions_upserted, 0);
+    assert_eq!(hook.messages_upserted, 0);
+
+    let hits = db
+        .search_session_messages("cursor", None, "orchard catchup", 10)
+        .await;
+    assert_eq!(hits.len(), 2);
+}
+
+#[tokio::test]
+async fn cursor_sweep_picks_up_lines_appended_after_hook_ingest() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let (parent, _child) = write_sweep_fixture(&home, &project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "sweep-session",
+        "transcript_path": parent,
+        "workspace_roots": [project],
+        "cwd": project,
+    });
+    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(hook.messages_upserted, 2);
+
+    // Lines appended after the last hook firing (e.g. while hooks were
+    // uninstalled) are exactly what the catch-up sweep must reconcile.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&parent)
+        .unwrap();
+    file.write_all(
+        b"{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Appended orchard catchup line.\"}]}}\n",
+    )
+    .unwrap();
+    drop(file);
+
+    let sweep = CursorSweepSource::with_home(&home);
+    let stats = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 1);
+    assert_eq!(stats.messages_upserted, 1);
+
+    let hits = db
+        .search_session_messages("cursor", None, "orchard catchup", 10)
+        .await;
+    assert_eq!(hits.len(), 3);
+}
+
+#[tokio::test]
+async fn cursor_sweep_prefers_subagent_copy_over_toplevel_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    write_sweep_fixture(&home, &project);
+
+    // Cursor also materializes the subagent session as a top-level
+    // `<id>/<id>.jsonl` copy whose content drifts from the subagents/ copy
+    // (different byte offsets => different derived message ids). The sweep
+    // must ingest the session exactly once, from the subagent copy.
+    let slug = cursor_project_slug(&project).unwrap();
+    let duplicate_dir = home
+        .join(".cursor")
+        .join("projects")
+        .join(slug)
+        .join("agent-transcripts")
+        .join("sweep-worker");
+    std::fs::create_dir_all(&duplicate_dir).unwrap();
+    std::fs::write(
+        duplicate_dir.join("sweep-worker.jsonl"),
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"Drifted preamble line."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Historic worker message about orchard catchup."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let sweep = CursorSweepSource::with_home(&home);
+    let stats = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    // The session keeps its subagent identity instead of being flipped into
+    // a parentless top-level session by the duplicate copy.
+    let child = db
+        .get_session("cursor", "sweep-worker")
+        .await
+        .expect("subagent session should be stored");
+    assert!(child.is_subagent);
+    assert_eq!(child.parent_session_id.as_deref(), Some("sweep-session"));
+
+    // Exactly one copy of the worker's message, and nothing from the
+    // drifted duplicate.
+    let hits = db
+        .search_session_messages("cursor", None, "orchard catchup", 10)
+        .await;
+    let worker_hits = hits
+        .iter()
+        .filter(|hit| hit.session.session_id == "sweep-worker")
+        .count();
+    assert_eq!(worker_hits, 1);
+    let drifted = db
+        .search_session_messages("cursor", None, "Drifted preamble", 10)
+        .await;
+    assert!(drifted.is_empty());
+}
+
+#[tokio::test]
+async fn cursor_sweep_skips_ambiguous_project_slug() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("work").join("foo-bar");
+    std::fs::create_dir_all(project.join(".tokensave")).unwrap();
+    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    // A second *existing* directory that encodes to the same slug as the
+    // project ("…-work-foo-bar"): the sweep must skip rather than guess
+    // which workspace the slug's transcripts belong to.
+    std::fs::create_dir_all(tmp.path().join("work").join("foo").join("bar")).unwrap();
+    write_sweep_fixture(&home, &project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let sweep = CursorSweepSource::with_home(&home);
+    let stats = ingest_source(&db, &sweep, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 0);
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(db.get_session("cursor", "sweep-session").await.is_none());
+}
+
+#[tokio::test]
+async fn cursor_sweep_skips_projects_without_tokensave() {
+    let tmp = TempDir::new().unwrap();
+    let scratch = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let unindexed = tmp.path().join("unindexed");
+    std::fs::create_dir_all(&unindexed).unwrap();
+    write_sweep_fixture(&home, &unindexed);
+
+    let db = open_project_session_db(&scratch).await.unwrap();
+    let sweep = CursorSweepSource::with_home(&home);
+    let skipped = ingest_source(&db, &sweep, &unindexed, None).await;
+    assert_eq!(skipped.sessions_upserted, 0);
+    assert_eq!(skipped.messages_upserted, 0);
+
+    // Once the project is indexed, the same sweep picks its transcripts up.
+    std::fs::create_dir_all(unindexed.join(".tokensave")).unwrap();
+    std::fs::write(unindexed.join(".tokensave/tokensave.db"), "").unwrap();
+    let indexed = ingest_source(&db, &sweep, &unindexed, None).await;
+    assert_eq!(indexed.sessions_upserted, 2);
+    assert_eq!(indexed.messages_upserted, 2);
 }
 
 #[tokio::test]
