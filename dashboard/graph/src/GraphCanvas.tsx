@@ -118,12 +118,17 @@ function edgeStyle(kind: string, theme: ThemeColors) {
   };
 }
 
+interface CanvasSize {
+  width: number;
+  height: number;
+}
+
 /**
  * Frames the bounding box of every simulated node. `smooth` lerps toward the
  * target instead of snapping, for per-frame tracking while the layout settles.
  */
 function fitCameraToNodes(
-  canvas: HTMLCanvasElement,
+  size: CanvasSize,
   sim: Simulation,
   camera: Camera,
   smooth = false,
@@ -139,10 +144,9 @@ function fitCameraToNodes(
     maxX = Math.max(maxX, node.x + node.radius);
     maxY = Math.max(maxY, node.y + node.radius);
   }
-  const rect = canvas.getBoundingClientRect();
   const spanX = Math.max(1, maxX - minX);
   const spanY = Math.max(1, maxY - minY);
-  const fitK = Math.min(rect.width / spanX, rect.height / spanY) * 0.88;
+  const fitK = Math.min(size.width / spanX, size.height / spanY) * 0.88;
   const targetX = (minX + maxX) / 2;
   const targetY = (minY + maxY) / 2;
   const targetK = Math.min(5, Math.max(0.12, fitK));
@@ -176,6 +180,11 @@ export default function GraphCanvas({
   );
   const needsRenderRef = useRef(true);
   const rafRef = useRef(0);
+  // Cached per-frame inputs: CSS-pixel canvas size (refreshed by the
+  // ResizeObserver) and resolved theme tokens (dropped on data-theme flips) —
+  // getBoundingClientRect/getComputedStyle are too expensive at 60fps.
+  const sizeRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
+  const themeRef = useRef<ThemeColors | null>(null);
   const propsRef = useRef({ selectedId, pathIds, focusId, onSelect, onExpand });
   propsRef.current = { selectedId, pathIds, focusId, onSelect, onExpand };
 
@@ -217,7 +226,7 @@ export default function GraphCanvas({
     const canvas = canvasRef.current;
     const sim = simRef.current;
     if (!canvas || !sim || sim.nodes.length === 0) return;
-    fitCameraToNodes(canvas, sim, cameraRef.current);
+    fitCameraToNodes(sizeRef.current, sim, cameraRef.current);
     followIdRef.current = null;
     followFitRef.current = true;
     needsRenderRef.current = true;
@@ -288,8 +297,8 @@ export default function GraphCanvas({
 
     function render() {
       const sim = simRef.current;
-      const theme = readTheme(canvas);
-      const rect = canvas.getBoundingClientRect();
+      const theme = (themeRef.current ??= readTheme(canvas));
+      const rect = sizeRef.current;
       const dpr = window.devicePixelRatio || 1;
       if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
         canvas.width = Math.round(rect.width * dpr);
@@ -441,6 +450,10 @@ export default function GraphCanvas({
     }
 
     function frame() {
+      rafRef.current = requestAnimationFrame(frame);
+      // Idle while the panel is hidden (the shell keeps visited tabs
+      // mounted); pending work resumes on the first visible frame.
+      if (!canvas.offsetParent) return;
       const sim = simRef.current;
       const simActive = sim ? sim.isActive() : false;
       if (simActive) {
@@ -456,14 +469,13 @@ export default function GraphCanvas({
           }
         } else if (followFitRef.current && sim) {
           // Keep the whole graph framed as it spreads out and settles.
-          fitCameraToNodes(canvas, sim, cameraRef.current, true);
+          fitCameraToNodes(sizeRef.current, sim, cameraRef.current, true);
         }
       }
       if (simActive || needsRenderRef.current) {
         needsRenderRef.current = false;
         render();
       }
-      rafRef.current = requestAnimationFrame(frame);
     }
     rafRef.current = requestAnimationFrame(frame);
 
@@ -551,11 +563,27 @@ export default function GraphCanvas({
       needsRenderRef.current = true;
     }
 
-    const onResize = () => {
-      needsRenderRef.current = true;
+    const readSize = () => {
+      const rect = canvas.getBoundingClientRect();
+      sizeRef.current = { width: rect.width, height: rect.height };
     };
-    const resizeObserver = new ResizeObserver(onResize);
+    readSize();
+    const resizeObserver = new ResizeObserver(() => {
+      readSize();
+      needsRenderRef.current = true;
+    });
     resizeObserver.observe(canvas);
+
+    // Theme tokens only change when the shell flips <html data-theme>;
+    // re-resolve them then instead of per frame.
+    const themeObserver = new MutationObserver(() => {
+      themeRef.current = null;
+      needsRenderRef.current = true;
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
 
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("pointerdown", onPointerDown);
@@ -567,6 +595,7 @@ export default function GraphCanvas({
     return () => {
       cancelAnimationFrame(rafRef.current);
       resizeObserver.disconnect();
+      themeObserver.disconnect();
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);

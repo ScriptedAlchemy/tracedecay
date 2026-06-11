@@ -284,10 +284,20 @@ function App() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll capabilities for connection health.
+  // Poll capabilities for connection health — but only while the browser tab
+  // is visible; a hidden tab refreshes once on return instead.
   useEffect(() => {
-    const id = setInterval(fetchCapabilities, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") fetchCapabilities();
+    }, POLL_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") fetchCapabilities();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [fetchCapabilities]);
 
   // Keyboard shortcuts: digits 1–9 switch tabs. Skipped for modified
