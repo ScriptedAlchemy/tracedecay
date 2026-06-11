@@ -286,6 +286,21 @@ fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
     Some(pin)
 }
 
+/// Project root baked into the deployed dashboard page: an explicit code
+/// project pin when one exists, otherwise the profile home itself — the
+/// hermes-profile stores (`<home>/.tokensave/`) are where the plugin keeps
+/// LCM/memory state, so the dashboard serves them instead of whatever cwd
+/// the Hermes host happens to spawn it from.
+fn dashboard_project_root(plugin_dir: &Path, pinned_project_root: Option<&str>) -> Option<String> {
+    if let Some(pin) = pinned_project_root {
+        return Some(pin.to_string());
+    }
+    plugin_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(|profile_dir| profile_dir.display().to_string())
+}
+
 /// Reads the `version:` field from a generated plugin.yaml manifest.
 fn read_manifest_version(manifest_path: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(manifest_path).ok()?;
@@ -314,10 +329,11 @@ fn install_plugin(
     // `--no-dashboard` opt-out also removes a previously deployed page so
     // the flag is a real toggle rather than install-order dependent.
     if deploy_dashboard {
+        let dashboard_root = dashboard_project_root(plugin_dir, pinned_project_root.as_deref());
         super::hermes_dashboard::install_dashboard(
             plugin_dir,
             tokensave_bin,
-            pinned_project_root.as_deref(),
+            dashboard_root.as_deref(),
         )?;
     } else {
         super::hermes_dashboard::uninstall_dashboard(plugin_dir)?;
@@ -375,10 +391,12 @@ fn update_plugin_artifacts(home: &Path, tokensave_bin: &str) -> Result<Vec<PathB
         let pinned_project_root = effective_pinned_project_root(&plugin_dir);
         write_plugin_files(&plugin_dir, tokensave_bin)?;
         if plugin_dir.join("dashboard/manifest.json").is_file() {
+            let dashboard_root =
+                dashboard_project_root(&plugin_dir, pinned_project_root.as_deref());
             super::hermes_dashboard::install_dashboard(
                 &plugin_dir,
                 tokensave_bin,
-                pinned_project_root.as_deref(),
+                dashboard_root.as_deref(),
             )?;
         }
         eprintln!(

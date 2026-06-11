@@ -6606,7 +6606,9 @@ fn message_search_provider_schema_matches_ingested_providers() {
 
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
-        serde_json::json!(["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"])
+        serde_json::json!([
+            "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
+        ])
     );
     assert_eq!(
         message_search.input_schema["properties"]["scope"]["enum"],

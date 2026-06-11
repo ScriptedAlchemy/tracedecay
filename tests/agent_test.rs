@@ -569,22 +569,31 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains(&expected_tokensave_bin()));
     assert!(tools_py.contains("subprocess.run"));
     assert!(tools_py.contains("tokensave tool"));
-    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 120"));
+    assert!(tools_py.contains("TOKENSAVE_LONG_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("ARGS_FILE_THRESHOLD_BYTES"));
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
     assert!(tools_py.contains("kwargs.get(\"project_root\")"));
     assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
     assert!(
-        tools_py.contains("or config_pinned_project_root()"),
+        tools_py.contains("config_pinned_project_root()"),
         "tool dispatch must fall back to the config-block project pin"
+    );
+    assert!(
+        tools_py.contains("PROFILE_STORE_TOOLS"),
+        "profile-global state tools must anchor at the Hermes home when unpinned"
     );
     assert!(
         !tools_py.contains("PINNED_PROJECT_ROOT"),
         "the install-time pin lives only in plugins.tokensave.project_root"
     );
     assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
-    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
+    // Large payloads spill to a tempfile passed as `--args @<path>` so argv
+    // never exceeds the kernel's per-string cap.
+    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\"])"));
+    assert!(tools_py.contains("argv.append(\"@\" + args_file)"));
     assert!(!tools_py.contains("shell=True"));
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
@@ -745,7 +754,7 @@ def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
     assert argv[1:] == ["tool", "tokensave_context", "--json", "--args", "{\"query\": \"x\"}"]
     assert "cwd" not in kwargs
-    assert kwargs["timeout"] == 600
+    assert kwargs["timeout"] == 120
     assert kwargs["shell"] is False
     return Result()
 
@@ -900,32 +909,22 @@ plugin.tools.TOKENSAVE_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
 assert provider.session_id == "session-123"
+# Without an explicit hermes_home the provider resolves the active profile
+# home itself (sync_turn/prefetch need a storage anchor).
 provider.initialize("session-only")
-assert provider.hermes_home is None
+assert provider.hermes_home == os.environ["HERMES_HOME"]
 assert provider.session_id == "session-only"
 
+# Collapsed schema surface: fact_store(action=...) covers the nine legacy
+# fixed-action aliases, which stay dispatchable but cost no schema footprint.
 schemas = provider.get_tool_schemas()
 schema_names = [schema.get("name") for schema in schemas]
-assert schema_names == [
-    "fact_store",
-    "fact_add",
-    "fact_search",
-    "fact_probe",
-    "fact_related",
-    "fact_reason",
-    "fact_contradict",
-    "fact_update",
-    "fact_remove",
-    "fact_list",
-    "fact_feedback",
-    "memory_status",
-]
+assert schema_names == ["fact_store", "fact_feedback", "memory_status"]
 assert all("function" not in schema for schema in schemas)
 schema_by_name = {schema["name"]: schema for schema in schemas}
 fact_store_schema = schema_by_name["fact_store"]
 fact_feedback_schema = schema_by_name["fact_feedback"]
 assert fact_store_schema["parameters"]["required"] == ["action"]
-assert "action" not in schema_by_name["fact_search"]["parameters"].get("required", [])
 assert fact_feedback_schema["parameters"]["required"] == ["fact_id"]
 
 calls = []
@@ -1153,7 +1152,7 @@ assert saved["memory"]["provider"] == "tokensave"
 
 provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
 assert provider.hermes_home == str(hermes_home)
-assert "fact_search" in [schema["name"] for schema in provider.get_tool_schemas()]
+assert "fact_store" in [schema["name"] for schema in provider.get_tool_schemas()]
 assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
 "#,
     )
@@ -1316,10 +1315,17 @@ assert ctx.skills and ctx.skills[0][0] == "tokensave"
 assert ctx.context_engine is not None
 assert isinstance(ctx.context_engine, ContextEngine)
 assert ctx.context_engine.name == "tokensave"
-# Stock never advertises message forwarding for registered tool handlers, so
-# direct tool registration must degrade to a silent skip — the LCM surface
-# stays reachable through the context engine schemas instead.
-assert ctx.tools == []
+# Code-graph / memory / transcript tools register unconditionally; only the
+# messages-dependent LCM live-ingest verbs (and the context-engine tool
+# mirrors) stay gated on the message-forwarding capability, which stock
+# never advertises — the LCM surface stays reachable through the context
+# engine schemas instead.
+registered = [tool["name"] for tool in ctx.tools]
+assert "tokensave_search" in registered
+assert "tokensave_context" in registered
+assert "tokensave_lcm_compress" not in registered
+assert "tokensave_lcm_preflight" not in registered
+assert "lcm_grep" not in registered
 lcm_names = [schema["name"] for schema in ctx.context_engine.get_tool_schemas()]
 assert "lcm_status" in lcm_names and "lcm_grep" in lcm_names
 

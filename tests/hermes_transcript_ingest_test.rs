@@ -21,22 +21,33 @@ fn setup(tmp: &TempDir) -> (PathBuf, PathBuf) {
     (home.join(".hermes"), project)
 }
 
-/// Writes a Hermes profile dir: a `config.yaml` pinning `pinned_project` (the
-/// real `plugins.tokensave.project_root` shape) and a `state.db` with the
-/// real Hermes schema.
-async fn write_hermes_profile(hermes_home: &Path, profile: &str, pinned_project: &Path) -> PathBuf {
+/// Writes a Hermes profile dir: a `config.yaml` optionally pinning
+/// `pinned_project` (the real `plugins.tokensave.project_root` shape) and a
+/// `state.db` with the real Hermes schema. Unpinned profiles (the default
+/// since the installer stopped writing storage-home pins) carry only the
+/// plugin-enable block.
+async fn write_hermes_profile(
+    hermes_home: &Path,
+    profile: &str,
+    pinned_project: Option<&Path>,
+) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
-    // The pin is JSON-encoded exactly as `tokensave install --agent hermes`
-    // writes it, so Windows backslashes survive the double-quoted YAML scalar.
-    let pin = serde_json::to_string(pinned_project.to_string_lossy().as_ref()).unwrap();
-    std::fs::write(
-        profile_dir.join("config.yaml"),
-        format!(
-            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n  tokensave:\n    project_root: {pin}\n",
-        ),
-    )
-    .unwrap();
+    let config = match pinned_project {
+        Some(pinned_project) => {
+            // The pin is JSON-encoded exactly as `tokensave install --agent
+            // hermes` writes it, so Windows backslashes survive the
+            // double-quoted YAML scalar.
+            let pin = serde_json::to_string(pinned_project.to_string_lossy().as_ref()).unwrap();
+            format!(
+                "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n  tokensave:\n    project_root: {pin}\n",
+            )
+        }
+        None => {
+            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n".to_string()
+        }
+    };
+    std::fs::write(profile_dir.join("config.yaml"), config).unwrap();
 
     let state_db = profile_dir.join("state.db");
     let conn = open_state_db(&state_db).await;
@@ -175,7 +186,7 @@ async fn open_state_db(path: &Path) -> libsql::Connection {
 async fn hermes_state_db_populates_projection_for_pinned_project() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
-    write_hermes_profile(&hermes_home, "test", &project).await;
+    write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -248,7 +259,7 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
 async fn hermes_ingest_is_incremental_and_idempotent() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
-    let state_db = write_hermes_profile(&hermes_home, "test", &project).await;
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
     let homes = [hermes_home.clone()];
@@ -291,11 +302,37 @@ async fn hermes_profile_pinned_elsewhere_is_not_ingested() {
     let (hermes_home, project) = setup(&tmp);
     let other_project = tmp.path().join("other-project");
     std::fs::create_dir_all(&other_project).unwrap();
-    write_hermes_profile(&hermes_home, "test", &other_project).await;
+    write_hermes_profile(&hermes_home, "test", Some(&other_project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, &[hermes_home], &project).await;
     assert_eq!(stats.messages_upserted, 0);
     assert_eq!(stats.sessions_upserted, 0);
     assert!(db.get_session("hermes", SESSION_ID).await.is_none());
+}
+
+#[tokio::test]
+async fn unpinned_profile_maps_to_its_own_home_store() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, unrelated_project) = setup(&tmp);
+    write_hermes_profile(&hermes_home, "test", None).await;
+    let profile_dir = hermes_home.join("profiles").join("test");
+
+    // Sweeping an unrelated project must not pick up the unpinned profile.
+    let db = open_project_session_db(&unrelated_project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &unrelated_project).await;
+    assert_eq!(stats.messages_upserted, 0);
+
+    // Sweeping the profile home itself ingests into the profile-scoped store
+    // (`<profile>/.tokensave/sessions.db`) — the store the generated
+    // plugin's hermes_profile storage scope serves.
+    let profile_db = open_project_session_db(&profile_dir).await.unwrap();
+    let stats = ingest_homes(&profile_db, std::slice::from_ref(&hermes_home), &profile_dir).await;
+    assert_eq!(stats.messages_upserted, 4);
+    assert_eq!(stats.sessions_upserted, 1);
+    let session = profile_db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("unpinned profile history should land in its own home store");
+    assert_eq!(session.title.as_deref(), Some("Billing pipeline fix"));
 }
