@@ -1519,25 +1519,42 @@ fn isolated_savings_env(tmp: &TempDir) -> Vec<EnvVarGuard> {
     guards
 }
 
-/// Polls the ledger until `calls` reaches `expected_calls` (rows are written
-/// by a spawned task) and returns the final total.
-async fn await_ledger_calls(
-    db: &tokensave::global_db::GlobalDb,
+/// Awaits the server's ledger-write settlement signal (the rows are written
+/// by spawned fire-and-forget tasks), then reads the ledger once and asserts
+/// the expected row count for `project`. Deterministic where the old
+/// 10-second DB poll was not:
+///
+/// - settlement replaces the wall-clock deadline race against the spawned
+///   write task;
+/// - the DB path is captured by the caller under `SAVINGS_ENV_LOCK`, so a
+///   concurrent test's env mutation cannot redirect the read;
+/// - the count is scoped to this test's unique project path, because tests
+///   running in parallel *outside* the lock construct servers while `HOME`
+///   is redirected here and append their own ledger rows to this same DB.
+async fn settled_ledger_total(
+    server: &McpServer,
+    global_db_path: &std::path::Path,
+    project: &std::path::Path,
     expected_calls: u64,
 ) -> tokensave::global_db::SavingsTotal {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let total = db.sum_savings(None, 0).await;
-        if total.calls >= expected_calls {
-            return total;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "expected {expected_calls} ledger row(s) within 10s, got {}",
-            total.calls
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    server.ledger_writes_settled().await;
+    let db = tokensave::global_db::GlobalDb::open_at(global_db_path)
+        .await
+        .expect("global db opens at isolated path");
+    let total = db.sum_savings(Some(&project.to_string_lossy()), 0).await;
+    assert_eq!(
+        total.calls, expected_calls,
+        "every settled ledger write for this project must be visible (got {} calls)",
+        total.calls
+    );
+    total
+}
+
+/// The global-DB path as resolved *right now* (callers hold
+/// `SAVINGS_ENV_LOCK`, so this is the same path the server under test
+/// resolves at construction).
+fn locked_global_db_path() -> std::path::PathBuf {
+    tokensave::global_db::global_db_path().expect("global db path resolves under isolated HOME")
 }
 
 /// Creates a temp project whose `src/main.rs` is large enough that the
@@ -1584,7 +1601,9 @@ async fn search_call_writes_savings_ledger_row() {
     let tmp_home = tempfile::tempdir().unwrap();
     let _env = isolated_savings_env(&tmp_home);
 
-    let (server, _proj_tmp) = setup_server().await;
+    let (server, proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
 
     let responses = run_server_with_messages(
         server,
@@ -1607,12 +1626,7 @@ async fn search_call_writes_savings_ledger_row() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    // The ledger row is written by a spawned task; poll with a deadline
-    // instead of a fixed sleep so the test survives heavy parallel load.
-    let db = tokensave::global_db::GlobalDb::open()
-        .await
-        .expect("global db opens at isolated HOME");
-    await_ledger_calls(&db, 1).await;
+    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
 }
 
 /// Regression test for the empty-ledger bug: the savings ledger must record
@@ -1639,7 +1653,9 @@ async fn ledger_records_by_default_without_env_opt_in() {
     env.push(EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB"));
     assert!(tokensave::global_db::global_accounting_enabled());
 
-    let (server, _proj_tmp) = setup_server().await;
+    let (server, proj_tmp) = setup_server().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
 
     let responses = run_server_with_messages(
         server,
@@ -1661,10 +1677,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    let db = tokensave::global_db::GlobalDb::open()
-        .await
-        .expect("global db opens at isolated HOME");
-    await_ledger_calls(&db, 1).await;
+    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
 }
 
 /// The explicit opt-outs must still work: a falsy
@@ -1711,6 +1724,8 @@ async fn full_file_read_credits_zero_net_savings() {
     let _env = isolated_savings_env(&tmp_home);
 
     let (server, proj_tmp) = setup_savings_project().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
     let project_path = proj_tmp.path().to_path_buf();
 
     let responses = run_server_with_messages(
@@ -1742,14 +1757,14 @@ async fn full_file_read_credits_zero_net_savings() {
         "full-file response ({after}) should be at least the raw estimate ({before})"
     );
 
-    let db = tokensave::global_db::GlobalDb::open()
-        .await
-        .expect("global db opens at isolated path");
-    let total = await_ledger_calls(&db, 1).await;
+    let total = settled_ledger_total(&server_handle, &db_path, &project_path, 1).await;
     assert_eq!(
         total.saved_tokens, 0,
         "ledger must not count a full-file read as savings"
     );
+    let db = tokensave::global_db::GlobalDb::open_at(&db_path)
+        .await
+        .expect("global db opens at isolated path");
     assert_eq!(
         db.get_project_tokens(&project_path).await,
         0,
@@ -1772,6 +1787,8 @@ async fn lifetime_counter_matches_ledger_net_savings() {
     let _env = isolated_savings_env(&tmp_home);
 
     let (server, proj_tmp) = setup_savings_project().await;
+    let server_handle = server.clone();
+    let db_path = locked_global_db_path();
     let project_path = proj_tmp.path().to_path_buf();
 
     let responses = run_server_with_messages(
@@ -1800,15 +1817,15 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         "compressed search should save tokens (before={before}, after={after})"
     );
 
-    let db = tokensave::global_db::GlobalDb::open()
-        .await
-        .expect("global db opens at isolated path");
-    let total = await_ledger_calls(&db, 1).await;
+    let total = settled_ledger_total(&server_handle, &db_path, &project_path, 1).await;
     assert_eq!(
         total.saved_tokens,
         before - after,
         "ledger net saving must match the metrics line"
     );
+    let db = tokensave::global_db::GlobalDb::open_at(&db_path)
+        .await
+        .expect("global db opens at isolated path");
     assert_eq!(
         db.get_project_tokens(&project_path).await,
         total.saved_tokens,

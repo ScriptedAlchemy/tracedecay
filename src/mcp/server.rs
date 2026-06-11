@@ -339,6 +339,14 @@ pub struct McpServer {
     /// timeout). Stored as `Arc<AtomicBool>` so the spawned task can hold a
     /// cheap clone and signal completion without a raw-pointer round-trip.
     transcript_ingest_done: Arc<AtomicBool>,
+    /// Savings-ledger recorder tasks spawned so far / finished so far, plus
+    /// a notifier pinged on every completion. Production never awaits these
+    /// (ledger writes stay fire-and-forget); tests await
+    /// [`Self::ledger_writes_settled`] to observe durability
+    /// deterministically instead of polling the DB against a deadline.
+    ledger_writes_started: Arc<AtomicU64>,
+    ledger_writes_finished: Arc<AtomicU64>,
+    ledger_write_notify: Arc<tokio::sync::Notify>,
 }
 
 impl McpServer {
@@ -402,6 +410,9 @@ impl McpServer {
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(false),
             transcript_ingest_done: Arc::new(AtomicBool::new(false)),
+            ledger_writes_started: Arc::new(AtomicU64::new(0)),
+            ledger_writes_finished: Arc::new(AtomicU64::new(0)),
+            ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
         });
 
         // Catch-up sync (#414): pick up changes made while the server
@@ -490,6 +501,28 @@ impl McpServer {
         // Best-effort update to global DB
         if let Some(ref gdb) = self.global_db {
             gdb.upsert(self.cg.project_root(), new_total).await;
+        }
+    }
+
+    /// Resolves once every savings-ledger write spawned so far has
+    /// completed (immediately when none are pending — including when global
+    /// accounting is disabled and no writes are ever spawned).
+    ///
+    /// Test-only observability for the fire-and-forget ledger recorder:
+    /// production code never calls this, so the request path stays
+    /// non-blocking, while tests can await durability deterministically
+    /// instead of polling the DB against a wall-clock deadline.
+    pub async fn ledger_writes_settled(&self) {
+        loop {
+            // Register interest *before* re-checking so a completion between
+            // the check and the await cannot be missed.
+            let notified = self.ledger_write_notify.notified();
+            let started = self.ledger_writes_started.load(Ordering::SeqCst);
+            let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
+            if finished >= started {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -1395,11 +1428,17 @@ impl McpServer {
                 }
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
-                // Clone the Arc — no new connection is opened.
+                // Clone the Arc — no new connection is opened. The counters
+                // and notify make the write's completion observable to
+                // [`Self::ledger_writes_settled`] without making it awaited
+                // anywhere on the request path.
                 if let Some(gdb) = self.global_db.clone() {
                     let project_path_str = self.cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();
+                    self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
+                    let finished = self.ledger_writes_finished.clone();
+                    let notify = self.ledger_write_notify.clone();
                     tokio::spawn(async move {
                         gdb.record_savings(
                             &project_path_str,
@@ -1409,6 +1448,8 @@ impl McpServer {
                             ts,
                         )
                         .await;
+                        finished.fetch_add(1, Ordering::SeqCst);
+                        notify.notify_waiters();
                     });
                 }
 
