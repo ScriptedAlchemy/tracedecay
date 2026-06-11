@@ -8,10 +8,15 @@ use tokensave::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 const PLUGIN_LOAD_PRELUDE: &str = r#"
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
 import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
+# Hermetic profile home: the generated code reads plugins.tokensave from
+# {HERMES_HOME}/config.yaml, so point it at the temp install instead of the
+# developer's real ~/.hermes.
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
 parent_name = "_hermes_user_shared_prelude"
 parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
 parent_spec.submodule_search_locations = []
