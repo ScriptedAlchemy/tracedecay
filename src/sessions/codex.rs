@@ -98,6 +98,11 @@ impl TranscriptSource for CodexSource {
         for line in &new.lines {
             if let Some(message) = message_from_line(&line.value, &meta, path, line.offset) {
                 messages.push(message);
+            } else if let Some(usage) = token_count_usage(&line.value) {
+                // A `token_count` event reports the turn that just finished;
+                // attach its per-turn counters to the assistant reply it
+                // follows so the savings dashboard can cost it as `actual`.
+                attach_usage_to_last_assistant(&mut messages, &usage);
             }
         }
 
@@ -285,4 +290,69 @@ fn message_metadata(payload: &Value) -> Value {
     );
     append_tool_calls_metadata(&mut metadata, payload);
     Value::Object(metadata)
+}
+
+/// Per-turn token counters from an `event_msg`/`token_count` rollout line,
+/// normalized from `payload.info.last_token_usage`.
+///
+/// Codex reports `OpenAI` semantics where `input_tokens` *includes*
+/// `cached_input_tokens`; the savings dashboard prices counters additively
+/// (Anthropic semantics: input + `cache_read` + `cache_write`), so the cached
+/// portion is split out into `cache_read_input_tokens` and `input_tokens`
+/// keeps only the uncached remainder.
+pub(crate) fn token_count_usage(record: &Value) -> Option<Value> {
+    if record.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let last = payload.pointer("/info/last_token_usage")?;
+    let input = last.get("input_tokens").and_then(Value::as_i64)?;
+    let cached = last
+        .get("cached_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output = last.get("output_tokens").and_then(Value::as_i64)?;
+
+    let mut usage = serde_json::Map::new();
+    usage.insert(
+        "input_tokens".to_string(),
+        Value::from((input - cached).max(0)),
+    );
+    usage.insert("output_tokens".to_string(), Value::from(output));
+    if cached > 0 {
+        usage.insert("cache_read_input_tokens".to_string(), Value::from(cached));
+    }
+    if let Some(total) = last.get("total_tokens").and_then(Value::as_i64) {
+        usage.insert("total_tokens".to_string(), Value::from(total));
+    }
+    Some(Value::Object(usage))
+}
+
+/// Merges turn usage into the most recent assistant message of the batch
+/// (the reply the `token_count` event reports on). First usage wins; later
+/// duplicate `token_count` events for the same turn are ignored.
+fn attach_usage_to_last_assistant(messages: &mut [SessionMessageRecord], usage: &Value) {
+    let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == "assistant")
+    else {
+        return;
+    };
+    let mut metadata = message
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if metadata.contains_key("usage") {
+        return;
+    }
+    metadata.insert("usage".to_string(), usage.clone());
+    if let Ok(serialized) = serde_json::to_string(&Value::Object(metadata)) {
+        message.metadata_json = Some(serialized);
+    }
 }

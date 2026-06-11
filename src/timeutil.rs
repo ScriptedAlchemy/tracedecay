@@ -84,6 +84,113 @@ pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
     (timestamp >= 0).then_some(timestamp)
 }
 
+/// Parses the human-readable timestamp Cursor injects into user prompts as
+/// `<timestamp>…</timestamp>` (e.g. `Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)`)
+/// into Unix epoch seconds.
+///
+/// Cursor transcript JSONL carries no structured per-message timestamps, so
+/// this tag is the only per-message time signal available to ingest. The
+/// parser is tolerant: the weekday is optional, the clock accepts 12-hour
+/// (`AM`/`PM`) or 24-hour form, and the offset accepts `(UTC)`, `(UTC±H)`,
+/// and `(UTC±H:MM)`.
+pub fn parse_cursor_human_timestamp(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    // [weekday,] "Jun 10", "2026", "9:11 AM (UTC+2)"
+    let (month_day, year_part, time_part) = match parts.as_slice() {
+        [_, month_day, year, time] | [month_day, year, time] => (*month_day, *year, *time),
+        _ => return None,
+    };
+
+    let mut md = month_day.split_whitespace();
+    let month = month_number(md.next()?)?;
+    let day: u32 = md.next()?.parse().ok()?;
+    if md.next().is_some() {
+        return None;
+    }
+    let year: i32 = year_part.parse().ok()?;
+    if day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let mut clock = time_part.split_whitespace();
+    let hour_minute = clock.next()?;
+    let (hour_text, minute_text) = hour_minute.split_once(':')?;
+    let mut hour: u32 = hour_text.parse().ok()?;
+    let minute: u32 = minute_text.parse().ok()?;
+    let mut rest = clock.next();
+    match rest.map(str::to_ascii_uppercase).as_deref() {
+        Some("AM") => {
+            if !(1..=12).contains(&hour) {
+                return None;
+            }
+            hour %= 12;
+            rest = clock.next();
+        }
+        Some("PM") => {
+            if !(1..=12).contains(&hour) {
+                return None;
+            }
+            hour = hour % 12 + 12;
+            rest = clock.next();
+        }
+        _ => {}
+    }
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    let offset_seconds = match rest {
+        Some(zone) => parse_utc_offset(zone)?,
+        None => 0,
+    };
+    if clock.next().is_some() {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    let local_seconds = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60;
+    let timestamp = local_seconds - offset_seconds;
+    (timestamp >= 0).then_some(timestamp)
+}
+
+fn month_number(name: &str) -> Option<u32> {
+    let abbrev = name.get(..3)?.to_ascii_lowercase();
+    Some(match abbrev.as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    })
+}
+
+/// Parses `(UTC)`, `(UTC+2)`, `(UTC-7)`, or `(UTC+5:30)` into offset seconds.
+fn parse_utc_offset(zone: &str) -> Option<i64> {
+    let inner = zone.strip_prefix("(UTC")?.strip_suffix(')')?;
+    if inner.is_empty() {
+        return Some(0);
+    }
+    let (sign, magnitude) = match inner.as_bytes().first()? {
+        b'+' => (1, &inner[1..]),
+        b'-' => (-1, &inner[1..]),
+        _ => return None,
+    };
+    let (hours_text, minutes_text) = magnitude.split_once(':').unwrap_or((magnitude, "0"));
+    let hours: i64 = hours_text.parse().ok()?;
+    let minutes: i64 = minutes_text.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
 fn parse_fixed_i32(value: &str, start: usize, end: usize) -> Option<i32> {
     value.get(start..end)?.parse().ok()
 }
@@ -175,5 +282,61 @@ mod tests {
         assert!(parse_rfc3339_timestamp("1969-12-31T23:59:59Z").is_none());
         assert!(parse_rfc3339_timestamp("bad").is_none());
         assert!(parse_rfc3339_timestamp("").is_none());
+    }
+
+    #[test]
+    fn parses_cursor_human_timestamp() {
+        // 2026-06-10 09:11 at UTC+2 == 2026-06-10T07:11:00Z.
+        assert_eq!(
+            parse_cursor_human_timestamp("Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)"),
+            parse_rfc3339_timestamp("2026-06-10T09:11:00+02:00"),
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Monday, Jun 8, 2026, 11:55 PM (UTC+2)"),
+            parse_rfc3339_timestamp("2026-06-08T23:55:00+02:00"),
+        );
+    }
+
+    #[test]
+    fn cursor_human_timestamp_handles_midnight_noon_and_offsets() {
+        assert_eq!(
+            parse_cursor_human_timestamp("Thursday, Jan 1, 1970, 12:00 AM (UTC)"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Thursday, Jan 1, 1970, 12:30 PM (UTC)"),
+            Some(12 * 3_600 + 30 * 60)
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Friday, Jan 2, 1970, 5:30 AM (UTC+5:30)"),
+            Some(86_400)
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Wednesday, Dec 31, 1969, 5:00 PM (UTC-7)"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn cursor_human_timestamp_tolerates_missing_weekday_and_24h_clock() {
+        assert_eq!(
+            parse_cursor_human_timestamp("Jun 10, 2026, 9:11 AM (UTC+2)"),
+            parse_rfc3339_timestamp("2026-06-10T09:11:00+02:00"),
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Jun 10, 2026, 21:11 (UTC+2)"),
+            parse_rfc3339_timestamp("2026-06-10T21:11:00+02:00"),
+        );
+    }
+
+    #[test]
+    fn cursor_human_timestamp_rejects_garbage() {
+        assert!(parse_cursor_human_timestamp("").is_none());
+        assert!(parse_cursor_human_timestamp("…").is_none());
+        assert!(parse_cursor_human_timestamp("Jun 10, 2026").is_none());
+        assert!(parse_cursor_human_timestamp("Foo 10, 2026, 9:11 AM (UTC+2)").is_none());
+        assert!(parse_cursor_human_timestamp("Jun 32, 2026, 9:11 AM (UTC+2)").is_none());
+        assert!(parse_cursor_human_timestamp("Jun 10, 2026, 13:11 PM (UTC+2)").is_none());
+        assert!(parse_cursor_human_timestamp("Jun 10, 2026, 9:11 AM (GMT+2)").is_none());
     }
 }

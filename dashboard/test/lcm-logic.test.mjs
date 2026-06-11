@@ -19,7 +19,8 @@ globalThis.__LCM_TEST_EXPORTS__ = {
   parseLeadingJSON,
   ratioStr,
   mergeRows,
-  mergeSearchPayload
+  mergeSearchPayload,
+  TimelineChart
 };
 })();
 `,
@@ -143,6 +144,44 @@ test("mergeSearchPayload appends match rows but takes scalars from the new page"
   assert.deepEqual(merged.total, { messages: 450, summary_nodes: 1 });
   assert.deepEqual(merged.matches.messages.map((row) => row.store_id), [1, 2, 3]);
   assert.deepEqual(merged.matches.summary_nodes.map((row) => row.node_id), [10, 11]);
+});
+
+function flattenText(node, out = []) {
+  if (node == null) return out;
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    node.forEach((child) => flattenText(child, out));
+    return out;
+  }
+  if (node.props) flattenText(node.props.children, out);
+  return out;
+}
+
+test("TimelineChart drops null buckets and reports undated messages honestly", () => {
+  // A NULL-timestamp bucket from an older server must never render as a bar.
+  const rendered = lcm.TimelineChart({
+    buckets: [
+      { bucket: null, count: 500 },
+      { bucket: "2026-06-10", count: 3 },
+      { bucket: "2026-06-11", count: 7 },
+    ],
+    nodeBuckets: [],
+    undatedCount: 500,
+  });
+  const bars = rendered.props.children[0];
+  assert.equal(bars.props.children.length, 2);
+  const text = flattenText(rendered).join(" ");
+  assert.match(text, /500 undated messages not shown/);
+});
+
+test("TimelineChart explains all-undated stores instead of showing a fake bar", () => {
+  const empty = lcm.TimelineChart({ buckets: [], nodeBuckets: [], undatedCount: 42 });
+  assert.match(flattenText(empty).join(" "), /42 stored messages have no timestamp/);
+  const noData = lcm.TimelineChart({ buckets: [], nodeBuckets: [], undatedCount: 0 });
+  assert.match(flattenText(noData).join(" "), /No timeline data/);
 });
 
 test("mergeSearchPayload passes the page through when there is no previous payload", () => {

@@ -11,6 +11,7 @@ pub mod codex;
 pub mod cursor;
 pub mod lcm;
 pub mod source;
+pub(crate) mod transcript_backfill;
 pub mod vibe;
 
 /// Ingest transcripts from every hookless, path-discoverable agent whose

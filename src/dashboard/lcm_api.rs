@@ -1064,6 +1064,7 @@ pub(crate) async fn timeline(
         "session_id": if params.session_id.is_empty() { Value::Null } else { json!(params.session_id) },
         "buckets": [],
         "node_buckets": [],
+        "undated": {"count": 0, "token_estimate": 0},
     });
     let Some(conn) = state.lcm_conn.as_ref() else {
         return ok(payload);
@@ -1072,11 +1073,19 @@ pub(crate) async fn timeline(
         return ok(payload);
     };
 
-    let (msg_where, node_where) = if params.session_id.is_empty() {
-        (String::new(), String::new())
+    // NULL timestamps would otherwise collapse into one NULL group rendered
+    // as a single fake bar; exclude them from the dated buckets and report
+    // them honestly via the `undated` aggregate instead.
+    let (msg_where, undated_where, node_where) = if params.session_id.is_empty() {
+        (
+            "WHERE timestamp IS NOT NULL".to_string(),
+            "WHERE timestamp IS NULL".to_string(),
+            String::new(),
+        )
     } else {
         (
-            "WHERE session_id = ?2".to_string(),
+            "WHERE timestamp IS NOT NULL AND session_id = ?2".to_string(),
+            "WHERE timestamp IS NULL AND session_id = ?1".to_string(),
             "WHERE session_id = ?2".to_string(),
         )
     };
@@ -1090,6 +1099,12 @@ pub(crate) async fn timeline(
          ORDER BY bucket ASC
          LIMIT ?1"
     );
+    let undated_sql = format!(
+        "SELECT COUNT(*) AS count,
+                COALESCE(SUM((LENGTH(COALESCE(content, snippet_text, '')) + 3) / 4), 0) AS token_estimate
+         FROM lcm_raw_messages
+         {undated_where}"
+    );
     let node_sql = format!(
         "SELECT strftime('{fmt}', COALESCE(source_time_end, created_at), 'unixepoch') AS bucket,
                 COUNT(*) AS count
@@ -1099,9 +1114,10 @@ pub(crate) async fn timeline(
          ORDER BY bucket ASC
          LIMIT ?1"
     );
-    let (buckets, node_buckets) = if params.session_id.is_empty() {
+    let (buckets, undated, node_buckets) = if params.session_id.is_empty() {
         (
             query_rows(conn, &msg_sql, libsql::params![limit]).await,
+            query_rows(conn, &undated_sql, ()).await,
             query_rows(conn, &node_sql, libsql::params![limit]).await,
         )
     } else {
@@ -1112,6 +1128,7 @@ pub(crate) async fn timeline(
                 libsql::params![limit, params.session_id.clone()],
             )
             .await,
+            query_rows(conn, &undated_sql, libsql::params![params.session_id.clone()]).await,
             query_rows(
                 conn,
                 &node_sql,
@@ -1126,6 +1143,15 @@ pub(crate) async fn timeline(
             Ok(rows) => rows,
             Err(err) => return query_error("timeline message buckets", &err),
         }),
+    );
+    obj.insert(
+        "undated".into(),
+        match undated {
+            Ok(mut rows) => rows
+                .pop()
+                .unwrap_or_else(|| json!({"count": 0, "token_estimate": 0})),
+            Err(err) => return query_error("timeline undated messages", &err),
+        },
     );
     obj.insert(
         "node_buckets".into(),

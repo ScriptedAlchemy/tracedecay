@@ -4,9 +4,9 @@ use serde_json::Value;
 
 use crate::global_db::GlobalDb;
 use crate::sessions::source::{
-    append_tool_calls_metadata, content_storage_text_and_tools, ingest_source, paths_equal,
-    stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
-    TranscriptSource,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    ingest_source, paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript,
+    SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -175,8 +175,10 @@ impl TranscriptSource for CursorEventSource {
             || parent_session_id.clone(),
             |(session_id, _agent_id)| session_id.clone(),
         );
+        let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
         let mut messages = Vec::new();
         for line in &new.lines {
+            let derived_timestamp = carry.observe(&line.value);
             // The byte offset doubles as the message ordinal and source_offset,
             // matching the original Cursor ingestion.
             if let Some(message) = event_message(
@@ -186,6 +188,7 @@ impl TranscriptSource for CursorEventSource {
                 path,
                 line.offset,
                 line.offset,
+                derived_timestamp,
             ) {
                 messages.push(message);
             }
@@ -195,6 +198,7 @@ impl TranscriptSource for CursorEventSource {
                 &session_id,
                 path,
                 line.offset,
+                derived_timestamp,
             ));
         }
 
@@ -344,6 +348,56 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
+/// Per-line timestamp derivation for Cursor transcripts, which carry no
+/// structured per-message timestamps. The injected `<timestamp>…</timestamp>`
+/// tag in user prompts is parsed and carried forward across subsequent lines
+/// (assistant turns happen after the prompt that started them); lines seen
+/// before any tag fall back to the transcript file's mtime, which on the
+/// incremental hook path approximates "now" for freshly appended lines.
+pub(crate) struct TimestampCarry {
+    carried: Option<i64>,
+    fallback: Option<i64>,
+}
+
+impl TimestampCarry {
+    pub(crate) fn new(fallback_mtime: Option<i64>) -> Self {
+        Self {
+            carried: None,
+            fallback: fallback_mtime.filter(|mtime| *mtime > 0),
+        }
+    }
+
+    /// Folds one transcript line into the carry and returns the timestamp to
+    /// use for messages derived from that line.
+    pub(crate) fn observe(&mut self, record: &Value) -> Option<i64> {
+        if let Some(tag) = timestamp_tag_from_record(record) {
+            self.carried = Some(tag);
+        }
+        self.carried.or(self.fallback)
+    }
+}
+
+/// Extracts and parses the first `<timestamp>…</timestamp>` tag found in a
+/// transcript line's text content.
+fn timestamp_tag_from_record(record: &Value) -> Option<i64> {
+    let message = record.get("message").unwrap_or(record);
+    let content = message.get("content").unwrap_or(message);
+    match content {
+        Value::String(text) => timestamp_tag_from_text(text),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .find_map(timestamp_tag_from_text),
+        _ => None,
+    }
+}
+
+fn timestamp_tag_from_text(text: &str) -> Option<i64> {
+    let start = text.find("<timestamp>")? + "<timestamp>".len();
+    let end = start + text[start..].find("</timestamp>")?;
+    crate::timeutil::parse_cursor_human_timestamp(text[start..end].trim())
+}
+
 fn event_message(
     record: &Value,
     event: &Value,
@@ -351,6 +405,7 @@ fn event_message(
     transcript_path: &Path,
     ordinal: i64,
     source_offset: i64,
+    derived_timestamp: Option<i64>,
 ) -> Option<SessionMessageRecord> {
     let role = record
         .get("role")
@@ -392,7 +447,9 @@ fn event_message(
         message_id,
         session_id: session_id.to_string(),
         role: role.to_string(),
-        timestamp: record_timestamp(record).or_else(|| record_timestamp(event)),
+        timestamp: record_timestamp(record)
+            .or_else(|| record_timestamp(event))
+            .or(derived_timestamp),
         ordinal,
         text,
         kind: content_kind(content).map(str::to_string),
@@ -410,6 +467,7 @@ fn event_dispatch_messages(
     session_id: &str,
     transcript_path: &Path,
     source_offset: i64,
+    derived_timestamp: Option<i64>,
 ) -> Vec<SessionMessageRecord> {
     let Some(role) = record
         .get("role")
@@ -448,7 +506,9 @@ fn event_dispatch_messages(
             message_id,
             session_id: session_id.to_string(),
             role: role.to_string(),
-            timestamp: record_timestamp(record).or_else(|| record_timestamp(event)),
+            timestamp: record_timestamp(record)
+                .or_else(|| record_timestamp(event))
+                .or(derived_timestamp),
             ordinal: source_offset.saturating_add(index as i64),
             text,
             kind: Some("tool_dispatch".to_string()),
@@ -628,5 +688,8 @@ fn message_metadata(record: &Value, message: &Value) -> Value {
         record.get("type").cloned().unwrap_or(Value::Null),
     );
     append_tool_calls_metadata(&mut metadata, message);
+    // Cursor transcripts carry no token counters today (verified across
+    // 100k+ real lines); this probe is future-proofing for when they do.
+    append_usage_metadata(&mut metadata, &[record, message]);
     Value::Object(metadata)
 }

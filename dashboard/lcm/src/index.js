@@ -372,9 +372,17 @@
   // Responsive CSS bar chart (no SVG stretching, so bars stay crisp and the
   // summary markers render as true round dots regardless of bucket count).
   function TimelineChart(props) {
-    const buckets = props.buckets || [];
+    // Buckets cover only messages with real timestamps; the server reports
+    // messages without one separately so they surface as an honest note
+    // instead of a fake single bar.
+    const buckets = (props.buckets || []).filter(function (b) { return b && b.bucket != null; });
     const nodeBuckets = props.nodeBuckets || [];
-    if (!buckets.length) return h("div", { className: "hermes-lcm-empty" }, "No timeline data");
+    const undatedCount = Number(props.undatedCount) || 0;
+    if (!buckets.length) {
+      return h("div", { className: "hermes-lcm-empty" }, undatedCount > 0
+        ? `No dated messages yet — ${fmtInt(undatedCount)} stored messages have no timestamp`
+        : "No timeline data");
+    }
     const maxCount = buckets.reduce((acc, b) => Math.max(acc, Number(b.count) || 0), 0) || 1;
     const nodeByBucket = {};
     nodeBuckets.forEach(function (nb) { nodeByBucket[nb.bucket] = Number(nb.count) || 0; });
@@ -397,6 +405,8 @@
         h("span", null, short(buckets[0].bucket, 16)),
         h("span", null, short(buckets[buckets.length - 1].bucket, 16)),
       ]),
+      undatedCount > 0 ? h("div", { className: "hermes-lcm-dim hermes-lcm-tl-undated" },
+        `${fmtInt(undatedCount)} undated messages not shown`) : null,
     ]);
   }
 
@@ -1895,6 +1905,7 @@
               : h(TimelineChart, {
                   buckets: (timeline && timeline.buckets) || [],
                   nodeBuckets: (timeline && timeline.node_buckets) || [],
+                  undatedCount: (timeline && timeline.undated && timeline.undated.count) || 0,
                 }),
         ]),
         h("div", { className: "hermes-lcm-card hermes-lcm-wide" }, [

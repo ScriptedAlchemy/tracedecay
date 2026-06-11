@@ -589,6 +589,51 @@ pub(crate) fn append_tool_calls_metadata(
     }
 }
 
+/// Token-usage counter keys recognized by the savings dashboard
+/// (`dashboard/savings_api.rs` `MESSAGE_TOKENS_CTE`): both the Anthropic
+/// (`input_tokens`/`output_tokens`/`cache_*`) and `OpenAI`
+/// (`prompt_tokens`/`completion_tokens`) shapes, plus `total_tokens` for
+/// reference.
+const USAGE_COUNTER_KEYS: [&str; 7] = [
+    "input_tokens",
+    "output_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens",
+];
+
+/// Extracts a `usage` counters object from a transcript record/message,
+/// keeping only recognized numeric token counters (so arbitrarily large or
+/// provider-private payloads never bloat `metadata_json`). Returns `None`
+/// when the value has no `usage` object or it carries no recognized counters.
+pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
+    let usage = value.get("usage")?.as_object()?;
+    let mut counters = serde_json::Map::new();
+    for key in USAGE_COUNTER_KEYS {
+        if let Some(count) = usage.get(key).and_then(Value::as_i64) {
+            counters.insert(key.to_string(), Value::from(count));
+        }
+    }
+    (!counters.is_empty()).then_some(Value::Object(counters))
+}
+
+/// Inserts transcript-recorded token usage into message metadata under the
+/// `usage` key the savings dashboard reads. Probes each candidate value in
+/// order and keeps the first recognized counters object.
+pub(crate) fn append_usage_metadata(
+    map: &mut serde_json::Map<String, Value>,
+    candidates: &[&Value],
+) {
+    if map.contains_key("usage") {
+        return;
+    }
+    if let Some(usage) = candidates.iter().find_map(|value| usage_counters_from(value)) {
+        map.insert("usage".to_string(), usage);
+    }
+}
+
 fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
     match value {
         Value::Array(items) => {

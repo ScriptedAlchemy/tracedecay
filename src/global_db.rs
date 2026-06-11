@@ -385,6 +385,11 @@ impl GlobalDb {
         ensure_session_parent_columns(&db.conn).await?;
         ensure_parse_offset_columns(&db.conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
+        // One-off self-heal: re-derive timestamps and token-usage counters
+        // for legacy messages ingested before extraction existed.
+        // Marker-guarded (runs once per store) and fail-open, like the LCM
+        // schema migrations above.
+        let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
 
         Some(db)
     }

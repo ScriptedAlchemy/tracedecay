@@ -504,6 +504,111 @@ async fn cursor_parent_and_subagent_offsets_do_not_collide() {
 }
 
 #[tokio::test]
+async fn cursor_transcript_ingest_derives_timestamps_from_timestamp_tags() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    // Cursor transcripts carry no structured timestamps; the injected
+    // <timestamp> tag in user prompts is the only per-message signal. The
+    // assistant line between the two tags must inherit (carry forward) the
+    // first tag's timestamp.
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)</timestamp>\nFirst day question about chronology."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"First day answer about chronology."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Thursday, Jun 11, 2026, 8:00 AM (UTC+2)</timestamp>\nSecond day question about chronology."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 3);
+
+    let mut hits = db
+        .search_session_messages("cursor", None, "chronology", 10)
+        .await;
+    hits.sort_by_key(|hit| hit.message.ordinal);
+    assert_eq!(hits.len(), 3);
+
+    // 2026-06-10T09:11:00+02:00 and 2026-06-11T08:00:00+02:00.
+    let day_one = 1_781_075_460;
+    let day_two = 1_781_157_600;
+    assert_eq!(hits[0].message.timestamp, Some(day_one));
+    assert_eq!(hits[1].message.timestamp, Some(day_one));
+    assert_eq!(hits[2].message.timestamp, Some(day_two));
+
+    // The session window derives from the first/last message timestamps.
+    let session = db.get_session("cursor", "cursor-session").await.unwrap();
+    assert_eq!(session.started_at, Some(day_one));
+    assert_eq!(session.ended_at, Some(day_two));
+
+    // The LCM raw store (what the dashboard timeline reads) is dated too.
+    let raw = db
+        .lcm_load_raw_message("cursor", &hits[0].message.message_id)
+        .await
+        .expect("raw message should exist");
+    assert_eq!(raw.timestamp, Some(day_one));
+
+    // Cursor transcripts carry no token counters (verified against real
+    // files); ingest must not fabricate a usage object for the savings tab.
+    for hit in &hits {
+        let metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        assert!(metadata.get("usage").is_none(), "cursor rows are usage-free");
+    }
+}
+
+#[tokio::test]
+async fn cursor_transcript_ingest_falls_back_to_file_mtime_without_tags() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Untagged line about mtime fallback."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let hits = db
+        .search_session_messages("cursor", None, "mtime fallback", 10)
+        .await;
+    assert_eq!(hits.len(), 1);
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let timestamp = hits[0]
+        .message
+        .timestamp
+        .expect("untagged lines must fall back to the transcript mtime");
+    assert!(
+        (now - timestamp).abs() < 300,
+        "mtime fallback should be near now, got {timestamp} vs {now}"
+    );
+}
+
+#[tokio::test]
 async fn cursor_task_tool_dispatch_prompt_becomes_searchable() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);

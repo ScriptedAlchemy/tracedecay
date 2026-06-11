@@ -25,7 +25,7 @@ fn write_codex_rollout(
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
     let contents = format!(
-        "{}\n{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n",
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:00.000Z",
             "type": "session_meta",
@@ -57,6 +57,20 @@ fn write_codex_rollout(
             "timestamp": "2026-01-01T00:00:02.500Z",
             "type": "response_item",
             "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "duplicate"}]}
+        }),
+        // Per-turn usage arrives as a separate token_count event after the
+        // agent_message (real rollout shape, OpenAI semantics).
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:02.600Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"input_tokens": 14662, "cached_input_tokens": 6528, "output_tokens": 13, "reasoning_output_tokens": 0, "total_tokens": 14675},
+                    "last_token_usage": {"input_tokens": 14662, "cached_input_tokens": 6528, "output_tokens": 13, "reasoning_output_tokens": 0, "total_tokens": 14675},
+                    "model_context_window": 258400
+                }
+            }
         }),
     );
     std::fs::write(&path, contents).unwrap();
@@ -135,6 +149,13 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     assert!(results
         .iter()
         .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5")));
+    // Rollout ISO-8601 timestamps land as epoch seconds (2026-01-01).
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_601)));
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_602)));
     let assistant = results
         .iter()
         .find(|hit| hit.message.role == "assistant")
@@ -147,6 +168,22 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let metadata: serde_json::Value =
         serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["tool_calls"][0]["function"]["name"], "apply_patch");
+
+    // The trailing token_count event's per-turn usage attaches to the
+    // assistant reply it reports on, normalized for the savings dashboard's
+    // additive pricing: input excludes the cached portion (OpenAI input
+    // includes it), which lands in cache_read_input_tokens.
+    assert_eq!(metadata["usage"]["input_tokens"], 14662 - 6528);
+    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 6528);
+    assert_eq!(metadata["usage"]["output_tokens"], 13);
+    assert_eq!(metadata["usage"]["total_tokens"], 14675);
+    let user = results
+        .iter()
+        .find(|hit| hit.message.role == "user")
+        .expect("user message should be searchable");
+    let user_metadata: serde_json::Value =
+        serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(user_metadata.get("usage").is_none());
 }
 
 #[tokio::test]

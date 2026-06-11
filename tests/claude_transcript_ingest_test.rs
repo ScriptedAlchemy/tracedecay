@@ -46,6 +46,13 @@ fn write_claude_transcript(
                 "id": "msg_claude_1",
                 "role": "assistant",
                 "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 340,
+                    "cache_creation_input_tokens": 500,
+                    "cache_read_input_tokens": 8000,
+                    "service_tier": "standard"
+                },
                 "content": [
                     {"type": "text", "text": "The billing pipeline regression is fixed."},
                     {"type": "tool_use", "name": "tokensave_context", "input": {}}
@@ -118,6 +125,34 @@ async fn claude_transcript_populates_searchable_messages() {
     assert!(results
         .iter()
         .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8")));
+    // The structured ISO-8601 timestamps land as epoch seconds (2026-01-01).
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_600)));
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_605)));
+
+    // Anthropic-style `message.usage` counters land in metadata under the
+    // keys the savings dashboard reads; non-counter fields are dropped.
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("assistant message should be searchable");
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["usage"]["input_tokens"], 1200);
+    assert_eq!(metadata["usage"]["output_tokens"], 340);
+    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
+    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
+    assert!(metadata["usage"].get("service_tier").is_none());
+    let user = results
+        .iter()
+        .find(|hit| hit.message.role == "user")
+        .expect("user message should be searchable");
+    let user_metadata: serde_json::Value =
+        serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(user_metadata.get("usage").is_none());
 
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},

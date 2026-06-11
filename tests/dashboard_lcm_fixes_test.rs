@@ -442,6 +442,88 @@ fn message_by_id<'a>(messages: &'a [Value], message_id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("expected message {message_id} in payload"))
 }
 
+/// Inserts a raw LCM message with `timestamp = NULL` (the shape legacy Cursor
+/// ingest produced) directly into the store the dashboard is serving.
+async fn insert_undated_message(global_db_path: &Path) {
+    let conn = open_raw_conn(global_db_path).await;
+    if let Err(err) = conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref, snippet_text,
+                index_text, legacy_source, legacy_truncated, metadata_json
+             )
+             VALUES (?1, 'msg-undated', ?2, 'user', 99, NULL,
+                     'undated legacy message', 'hash-undated', 'inline', NULL,
+                     'undated legacy message', 'undated legacy message', 0, 0, NULL)",
+            libsql::params![PROVIDER, SESSION_ID],
+        )
+        .await
+    {
+        panic!("failed to insert undated message fixture: {err}");
+    }
+}
+
+#[test]
+fn timeline_excludes_null_timestamps_and_reports_undated_count() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        insert_undated_message(&fixture.global_db_path).await;
+        let agent = http_agent();
+
+        let (status, timeline) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&limit=400",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+
+        // All four dated fixture messages share 2023-11-14; the NULL-timestamp
+        // row must not appear as a bucket (the old behavior rendered it as a
+        // single fake bar) and is reported via the explicit aggregate instead.
+        let buckets = as_array(&timeline["buckets"], "timeline buckets");
+        assert_eq!(buckets.len(), 1, "expected one dated bucket: {timeline}");
+        assert_eq!(buckets[0]["bucket"], "2023-11-14");
+        assert_eq!(buckets[0]["count"], 4);
+        assert!(
+            buckets.iter().all(|bucket| !bucket["bucket"].is_null()),
+            "NULL timestamps must never surface as a bucket: {timeline}"
+        );
+        assert_eq!(timeline["undated"]["count"], 1, "undated: {timeline}");
+        assert!(
+            timeline["undated"]["token_estimate"].as_i64().unwrap_or(0) > 0,
+            "undated token estimate should count the row's text: {timeline}"
+        );
+
+        // Session-scoped queries keep both aggregates scoped.
+        let (status, scoped) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&session_id={SESSION_ID}",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(scoped["undated"]["count"], 1, "scoped undated: {scoped}");
+        let (status, other) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&session_id=other-session",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(other["undated"]["count"], 0, "other-session: {other}");
+        assert!(as_array(&other["buckets"], "other buckets").is_empty());
+    });
+}
+
 #[test]
 fn malformed_summary_metadata_surfaces_json_error_instead_of_empty_rows() {
     let _env_lock = GLOBAL_DB_ENV_LOCK

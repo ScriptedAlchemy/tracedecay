@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::source::{
-    append_tool_calls_metadata, collect_files_with_ext, content_storage_text_and_tools,
-    paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
-    StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, append_usage_metadata, collect_files_with_ext,
+    content_storage_text_and_tools, paths_equal, stream_new_jsonl, title_from_messages,
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -218,6 +218,9 @@ fn message_metadata(record: &Value) -> Value {
     append_tool_calls_metadata(&mut metadata, record);
     if let Some(message) = record.get("message") {
         append_tool_calls_metadata(&mut metadata, message);
+        append_usage_metadata(&mut metadata, &[record, message]);
+    } else {
+        append_usage_metadata(&mut metadata, &[record]);
     }
     Value::Object(metadata)
 }

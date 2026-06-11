@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::sessions::source::{
-    append_tool_calls_metadata, content_storage_text_and_tools, paths_equal, read_changed_file,
-    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
+    read_changed_file, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
+    TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -285,5 +286,10 @@ fn message_metadata(provider: &str, entry: &Value) -> Value {
         Value::String(format!("{provider}_task_history")),
     );
     append_tool_calls_metadata(&mut metadata, entry);
+    // The api_conversation_history file is the raw Anthropic-API message
+    // array and normally carries no counters (usage lives in ui_messages.json,
+    // which this source does not read); the probe catches forks that embed
+    // a `usage` object on the entry.
+    append_usage_metadata(&mut metadata, &[entry]);
     Value::Object(metadata)
 }
