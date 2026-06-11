@@ -205,9 +205,7 @@ pub(super) async fn handle_context(
                     let callers = cg.get_callers(&node.id, 2).await?;
                     let caller_ids: Vec<String> =
                         callers.iter().map(|(n, _)| n.id.clone()).collect();
-                    let test_annotated = cg
-                        .get_test_annotated_node_ids(&caller_ids)
-                        .await?;
+                    let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
                     for (caller, _) in &callers {
                         if crate::tokensave::is_test_file(&caller.file_path)
                             || test_annotated.contains(&caller.id)

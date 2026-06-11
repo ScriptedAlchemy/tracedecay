@@ -195,9 +195,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
                 .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
                 .map(|n| n.id.clone())
                 .collect();
-            let test_annotated_in_file = cg
-                .get_test_annotated_node_ids(&candidate_ids)
-                .await?;
+            let test_annotated_in_file = cg.get_test_annotated_node_ids(&candidate_ids).await?;
             for node in &nodes {
                 if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
                     continue;
@@ -225,9 +223,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
             }
             let callers = cg.get_callers(&node.id, 3).await?;
             let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-            let test_annotated = cg
-                .get_test_annotated_node_ids(&caller_ids)
-                .await?;
+            let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
             for (caller, _) in callers {
                 if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
                     continue;

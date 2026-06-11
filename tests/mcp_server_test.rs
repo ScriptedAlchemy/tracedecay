@@ -1879,7 +1879,11 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
     // main: one committed source file, indexed into the default DB.
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() -> u32 { 1 }\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn main_only() -> u32 { 1 }\n",
+    )
+    .unwrap();
     fs::write(project.join(".gitignore"), ".tokensave/\n").unwrap();
     git(project, &["init"]);
     git(project, &["config", "user.email", "test@test.com"]);
@@ -1938,7 +1942,9 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     let resp = search_via_transport(server.clone(), 1, "feature_only").await;
     assert!(resp["error"].is_null(), "search on main should not error");
     assert!(
-        !resp["result"]["content"].to_string().contains("feature_only"),
+        !resp["result"]["content"]
+            .to_string()
+            .contains("feature_only"),
         "main's DB must not contain the feature-only symbol"
     );
 
@@ -1951,7 +1957,9 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
         "search after checkout should not error: {resp}"
     );
     assert!(
-        resp["result"]["content"].to_string().contains("feature_only"),
+        resp["result"]["content"]
+            .to_string()
+            .contains("feature_only"),
         "after the checkout, reads must serve the feature branch's DB: {resp}"
     );
 

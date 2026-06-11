@@ -921,7 +921,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     message: "tokensave not found on PATH".to_string(),
                 }
             })?;
-            eprintln!("Refreshing tokensave-generated plugin artifacts (agent configs are not touched)");
+            eprintln!(
+                "Refreshing tokensave-generated plugin artifacts (agent configs are not touched)"
+            );
 
             // Detection-driven, not `installed_agents`-driven: each
             // integration decides whether generated artifacts exist on this
@@ -943,7 +945,11 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     Ok(tokensave::agents::UpdatePluginOutcome::Refreshed(paths)) => {
                         refreshed_any = true;
                         for path in paths {
-                            eprintln!("  \x1b[32m✔\x1b[0m {}: refreshed {}", ag.id(), path.display());
+                            eprintln!(
+                                "  \x1b[32m✔\x1b[0m {}: refreshed {}",
+                                ag.id(),
+                                path.display()
+                            );
                         }
                     }
                     Ok(tokensave::agents::UpdatePluginOutcome::NotInstalled) => {}

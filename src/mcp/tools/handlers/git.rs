@@ -34,9 +34,7 @@ pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolR
     let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
 
     // Pre-compute files with inline test modules for test detection.
-    let files_with_inline_tests = cg
-        .get_files_with_test_annotations()
-        .await?;
+    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
     let matches_test = |path: &str| -> bool {
         if let Some(ref g) = custom_glob {
             g.matches(path)
@@ -136,9 +134,7 @@ pub(super) async fn handle_diff_context(cg: &TokenSave, args: Value) -> Result<T
     };
 
     // Pre-compute files containing inline test modules.
-    let files_with_inline_tests = cg
-        .get_files_with_test_annotations()
-        .await?;
+    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
     let has_tests =
         |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
 
@@ -652,9 +648,7 @@ pub(super) async fn handle_commit_context(cg: &TokenSave, args: Value) -> Result
     }
 
     // Pre-compute files with inline test modules.
-    let files_with_inline_tests = cg
-        .get_files_with_test_annotations()
-        .await?;
+    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
 
     let mut file_roles: Vec<Value> = Vec::new();
     let mut symbols_by_role: HashMap<&str, Vec<Value>> = HashMap::new();
@@ -742,9 +736,7 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
     let mut impacted_modules: HashSet<String> = HashSet::new();
 
     // Pre-compute files with inline test modules.
-    let files_with_inline_tests = cg
-        .get_files_with_test_annotations()
-        .await?;
+    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
     let has_tests =
         |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
 

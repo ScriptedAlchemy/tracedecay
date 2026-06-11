@@ -1438,14 +1438,8 @@ impl McpServer {
         } else {
             None
         };
-        let dispatch_outcome = handle_tool_call(
-            &cg,
-            tool_name,
-            arguments,
-            server_stats,
-            self.scope_prefix(),
-        )
-        .await;
+        let dispatch_outcome =
+            handle_tool_call(&cg, tool_name, arguments, server_stats, self.scope_prefix()).await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
         match dispatch_outcome {
             Ok(mut result) => {
@@ -1564,10 +1558,8 @@ impl McpServer {
                             Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
                         };
                         if still_stale {
-                            let banner = format_per_file_staleness_banner(
-                                cg.project_root(),
-                                &stale_files,
-                            );
+                            let banner =
+                                format_per_file_staleness_banner(cg.project_root(), &stale_files);
                             // Machine-readable marker. Same shape as before
                             // so existing scrapers keep working.
                             let stale_json = serde_json::to_string(&stale_files)
