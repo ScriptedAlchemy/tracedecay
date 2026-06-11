@@ -14,21 +14,35 @@
 //!   `session_messages`, whose `model` and `metadata_json` columns drive
 //!   per-session cost accounting.
 //!
-//! Token counts carry an explicit provenance label everywhere:
-//! `cost_basis: "actual"` when the transcript recorded usage data
-//! (`metadata_json.usage.*`), `"estimated"` when counts come from the same
-//! chars/4 heuristic the LCM views use (`(LENGTH(text)+3)/4`), `"mixed"` for
-//! sessions containing both. Dollar costs are computed client-side from the
-//! `/pricing` table (see `savings_pricing`); unknown models keep their token
-//! counts but get no invented price.
+//! Token counts carry an explicit provenance label everywhere, with three
+//! quality tiers (best available wins per message):
+//!
+//! - `cost_basis: "actual"` — the transcript recorded usage data
+//!   (`metadata_json.usage.*`).
+//! - `"tokenized"` — no usage data, but the stored text was counted with a
+//!   real BPE tokenizer (see `token_count`): exact for OpenAI-family
+//!   models, a labeled approximation for vendors without a public
+//!   tokenizer.
+//! - `"estimated"` — the chars/4 heuristic the LCM views use
+//!   (`(LENGTH(text)+3)/4`), the fallback when the `token-counting`
+//!   feature is compiled out.
+//! - `"mixed"` keeps its meaning: usage-backed and non-usage messages in
+//!   one aggregate.
+//!
+//! Dollar costs are computed client-side from the `/pricing` table (see
+//! `savings_pricing`); unknown models keep their token counts but get no
+//! invented price.
+
+use std::collections::HashMap;
 
 use axum::extract::State;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::token_count::{counting_available, encoder_for_model, MessageTokens};
 use super::util::{coerce_limit, query_i64, query_rows, JsonQuery};
-use super::{savings_pricing, DashboardState};
+use super::{savings_pricing, token_count, DashboardState};
 use crate::accounting::metrics::parse_range;
 use crate::global_db::GlobalDb;
 
@@ -37,12 +51,14 @@ use crate::global_db::GlobalDb;
 /// (`input_tokens`/`output_tokens`) and `OpenAI` (`prompt_tokens`/
 /// `completion_tokens`) transcript shapes; `json_valid` guards keep one
 /// malformed `metadata_json` row from failing the whole query.
-const MESSAGE_TOKENS_CTE: &str = "
+pub(super) const MESSAGE_TOKENS_CTE: &str = "
     SELECT provider,
+           message_id,
            session_id,
            role,
            timestamp,
            COALESCE(NULLIF(TRIM(COALESCE(model, '')), ''), '') AS model,
+           LENGTH(COALESCE(text, '')) AS msg_len,
            (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens,
            CASE WHEN json_valid(metadata_json) THEN
                CAST(COALESCE(json_extract(metadata_json, '$.usage.input_tokens'),
@@ -110,35 +126,128 @@ fn model_value(model: &str) -> Value {
     }
 }
 
-fn basis_label(usage_messages: i64, messages: i64) -> &'static str {
+/// Provenance label for an aggregate. `tokenized` only applies when every
+/// non-usage message in the aggregate was BPE-counted; partial coverage
+/// stays `estimated` (conservative), and `mixed` keeps its legacy meaning
+/// of usage-backed plus non-usage messages.
+fn basis_label(usage_messages: i64, tokenized_messages: i64, messages: i64) -> &'static str {
     if messages > 0 && usage_messages >= messages {
         "actual"
     } else if usage_messages > 0 {
         "mixed"
+    } else if messages > 0 && tokenized_messages >= messages {
+        "tokenized"
     } else {
         "estimated"
     }
 }
 
-/// Token-aggregate JSON shared by session-model and model rows.
-fn token_block(row: &Value) -> Value {
+/// Tier sums for the non-usage messages of one aggregate, folded from the
+/// `token_count` overlay. `estimated_*` is strictly the chars/4 remainder —
+/// the three tiers (actual / tokenized / estimated) never overlap.
+#[derive(Debug, Clone, Copy, Default)]
+struct TierSums {
+    tokenized_messages: i64,
+    tokenized_input: i64,
+    tokenized_output: i64,
+    estimated_messages: i64,
+    estimated_input: i64,
+    estimated_output: i64,
+}
+
+impl TierSums {
+    /// Same role attribution as the SQL aggregates: non-assistant text
+    /// counts as input, assistant text as output.
+    fn add(&mut self, msg: &MessageTokens) {
+        let is_output = msg.role == "assistant";
+        if msg.tokenized {
+            self.tokenized_messages += 1;
+            if is_output {
+                self.tokenized_output += msg.tokens;
+            } else {
+                self.tokenized_input += msg.tokens;
+            }
+        } else {
+            self.estimated_messages += 1;
+            if is_output {
+                self.estimated_output += msg.tokens;
+            } else {
+                self.estimated_input += msg.tokens;
+            }
+        }
+    }
+}
+
+fn fold_overlay<K, F>(overlay: &[MessageTokens], mut key: F) -> HashMap<K, TierSums>
+where
+    K: std::hash::Hash + Eq,
+    F: FnMut(&MessageTokens) -> Option<K>,
+{
+    let mut out: HashMap<K, TierSums> = HashMap::new();
+    for msg in overlay {
+        if let Some(k) = key(msg) {
+            out.entry(k).or_default().add(msg);
+        }
+    }
+    out
+}
+
+/// Token-aggregate JSON shared by session-model and model rows. `tiers` is
+/// the overlay fold for the same group; when `None` (overlay unavailable)
+/// the SQL chars/4 sums serve, which is exactly the legacy two-tier shape.
+fn token_block(row: &Value, tiers: Option<&TierSums>) -> Value {
     let messages = i64_of(row, "messages");
     let usage_messages = i64_of(row, "usage_messages");
+    let fallback = TierSums {
+        estimated_messages: messages - usage_messages,
+        estimated_input: i64_of(row, "estimated_input_tokens"),
+        estimated_output: i64_of(row, "estimated_output_tokens"),
+        ..TierSums::default()
+    };
+    let tiers = tiers.copied().unwrap_or(fallback);
     json!({
         "messages": messages,
         "usage_messages": usage_messages,
-        "estimated_messages": messages - usage_messages,
-        "cost_basis": basis_label(usage_messages, messages),
+        "tokenized_messages": tiers.tokenized_messages,
+        "estimated_messages": tiers.estimated_messages,
+        "cost_basis": basis_label(usage_messages, tiers.tokenized_messages, messages),
         "actual": {
             "input_tokens": i64_of(row, "actual_input_tokens"),
             "output_tokens": i64_of(row, "actual_output_tokens"),
             "cache_read_tokens": i64_of(row, "cache_read_tokens"),
             "cache_write_tokens": i64_of(row, "cache_write_tokens"),
         },
-        "estimated": {
-            "input_tokens": i64_of(row, "estimated_input_tokens"),
-            "output_tokens": i64_of(row, "estimated_output_tokens"),
+        "tokenized": {
+            "input_tokens": tiers.tokenized_input,
+            "output_tokens": tiers.tokenized_output,
         },
+        "estimated": {
+            "input_tokens": tiers.estimated_input,
+            "output_tokens": tiers.estimated_output,
+        },
+    })
+}
+
+/// Tokenizer provenance for a model-keyed row (`model` is `""` for
+/// unknown-model rows, which still get the approximate o200k count).
+fn tokenizer_block(model: &str) -> Value {
+    if !counting_available() {
+        return Value::Null;
+    }
+    let encoder = encoder_for_model(model);
+    json!({ "encoder": encoder.name, "exact": encoder.exact })
+}
+
+/// Ledger-recording gate state, evaluated in the dashboard's own
+/// environment. MCP servers evaluate the same gate at startup, so this is
+/// the best honest signal the dashboard has: when recording is disabled (or
+/// a long-running MCP server predates ledger recording), the UI can explain
+/// an empty ledger instead of just saying "no events yet".
+fn recording_block() -> Value {
+    let mode = crate::global_db::global_accounting_mode();
+    json!({
+        "enabled": mode.enabled(),
+        "mode": mode.as_str(),
     })
 }
 
@@ -156,7 +265,11 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
 
     let savings = match state.savings_db.as_deref() {
         Some(gdb) => savings_overview(gdb, &state.savings_db_path).await,
-        None => json!({ "available": false, "db": state.savings_db_path }),
+        None => json!({
+            "available": false,
+            "db": state.savings_db_path,
+            "recording": recording_block(),
+        }),
     };
     let sessions = match state.lcm_conn.as_ref() {
         Some(conn) => sessions_overview(conn, &state).await,
@@ -210,12 +323,11 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
     )
     .await;
 
-    let sum_json = |total: &crate::global_db::SavingsTotal| {
-        json!({ "saved_tokens": total.saved_tokens, "calls": total.calls })
-    };
+    let sum_json = |total: &crate::global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
         "available": true,
         "db": db_path,
+        "recording": recording_block(),
         "ledger": {
             "today": sum_json(&today),
             "last_7d": sum_json(&week),
@@ -244,8 +356,17 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
     let agg = rows.first().cloned().unwrap_or_else(|| json!({}));
     let session_count = query_i64(conn, "SELECT COUNT(*) FROM sessions", ()).await;
 
+    let overlay = token_count::non_usage_message_tokens(state).await;
+    let total_tiers = overlay.as_deref().map(|messages| {
+        let mut sums = TierSums::default();
+        for msg in messages {
+            sums.add(msg);
+        }
+        sums
+    });
+
     merge(
-        token_block(&agg),
+        token_block(&agg, total_tiers.as_ref()),
         json!({
             "available": true,
             "db": state.lcm_db_path,
@@ -253,6 +374,7 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
             "session_count": session_count,
             "model_count": i64_of(&agg, "model_count"),
             "unknown_model_messages": i64_of(&agg, "unknown_model_messages"),
+            "token_counting": counting_available(),
         }),
     )
 }
@@ -381,6 +503,17 @@ pub(crate) async fn sessions(
     )
     .await;
 
+    let overlay = token_count::non_usage_message_tokens(&state).await;
+    let session_model_tiers = overlay.as_deref().map(|messages| {
+        fold_overlay(messages, |msg| {
+            Some((
+                msg.provider.clone(),
+                msg.session_id.clone(),
+                msg.model.clone(),
+            ))
+        })
+    });
+
     let mut sessions_json = Vec::with_capacity(page.len());
     for row in &page {
         let provider = str_of(row, "provider");
@@ -397,14 +530,30 @@ pub(crate) async fn sessions(
 
         let mut messages = 0;
         let mut usage_messages = 0;
+        let mut tokenized_messages = 0;
+        let mut estimated_messages = 0;
         let models: Vec<Value> = model_rows
             .iter()
             .map(|model_row| {
-                messages += i64_of(model_row, "messages");
-                usage_messages += i64_of(model_row, "usage_messages");
+                let model = str_of(model_row, "model");
+                let tiers = session_model_tiers.as_ref().and_then(|map| {
+                    map.get(&(
+                        provider.to_string(),
+                        session_id.to_string(),
+                        model.to_string(),
+                    ))
+                });
+                let block = token_block(model_row, tiers);
+                messages += i64_of(&block, "messages");
+                usage_messages += i64_of(&block, "usage_messages");
+                tokenized_messages += i64_of(&block, "tokenized_messages");
+                estimated_messages += i64_of(&block, "estimated_messages");
                 merge(
-                    token_block(model_row),
-                    json!({ "model": model_value(str_of(model_row, "model")) }),
+                    block,
+                    json!({
+                        "model": model_value(model),
+                        "tokenizer": tokenizer_block(model),
+                    }),
                 )
             })
             .collect();
@@ -418,8 +567,9 @@ pub(crate) async fn sessions(
             "is_subagent": i64_of(row, "is_subagent") != 0,
             "messages": messages,
             "usage_messages": usage_messages,
-            "estimated_messages": messages - usage_messages,
-            "cost_basis": basis_label(usage_messages, messages),
+            "tokenized_messages": tokenized_messages,
+            "estimated_messages": estimated_messages,
+            "cost_basis": basis_label(usage_messages, tokenized_messages, messages),
             "models": models,
         }));
     }
@@ -457,6 +607,22 @@ pub(crate) async fn models(
     });
 
     if let Some(conn) = state.lcm_conn.as_ref() {
+        let overlay = token_count::non_usage_message_tokens(&state).await;
+        // Folds replicate the SQL range predicates exactly: per-model rows
+        // use COALESCE(timestamp, 0), the daily series requires a positive
+        // timestamp.
+        let model_tiers = overlay.as_deref().map(|messages| {
+            fold_overlay(messages, |msg| {
+                (since == 0 || msg.timestamp.unwrap_or(0) >= since).then(|| msg.model.clone())
+            })
+        });
+        let day_tiers = overlay.as_deref().map(|messages| {
+            fold_overlay(messages, |msg| {
+                let ts = msg.timestamp.unwrap_or(0);
+                (ts > 0 && (since == 0 || ts >= since)).then(|| (ts / 86_400) * 86_400)
+            })
+        });
+
         let model_sql = format!(
             "SELECT model, COUNT(DISTINCT session_id) AS session_count, {TOKEN_AGG_COLUMNS}
              FROM ({MESSAGE_TOKENS_CTE})
@@ -470,11 +636,16 @@ pub(crate) async fn models(
             model_rows
                 .iter()
                 .map(|row| {
+                    let model = str_of(row, "model");
+                    let tiers = model_tiers
+                        .as_ref()
+                        .and_then(|map| map.get(&model.to_string()));
                     merge(
-                        token_block(row),
+                        token_block(row, tiers),
                         json!({
-                            "model": model_value(str_of(row, "model")),
+                            "model": model_value(model),
                             "sessions": i64_of(row, "session_count"),
+                            "tokenizer": tokenizer_block(model),
                         }),
                     )
                 })
@@ -493,7 +664,11 @@ pub(crate) async fn models(
         payload["daily"] = Value::Array(
             daily_rows
                 .iter()
-                .map(|row| merge(token_block(row), json!({ "day": i64_of(row, "day") })))
+                .map(|row| {
+                    let day = i64_of(row, "day");
+                    let tiers = day_tiers.as_ref().and_then(|map| map.get(&day));
+                    merge(token_block(row, tiers), json!({ "day": day }))
+                })
                 .collect(),
         );
     }
@@ -556,10 +731,89 @@ mod tests {
 
     #[test]
     fn basis_labels() {
-        assert_eq!(basis_label(0, 0), "estimated");
-        assert_eq!(basis_label(0, 4), "estimated");
-        assert_eq!(basis_label(2, 4), "mixed");
-        assert_eq!(basis_label(4, 4), "actual");
+        assert_eq!(basis_label(0, 0, 0), "estimated");
+        assert_eq!(basis_label(0, 0, 4), "estimated");
+        assert_eq!(basis_label(2, 0, 4), "mixed");
+        assert_eq!(basis_label(4, 0, 4), "actual");
+        // Fully BPE-counted aggregates get the new tier…
+        assert_eq!(basis_label(0, 4, 4), "tokenized");
+        // …partial coverage stays conservative…
+        assert_eq!(basis_label(0, 2, 4), "estimated");
+        // …and any usage data keeps the legacy mixed/actual labels.
+        assert_eq!(basis_label(2, 2, 4), "mixed");
+        assert_eq!(basis_label(4, 4, 4), "actual");
+    }
+
+    #[test]
+    fn tier_sums_attribute_roles_like_sql() {
+        let mut sums = TierSums::default();
+        let msg = |role: &str, tokens: i64, tokenized: bool| MessageTokens {
+            provider: "cursor".into(),
+            session_id: "s".into(),
+            model: "gpt-5".into(),
+            role: role.into(),
+            timestamp: None,
+            tokens,
+            tokenized,
+        };
+        sums.add(&msg("user", 10, true));
+        sums.add(&msg("assistant", 20, true));
+        sums.add(&msg("system", 5, false));
+        sums.add(&msg("assistant", 7, false));
+        assert_eq!(sums.tokenized_messages, 2);
+        assert_eq!(sums.tokenized_input, 10);
+        assert_eq!(sums.tokenized_output, 20);
+        assert_eq!(sums.estimated_messages, 2);
+        assert_eq!(sums.estimated_input, 5);
+        assert_eq!(sums.estimated_output, 7);
+    }
+
+    #[test]
+    fn token_block_falls_back_to_sql_estimates_without_overlay() {
+        let row = json!({
+            "messages": 3,
+            "usage_messages": 1,
+            "actual_input_tokens": 100,
+            "actual_output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "estimated_input_tokens": 40,
+            "estimated_output_tokens": 60,
+        });
+        let block = token_block(&row, None);
+        assert_eq!(block["cost_basis"], "mixed");
+        assert_eq!(block["tokenized_messages"], 0);
+        assert_eq!(block["estimated_messages"], 2);
+        assert_eq!(block["estimated"]["input_tokens"], 40);
+        assert_eq!(block["estimated"]["output_tokens"], 60);
+        assert_eq!(block["tokenized"]["input_tokens"], 0);
+    }
+
+    #[test]
+    fn token_block_prefers_overlay_tiers() {
+        let row = json!({
+            "messages": 2,
+            "usage_messages": 0,
+            "actual_input_tokens": 0,
+            "actual_output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "estimated_input_tokens": 40,
+            "estimated_output_tokens": 60,
+        });
+        let tiers = TierSums {
+            tokenized_messages: 2,
+            tokenized_input: 33,
+            tokenized_output: 44,
+            ..TierSums::default()
+        };
+        let block = token_block(&row, Some(&tiers));
+        assert_eq!(block["cost_basis"], "tokenized");
+        assert_eq!(block["tokenized_messages"], 2);
+        assert_eq!(block["estimated_messages"], 0);
+        assert_eq!(block["tokenized"]["input_tokens"], 33);
+        assert_eq!(block["tokenized"]["output_tokens"], 44);
+        assert_eq!(block["estimated"]["input_tokens"], 0);
     }
 
     #[test]

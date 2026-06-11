@@ -138,7 +138,36 @@ test("rowCost splits actual vs estimated portions", () => {
   assert.equal(cost.resolved.slug, "openai/gpt-5.5");
   assert.ok(Math.abs(cost.actual_usd - 5) < 1e-9);
   assert.ok(Math.abs(cost.estimated_usd - 30) < 1e-9);
+  // No tokenized block in the payload → tier contributes nothing.
+  assert.equal(cost.tokenized_usd, 0);
   assert.ok(Math.abs(cost.usd - 35) < 1e-9);
+});
+
+test("rowCost prices the tokenized tier separately", () => {
+  const row = {
+    model: "gpt-5.5-high",
+    cost_basis: "tokenized",
+    actual: { input_tokens: 0, output_tokens: 0 },
+    tokenized: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+    estimated: { input_tokens: 0, output_tokens: 0 },
+  };
+  const cost = pricing.rowCost(row, TABLE);
+  assert.ok(Math.abs(cost.tokenized_usd - 35) < 1e-9); // $5 in + $30 out
+  assert.equal(cost.actual_usd, 0);
+  assert.equal(cost.estimated_usd, 0);
+  assert.ok(Math.abs(cost.usd - 35) < 1e-9);
+});
+
+test("rowCost sums all three tiers", () => {
+  const row = {
+    model: "gpt-5.5-high",
+    cost_basis: "mixed",
+    actual: { input_tokens: 1_000_000, output_tokens: 0 },
+    tokenized: { input_tokens: 1_000_000, output_tokens: 0 },
+    estimated: { input_tokens: 1_000_000, output_tokens: 0 },
+  };
+  const cost = pricing.rowCost(row, TABLE);
+  assert.ok(Math.abs(cost.usd - 15) < 1e-9); // 3 × $5/MTok input
 });
 
 test("rowCost: unpriced model yields null cost", () => {
@@ -178,6 +207,21 @@ test("summarizeCosts aggregates priced rows and tracks unpriced models", () => {
   assert.equal(summary.priced_rows, 1);
   assert.ok(Math.abs(summary.priced_usd - 10) < 1e-9);
   assert.deepEqual(summary.unpriced_models, ["composer-2.5-fast", "unknown"]);
+});
+
+test("summarizeCosts accumulates the tokenized tier", () => {
+  const rows = [
+    {
+      model: "gpt-5.5",
+      cost_basis: "tokenized",
+      actual: { input_tokens: 0, output_tokens: 0 },
+      tokenized: { input_tokens: 1_000_000, output_tokens: 0 },
+      estimated: { input_tokens: 0, output_tokens: 0 },
+    },
+  ];
+  const summary = pricing.summarizeCosts(rows, TABLE);
+  assert.ok(Math.abs(summary.tokenized_usd - 5) < 1e-9);
+  assert.ok(Math.abs(summary.priced_usd - 5) < 1e-9);
 });
 
 test("savedTokensUsd values savings at the Sonnet input rate", () => {

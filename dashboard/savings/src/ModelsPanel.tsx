@@ -70,6 +70,8 @@ export default function ModelsPanel({
       value:
         row.actual.input_tokens +
         row.actual.output_tokens +
+        (row.tokenized?.input_tokens || 0) +
+        (row.tokenized?.output_tokens || 0) +
         row.estimated.input_tokens +
         row.estimated.output_tokens,
     })),
@@ -119,9 +121,13 @@ export default function ModelsPanel({
                   {data.models.map((row, index) => {
                     const cost = rowCost(row, prices);
                     const inputTokens =
-                      row.actual.input_tokens + row.estimated.input_tokens;
+                      row.actual.input_tokens +
+                      (row.tokenized?.input_tokens || 0) +
+                      row.estimated.input_tokens;
                     const outputTokens =
-                      row.actual.output_tokens + row.estimated.output_tokens;
+                      row.actual.output_tokens +
+                      (row.tokenized?.output_tokens || 0) +
+                      row.estimated.output_tokens;
                     return (
                       <tr key={`${row.model || "unknown"}-${index}`}>
                         <td>{row.model || <em>unknown model</em>}</td>
@@ -143,7 +149,7 @@ export default function ModelsPanel({
                         </td>
                         <td>{cost.usd === null ? "—" : fmtUsd(cost.usd)}</td>
                         <td>
-                          <BasisBadge basis={row.cost_basis} />
+                          <BasisBadge basis={row.cost_basis} tokenizer={row.tokenizer} />
                         </td>
                       </tr>
                     );

@@ -28,6 +28,17 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
+/// One freshly computed token count headed for the dashboard sidecar cache
+/// (see [`GlobalDb::save_token_counts`]).
+#[derive(Debug, Clone)]
+pub struct TokenCountUpsert {
+    pub provider: String,
+    pub message_id: String,
+    pub text_len: i64,
+    pub encoder: &'static str,
+    pub token_count: i64,
+}
+
 /// Transcript-ingest backlog snapshot for a session store. See
 /// [`GlobalDb::session_ingest_health`].
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -77,6 +88,69 @@ pub fn global_db_path() -> Option<PathBuf> {
 /// operator decision that wins over project-local store discovery.
 pub fn global_db_path_is_overridden() -> bool {
     std::env::var_os(GLOBAL_DB_PATH_ENV).is_some_and(|path| !path.is_empty())
+}
+
+/// How [`global_accounting_enabled`] reached its decision; the dashboard
+/// surfaces this so an empty ledger can be explained honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountingMode {
+    /// No env override — global accounting is on by default.
+    Default,
+    /// `TOKENSAVE_ENABLE_GLOBAL_DB` explicitly enabled it.
+    EnabledByEnv,
+    /// `TOKENSAVE_ENABLE_GLOBAL_DB` (falsy value) or
+    /// `TOKENSAVE_DISABLE_GLOBAL_DB` explicitly disabled it.
+    DisabledByEnv,
+}
+
+impl AccountingMode {
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::DisabledByEnv)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::EnabledByEnv => "enabled_by_env",
+            Self::DisabledByEnv => "disabled_by_env",
+        }
+    }
+}
+
+fn env_truthy(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES")
+}
+
+/// Whether user-level global accounting (the cross-project `savings_ledger`
+/// plus worldwide-counter flushes in the MCP server) is enabled.
+///
+/// Enabled **by default**: every other writer of `~/.tokensave/global.db`
+/// (CLI sync, hooks, `tokensave cost`, the dashboard) is ungated, and the
+/// Savings dashboard reads the ledger — an opt-in gate here silently left
+/// the ledger empty while lifetime counters kept growing. Precedence:
+///
+/// 1. `TOKENSAVE_ENABLE_GLOBAL_DB` set → its truthiness decides (the
+///    spelling existing agent installers already write).
+/// 2. `TOKENSAVE_DISABLE_GLOBAL_DB` truthy → disabled (opt-out; set by
+///    `.cargo/config.toml` so `cargo test` runs stay hermetic).
+/// 3. Otherwise → enabled.
+pub fn global_accounting_mode() -> AccountingMode {
+    if let Ok(value) = std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB") {
+        return if env_truthy(&value) {
+            AccountingMode::EnabledByEnv
+        } else {
+            AccountingMode::DisabledByEnv
+        };
+    }
+    if std::env::var("TOKENSAVE_DISABLE_GLOBAL_DB").is_ok_and(|value| env_truthy(&value)) {
+        return AccountingMode::DisabledByEnv;
+    }
+    AccountingMode::Default
+}
+
+/// Convenience wrapper over [`global_accounting_mode`].
+pub fn global_accounting_enabled() -> bool {
+    global_accounting_mode().enabled()
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -623,6 +697,84 @@ impl GlobalDb {
             });
         }
         out
+    }
+
+    /// Ensures the dashboard token-count sidecar table exists.
+    ///
+    /// Dashboard-scope only: called once when the dashboard opens the global
+    /// accounting DB. Deliberately NOT part of the shared `open_at` DDL batch
+    /// so project-local session stores keep their schema untouched.
+    pub async fn ensure_token_count_cache(&self) -> bool {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
+                    store TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    text_len INTEGER NOT NULL,
+                    encoder TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    computed_at INTEGER NOT NULL,
+                    PRIMARY KEY (store, provider, message_id)
+                )",
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Loads every cached token count for one session store. Returns
+    /// `(provider, message_id, text_len, token_count)` tuples; empty on any
+    /// error (including the sidecar table not existing yet).
+    pub async fn load_token_counts(&self, store: &str) -> Vec<(String, String, i64, i64)> {
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT provider, message_id, text_len, token_count
+                 FROM dashboard_token_counts WHERE store = ?1",
+                params![store],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let (Ok(provider), Ok(message_id), Ok(text_len), Ok(tokens)) = (
+                row.get::<String>(0),
+                row.get::<String>(1),
+                row.get::<i64>(2),
+                row.get::<i64>(3),
+            ) else {
+                continue;
+            };
+            out.push((provider, message_id, text_len, tokens));
+        }
+        out
+    }
+
+    /// Upserts freshly computed token counts for one session store.
+    /// Best-effort: the cache is an optimization, so errors are swallowed.
+    pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
+        let now = crate::tokensave::current_timestamp();
+        for row in rows {
+            let _ = self
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO dashboard_token_counts
+                     (store, provider, message_id, text_len, encoder, token_count, computed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        store,
+                        row.provider.as_str(),
+                        row.message_id.as_str(),
+                        row.text_len,
+                        row.encoder,
+                        row.token_count,
+                        now
+                    ],
+                )
+                .await;
+        }
     }
 
     /// Removes a project's row from the global DB. Best-effort.

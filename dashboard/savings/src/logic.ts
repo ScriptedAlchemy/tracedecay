@@ -88,10 +88,16 @@ export function projectLabel(path: string): string {
   return segments[segments.length - 1] || path || "(unknown)";
 }
 
-export type CostBasis = "actual" | "estimated" | "mixed";
+/**
+ * Cost provenance tiers, best first: `actual` (transcript usage records) >
+ * `tokenized` (BPE-counted stored text) > `estimated` (chars/4 heuristic).
+ * `mixed` keeps its legacy meaning: usage-backed plus non-usage messages.
+ */
+export type CostBasis = "actual" | "tokenized" | "estimated" | "mixed";
 
 export const BASIS_LABELS: Record<CostBasis, string> = {
   actual: "actual (from transcript usage)",
-  estimated: "estimated (computed)",
+  tokenized: "tokenized (BPE-counted stored text)",
+  estimated: "estimated (~4 chars/token heuristic)",
   mixed: "mixed (usage + estimates)",
 };

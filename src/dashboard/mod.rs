@@ -30,6 +30,7 @@ mod memory_analysis;
 mod memory_api;
 mod savings_api;
 mod savings_pricing;
+mod token_count;
 mod util;
 
 use std::path::PathBuf;
@@ -81,6 +82,9 @@ pub(crate) struct DashboardState {
     pub(crate) project_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
     pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
+    /// In-process BPE token-count cache for the Savings & Cost tab (backed
+    /// by the `dashboard_token_counts` sidecar in the global accounting DB).
+    pub(crate) token_counts: Arc<token_count::TokenCountCache>,
 }
 
 /// The LCM session store the dashboard will serve.
@@ -139,7 +143,7 @@ pub(crate) async fn build_state(cg: &TokenSave) -> DashboardState {
     let savings_db_path = crate::global_db::global_db_path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    DashboardState {
+    let state = DashboardState {
         mem_conn: cg.dashboard_connection(),
         mem_db_path: cg.dashboard_db_path().display().to_string(),
         lcm_conn: lcm.conn,
@@ -149,7 +153,12 @@ pub(crate) async fn build_state(cg: &TokenSave) -> DashboardState {
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
-    }
+        token_counts: Arc::new(token_count::TokenCountCache::new()),
+    };
+    // Pre-count non-usage messages in the background so the first Savings
+    // tab paint doesn't pay the initial BPE pass over the session store.
+    token_count::spawn_warm(state.clone());
+    state
 }
 
 /// Detached catch-up ingest for hookless agents (Claude, Codex, Vibe,

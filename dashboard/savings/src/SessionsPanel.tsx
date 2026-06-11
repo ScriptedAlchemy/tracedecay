@@ -18,10 +18,23 @@ const ShellCardContent = CardContent || "div";
 const ShellBadge = Badge || "span";
 const ShellButton = Button || "button";
 
-export function BasisBadge({ basis }: { basis: CostBasis }) {
+export function BasisBadge({
+  basis,
+  tokenizer,
+}: {
+  basis: CostBasis;
+  tokenizer?: { encoder: string; exact: boolean } | null;
+}) {
+  let title: string = BASIS_LABELS[basis] || basis;
+  if (basis === "tokenized" && tokenizer) {
+    title = tokenizer.exact
+      ? `tokenized: exact ${tokenizer.encoder} count (this model's real tokenizer)`
+      : `tokenized: ${tokenizer.encoder} approximation (no public tokenizer for this vendor)`;
+  }
   return (
-    <span className={cn("tss-basis", `tss-basis-${basis}`)} title={BASIS_LABELS[basis]}>
+    <span className={cn("tss-basis", `tss-basis-${basis}`)} title={title}>
       {basis}
+      {basis === "tokenized" && tokenizer && !tokenizer.exact && "≈"}
     </span>
   );
 }
@@ -44,9 +57,13 @@ function SessionDetails({ session, prices }: { session: SessionRow; prices: Pric
           {session.models.map((modelRow, index) => {
             const cost = rowCost(modelRow, prices);
             const inputTokens =
-              modelRow.actual.input_tokens + modelRow.estimated.input_tokens;
+              modelRow.actual.input_tokens +
+              (modelRow.tokenized?.input_tokens || 0) +
+              modelRow.estimated.input_tokens;
             const outputTokens =
-              modelRow.actual.output_tokens + modelRow.estimated.output_tokens;
+              modelRow.actual.output_tokens +
+              (modelRow.tokenized?.output_tokens || 0) +
+              modelRow.estimated.output_tokens;
             return (
               <tr key={`${modelRow.model || "unknown"}-${index}`}>
                 <td>
@@ -60,7 +77,7 @@ function SessionDetails({ session, prices }: { session: SessionRow; prices: Pric
                 <td>{fmtTokens(outputTokens)}</td>
                 <td>{cost.usd === null ? <em>no price data</em> : fmtUsd(cost.usd)}</td>
                 <td>
-                  <BasisBadge basis={modelRow.cost_basis} />
+                  <BasisBadge basis={modelRow.cost_basis} tokenizer={modelRow.tokenizer} />
                 </td>
               </tr>
             );
@@ -142,11 +159,19 @@ export default function SessionsPanel({
                 const key = `${session.provider}:${session.session_id}`;
                 const cost = summarizeCosts(session.models, prices);
                 const inputTokens = session.models.reduce(
-                  (sum, row) => sum + row.actual.input_tokens + row.estimated.input_tokens,
+                  (sum, row) =>
+                    sum +
+                    row.actual.input_tokens +
+                    (row.tokenized?.input_tokens || 0) +
+                    row.estimated.input_tokens,
                   0,
                 );
                 const outputTokens = session.models.reduce(
-                  (sum, row) => sum + row.actual.output_tokens + row.estimated.output_tokens,
+                  (sum, row) =>
+                    sum +
+                    row.actual.output_tokens +
+                    (row.tokenized?.output_tokens || 0) +
+                    row.estimated.output_tokens,
                   0,
                 );
                 const isOpen = expanded === key;
@@ -236,11 +261,15 @@ export default function SessionsPanel({
           </ShellButton>
         </div>
         <p className="tss-chart-hint">
-          Estimated token counts use the same ~4 chars/token heuristic as the
-          LCM views and only cover stored message text — real context windows
-          (resent history, tool payloads) are larger, so estimated costs are a
-          lower bound. Rows marked <strong>actual</strong> come from usage
-          records in the transcript itself.
+          Token counts come in three quality tiers, best available per
+          message: <strong>actual</strong> (usage records in the transcript
+          itself) &gt; <strong>tokenized</strong> (stored text counted with a
+          real BPE tokenizer — exact for OpenAI-family models, an o200k
+          approximation marked “≈” for vendors without a public tokenizer)
+          &gt; <strong>estimated</strong> (~4 chars/token heuristic). All
+          non-usage tiers only cover stored message text — real context
+          windows (resent history, tool payloads) are larger, so those costs
+          are a lower bound.
         </p>
       </ShellCardContent>
     </ShellCard>

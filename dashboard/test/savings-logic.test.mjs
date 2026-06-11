@@ -77,8 +77,9 @@ test("projectLabel shortens paths", () => {
   assert.equal(logic.projectLabel(""), "(unknown)");
 });
 
-test("basis labels distinguish actual from estimated", () => {
+test("basis labels distinguish all three quality tiers", () => {
   assert.equal(logic.BASIS_LABELS.actual, "actual (from transcript usage)");
-  assert.equal(logic.BASIS_LABELS.estimated, "estimated (computed)");
+  assert.ok(logic.BASIS_LABELS.tokenized.includes("BPE"));
+  assert.ok(logic.BASIS_LABELS.estimated.includes("chars/token"));
   assert.ok(logic.BASIS_LABELS.mixed.includes("usage"));
 });

@@ -41,10 +41,9 @@ impl ServerStats {
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 
-fn global_db_enabled() -> bool {
-    std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB")
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-}
+// Global accounting (savings ledger + worldwide-counter flushes) is enabled
+// by default; see `crate::global_db::global_accounting_mode` for the env
+// override precedence.
 
 /// Hand-maintained schema documentation for the `tokensave://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
@@ -357,7 +356,7 @@ impl McpServer {
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
-        let global_db: Option<Arc<GlobalDb>> = if global_db_enabled() {
+        let global_db: Option<Arc<GlobalDb>> = if crate::global_db::global_accounting_enabled() {
             GlobalDb::open().await.map(Arc::new)
         } else {
             None

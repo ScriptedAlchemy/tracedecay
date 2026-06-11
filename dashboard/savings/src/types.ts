@@ -6,10 +6,17 @@ export interface SavingsTotalJson {
   calls: number;
 }
 
+/** Ledger-recording gate state as evaluated by the dashboard process. */
+export interface LedgerRecording {
+  enabled: boolean;
+  mode: "default" | "enabled_by_env" | "disabled_by_env";
+}
+
 export interface SavingsOverview {
   savings: {
     available: boolean;
     db?: string;
+    recording?: LedgerRecording;
     ledger?: {
       today: SavingsTotalJson;
       last_7d: SavingsTotalJson;
@@ -28,16 +35,20 @@ export interface SavingsOverview {
     session_count?: number;
     messages?: number;
     usage_messages?: number;
+    tokenized_messages?: number;
     estimated_messages?: number;
     cost_basis?: CostBasis;
     model_count?: number;
     unknown_model_messages?: number;
+    /** True when the server was built with the `token-counting` feature. */
+    token_counting?: boolean;
     actual?: {
       input_tokens: number;
       output_tokens: number;
       cache_read_tokens: number;
       cache_write_tokens: number;
     };
+    tokenized?: { input_tokens: number; output_tokens: number };
     estimated?: { input_tokens: number; output_tokens: number };
   };
   turns: {
@@ -65,10 +76,18 @@ export interface LedgerResponse {
   by_project?: Array<{ project: string; saved_tokens: number; calls: number }>;
 }
 
+/** Which BPE the server counted a model row with (null = feature off). */
+export interface TokenizerInfo {
+  encoder: string;
+  exact: boolean;
+}
+
 export interface SessionModelRow extends ApiTokenRow {
   messages: number;
   usage_messages: number;
+  tokenized_messages?: number;
   estimated_messages: number;
+  tokenizer?: TokenizerInfo | null;
 }
 
 export interface SessionRow {
@@ -80,6 +99,7 @@ export interface SessionRow {
   is_subagent: boolean;
   messages: number;
   usage_messages: number;
+  tokenized_messages?: number;
   estimated_messages: number;
   cost_basis: CostBasis;
   models: SessionModelRow[];
@@ -98,7 +118,9 @@ export interface ModelAggRow extends ApiTokenRow {
   sessions: number;
   messages: number;
   usage_messages: number;
+  tokenized_messages?: number;
   estimated_messages: number;
+  tokenizer?: TokenizerInfo | null;
 }
 
 export interface ModelsResponse {

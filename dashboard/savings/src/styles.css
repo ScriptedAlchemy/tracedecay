@@ -313,6 +313,12 @@
   color: var(--ts-blue);
 }
 
+.tss-basis-tokenized {
+  background: color-mix(in srgb, var(--ts-purple, #b18aff) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ts-purple, #b18aff) 45%, transparent);
+  color: var(--ts-purple, #b18aff);
+}
+
 /* ------------------------------------------------------------- misc */
 
 .tss-meta-strip {
@@ -340,6 +346,11 @@
   font-size: 0.8rem;
   line-height: 1.55;
   padding: 0.7rem 0.95rem;
+}
+
+.tss-note-warn {
+  border-color: color-mix(in srgb, var(--ts-red, #ff7a7a) 55%, transparent);
+  background: color-mix(in srgb, var(--ts-red, #ff7a7a) 8%, transparent);
 }
 
 .tss-empty {

@@ -365,28 +365,65 @@ time-range selector (All time / Today / 7 days / 30 days):
   (always `actual` — costs were computed from real usage data at ingest),
   and a panel showing where prices came from.
 
-#### Cost-basis semantics (`actual` vs `estimated`)
+#### Cost-basis semantics (three quality tiers)
 
 Every token count and cost is labeled with its provenance — in the UI
-(badges) and in the API (`cost_basis` fields):
+(badges) and in the API (`cost_basis` fields). The best available tier wins
+per message:
 
 - **`actual`** — the transcript recorded real usage data
   (`metadata_json.usage.input_tokens`/`output_tokens`, or OpenAI-style
   `prompt_tokens`/`completion_tokens`; cache read/write tokens are honored
   too). Costs computed from these are labeled *actual (from transcript
-  usage)*.
-- **`estimated`** — no usage data exists, so tokens are estimated with the
-  same ~4 chars/token heuristic the LCM views use (`(LENGTH(text)+3)/4`),
-  attributing non-assistant text to input and assistant text to output.
-  This only covers stored message text — resent context windows and tool
-  payloads are not modeled — so estimated costs are a deliberate lower
-  bound, and the UI says so. (Cursor hook ingests record models but no usage
-  and no timestamps, so Cursor-heavy stores are fully `estimated` and have
-  empty daily charts.)
-- **`mixed`** — a session/aggregate containing both.
+  usage)*. Claude transcripts carry Anthropic usage verbatim; Codex
+  `token_count` events are normalized at ingest (cached input split into
+  `cache_read_input_tokens`).
+- **`tokenized`** — no usage data, but the stored message text was counted
+  with a real BPE tokenizer (tiktoken). Exact for OpenAI-family models
+  (`o200k_base` for GPT-5/4o/4.1/o-series/codex/gpt-oss, `cl100k_base` for
+  legacy GPT-4/GPT-3.5/embeddings); for vendors without a public tokenizer
+  (Claude, Gemini, Grok, …) `o200k_base` serves as a much-better-than-chars/4
+  approximation, marked `≈` in the UI and `"exact": false` in the API's
+  per-row `tokenizer` block. This is the primary tier for Cursor (whose
+  transcripts carry **no** token counters at all), cline, and vibe stores.
+  Counts are cached per message — in process memory and in a
+  `dashboard_token_counts` sidecar table in the global accounting DB — so
+  large stores (15k+ messages) only pay the counting cost once; a background
+  warm task runs at dashboard startup. Built behind the `token-counting`
+  cargo feature (on by default; ~4 MB of embedded vocabularies, decoded
+  lazily on first use).
+- **`estimated`** — the fallback ~4 chars/token heuristic the LCM views use
+  (`(LENGTH(text)+3)/4`), attributing non-assistant text to input and
+  assistant text to output. Applies when the binary was built without
+  `token-counting` (or a message has no countable text). All non-usage
+  tiers only cover stored message text — resent context windows and tool
+  payloads are not modeled — so those costs are a deliberate lower bound,
+  and the UI says so.
+- **`mixed`** — a session/aggregate containing both usage-backed and
+  non-usage messages (unchanged legacy meaning).
+
+The three tiers never overlap in the API: per row, `actual` + `tokenized` +
+`estimated` token blocks partition the messages, and `tokenized_messages` /
+`estimated_messages` count the non-usage split.
 
 Messages with no recorded model id appear as explicit **unknown model** rows:
 their tokens are counted but never priced.
+
+#### Ledger recording
+
+MCP servers append a `savings_ledger` row after every tool call **by
+default** whenever the global accounting DB is available. Opt out with
+`TOKENSAVE_DISABLE_GLOBAL_DB=1` (or `TOKENSAVE_ENABLE_GLOBAL_DB=0`); an
+explicit `TOKENSAVE_ENABLE_GLOBAL_DB=1` always wins (it is what
+`tokensave install` writes for user-global agent configs, and what tests
+use to opt back in past the repo's cargo-test opt-out). The Savings view
+surfaces the gate verdict (`recording: on/off` badge plus an explanatory
+note when the ledger is empty), and the overview API reports it under
+`savings.recording` (`{"enabled": bool, "mode": "default" |
+"enabled_by_env" | "disabled_by_env"}`). Note that a long-running MCP
+server evaluates the gate at startup — restart/reload your agent's
+tokensave server after changing the environment (or after upgrading from a
+build that defaulted the ledger off).
 
 #### Model pricing
 
@@ -875,11 +912,12 @@ hook ingests — only appear in `all`).
 
 #### `GET /api/plugins/savings/overview`
 
-Combined summary: ledger totals (today / 7d / 30d / all-time), lifetime
-per-project counters, session-store rollup (message counts split into
-`usage_messages` vs `estimated_messages`, actual vs estimated token sums,
-`unknown_model_messages`), `turns` accounting totals, and pricing provenance
-(`source`, `fetched_at`, `offline`).
+Combined summary: ledger totals (today / 7d / 30d / all-time), the
+ledger-recording gate verdict (`savings.recording`), lifetime per-project
+counters, session-store rollup (message counts split into `usage_messages`
+/ `tokenized_messages` / `estimated_messages`, token sums per tier,
+`unknown_model_messages`, `token_counting` build flag), `turns` accounting
+totals, and pricing provenance (`source`, `fetched_at`, `offline`).
 
 #### `GET /api/plugins/savings/ledger`
 
@@ -891,12 +929,14 @@ Savings-ledger detail for a range: `total`, `by_day`, `by_tool`,
 #### `GET /api/plugins/savings/sessions`
 
 Paged per-session cost rows. Each session carries `cost_basis`
-(`"actual" | "estimated" | "mixed"`), `usage_messages` /
-`estimated_messages`, and a `models` array; each model entry has `model`
-(`null` = unknown model), its own `cost_basis`, an `actual` block
-(`input_tokens`, `output_tokens`, `cache_read_tokens`,
-`cache_write_tokens`) and an `estimated` block (`input_tokens`,
-`output_tokens`). Dollar costs are computed by the UI from the `/pricing`
+(`"actual" | "tokenized" | "estimated" | "mixed"`), `usage_messages` /
+`tokenized_messages` / `estimated_messages`, and a `models` array; each
+model entry has `model` (`null` = unknown model), its own `cost_basis`, a
+`tokenizer` block (`{"encoder", "exact"}`, `null` when the build lacks
+`token-counting`), an `actual` block (`input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_write_tokens`), a `tokenized` block and an
+`estimated` block (`input_tokens`, `output_tokens` each; the three blocks
+never overlap). Dollar costs are computed by the UI from the `/pricing`
 table.
 
 **Query Parameters:** `range`, `limit` (default 25, max 100), `offset`

@@ -1512,6 +1512,12 @@ impl EnvVarGuard {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -1524,15 +1530,15 @@ impl Drop for EnvVarGuard {
 }
 
 /// Redirects HOME at an isolated temp dir (so `~/.tokensave/global.db`
-/// lands there) and enables the opt-in global DB. Deliberately does NOT
-/// set `TOKENSAVE_GLOBAL_DB`: that override also wins over project-local
+/// lands there) and enables the global DB. Deliberately does NOT set
+/// `TOKENSAVE_GLOBAL_DB`: that override also wins over project-local
 /// LCM store discovery and would leak into concurrently running tests.
 fn isolated_savings_env(tmp: &TempDir) -> Vec<EnvVarGuard> {
     let mut guards = vec![EnvVarGuard::set("HOME", tmp.path().as_os_str())];
     #[cfg(target_os = "windows")]
     guards.push(EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str()));
-    // The global DB (and thus the savings ledger) is opt-in since the
-    // holographic fact store landed; enable it for these tests.
+    // `.cargo/config.toml` sets TOKENSAVE_DISABLE_GLOBAL_DB=1 to keep
+    // cargo-launched processes hermetic; the explicit enable wins.
     guards.push(EnvVarGuard::set(
         "TOKENSAVE_ENABLE_GLOBAL_DB",
         std::ffi::OsStr::new("1"),
@@ -1634,6 +1640,86 @@ async fn search_call_writes_savings_ledger_row() {
         .await
         .expect("global db opens at isolated HOME");
     await_ledger_calls(&db, 1).await;
+}
+
+/// Regression test for the empty-ledger bug: the savings ledger must record
+/// **by default**, with no env opt-in. The holographic-fact-store commit
+/// made the global DB opt-in via `TOKENSAVE_ENABLE_GLOBAL_DB`, which
+/// silently disabled ledger writes for every default MCP-server install
+/// (dashboards showed "no events yet" while lifetime counters kept growing
+/// through the ungated CLI paths).
+#[tokio::test]
+// Intentional: serializes env-mutating savings tests; #[tokio::test]
+// defaults to a current-thread runtime, so no executor thread blocks.
+#[allow(clippy::await_holding_lock)]
+async fn ledger_records_by_default_without_env_opt_in() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp_home = tempfile::tempdir().unwrap();
+    let mut env = vec![EnvVarGuard::set("HOME", tmp_home.path().as_os_str())];
+    #[cfg(target_os = "windows")]
+    env.push(EnvVarGuard::set("USERPROFILE", tmp_home.path().as_os_str()));
+    // Simulate a real (non-cargo) launch: neither the legacy opt-in nor the
+    // cargo-test opt-out is present, so the default-on path is exercised.
+    env.push(EnvVarGuard::remove("TOKENSAVE_ENABLE_GLOBAL_DB"));
+    env.push(EnvVarGuard::remove("TOKENSAVE_DISABLE_GLOBAL_DB"));
+    assert!(tokensave::global_db::global_accounting_enabled());
+
+    let (server, _proj_tmp) = setup_server().await;
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(9103),
+            "tools/call",
+            json!({
+                "name": "tokensave_search",
+                "arguments": { "query": "hello" }
+            }),
+        )],
+    )
+    .await;
+
+    let resp_str = responses
+        .iter()
+        .find(|r| parse_response(r)["id"] == 9103)
+        .expect("should have a response for id=9103");
+    let resp = parse_response(resp_str);
+    assert!(resp["error"].is_null(), "search should not error");
+
+    let db = tokensave::global_db::GlobalDb::open()
+        .await
+        .expect("global db opens at isolated HOME");
+    await_ledger_calls(&db, 1).await;
+}
+
+/// The explicit opt-outs must still work: a falsy
+/// `TOKENSAVE_ENABLE_GLOBAL_DB` or a truthy `TOKENSAVE_DISABLE_GLOBAL_DB`
+/// disables global accounting.
+#[test]
+fn global_accounting_env_overrides() {
+    let _env_guard = SAVINGS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    use tokensave::global_db::{global_accounting_mode, AccountingMode};
+
+    let _clear_enable = EnvVarGuard::remove("TOKENSAVE_ENABLE_GLOBAL_DB");
+    let _clear_disable = EnvVarGuard::remove("TOKENSAVE_DISABLE_GLOBAL_DB");
+    assert_eq!(global_accounting_mode(), AccountingMode::Default);
+    assert!(global_accounting_mode().enabled());
+
+    {
+        let _disable = EnvVarGuard::set("TOKENSAVE_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+        assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
+        // An explicit enable wins over the opt-out (the cargo-test default).
+        let _enable = EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+        assert_eq!(global_accounting_mode(), AccountingMode::EnabledByEnv);
+    }
+
+    let _enable_falsy = EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+    assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
+    assert!(!global_accounting_mode().enabled());
 }
 
 /// A full-file read returns the entire file to the agent, so it must not

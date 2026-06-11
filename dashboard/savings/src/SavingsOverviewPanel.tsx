@@ -64,6 +64,7 @@ export default function SavingsOverviewPanel({
   const total = ledger?.total || savings.ledger?.all_time || { saved_tokens: 0, calls: 0 };
   const usd = savedTokensUsd(total.saved_tokens, prices);
   const lifetime = savings.lifetime_counters;
+  const recording = savings.recording;
   const series = fillDailySeries(
     (ledger?.by_day || []).map((day) => ({ day: day.day, value: day.saved_tokens })),
     (row) => row.value,
@@ -109,15 +110,29 @@ export default function SavingsOverviewPanel({
         as looser upper bounds than the ledger.
       </div>
 
-      {ledgerEmpty && (
+      {ledgerEmpty && recording && !recording.enabled && (
+        <div className="tss-note tss-note-warn" role="note">
+          <strong>Ledger recording is disabled by environment.</strong>{" "}
+          {recording.mode === "disabled_by_env" &&
+            "TOKENSAVE_DISABLE_GLOBAL_DB (or a falsy TOKENSAVE_ENABLE_GLOBAL_DB) is set, so MCP servers do not append savings_ledger rows. "}
+          Unset it (or set <code>TOKENSAVE_ENABLE_GLOBAL_DB=1</code>) and
+          restart your agent&apos;s tokensave MCP server to start recording.
+        </div>
+      )}
+
+      {ledgerEmpty && (!recording || recording.enabled) && (
         <div className="tss-note" role="note">
           The savings ledger has no events
           {ledger?.range && ledger.range !== "all" ? ` in range "${ledger.range}"` : ""} yet —
           rows are appended when tokensave MCP tools return trimmed context
-          (each row records before/after token counts per tool call). The
-          lifetime counters below come from the older{" "}
-          <code>projects.tokens_saved</code> tally that <code>tokensave gain</code>{" "}
-          also reports.
+          (each row records before/after token counts per tool call).
+          Recording is enabled in this environment, so an empty all-time
+          ledger usually means the running MCP server was started from an
+          older build (or with recording disabled) —{" "}
+          <strong>restart/reload your agent&apos;s tokensave MCP server</strong>{" "}
+          to pick up ledger recording. The lifetime counters below come from
+          the older <code>projects.tokens_saved</code> tally that{" "}
+          <code>tokensave gain</code> also reports.
         </div>
       )}
 
@@ -192,6 +207,11 @@ export default function SavingsOverviewPanel({
         <ShellBadge>
           ledger calls (all time): {fmtTokens(savings.ledger?.all_time.calls)}
         </ShellBadge>
+        {recording && (
+          <ShellBadge>
+            recording: {recording.enabled ? "on" : "off"} ({recording.mode})
+          </ShellBadge>
+        )}
       </div>
     </div>
   );

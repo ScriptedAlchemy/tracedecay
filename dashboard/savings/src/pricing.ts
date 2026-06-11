@@ -215,11 +215,17 @@ export function costUsd(price: ModelPrice, tokens: TokenCounts): number {
   );
 }
 
-/** Token-aggregate row as served by the savings API (per session-model). */
+/**
+ * Token-aggregate row as served by the savings API (per session-model).
+ * The three tiers never overlap: `actual` (usage records) + `tokenized`
+ * (BPE-counted text) + `estimated` (chars/4 remainder) = all messages.
+ * `tokenized` is optional for backward compatibility with older payloads.
+ */
 export interface ApiTokenRow {
   model: string | null;
-  cost_basis: "actual" | "estimated" | "mixed";
+  cost_basis: "actual" | "tokenized" | "estimated" | "mixed";
   actual: TokenCounts;
+  tokenized?: { input_tokens: number; output_tokens: number };
   estimated: { input_tokens: number; output_tokens: number };
 }
 
@@ -228,6 +234,8 @@ export interface RowCost {
   usd: number | null;
   /** Portion backed by transcript usage records. */
   actual_usd: number | null;
+  /** Portion counted with a real BPE tokenizer. */
+  tokenized_usd: number | null;
   /** Portion computed from chars/4 token estimates. */
   estimated_usd: number | null;
   resolved: ResolvedPrice | null;
@@ -237,16 +245,27 @@ export interface RowCost {
 export function rowCost(row: ApiTokenRow, table: PriceTable): RowCost {
   const resolved = resolveModel(row.model, table);
   if (!resolved) {
-    return { usd: null, actual_usd: null, estimated_usd: null, resolved: null };
+    return {
+      usd: null,
+      actual_usd: null,
+      tokenized_usd: null,
+      estimated_usd: null,
+      resolved: null,
+    };
   }
   const actual = costUsd(resolved.price, row.actual);
+  const tokenized = costUsd(resolved.price, {
+    input_tokens: row.tokenized?.input_tokens || 0,
+    output_tokens: row.tokenized?.output_tokens || 0,
+  });
   const estimated = costUsd(resolved.price, {
     input_tokens: row.estimated.input_tokens,
     output_tokens: row.estimated.output_tokens,
   });
   return {
-    usd: actual + estimated,
+    usd: actual + tokenized + estimated,
     actual_usd: actual,
+    tokenized_usd: tokenized,
     estimated_usd: estimated,
     resolved,
   };
@@ -256,6 +275,7 @@ export interface CostSummary {
   /** Sum over rows whose model had price data. */
   priced_usd: number;
   actual_usd: number;
+  tokenized_usd: number;
   estimated_usd: number;
   priced_rows: number;
   /** Distinct model labels without price data (null model → "unknown"). */
@@ -267,6 +287,7 @@ export function summarizeCosts(rows: ApiTokenRow[], table: PriceTable): CostSumm
   const summary: CostSummary = {
     priced_usd: 0,
     actual_usd: 0,
+    tokenized_usd: 0,
     estimated_usd: 0,
     priced_rows: 0,
     unpriced_models: [],
@@ -280,6 +301,7 @@ export function summarizeCosts(rows: ApiTokenRow[], table: PriceTable): CostSumm
     }
     summary.priced_usd += cost.usd;
     summary.actual_usd += cost.actual_usd ?? 0;
+    summary.tokenized_usd += cost.tokenized_usd ?? 0;
     summary.estimated_usd += cost.estimated_usd ?? 0;
     summary.priced_rows += 1;
   }

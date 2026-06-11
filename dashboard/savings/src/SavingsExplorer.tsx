@@ -124,6 +124,7 @@ export default function SavingsExplorer() {
           </span>
           <span className="tss-meta-item">
             {fmtTokens(sessionStats.usage_messages)} with transcript usage ·{" "}
+            {fmtTokens(sessionStats.tokenized_messages)} tokenized (BPE) ·{" "}
             {fmtTokens(sessionStats.estimated_messages)} estimated (~4 chars/token)
           </span>
           {(sessionStats.unknown_model_messages || 0) > 0 && (
