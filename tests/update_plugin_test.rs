@@ -112,9 +112,16 @@ fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
     // config.yaml and re-baked into plugin_api.py.
     let api = text(&default_plugin.join("dashboard/plugin_api.py"));
     assert!(api.contains(NEW_BIN));
-    assert!(api.contains(&project.path().display().to_string()));
-    assert!(text(&default_plugin.join("dashboard/manifest.json"))
-        .contains(env!("CARGO_PKG_VERSION")));
+    // The pin is baked in as a JSON-encoded Python string literal, so match
+    // the encoded form (Windows backslashes are escaped in the artifact).
+    let pinned_json = serde_json::to_string(&project.path().display().to_string()).unwrap();
+    assert!(
+        api.contains(&pinned_json),
+        "plugin_api.py should bake the project-root pin, missing {pinned_json}"
+    );
+    assert!(
+        text(&default_plugin.join("dashboard/manifest.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
 
     // A `--no-dashboard` install stays dashboard-free.
     assert!(!work_plugin.join("dashboard").exists());
@@ -195,8 +202,9 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     // paths, and the manifest version stamp.
     assert!(text(&plugin_dir.join("mcp.json")).contains(NEW_BIN));
     assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
-    assert!(text(&plugin_dir.join(".cursor-plugin/plugin.json"))
-        .contains(env!("CARGO_PKG_VERSION")));
+    assert!(
+        text(&plugin_dir.join(".cursor-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
