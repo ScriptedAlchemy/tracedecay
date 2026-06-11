@@ -5,19 +5,13 @@
  */
 
 import React from "react";
-import { Badge, Card, CardContent, CardHeader, CardTitle, timeAgo } from "./sdk";
+import { Badge, Card, CardContent, CardHeader, CardTitle, timeAgo } from "../../lib/sdk";
 import { fillDailySeries, fmtTokens, fmtUsd } from "./logic";
 import { rowCost } from "./pricing";
 import type { PriceTable } from "./pricing";
 import { DailyBars } from "./charts";
 import { BasisBadge } from "./SessionsPanel";
 import type { ModelsResponse, PricingResponse } from "./types";
-
-const ShellCard = Card || "div";
-const ShellCardHeader = CardHeader || "div";
-const ShellCardTitle = CardTitle || "h3";
-const ShellCardContent = CardContent || "div";
-const ShellBadge = Badge || "span";
 
 function PricingSourceCard({ pricing }: { pricing: PricingResponse | null }) {
   if (!pricing) return null;
@@ -26,16 +20,16 @@ function PricingSourceCard({ pricing }: { pricing: PricingResponse | null }) {
       ? "OpenRouter (cached fetch)"
       : "bundled snapshot (offline fallback)";
   return (
-    <ShellCard>
-      <ShellCardHeader>
-        <ShellCardTitle>Model pricing source</ShellCardTitle>
-      </ShellCardHeader>
-      <ShellCardContent>
+    <Card>
+      <CardHeader>
+        <CardTitle>Model pricing source</CardTitle>
+      </CardHeader>
+      <CardContent>
         <div className="tss-meta-strip">
-          <ShellBadge>{sourceLabel}</ShellBadge>
-          <ShellBadge>{fmtTokens(pricing.model_count)} models</ShellBadge>
-          {pricing.fetched_at && <ShellBadge>fetched {timeAgo(pricing.fetched_at)}</ShellBadge>}
-          {pricing.offline && <ShellBadge>TOKENSAVE_OFFLINE=1 — network disabled</ShellBadge>}
+          <Badge>{sourceLabel}</Badge>
+          <Badge>{fmtTokens(pricing.model_count)} models</Badge>
+          {pricing.fetched_at && <Badge>fetched {timeAgo(pricing.fetched_at)}</Badge>}
+          {pricing.offline && <Badge>TOKENSAVE_OFFLINE=1 — network disabled</Badge>}
         </div>
         <p className="tss-chart-hint">
           Prices come from OpenRouter’s public model list, cached at{" "}
@@ -46,8 +40,8 @@ function PricingSourceCard({ pricing }: { pricing: PricingResponse | null }) {
           fuzzy-matched to OpenRouter slugs; unmatched models show{" "}
           <em>no price data</em>.
         </p>
-      </ShellCardContent>
-    </ShellCard>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -70,8 +64,8 @@ export default function ModelsPanel({
       value:
         row.actual.input_tokens +
         row.actual.output_tokens +
-        (row.tokenized?.input_tokens || 0) +
-        (row.tokenized?.output_tokens || 0) +
+        row.tokenized.input_tokens +
+        row.tokenized.output_tokens +
         row.estimated.input_tokens +
         row.estimated.output_tokens,
     })),
@@ -94,11 +88,11 @@ export default function ModelsPanel({
 
   return (
     <div className="tss-grid">
-      <ShellCard>
-        <ShellCardHeader>
-          <ShellCardTitle>Cost by model</ShellCardTitle>
-        </ShellCardHeader>
-        <ShellCardContent>
+      <Card>
+        <CardHeader>
+          <CardTitle>Cost by model</CardTitle>
+        </CardHeader>
+        <CardContent>
           {data.models.length === 0 ? (
             <div className="tss-empty-mini">No session messages in this range.</div>
           ) : (
@@ -122,11 +116,11 @@ export default function ModelsPanel({
                     const cost = rowCost(row, prices);
                     const inputTokens =
                       row.actual.input_tokens +
-                      (row.tokenized?.input_tokens || 0) +
+                      row.tokenized.input_tokens +
                       row.estimated.input_tokens;
                     const outputTokens =
                       row.actual.output_tokens +
-                      (row.tokenized?.output_tokens || 0) +
+                      row.tokenized.output_tokens +
                       row.estimated.output_tokens;
                     return (
                       <tr key={`${row.model || "unknown"}-${index}`}>
@@ -164,43 +158,43 @@ export default function ModelsPanel({
               recorded no model id — their tokens are counted but never priced.
             </p>
           )}
-        </ShellCardContent>
-      </ShellCard>
+        </CardContent>
+      </Card>
 
       <div className="tss-card-grid">
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Tokens by day</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Tokens by day</CardTitle>
+          </CardHeader>
+          <CardContent>
             <DailyBars
               series={dailyTokens}
               emptyText="No timestamped messages — Cursor hook ingests carry no per-message timestamps, so daily series need transcripts from providers that do (e.g. Claude Code)."
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Estimated cost by day</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Estimated cost by day</CardTitle>
+          </CardHeader>
+          <CardContent>
             <DailyBars
               series={dailyCost}
               color="var(--ts-amber, #f7c76a)"
               valueLabel={(value) => fmtUsd(value)}
               emptyText="No dated cost data yet."
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
       </div>
 
       {data.turns.available && data.turns.by_model.length > 0 && (
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Claude Code accounting (actual)</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Claude Code accounting (actual)</CardTitle>
+          </CardHeader>
+          <CardContent>
             <div className="tss-table-scroll">
               <table className="tss-table">
                 <thead>
@@ -229,8 +223,8 @@ export default function ModelsPanel({
               Imported by <code>tokensave cost</code> from Claude Code
               transcripts, which record real usage data per turn.
             </p>
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
       )}
 
       <PricingSourceCard pricing={pricing} />

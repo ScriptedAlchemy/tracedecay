@@ -1,4 +1,5 @@
-import { fetchJSON } from "./sdk";
+import { fetchJSON } from "../../lib/sdk";
+import { qs } from "../../lib/qs";
 import type {
   GraphNeighborsResponse,
   GraphNodeResponse,
@@ -9,15 +10,6 @@ import type {
 } from "./types";
 
 const BASE = "/api/plugins/graph";
-
-function qs(params: Record<string, string | number | undefined>) {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== "") search.set(key, String(value));
-  }
-  const suffix = search.toString();
-  return suffix ? `?${suffix}` : "";
-}
 
 export const api = {
   overview: () => fetchJSON<GraphOverview>(`${BASE}/overview`),

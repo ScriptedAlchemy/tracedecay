@@ -4,19 +4,12 @@
  */
 
 import React, { useState } from "react";
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle, cn, timeAgo } from "./sdk";
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, cn, timeAgo } from "../../lib/sdk";
 import { BASIS_LABELS, cleanTitle, fmtTokens, fmtUsd } from "./logic";
 import type { CostBasis } from "./logic";
 import { rowCost, summarizeCosts } from "./pricing";
 import type { PriceTable } from "./pricing";
 import type { SessionRow, SessionsResponse } from "./types";
-
-const ShellCard = Card || "div";
-const ShellCardHeader = CardHeader || "div";
-const ShellCardTitle = CardTitle || "h3";
-const ShellCardContent = CardContent || "div";
-const ShellBadge = Badge || "span";
-const ShellButton = Button || "button";
 
 export function BasisBadge({
   basis,
@@ -58,11 +51,11 @@ function SessionDetails({ session, prices }: { session: SessionRow; prices: Pric
             const cost = rowCost(modelRow, prices);
             const inputTokens =
               modelRow.actual.input_tokens +
-              (modelRow.tokenized?.input_tokens || 0) +
+              modelRow.tokenized.input_tokens +
               modelRow.estimated.input_tokens;
             const outputTokens =
               modelRow.actual.output_tokens +
-              (modelRow.tokenized?.output_tokens || 0) +
+              modelRow.tokenized.output_tokens +
               modelRow.estimated.output_tokens;
             return (
               <tr key={`${modelRow.model || "unknown"}-${index}`}>
@@ -136,11 +129,11 @@ export default function SessionsPanel({
   const pageCount = Math.max(1, Math.ceil(data.total / pageSize));
 
   return (
-    <ShellCard>
-      <ShellCardHeader>
-        <ShellCardTitle>Session cost accounting</ShellCardTitle>
-      </ShellCardHeader>
-      <ShellCardContent>
+    <Card>
+      <CardHeader>
+        <CardTitle>Session cost accounting</CardTitle>
+      </CardHeader>
+      <CardContent>
         <div className="tss-table-scroll">
           <table className="tss-table">
             <thead>
@@ -162,7 +155,7 @@ export default function SessionsPanel({
                   (sum, row) =>
                     sum +
                     row.actual.input_tokens +
-                    (row.tokenized?.input_tokens || 0) +
+                    row.tokenized.input_tokens +
                     row.estimated.input_tokens,
                   0,
                 );
@@ -170,7 +163,7 @@ export default function SessionsPanel({
                   (sum, row) =>
                     sum +
                     row.actual.output_tokens +
-                    (row.tokenized?.output_tokens || 0) +
+                    row.tokenized.output_tokens +
                     row.estimated.output_tokens,
                   0,
                 );
@@ -185,7 +178,7 @@ export default function SessionsPanel({
                       <td className="tss-session-title">
                         <span className="tss-caret">{isOpen ? "▾" : "▸"}</span>
                         {cleanTitle(session.title)}
-                        {session.is_subagent && <ShellBadge>subagent</ShellBadge>}
+                        {session.is_subagent && <Badge>subagent</Badge>}
                         <span className="tss-session-meta">
                           {session.session_id.slice(0, 8)}
                           {when ? ` · ${timeAgo(when)}` : " · no timestamp"}
@@ -240,25 +233,25 @@ export default function SessionsPanel({
         </div>
 
         <div className="tss-pager">
-          <ShellButton
+          <Button
             size="sm"
             ghost
             disabled={page <= 0}
             onClick={() => onPage(page - 1)}
           >
             ← Prev
-          </ShellButton>
+          </Button>
           <span className="tss-pager-label">
             page {page + 1} / {pageCount} · {fmtTokens(data.total)} sessions
           </span>
-          <ShellButton
+          <Button
             size="sm"
             ghost
             disabled={page + 1 >= pageCount}
             onClick={() => onPage(page + 1)}
           >
             Next →
-          </ShellButton>
+          </Button>
         </div>
         <p className="tss-chart-hint">
           Token counts come in three quality tiers, best available per
@@ -271,7 +264,7 @@ export default function SessionsPanel({
           windows (resent history, tool payloads) are larger, so those costs
           are a lower bound.
         </p>
-      </ShellCardContent>
-    </ShellCard>
+      </CardContent>
+    </Card>
   );
 }

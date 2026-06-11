@@ -219,13 +219,13 @@ export function costUsd(price: ModelPrice, tokens: TokenCounts): number {
  * Token-aggregate row as served by the savings API (per session-model).
  * The three tiers never overlap: `actual` (usage records) + `tokenized`
  * (BPE-counted text) + `estimated` (chars/4 remainder) = all messages.
- * `tokenized` is optional for backward compatibility with older payloads.
+ * The server always emits all three blocks (zeroed when a tier is empty).
  */
 export interface ApiTokenRow {
   model: string | null;
   cost_basis: "actual" | "tokenized" | "estimated" | "mixed";
   actual: TokenCounts;
-  tokenized?: { input_tokens: number; output_tokens: number };
+  tokenized: { input_tokens: number; output_tokens: number };
   estimated: { input_tokens: number; output_tokens: number };
 }
 
@@ -254,14 +254,8 @@ export function rowCost(row: ApiTokenRow, table: PriceTable): RowCost {
     };
   }
   const actual = costUsd(resolved.price, row.actual);
-  const tokenized = costUsd(resolved.price, {
-    input_tokens: row.tokenized?.input_tokens || 0,
-    output_tokens: row.tokenized?.output_tokens || 0,
-  });
-  const estimated = costUsd(resolved.price, {
-    input_tokens: row.estimated.input_tokens,
-    output_tokens: row.estimated.output_tokens,
-  });
+  const tokenized = costUsd(resolved.price, row.tokenized);
+  const estimated = costUsd(resolved.price, row.estimated);
   return {
     usd: actual + tokenized + estimated,
     actual_usd: actual,

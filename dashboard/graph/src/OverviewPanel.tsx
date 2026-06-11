@@ -5,7 +5,8 @@
  */
 
 import React from "react";
-import { Badge, Card, CardContent, CardHeader, CardTitle } from "./sdk";
+import { Badge, Card, CardContent, CardHeader, CardTitle } from "../../lib/sdk";
+import { fmt } from "../../lib/format";
 import {
   colorForKind,
   KIND_FAMILY_COLORS,
@@ -13,16 +14,6 @@ import {
   kindFamily,
 } from "./types";
 import type { GraphNode, GraphOverview } from "./types";
-
-const ShellCard = Card || "div";
-const ShellCardHeader = CardHeader || "div";
-const ShellCardTitle = CardTitle || "h3";
-const ShellCardContent = CardContent || "div";
-const ShellBadge = Badge || "span";
-
-function fmt(n: number | undefined) {
-  return Number(n || 0).toLocaleString();
-}
 
 const LANGUAGE_COLORS: Record<string, string> = {
   rust: "#f7c76a",
@@ -126,9 +117,9 @@ export default function OverviewPanel({
   return (
     <div className="tsg-analytics">
       <div className="tsg-analytics-grid">
-        <ShellCard>
-          <ShellCardHeader><ShellCardTitle>Symbols by family</ShellCardTitle></ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader><CardTitle>Symbols by family</CardTitle></CardHeader>
+          <CardContent>
             <HBarChart
               rows={familyRows.map((row) => ({ label: row.label, count: row.count }))}
               colorFor={(label) => {
@@ -141,12 +132,12 @@ export default function OverviewPanel({
               }}
             />
             <p className="tsg-chart-hint">Click a family to open the canvas filtered to it.</p>
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader><ShellCardTitle>Files by language</ShellCardTitle></ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader><CardTitle>Files by language</CardTitle></CardHeader>
+          <CardContent>
             <HBarChart
               rows={overview.files_by_language.slice(0, 9).map((row) => ({
                 label: row.language,
@@ -155,12 +146,12 @@ export default function OverviewPanel({
               colorFor={(label) => LANGUAGE_COLORS[label] || "#6f9189"}
               onPick={onFilterLanguage}
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader><ShellCardTitle>Most connected symbols</ShellCardTitle></ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader><CardTitle>Most connected symbols</CardTitle></CardHeader>
+          <CardContent>
             <div className="tsg-hub-list">
               {overview.top_connected.map((row) => (
                 <button
@@ -176,12 +167,12 @@ export default function OverviewPanel({
                 </button>
               ))}
             </div>
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader><ShellCardTitle>Largest files</ShellCardTitle></ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader><CardTitle>Largest files</CardTitle></CardHeader>
+          <CardContent>
             <HBarChart
               rows={overview.largest_files.map((row) => {
                 const short = row.path.split("/").slice(-2).join("/");
@@ -189,13 +180,13 @@ export default function OverviewPanel({
               })}
               colorFor={() => "color-mix(in srgb, var(--ts-cyan, #75f4d2) 60%, transparent)"}
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
       </div>
 
       <div className="tsg-edge-kind-strip">
         {overview.edges_by_kind.map((row) => (
-          <ShellBadge key={row.kind}>{row.kind}: {fmt(row.count)}</ShellBadge>
+          <Badge key={row.kind}>{row.kind}: {fmt(row.count)}</Badge>
         ))}
       </div>
     </div>

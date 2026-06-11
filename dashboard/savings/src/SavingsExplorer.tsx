@@ -5,7 +5,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { cn } from "./sdk";
+import { cn } from "../../lib/sdk";
 import { api } from "./api";
 import { fmtTokens } from "./logic";
 import type { PriceTable } from "./pricing";
@@ -47,33 +47,66 @@ export default function SavingsExplorer() {
   const [models, setModels] = useState<ModelsResponse | null>(null);
   const [pricing, setPricing] = useState<PricingResponse | null>(null);
   const [error, setError] = useState<string>("");
+  // Bumped by the Retry button; every fetch effect below depends on it.
+  const [retryToken, setRetryToken] = useState(0);
 
   const prices: PriceTable = useMemo(() => pricing?.models || {}, [pricing]);
 
-  const load = useCallback(async () => {
+  const retry = useCallback(() => setRetryToken((token) => token + 1), []);
+
+  /**
+   * Runs `fetch()` inside an effect, dropping the response after unmount or
+   * a dependency change so stale results never overwrite newer ones.
+   */
+  function fetchIntoState<T>(
+    fetch: () => Promise<T>,
+    setState: (value: T) => void,
+  ): () => void {
+    let active = true;
     setError("");
-    try {
-      const [overviewData, ledgerData, sessionsData, modelsData, pricingData] =
-        await Promise.all([
-          api.overview(),
-          api.ledger({ range }),
-          api.sessions({ range, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
-          api.models({ range }),
-          api.pricing(),
-        ]);
-      setOverview(overviewData);
-      setLedger(ledgerData);
-      setSessions(sessionsData);
-      setModels(modelsData);
-      setPricing(pricingData);
-    } catch (err) {
-      setError(String(err));
-    }
-  }, [range, page]);
+    fetch().then(
+      (data) => {
+        if (active) setState(data);
+      },
+      (err) => {
+        if (active) setError(String(err));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }
+
+  // Each view fetches only what it renders. The overview (meta strip +
+  // savings stats) and the price table take no range/page params, so they
+  // load once; `sessions` is the only request that depends on the page, so
+  // paging the sessions table costs exactly one request.
+  useEffect(() => {
+    const cancelOverview = fetchIntoState(() => api.overview(), setOverview);
+    const cancelPricing = fetchIntoState(() => api.pricing(), setPricing);
+    return () => {
+      cancelOverview();
+      cancelPricing();
+    };
+  }, [retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (view !== "savings") return;
+    return fetchIntoState(() => api.ledger({ range }), setLedger);
+  }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (view !== "sessions") return;
+    return fetchIntoState(
+      () => api.sessions({ range, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
+      setSessions,
+    );
+  }, [view, range, page, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (view !== "models") return;
+    return fetchIntoState(() => api.models({ range }), setModels);
+  }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sessionStats = overview?.sessions;
 
@@ -138,7 +171,7 @@ export default function SavingsExplorer() {
       {error && (
         <div className="tss-error" role="alert">
           Failed to load savings data: {error}{" "}
-          <button className="tss-retry" onClick={load}>
+          <button className="tss-retry" onClick={retry}>
             Retry
           </button>
         </div>

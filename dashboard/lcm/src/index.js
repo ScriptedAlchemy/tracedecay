@@ -1807,8 +1807,7 @@
         h("span", null, "Arrow keys browse results"),
         h("span", null, "Enter opens detail"),
       ]),
-      // Which session store is being served (additive `storage_scope` field;
-      // older servers omit it and only the path renders).
+      // Which session store is being served (scope tag + database path).
       h("div", { className: "hermes-lcm-path" }, data ? [
         data.storage_scope === "project_local"
           ? h("span", { key: "scope", className: "hermes-lcm-tag hermes-lcm-tag-src" }, "Project store")

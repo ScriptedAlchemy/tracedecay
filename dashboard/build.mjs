@@ -54,8 +54,12 @@ async function buildShell() {
  * externalizing React onto the host SDK (Hermes or the standalone shell) via
  * the shims; everything else (@observablehq/plot, d3-force, lucide-react) is
  * bundled.
+ *
+ * Shims default to the shared `lib/` copies. holographic/ overrides with its
+ * own in-tree shims: that source mirrors the upstream Hermes plugin
+ * byte-for-byte (see build.from-hermes.mjs) and must stay self-contained.
  */
-async function buildPlugin(dir, bannerLabel) {
+async function buildPlugin(dir, bannerLabel, { shimDir = path.join(root, "lib") } = {}) {
   const srcDir = path.join(root, dir, "src");
   await esbuild.build({
     entryPoints: [path.join(srcDir, "entry.tsx")],
@@ -69,9 +73,9 @@ async function buildPlugin(dir, bannerLabel) {
     legalComments: "none",
     define: { "process.env.NODE_ENV": '"production"' },
     alias: {
-      react: path.join(srcDir, "react-shim.ts"),
-      "react/jsx-runtime": path.join(srcDir, "jsx-runtime.ts"),
-      "react/jsx-dev-runtime": path.join(srcDir, "jsx-runtime.ts"),
+      react: path.join(shimDir, "react-shim.ts"),
+      "react/jsx-runtime": path.join(shimDir, "jsx-runtime.ts"),
+      "react/jsx-dev-runtime": path.join(shimDir, "jsx-runtime.ts"),
     },
     banner: {
       js: `/* tokensave ${bannerLabel} dashboard plugin — bundled with esbuild. Do not edit; see src/. */`,
@@ -126,7 +130,9 @@ async function main() {
   await fs.mkdir(path.join(root, "shell/dist"), { recursive: true });
   await Promise.all([
     buildShell(),
-    buildPlugin("holographic", "holographic-memory"),
+    buildPlugin("holographic", "holographic-memory", {
+      shimDir: path.join(root, "holographic/src"),
+    }),
     buildPlugin("graph", "code graph"),
     buildPlugin("savings", "savings & cost"),
     copyLcm(),

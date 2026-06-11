@@ -85,7 +85,7 @@ export interface TokenizerInfo {
 export interface SessionModelRow extends ApiTokenRow {
   messages: number;
   usage_messages: number;
-  tokenized_messages?: number;
+  tokenized_messages: number;
   estimated_messages: number;
   tokenizer?: TokenizerInfo | null;
 }
@@ -99,7 +99,7 @@ export interface SessionRow {
   is_subagent: boolean;
   messages: number;
   usage_messages: number;
-  tokenized_messages?: number;
+  tokenized_messages: number;
   estimated_messages: number;
   cost_basis: CostBasis;
   models: SessionModelRow[];
@@ -118,7 +118,7 @@ export interface ModelAggRow extends ApiTokenRow {
   sessions: number;
   messages: number;
   usage_messages: number;
-  tokenized_messages?: number;
+  tokenized_messages: number;
   estimated_messages: number;
   tokenizer?: TokenizerInfo | null;
 }

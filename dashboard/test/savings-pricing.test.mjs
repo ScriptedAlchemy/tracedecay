@@ -132,13 +132,14 @@ test("rowCost splits actual vs estimated portions", () => {
     model: "gpt-5.5-high",
     cost_basis: "mixed",
     actual: { input_tokens: 1_000_000, output_tokens: 0 },
+    tokenized: { input_tokens: 0, output_tokens: 0 },
     estimated: { input_tokens: 0, output_tokens: 1_000_000 },
   };
   const cost = pricing.rowCost(row, TABLE);
   assert.equal(cost.resolved.slug, "openai/gpt-5.5");
   assert.ok(Math.abs(cost.actual_usd - 5) < 1e-9);
   assert.ok(Math.abs(cost.estimated_usd - 30) < 1e-9);
-  // No tokenized block in the payload → tier contributes nothing.
+  // Zeroed tokenized block (the server always emits it) → tier contributes nothing.
   assert.equal(cost.tokenized_usd, 0);
   assert.ok(Math.abs(cost.usd - 35) < 1e-9);
 });
@@ -175,6 +176,7 @@ test("rowCost: unpriced model yields null cost", () => {
     model: "composer-2.5-fast",
     cost_basis: "estimated",
     actual: { input_tokens: 0, output_tokens: 0 },
+    tokenized: { input_tokens: 0, output_tokens: 0 },
     estimated: { input_tokens: 500, output_tokens: 500 },
   };
   const cost = pricing.rowCost(row, TABLE);
@@ -188,18 +190,21 @@ test("summarizeCosts aggregates priced rows and tracks unpriced models", () => {
       model: "claude-fable-5-thinking-high",
       cost_basis: "estimated",
       actual: { input_tokens: 0, output_tokens: 0 },
+      tokenized: { input_tokens: 0, output_tokens: 0 },
       estimated: { input_tokens: 1_000_000, output_tokens: 0 },
     },
     {
       model: "composer-2.5-fast",
       cost_basis: "estimated",
       actual: { input_tokens: 0, output_tokens: 0 },
+      tokenized: { input_tokens: 0, output_tokens: 0 },
       estimated: { input_tokens: 999, output_tokens: 999 },
     },
     {
       model: null,
       cost_basis: "estimated",
       actual: { input_tokens: 0, output_tokens: 0 },
+      tokenized: { input_tokens: 0, output_tokens: 0 },
       estimated: { input_tokens: 10, output_tokens: 10 },
     },
   ];

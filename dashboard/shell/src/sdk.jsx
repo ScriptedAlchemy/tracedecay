@@ -10,7 +10,7 @@
  *   - React + hooks (the bundles externalize React onto the SDK)
  *   - fetchJSON (plain same-origin fetch; the standalone server has no auth)
  *   - components: Card/CardHeader/CardTitle/CardContent/Badge/Button/Input/...
- *   - utils: cn / timeAgo / isoTimeAgo
+ *   - utils: cn / timeAgo / isoTimeAgo / makeSequence
  *   - useI18n (identity translations)
  */
 
@@ -23,6 +23,9 @@ import React, {
   useContext,
   createContext,
 } from "react";
+import { makeSequence } from "../../lib/sequence";
+
+export { makeSequence };
 
 export async function fetchJSON(url, init) {
   const res = await fetch(url, init);
@@ -46,23 +49,24 @@ export function cn(...args) {
     .join(" ");
 }
 
-export function timeAgo(ts) {
-  const delta = Date.now() / 1000 - Number(ts);
-  if (Number.isNaN(delta)) return "unknown";
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  if (delta < 172800) return "yesterday";
-  return `${Math.floor(delta / 86400)}d ago`;
+function relativeTime(deltaSeconds) {
+  if (Number.isNaN(deltaSeconds)) return "unknown";
+  if (deltaSeconds < 60) return "just now";
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
+  if (deltaSeconds < 172800) return "yesterday";
+  return `${Math.floor(deltaSeconds / 86400)}d ago`;
 }
 
+/** Relative time from a unix-seconds timestamp. */
+export function timeAgo(ts) {
+  return relativeTime(Date.now() / 1000 - Number(ts));
+}
+
+/** Relative time from an ISO string; future timestamps read "unknown". */
 export function isoTimeAgo(iso) {
   const delta = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (delta < 0 || Number.isNaN(delta)) return "unknown";
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  return delta < 0 ? "unknown" : relativeTime(delta);
 }
 
 /* Minimal stand-ins for the Hermes design-system components the plugin
@@ -198,7 +202,7 @@ export function buildSDK() {
       TabsTrigger,
       PluginSlot,
     },
-    utils: { cn, timeAgo, isoTimeAgo },
+    utils: { cn, timeAgo, isoTimeAgo, makeSequence },
     useI18n,
   };
 }

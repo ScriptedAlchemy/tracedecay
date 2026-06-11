@@ -110,9 +110,21 @@ test("timeAgo and isoTimeAgo format recent and stale timestamps", () => {
     assert.equal(sdk.timeAgo(1_700_000_000), "just now");
     assert.equal(sdk.timeAgo(1_699_999_640), "6m ago");
     assert.equal(sdk.timeAgo(1_699_991_000), "2h ago");
+    // ~1.5 days ago: both formatters share the same ladder, including the
+    // "yesterday" bucket.
+    assert.equal(sdk.timeAgo(1_700_000_000 - 130_000), "yesterday");
+    assert.equal(sdk.timeAgo(1_700_000_000 - 200_000), "2d ago");
     assert.equal(sdk.isoTimeAgo("2023-11-14T22:13:20.000Z"), "just now");
+    assert.equal(sdk.isoTimeAgo("2023-11-13T10:00:00.000Z"), "yesterday");
     assert.equal(sdk.isoTimeAgo("2099-01-01T00:00:00.000Z"), "unknown");
+    assert.equal(sdk.isoTimeAgo("not a date"), "unknown");
   } finally {
     Date.now = realNow;
   }
+});
+
+test("buildSDK exposes makeSequence on utils", () => {
+  const built = sdk.buildSDK();
+  assert.equal(typeof built.utils.makeSequence, "function");
+  assert.equal(built.utils.makeSequence, sdk.makeSequence);
 });

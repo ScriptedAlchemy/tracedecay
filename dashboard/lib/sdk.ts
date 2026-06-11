@@ -1,5 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * Host-SDK accessor shared by the bundled plugin frontends (graph, savings).
+ *
+ * Each plugin bundle externalizes React and the design-system components onto
+ * `window.__HERMES_PLUGIN_SDK__` (provided by the Hermes dashboard or the
+ * standalone shell — see shell/src/sdk.jsx). esbuild inlines this module into
+ * every bundle, so the bundles stay independent at runtime.
+ */
+
 const SDK: any =
   (typeof window !== "undefined" && (window as any).__HERMES_PLUGIN_SDK__) || {};
 

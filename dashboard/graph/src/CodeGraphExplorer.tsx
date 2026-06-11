@@ -3,7 +3,9 @@ import { api } from "./api";
 import { canvasEmptyMessage, DEFAULT_VIEW_LIMITS } from "./defaultView";
 import GraphCanvas from "./GraphCanvas";
 import OverviewPanel from "./OverviewPanel";
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, cn } from "./sdk";
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, cn } from "../../lib/sdk";
+import { fmt, short } from "../../lib/format";
+import { makeSequence } from "../../lib/sequence";
 import {
   colorForKind,
   KIND_FAMILY_COLORS,
@@ -19,25 +21,8 @@ import type {
   GraphPathResponse,
 } from "./types";
 
-const ShellCard = Card || "div";
-const ShellCardHeader = CardHeader || "div";
-const ShellCardTitle = CardTitle || "h3";
-const ShellCardContent = CardContent || "div";
-const ShellBadge = Badge || "span";
-const ShellButton = Button || "button";
-const ShellInput = Input || "input";
-
 /** Soft cap on accumulated canvas nodes; expansion pauses above this. */
 const CANVAS_NODE_CAP = 600;
-
-function fmt(n: number | undefined) {
-  return Number(n || 0).toLocaleString();
-}
-
-function short(text: string | null | undefined, max = 72) {
-  const raw = String(text || "");
-  return raw.length > max ? `${raw.slice(0, max - 1)}…` : raw;
-}
 
 function edgeKey(edge: GraphEdge) {
   return `${edge.source}>${edge.target}:${edge.kind}`;
@@ -85,15 +70,15 @@ function DetailPanel({
 }) {
   if (!node) {
     return (
-      <ShellCard className="tsg-panel">
-        <ShellCardHeader><ShellCardTitle>Inspector</ShellCardTitle></ShellCardHeader>
-        <ShellCardContent>
+      <Card className="tsg-panel">
+        <CardHeader><CardTitle>Inspector</CardTitle></CardHeader>
+        <CardContent>
           <div className="tsg-empty">
             Click a node to inspect it. Double-click (or use the +N badge counts as a guide) to
             expand its neighbors into the canvas.
           </div>
-        </ShellCardContent>
-      </ShellCard>
+        </CardContent>
+      </Card>
     );
   }
   const renderList = (title: string, rows: GraphNode[]) => (
@@ -112,16 +97,16 @@ function DetailPanel({
     </section>
   );
   return (
-    <ShellCard className="tsg-panel">
-      <ShellCardHeader>
-        <ShellCardTitle>{node.name}</ShellCardTitle>
+    <Card className="tsg-panel">
+      <CardHeader>
+        <CardTitle>{node.name}</CardTitle>
         <div className="tsg-panel-badges">
-          <ShellBadge>{node.kind}</ShellBadge>
-          {node.visibility && <ShellBadge>{node.visibility}</ShellBadge>}
-          <ShellBadge>{fmt(node.degree)} edges</ShellBadge>
+          <Badge>{node.kind}</Badge>
+          {node.visibility && <Badge>{node.visibility}</Badge>}
+          <Badge>{fmt(node.degree)} edges</Badge>
         </div>
-      </ShellCardHeader>
-      <ShellCardContent>
+      </CardHeader>
+      <CardContent>
         <div className="tsg-detail">
           <code>{node.qualified_name}</code>
           <span>{node.file_path}:{node.span?.start_line || 0}-{node.span?.end_line || 0}</span>
@@ -129,18 +114,18 @@ function DetailPanel({
           {node.doc && <p>{short(node.doc, 360)}</p>}
         </div>
         <div className="tsg-panel-actions">
-          <ShellButton size="sm" onClick={onShowCallers}>Show callers</ShellButton>
-          <ShellButton size="sm" onClick={onShowCallees}>Show callees</ShellButton>
+          <Button size="sm" onClick={onShowCallers}>Show callers</Button>
+          <Button size="sm" onClick={onShowCallees}>Show callees</Button>
         </div>
         {renderList("Callers", neighbors?.callers || [])}
         {renderList("Callees", neighbors?.callees || [])}
         <section className="tsg-edge-kinds">
           {(neighbors?.edges_by_kind || []).map((row) => (
-            <ShellBadge key={row.kind}>{row.kind}: {fmt(row.count)}</ShellBadge>
+            <Badge key={row.kind}>{row.kind}: {fmt(row.count)}</Badge>
           ))}
         </section>
-      </ShellCardContent>
-    </ShellCard>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -176,14 +161,14 @@ export default function CodeGraphExplorer() {
   const [pathResult, setPathResult] = useState<GraphPathResponse | null>(null);
 
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchSeq = useRef(0);
+  const searchSeq = useRef(makeSequence()).current;
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
 
   // True while the canvas shows the untouched seedless default view; the
   // first search-to-focus replaces it instead of merging into it.
   const defaultViewRef = useRef(false);
   // Invalidates an in-flight default load once the user takes over the canvas.
-  const defaultSeq = useRef(0);
+  const defaultSeq = useRef(makeSequence()).current;
 
   useEffect(() => {
     api.overview().then(setOverview).catch((err) => setError(String(err)));
@@ -204,21 +189,21 @@ export default function CodeGraphExplorer() {
 
   /** Loads the seedless default slice (top-connected hubs + their edges). */
   const loadDefaultView = useCallback(async () => {
-    const seq = ++defaultSeq.current;
+    const ticket = defaultSeq.next();
     setLoading(true);
     setError("");
     try {
       const payload = await api.subgraph(DEFAULT_VIEW_LIMITS);
-      if (seq !== defaultSeq.current) return;
+      if (!defaultSeq.isCurrent(ticket)) return;
       mergeGraph(payload.nodes, payload.edges);
       defaultViewRef.current = true;
       setFitSignal((prev) => prev + 1);
     } catch (err) {
-      if (seq === defaultSeq.current) setError(String(err));
+      if (defaultSeq.isCurrent(ticket)) setError(String(err));
     } finally {
-      if (seq === defaultSeq.current) setLoading(false);
+      if (defaultSeq.isCurrent(ticket)) setLoading(false);
     }
-  }, [mergeGraph]);
+  }, [defaultSeq, mergeGraph]);
 
   useEffect(() => {
     void loadDefaultView();
@@ -263,21 +248,21 @@ export default function CodeGraphExplorer() {
   // Sequenced like the search dropdown: rapid clicks can resolve out of
   // order, and a stale response must not repoint the Inspector (and the
   // "Show callers/callees" actions) at the wrong node.
-  const inspectSeq = useRef(0);
+  const inspectSeq = useRef(makeSequence()).current;
   const inspect = useCallback(async (id: string) => {
-    const seq = ++inspectSeq.current;
+    const ticket = inspectSeq.next();
     try {
       const [detail, nextNeighbors] = await Promise.all([
         api.node(id),
         api.neighbors(id, { limit: 60 }),
       ]);
-      if (seq !== inspectSeq.current) return;
+      if (!inspectSeq.isCurrent(ticket)) return;
       setSelected(detail.node);
       setNeighbors(nextNeighbors);
     } catch (err) {
-      if (seq === inspectSeq.current) setError(String(err));
+      if (inspectSeq.isCurrent(ticket)) setError(String(err));
     }
-  }, []);
+  }, [inspectSeq]);
 
   const runPath = useCallback(
     async (from: GraphNode, to: GraphNode) => {
@@ -330,7 +315,7 @@ export default function CodeGraphExplorer() {
       // custom exploration, focusing merges into it as before.
       if (defaultViewRef.current) {
         defaultViewRef.current = false;
-        defaultSeq.current++;
+        defaultSeq.invalidate();
         setGraphNodes(new Map());
         setGraphEdges(new Map());
         setPathResult(null);
@@ -344,7 +329,7 @@ export default function CodeGraphExplorer() {
       void expandNode(node.id, { focus: true });
       void inspect(node.id);
     },
-    [expandNode, inspect],
+    [defaultSeq, expandNode, inspect],
   );
 
   /** Keyboard support for the search dropdown: Enter opens the top hit, arrows
@@ -389,15 +374,15 @@ export default function CodeGraphExplorer() {
     setSearchOpen(true);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
-      const seq = ++searchSeq.current;
+      const ticket = searchSeq.next();
       api.search({ q: value, limit: 20 })
         .then((payload) => {
           // Drop stale responses that resolve after a newer query.
-          if (seq === searchSeq.current) setResults(payload.results);
+          if (searchSeq.isCurrent(ticket)) setResults(payload.results);
         })
         .catch((err) => setError(String(err)));
     }, 180);
-  }, []);
+  }, [searchSeq]);
 
   // Visible (filtered) slice of the accumulated canvas graph.
   const visible = useMemo(() => {
@@ -483,7 +468,7 @@ export default function CodeGraphExplorer() {
           </nav>
         </div>
         <div className="tsg-searchbox" ref={searchBoxRef} onKeyDown={onSearchKeyDown}>
-          <ShellInput
+          <Input
             value={query}
             onChange={(event: React.ChangeEvent<HTMLInputElement>) => onQueryChange(event.target.value)}
             onFocus={() => query && setSearchOpen(true)}
@@ -548,7 +533,7 @@ export default function CodeGraphExplorer() {
               )}
             </div>
             <div className="tsg-control-buttons">
-              <ShellButton
+              <Button
                 size="sm"
                 variant={pathMode ? undefined : "outline"}
                 onClick={() => {
@@ -570,16 +555,16 @@ export default function CodeGraphExplorer() {
                         : pathResult?.found
                           ? `Path: ${short(pathFrom.name, 14)} → ${short(pathTo.name, 14)} · ${Math.max(0, pathResult.path.length - 1)} hop${pathResult.path.length === 2 ? "" : "s"}`
                           : `Path: ${short(pathFrom.name, 14)} → ${short(pathTo.name, 14)} · none`}
-              </ShellButton>
-              <ShellButton
+              </Button>
+              <Button
                 size="sm"
                 variant="outline"
                 onClick={() => setFitSignal((prev) => prev + 1)}
                 title="Zoom to fit every loaded node"
               >
                 Fit
-              </ShellButton>
-              <ShellButton size="sm" variant="outline" onClick={clearCanvas}>Clear</ShellButton>
+              </Button>
+              <Button size="sm" variant="outline" onClick={clearCanvas}>Clear</Button>
             </div>
           </div>
 

@@ -4,18 +4,12 @@
  */
 
 import React from "react";
-import { Badge, Card, CardContent, CardHeader, CardTitle } from "./sdk";
+import { Badge, Card, CardContent, CardHeader, CardTitle } from "../../lib/sdk";
 import { fillDailySeries, fmtTokens, fmtUsd, projectLabel } from "./logic";
 import { savedTokensUsd } from "./pricing";
 import type { PriceTable } from "./pricing";
 import { DailyBars, HBarChart } from "./charts";
 import type { LedgerResponse, SavingsOverview } from "./types";
-
-const ShellCard = Card || "div";
-const ShellCardHeader = CardHeader || "div";
-const ShellCardTitle = CardTitle || "h3";
-const ShellCardContent = CardContent || "div";
-const ShellBadge = Badge || "span";
 
 function StatCard({
   label,
@@ -137,23 +131,23 @@ export default function SavingsOverviewPanel({
       )}
 
       <div className="tss-card-grid">
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Savings by day</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Savings by day</CardTitle>
+          </CardHeader>
+          <CardContent>
             <DailyBars
               series={series}
               emptyText="No ledger events to chart yet."
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Savings by tool</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Savings by tool</CardTitle>
+          </CardHeader>
+          <CardContent>
             <HBarChart
               rows={(ledger?.by_tool || []).slice(0, 12).map((row) => ({
                 label: row.tool,
@@ -162,14 +156,14 @@ export default function SavingsOverviewPanel({
               }))}
               emptyText="No per-tool ledger entries yet."
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Savings by project (ledger)</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Savings by project (ledger)</CardTitle>
+          </CardHeader>
+          <CardContent>
             <HBarChart
               rows={(ledger?.by_project || []).slice(0, 12).map((row) => ({
                 label: projectLabel(row.project),
@@ -178,14 +172,14 @@ export default function SavingsOverviewPanel({
               color="var(--ts-blue, #7aa7ff)"
               emptyText="No per-project ledger entries yet."
             />
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
 
-        <ShellCard>
-          <ShellCardHeader>
-            <ShellCardTitle>Lifetime counters by project</ShellCardTitle>
-          </ShellCardHeader>
-          <ShellCardContent>
+        <Card>
+          <CardHeader>
+            <CardTitle>Lifetime counters by project</CardTitle>
+          </CardHeader>
+          <CardContent>
             <HBarChart
               rows={(lifetime?.projects || []).slice(0, 12).map((row) => ({
                 label: projectLabel(row.path),
@@ -198,19 +192,19 @@ export default function SavingsOverviewPanel({
               Running totals kept since each project was initialized (the
               number <code>tokensave gain</code> reports as lifetime savings).
             </p>
-          </ShellCardContent>
-        </ShellCard>
+          </CardContent>
+        </Card>
       </div>
 
       <div className="tss-meta-strip">
-        <ShellBadge>ledger db: {savings.db}</ShellBadge>
-        <ShellBadge>
+        <Badge>ledger db: {savings.db}</Badge>
+        <Badge>
           ledger calls (all time): {fmtTokens(savings.ledger?.all_time.calls)}
-        </ShellBadge>
+        </Badge>
         {recording && (
-          <ShellBadge>
+          <Badge>
             recording: {recording.enabled ? "on" : "off"} ({recording.mode})
-          </ShellBadge>
+          </Badge>
         )}
       </div>
     </div>
