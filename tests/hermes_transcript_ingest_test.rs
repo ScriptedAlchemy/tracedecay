@@ -27,11 +27,13 @@ fn setup(tmp: &TempDir) -> (PathBuf, PathBuf) {
 async fn write_hermes_profile(hermes_home: &Path, profile: &str, pinned_project: &Path) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
+    // The pin is JSON-encoded exactly as `tokensave install --agent hermes`
+    // writes it, so Windows backslashes survive the double-quoted YAML scalar.
+    let pin = serde_json::to_string(pinned_project.to_string_lossy().as_ref()).unwrap();
     std::fs::write(
         profile_dir.join("config.yaml"),
         format!(
-            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n  tokensave:\n    project_root: \"{}\"\n",
-            pinned_project.to_string_lossy()
+            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n  tokensave:\n    project_root: {pin}\n",
         ),
     )
     .unwrap();
