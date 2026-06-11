@@ -239,7 +239,9 @@ async fn codex_rollout_ingest_is_incremental() {
 async fn codex_archived_rollout_is_ingested() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let dir = home.join(".codex/archived_sessions");
+    // Native joins keep the expected path separator-identical to the stored
+    // transcript_path on Windows.
+    let dir = home.join(".codex").join("archived_sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-00-archived-sess.jsonl");
     let contents = format!(
