@@ -226,6 +226,24 @@ async fn claude_transcript_for_other_project_is_skipped() {
     );
 }
 
+/// The real machine has `~/.claude` but no `projects/` dir (no Claude Code
+/// sessions); the scan must be a silent no-op, not an error.
+#[tokio::test]
+async fn claude_missing_projects_dir_is_silent_noop() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    // `~/.claude` exists but holds no `projects/` subdir, like a machine
+    // where Claude Code never ran (only backups or settings live there).
+    std::fs::create_dir_all(home.join(".claude/backups")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 0);
+    assert_eq!(stats.messages_upserted, 0);
+}
+
 #[tokio::test]
 async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     let tmp = TempDir::new().unwrap();

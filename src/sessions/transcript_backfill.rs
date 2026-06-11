@@ -30,6 +30,7 @@ use std::path::Path;
 use libsql::{params, Connection};
 use serde_json::Value;
 
+use crate::sessions::codex::{merge_usage_counters, CodexTurnUsage};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::source::usage_counters_from;
 
@@ -285,9 +286,10 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
 
     let mut carry = TimestampCarry::new(mtime);
     let mut facts: HashMap<i64, LineFacts> = HashMap::new();
-    // For Codex, a `token_count` event reports on the `agent_message` line it
-    // follows; remember that line's offset so the usage lands on the message.
+    // For Codex, a turn's `token_count` events are summed and flushed onto the
+    // turn's `agent_message` line at turn boundaries, mirroring live ingest.
     let mut last_assistant_offset: Option<i64> = None;
+    let mut codex_turn_usage = CodexTurnUsage::default();
     let mut offset = 0i64;
     let mut line = String::new();
     loop {
@@ -315,19 +317,18 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
                     usage: derive_usage(provider, &value),
                 };
                 if provider == "codex" {
-                    if let Some(usage) = crate::sessions::codex::token_count_usage(&value) {
-                        if let Some(assistant_offset) = last_assistant_offset.take() {
-                            let entry = facts.entry(assistant_offset).or_default();
-                            if entry.usage.is_none() {
-                                entry.usage = Some(usage);
-                            }
-                        }
+                    if codex_turn_usage.observe(&value) {
                         continue;
                     }
-                    if value.pointer("/payload/type").and_then(Value::as_str)
-                        == Some("agent_message")
-                    {
-                        last_assistant_offset = Some(line_offset);
+                    match value.pointer("/payload/type").and_then(Value::as_str) {
+                        // A new user prompt closes the previous turn.
+                        Some("user_message") => flush_codex_turn_usage(
+                            &mut facts,
+                            last_assistant_offset,
+                            &mut codex_turn_usage,
+                        ),
+                        Some("agent_message") => last_assistant_offset = Some(line_offset),
+                        _ => {}
                     }
                     line_facts.usage = None;
                 }
@@ -335,7 +336,31 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
             }
         }
     }
+    if provider == "codex" {
+        // The final turn's trailing token_count(s) follow its agent_message.
+        flush_codex_turn_usage(&mut facts, last_assistant_offset, &mut codex_turn_usage);
+    }
     Some(facts)
+}
+
+/// Attach a finished Codex turn's summed usage to its assistant line's facts,
+/// merging additively when several flushes land on the same line.
+fn flush_codex_turn_usage(
+    facts: &mut HashMap<i64, LineFacts>,
+    assistant_offset: Option<i64>,
+    turn_usage: &mut CodexTurnUsage,
+) {
+    let Some(usage) = turn_usage.take() else {
+        return;
+    };
+    let Some(offset) = assistant_offset else {
+        return;
+    };
+    let entry = facts.entry(offset).or_default();
+    match entry.usage.as_mut() {
+        Some(existing) => merge_usage_counters(existing, &usage),
+        None => entry.usage = Some(usage),
+    }
 }
 
 /// Per-provider timestamp derivation, mirroring each source's live ingest.
