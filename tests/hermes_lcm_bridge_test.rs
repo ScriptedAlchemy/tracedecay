@@ -4070,7 +4070,9 @@ assert explicit.project_root == "/explicit/root", explicit.project_root
     check
         .arg(&script)
         .arg(&plugin_dir)
+        // expanduser reads HOME on POSIX and USERPROFILE on Windows.
         .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .env_remove("HERMES_HOME");
     // Reading the config-block pin requires a yaml module.
     if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
