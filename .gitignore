@@ -4,6 +4,7 @@
 .tokensave
 .mcp.json
 .claude/
+.cursor/
 docs/superpowers
 /local-only
 .worktrees
