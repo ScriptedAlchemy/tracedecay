@@ -150,7 +150,7 @@ pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<Too
     let action = required_str(&args, "action")?;
     let out = match action {
         "add" => {
-            let fact = cg
+            let outcome = cg
                 .add_fact(AddFactRequest {
                     content: required_str(&args, "content")?.to_string(),
                     category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
@@ -164,7 +164,18 @@ pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<Too
                     metadata: metadata_with_tags(&args),
                 })
                 .await?;
-            json!({ "action": action, "fact": fact, "count": 1 })
+            // Additive write-time diff report fields, so writers SEE
+            // near-duplicates, possible conflicts, and secret rejections.
+            let count = usize::from(outcome.fact.is_some());
+            json!({
+                "action": action,
+                "fact": outcome.fact,
+                "count": count,
+                "diff": outcome.diff.diff.as_str(),
+                "closest_fact_id": outcome.diff.closest_fact_id,
+                "similarity": outcome.diff.similarity,
+                "reason": outcome.diff.reason,
+            })
         }
         "search" => {
             let facts = cg

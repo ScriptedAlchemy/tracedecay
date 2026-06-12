@@ -403,7 +403,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
     assert!(table_exists(&conn, "nodes").await);
     assert!(table_exists(&conn, "edges").await);
     assert!(table_exists(&conn, "files").await);
@@ -434,7 +434,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 }
 
 /// migrate returns false when already at the latest version.
@@ -452,7 +452,7 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -471,7 +471,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -512,7 +512,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -548,7 +548,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -578,7 +578,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -606,7 +606,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -736,7 +736,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    assert_eq!(get_user_version(db.conn()).await, 13);
+    assert_eq!(get_user_version(db.conn()).await, 14);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -791,7 +791,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 13);
+    assert_eq!(get_user_version(db.conn()).await, 14);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -942,7 +942,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     let mut rows = conn
         .query(
@@ -1002,11 +1002,13 @@ async fn test_v11_create_schema_has_holographic_memory_schema() {
             "tags",
             "trust_score",
             "retrieval_count",
+            "access_count",
             "helpful_count",
             "unhelpful_count",
             "created_at",
             "updated_at",
             "last_retrieved_at",
+            "last_recalled_at",
             "last_feedback_at",
             "source",
             "metadata",
@@ -1112,7 +1114,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -1133,7 +1135,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
     let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -1564,7 +1566,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
-    assert_eq!(get_user_version(&conn).await, 13);
+    assert_eq!(get_user_version(&conn).await, 14);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in [
@@ -1580,6 +1582,67 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         );
     }
     // The data row survives the column drops.
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
+        1
+    );
+}
+
+/// v14 adds the access-tracking columns (`access_count`, `last_recalled_at`)
+/// and the `memory_oplog` table to databases stuck at the v13 shape, and is
+/// idempotent for databases that already carry both (fresh schema, or a
+/// re-run after a partial upgrade).
+#[tokio::test]
+async fn test_v14_adds_access_tracking_and_oplog() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn).await.unwrap();
+
+    // Rewind to the v13 shape: no access columns, no oplog table.
+    conn.execute_batch(
+        "ALTER TABLE memory_facts DROP COLUMN access_count;
+         ALTER TABLE memory_facts DROP COLUMN last_recalled_at;
+         DROP TABLE memory_oplog;
+         DROP INDEX IF EXISTS idx_memory_oplog_ts;",
+    )
+    .await
+    .expect("failed to rewind to the v13 shape");
+    conn.execute(
+        "INSERT INTO memory_facts (content, category) VALUES ('Pre-v14 fact', 'general')",
+        (),
+    )
+    .await
+    .expect("failed to insert fixture fact");
+    set_user_version(&conn, 13).await;
+
+    let migrated = migrate(&conn).await.expect("v14 must apply cleanly");
+    assert!(migrated, "expected migrate() to run the v14 additions");
+    assert_eq!(get_user_version(&conn).await, 14);
+
+    let columns = column_names(&conn, "memory_facts").await;
+    for col in ["access_count", "last_recalled_at"] {
+        assert!(
+            columns.iter().any(|c| c == col),
+            "v14 must add `{col}`; present: {columns:?}"
+        );
+    }
+    // Pre-existing rows pick up the defaults.
+    assert_eq!(
+        scalar_i64(&conn, "SELECT access_count FROM memory_facts LIMIT 1").await,
+        0
+    );
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_oplog").await,
+        0
+    );
+
+    // Idempotence: re-running v14 against the already-upgraded shape must
+    // not fail or duplicate anything.
+    set_user_version(&conn, 13).await;
+    let migrated_again = migrate(&conn)
+        .await
+        .expect("v14 must be idempotent on an already-upgraded schema");
+    assert!(migrated_again);
+    assert_eq!(get_user_version(&conn).await, 14);
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
         1

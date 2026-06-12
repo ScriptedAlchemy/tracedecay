@@ -1,18 +1,24 @@
 //! Persistence layer for memory facts, entities, vectors, and feedback.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use libsql::{params, Connection};
 
+use super::diff::{
+    classify_add_diff, combined_similarity, normalized_equivalent, NEAR_DUPLICATE_THRESHOLD,
+};
 use super::encoding::HolographicEncoder;
 use super::entities::{extract_entities, normalize_entity};
+use super::hygiene::detect_secret_like;
+use super::similarity::content_tokens;
 use super::trust::{apply_feedback, clamp_trust, DEFAULT_MIN_TRUST};
 use super::types::{
-    AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, FeedbackResult, MemoryCategory,
-    UpdateFactRequest,
+    AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, FactRecord, FeedbackAction,
+    FeedbackRequest, FeedbackResult, MemoryCategory, UpdateFactRequest,
 };
 use crate::errors::{Result, TokenSaveError};
+use crate::sync::content_hash;
 use crate::tokensave::current_timestamp;
 
 const DEFAULT_LIMIT: usize = 50;
@@ -65,7 +71,7 @@ impl<'a> MemoryStore<'a> {
         &self,
         request: AddFactRequest,
         default_trust: f64,
-    ) -> Result<FactRecord> {
+    ) -> Result<AddFactOutcome> {
         self.with_immediate_tx("add_fact", self.add_fact_inner(request, default_trust))
             .await
     }
@@ -74,21 +80,82 @@ impl<'a> MemoryStore<'a> {
         &self,
         request: AddFactRequest,
         default_trust: f64,
-    ) -> Result<FactRecord> {
+    ) -> Result<AddFactOutcome> {
         let content = request.content.trim().to_string();
         if content.is_empty() {
             return Err(db_message("add_fact", "fact content cannot be empty"));
+        }
+
+        // Write-time hygiene gate: conservative, rule-based secret detection.
+        // Secret-like content is REJECTED (never stored); only a content hash
+        // is recorded in the oplog.
+        if let Some(reason) = detect_secret_like(&content) {
+            self.log_oplog(
+                "reject_secret_like",
+                None,
+                &serde_json::json!({ "content_hash": content_hash(&content), "reason": reason }),
+            )
+            .await?;
+            return Ok(AddFactOutcome {
+                fact: None,
+                diff: AddFactDiff {
+                    diff: AddFactDiffKind::RejectedSecretLike,
+                    closest_fact_id: None,
+                    similarity: None,
+                    reason: Some(format!("content matched secret-likeness rule: {reason}")),
+                },
+            });
         }
 
         let now = current_timestamp();
         let entities = merge_entities(&content, &request.entities);
         let tags_json = to_json_string(&request.tags, "add_fact")?;
         let metadata_json = to_json_string(&request.metadata, "add_fact")?;
-        let vector = self.encode_vector(&content, &entities, "add_fact")?;
+        let phase_vector = self.encoder.encode_fact(&content, &entities);
+        let vector = serialize_vector(&phase_vector, "add_fact")?;
         let source = request
             .source
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| MEMORY_SOURCE_DEFAULT.to_string());
+
+        // Exact duplicate (content UNIQUE) and FTS near-duplicate candidates
+        // are evaluated BEFORE the insert so a content-normalized equivalent
+        // can conservatively skip the insert entirely.
+        let pre_existing = self.get_fact_by_content(&content).await?;
+        let diff = if let Some(existing) = &pre_existing {
+            AddFactDiff {
+                diff: AddFactDiffKind::NearDuplicate,
+                closest_fact_id: Some(existing.fact_id),
+                similarity: Some(1.0),
+                reason: Some(format!(
+                    "exact content match with fact #{}; merged entities instead of inserting",
+                    existing.fact_id
+                )),
+            }
+        } else {
+            let diff = self.near_duplicate_diff(&content, &phase_vector).await?;
+            // A >0.9 near-duplicate may skip the insert ONLY when the content
+            // is normalized-equivalent (case/whitespace) to the closest fact.
+            // Anything weaker still inserts and merely reports.
+            if diff.diff == AddFactDiffKind::NearDuplicate {
+                if let Some(closest_id) = diff.closest_fact_id {
+                    if let Some(closest) = self.get_fact(closest_id).await? {
+                        if normalized_equivalent(&content, &closest.content) {
+                            return Ok(AddFactOutcome {
+                                fact: Some(closest),
+                                diff: AddFactDiff {
+                                    reason: Some(format!(
+                                        "content-normalized equivalent of fact #{closest_id}; insert skipped"
+                                    )),
+                                    ..diff
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+            diff
+        };
 
         self.conn
             .execute(
@@ -104,7 +171,7 @@ impl<'a> MemoryStore<'a> {
                     clamp_trust(request.trust.unwrap_or(default_trust)),
                     now,
                     now,
-                    source,
+                    source.as_str(),
                     metadata_json,
                     vector,
                     HRR_ALGEBRA,
@@ -148,7 +215,120 @@ impl<'a> MemoryStore<'a> {
             )
         })?;
         self.mark_fact_banks_dirty(fact.category).await?;
-        Ok(fact)
+        if pre_existing.is_none() {
+            self.log_oplog(
+                "add",
+                Some(fact.fact_id),
+                &serde_json::json!({
+                    "category": fact.category.as_str(),
+                    "source": source,
+                    "diff": diff.diff.as_str(),
+                }),
+            )
+            .await?;
+        }
+        Ok(AddFactOutcome {
+            fact: Some(fact),
+            diff,
+        })
+    }
+
+    /// Scores the new content against its FTS candidates and classifies the
+    /// strongest match. Deterministic lexical + phase-cosine scoring only —
+    /// this is a write-time REPORT, never an automatic action.
+    async fn near_duplicate_diff(
+        &self,
+        content: &str,
+        phase_vector: &[f64],
+    ) -> Result<AddFactDiff> {
+        const CANDIDATE_LIMIT: i64 = 8;
+        const MAX_QUERY_TOKENS: usize = 24;
+        /// Report floor: weaker matches are ordinary adds and not worth a
+        /// closest-fact pointer.
+        const REPORT_FLOOR: f64 = 0.5;
+
+        let tokens: Vec<String> = content_tokens(content)
+            .into_iter()
+            .take(MAX_QUERY_TOKENS)
+            .collect();
+        if tokens.is_empty() {
+            return Ok(AddFactDiff::plain_add());
+        }
+        let fts_query = tokens
+            .iter()
+            .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT f.fact_id, f.content, f.hrr_vector
+                 FROM memory_facts_fts
+                 JOIN memory_facts f ON f.rowid = memory_facts_fts.rowid
+                 WHERE memory_facts_fts MATCH ?1
+                 ORDER BY bm25(memory_facts_fts)
+                 LIMIT ?2",
+                params![fts_query, CANDIDATE_LIMIT],
+            )
+            .await
+            .map_err(|e| db_error("near_duplicate_diff", e))?;
+
+        let mut best: Option<(i64, String, f64)> = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("near_duplicate_diff", e))?
+        {
+            let fact_id = row
+                .get::<i64>(0)
+                .map_err(|e| db_error("near_duplicate_diff", e))?;
+            let candidate_content = row
+                .get::<String>(1)
+                .map_err(|e| db_error("near_duplicate_diff", e))?;
+            let stored_vector = row
+                .get::<libsql::Value>(2)
+                .ok()
+                .and_then(|value| deserialize_vector_value(value, "near_duplicate_diff").ok())
+                .flatten();
+            let cosine = stored_vector
+                .as_deref()
+                .map(|vector| super::similarity::phase_cosine_similarity(phase_vector, vector));
+            let similarity = combined_similarity(content, &candidate_content, cosine);
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, best_sim)| similarity > *best_sim)
+            {
+                best = Some((fact_id, candidate_content, similarity));
+            }
+        }
+
+        let Some((closest_id, closest_content, similarity)) = best else {
+            return Ok(AddFactDiff::plain_add());
+        };
+        if similarity < REPORT_FLOOR {
+            return Ok(AddFactDiff::plain_add());
+        }
+        let kind = classify_add_diff(similarity, content, &closest_content);
+        let rounded = (similarity * 10_000.0).round() / 10_000.0;
+        let reason = match kind {
+            AddFactDiffKind::NearDuplicate => Some(format!(
+                "similarity {rounded:.4} to fact #{closest_id} exceeds the near-duplicate threshold ({NEAR_DUPLICATE_THRESHOLD}); stored anyway — review for consolidation"
+            )),
+            AddFactDiffKind::PossibleConflict => Some(format!(
+                "similarity {rounded:.4} to fact #{closest_id} with a negation/state-change cue; possible supersession — review which fact is current"
+            )),
+            AddFactDiffKind::Add | AddFactDiffKind::RejectedSecretLike => None,
+        };
+        Ok(AddFactDiff {
+            diff: match kind {
+                AddFactDiffKind::Add | AddFactDiffKind::RejectedSecretLike => AddFactDiffKind::Add,
+                other => other,
+            },
+            closest_fact_id: Some(closest_id),
+            similarity: Some(rounded),
+            reason,
+        })
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
@@ -225,6 +405,15 @@ impl<'a> MemoryStore<'a> {
         })?;
         self.mark_fact_banks_dirty(existing.category).await?;
         self.mark_fact_banks_dirty(updated.category).await?;
+        self.log_oplog(
+            "update",
+            Some(updated.fact_id),
+            &serde_json::json!({
+                "category": updated.category.as_str(),
+                "content_changed": updated.content != existing.content,
+            }),
+        )
+        .await?;
         Ok(updated)
     }
 
@@ -246,6 +435,16 @@ impl<'a> MemoryStore<'a> {
         if changed > 0 {
             if let Some(fact) = existing {
                 self.mark_fact_banks_dirty(fact.category).await?;
+                // Deletes log a content hash, never the content itself.
+                self.log_oplog(
+                    "remove",
+                    Some(fact_id),
+                    &serde_json::json!({
+                        "category": fact.category.as_str(),
+                        "content_hash": content_hash(&fact.content),
+                    }),
+                )
+                .await?;
             }
         }
         Ok(changed > 0)
@@ -263,7 +462,7 @@ impl<'a> MemoryStore<'a> {
             "SELECT fact_id, content, category, tags, trust_score, source,
                     retrieval_count, helpful_count, unhelpful_count,
                     created_at, updated_at, last_retrieved_at, last_feedback_at,
-                    metadata
+                    metadata, access_count, last_recalled_at
              FROM memory_facts
              WHERE category = ?1 AND trust_score >= ?2
              ORDER BY updated_at DESC, fact_id DESC
@@ -272,7 +471,7 @@ impl<'a> MemoryStore<'a> {
             "SELECT fact_id, content, category, tags, trust_score, source,
                     retrieval_count, helpful_count, unhelpful_count,
                     created_at, updated_at, last_retrieved_at, last_feedback_at,
-                    metadata
+                    metadata, access_count, last_recalled_at
              FROM memory_facts
              WHERE trust_score >= ?1
              ORDER BY updated_at DESC, fact_id DESC
@@ -310,7 +509,7 @@ impl<'a> MemoryStore<'a> {
                 "SELECT fact_id, content, category, tags, trust_score, source,
                         retrieval_count, helpful_count, unhelpful_count,
                         created_at, updated_at, last_retrieved_at, last_feedback_at,
-                        metadata
+                        metadata, access_count, last_recalled_at
                  FROM memory_facts
                  WHERE fact_id = ?1",
                 params![fact_id],
@@ -344,7 +543,7 @@ impl<'a> MemoryStore<'a> {
                 "SELECT fact_id, content, category, tags, trust_score, source,
                         retrieval_count, helpful_count, unhelpful_count,
                         created_at, updated_at, last_retrieved_at, last_feedback_at,
-                        metadata
+                        metadata, access_count, last_recalled_at
                  FROM memory_facts
                  WHERE fact_id IN ({placeholders})"
             );
@@ -445,6 +644,65 @@ impl<'a> MemoryStore<'a> {
         Ok(())
     }
 
+    /// Batched access-tracking bump for facts RETURNED from a recall search
+    /// (`FactRetriever::search`). Distinct from `increment_retrieval_counts`,
+    /// which also counts probe/list/related/reason scans. One UPDATE for the
+    /// whole result set; callers treat it as fire-and-forget (a failure must
+    /// never fail the search that triggered it).
+    pub async fn record_fact_recalls(&self, fact_ids: &[i64]) -> Result<()> {
+        if fact_ids.is_empty() {
+            return Ok(());
+        }
+        let now = current_timestamp();
+        let unique: BTreeSet<i64> = fact_ids.iter().copied().collect();
+        let ids: Vec<i64> = unique.into_iter().collect();
+        let id_list = sql_i64_list(&ids)
+            .ok_or_else(|| db_message("record_fact_recalls", "recall update had no fact ids"))?;
+        let sql = format!(
+            "UPDATE memory_facts
+             SET access_count = access_count + 1,
+                 last_recalled_at = ?1
+             WHERE fact_id IN ({id_list})"
+        );
+        self.conn
+            .execute(sql.as_str(), params![now])
+            .await
+            .map_err(|e| db_error("record_fact_recalls", e))?;
+        Ok(())
+    }
+
+    /// Appends one row to `memory_oplog`. `detail` must never carry fact
+    /// content beyond what the operation needs — deletes record a
+    /// `content_hash`, not the content (hard-delete stance preserved).
+    async fn log_oplog(
+        &self,
+        op: &str,
+        fact_id: Option<i64>,
+        detail: &serde_json::Value,
+    ) -> Result<()> {
+        let detail_json = to_json_string(detail, "log_oplog")?;
+        self.conn
+            .execute(
+                "INSERT INTO memory_oplog (ts, op, fact_id, detail_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![current_timestamp(), op, fact_id, detail_json],
+            )
+            .await
+            .map_err(|e| db_error("log_oplog", e))?;
+        Ok(())
+    }
+
+    /// Public oplog hook for mutation flows that live outside this store
+    /// (e.g. dashboard curation apply).
+    pub async fn record_oplog(
+        &self,
+        op: &str,
+        fact_id: Option<i64>,
+        detail: &serde_json::Value,
+    ) -> Result<()> {
+        self.log_oplog(op, fact_id, detail).await
+    }
+
     pub async fn record_feedback_event(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
         self.with_immediate_tx(
             "record_feedback_event",
@@ -515,6 +773,12 @@ impl<'a> MemoryStore<'a> {
             .map_err(|e| db_error("record_feedback_event", e))?;
 
         let event_id = self.last_insert_rowid("record_feedback_event").await?;
+        self.log_oplog(
+            "feedback",
+            Some(request.fact_id),
+            &serde_json::json!({ "action": action, "trust_delta": delta }),
+        )
+        .await?;
         Ok(FeedbackResult {
             event_id,
             fact_id: request.fact_id,
@@ -940,8 +1204,7 @@ impl<'a> MemoryStore<'a> {
         operation: &str,
     ) -> Result<Vec<u8>> {
         let vector = self.encoder.encode_fact(content, entities);
-        HolographicEncoder::serialize(&vector)
-            .map_err(|e| db_message(operation, format!("failed to serialize vector: {e}")))
+        serialize_vector(&vector, operation)
     }
 
     async fn update_fact_vector(
@@ -1051,6 +1314,7 @@ fn fact_from_row(row: &libsql::Row, operation: &str, entities: Vec<String>) -> R
         trust_score: row.get::<f64>(4).map_err(|e| db_error(operation, e))?,
         source: Some(row.get::<String>(5).map_err(|e| db_error(operation, e))?),
         retrieval_count: row.get::<i64>(6).map_err(|e| db_error(operation, e))?,
+        access_count: row.get::<i64>(14).map_err(|e| db_error(operation, e))?,
         helpful_count: row.get::<i64>(7).map_err(|e| db_error(operation, e))?,
         unhelpful_count: row.get::<i64>(8).map_err(|e| db_error(operation, e))?,
         created_at: row.get::<i64>(9).map_err(|e| db_error(operation, e))?,
@@ -1058,11 +1322,19 @@ fn fact_from_row(row: &libsql::Row, operation: &str, entities: Vec<String>) -> R
         last_retrieved_at: row
             .get::<Option<i64>>(11)
             .map_err(|e| db_error(operation, e))?,
+        last_recalled_at: row
+            .get::<Option<i64>>(15)
+            .map_err(|e| db_error(operation, e))?,
         last_feedback_at: row
             .get::<Option<i64>>(12)
             .map_err(|e| db_error(operation, e))?,
         metadata,
     })
+}
+
+fn serialize_vector(vector: &[f64], operation: &str) -> Result<Vec<u8>> {
+    HolographicEncoder::serialize(vector)
+        .map_err(|e| db_message(operation, format!("failed to serialize vector: {e}")))
 }
 
 fn deserialize_vector_value(value: libsql::Value, operation: &str) -> Result<Option<Vec<f64>>> {

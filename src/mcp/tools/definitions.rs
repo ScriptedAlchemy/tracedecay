@@ -1646,7 +1646,11 @@ fn def_fact_store() -> ToolDefinition {
     def_rw(
         "tokensave_fact_store",
         "Fact Store",
-        "Add, search, probe, relate, reason over, update, remove, or list holographic memory facts. The action field selects the operation.",
+        "Add, search, probe, relate, reason over, update, remove, or list holographic memory facts. The action field selects the operation. \
+         The add result carries a write-time diff report (diff/closest_fact_id/similarity/reason): near_duplicate = a very similar fact exists \
+         (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
+         rejected_secret_like = credential-like content was NOT stored. Calibrate trust on add instead of defaulting high \
+         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups.",
         json!({
             "type": "object",
             "properties": memory_fact_properties(),

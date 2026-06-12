@@ -1,0 +1,10 @@
+tokensave
+Copyright (c) the tokensave contributors. Licensed under the MIT license (see LICENSE).
+
+This product includes material adapted from third-party projects:
+
+mnemon (https://github.com/mnemon-dev/mnemon)
+Licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
+The negation / state-change cue list and the write-time diff combination rule
+in src/memory/diff.rs are adapted from mnemon's internal/search/diff.go.
