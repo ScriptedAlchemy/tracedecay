@@ -487,6 +487,26 @@ async fn clear_fact_vector_without_touching_updated_at(fixture: &DashboardFixtur
     }
 }
 
+async fn set_fact_access_without_touching_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+    access_count: i64,
+    last_recalled_at: i64,
+) {
+    let conn = project_db_conn(fixture).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET access_count = ?1, last_recalled_at = ?2
+             WHERE fact_id = ?3",
+            libsql::params![access_count, last_recalled_at, fact_id],
+        )
+        .await
+    {
+        panic!("failed to update fact access fixture: {err}");
+    }
+}
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -539,6 +559,28 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             initial["pairs"].as_array().map(Vec::len),
             Some(1),
             "fixture starts with one near-duplicate pair"
+        );
+
+        set_fact_access_without_touching_updated_at(&fixture, 102, 7, 1_700_000_500).await;
+        let (status, curate_after_access) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        let access_action = curate_after_access["actions"]
+            .as_array()
+            .and_then(|actions| {
+                actions
+                    .iter()
+                    .find(|action| action["fact_id"].as_i64() == Some(102))
+            })
+            .unwrap_or_else(|| {
+                panic!("expected dry-run delete action for fact 102: {curate_after_access}")
+            });
+        assert_eq!(
+            access_action["access_count"], 7,
+            "access-only updates must invalidate cached curation metadata"
         );
 
         set_fact_vector_and_bump_updated_at(&fixture, 103, &[0.20, 0.35, 0.50]).await;

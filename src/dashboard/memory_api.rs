@@ -855,16 +855,17 @@ type VectorStateFingerprint = (i64, i64, i64, u64);
 /// hashed (at the 2000-fact cap that was ~32 MB pulled out of `SQLite` per
 /// request, paying most of what the cache exists to avoid). Inserts and
 /// deletes change `count`/`sum_fact_id`, content edits re-encode through the
-/// store paths that bump `updated_at` (hashed per row), the startup NULL-
-/// vector repair changes `count`, and algebra/dimension migrations hash
-/// differently.
+/// store paths that bump `updated_at` (hashed per row), recall access updates
+/// refresh curation delete-reluctance metadata, the startup NULL-vector repair
+/// changes `count`, and algebra/dimension migrations hash differently.
 async fn vector_state_fingerprint(
     state: &DashboardState,
 ) -> Result<VectorStateFingerprint, String> {
     let mut rows = state
         .mem_conn
         .query(
-            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim
+            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim,
+                    COALESCE(access_count, 0), COALESCE(last_recalled_at, 0)
              FROM memory_facts
              WHERE hrr_vector IS NOT NULL
              ORDER BY fact_id ASC",
@@ -881,6 +882,8 @@ async fn vector_state_fingerprint(
         let updated_at: i64 = row.get(1).unwrap_or(0);
         let hrr_algebra: String = row.get(2).unwrap_or_default();
         let hrr_dim: i64 = row.get(3).unwrap_or(0);
+        let access_count: i64 = row.get(4).unwrap_or(0);
+        let last_recalled_at: i64 = row.get(5).unwrap_or(0);
         count += 1;
         max_updated_at = max_updated_at.max(updated_at);
         sum_fact_id += fact_id;
@@ -888,6 +891,8 @@ async fn vector_state_fingerprint(
         updated_at.hash(&mut hasher);
         hrr_algebra.hash(&mut hasher);
         hrr_dim.hash(&mut hasher);
+        access_count.hash(&mut hasher);
+        last_recalled_at.hash(&mut hasher);
     }
     Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
 }
