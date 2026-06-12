@@ -474,7 +474,7 @@ conversation context matters. Do not store secrets, credentials, or unnecessary 
 in persistent facts.\n\n\
 If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
 question natively, propose opening an issue at \
-https://github.com/ScriptedAlchemy/tokensave. Remind the user to strip sensitive \
+https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip sensitive \
 or proprietary code from the bug description before submitting."
 }
 

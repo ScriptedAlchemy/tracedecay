@@ -110,7 +110,7 @@ cargo install tracedecay --no-default-features    # lite (smallest binary)
 
 **Prebuilt binaries (Linux, Windows, macOS):**
 
-Download from the [latest release](https://github.com/ScriptedAlchemy/tokensave/releases/latest) and place the binary in your `PATH`.
+Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest) and place the binary in your `PATH`.
 
 | Platform | Archive |
 |---|---|
@@ -1025,11 +1025,11 @@ cargo clippy --all
 
 ## Star History
 
-<a href="https://www.star-history.com/#ScriptedAlchemy/tokensave&Date">
+<a href="https://www.star-history.com/#ScriptedAlchemy/tracedecay&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ScriptedAlchemy/tokensave&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ScriptedAlchemy/tracedecay&type=Date" />
  </picture>
 </a>
 
@@ -1041,4 +1041,4 @@ Windows builds are code-signed with a free Authenticode certificate generously p
 
 MIT License -- see [LICENSE](LICENSE) for details.
 
-**[TraceDecay on GitHub](https://github.com/ScriptedAlchemy/tokensave)**
+**[TraceDecay on GitHub](https://github.com/ScriptedAlchemy/tracedecay)**

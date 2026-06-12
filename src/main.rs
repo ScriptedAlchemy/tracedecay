@@ -716,8 +716,8 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
             let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
                 tracedecay::errors::TraceDecayError::Config {
                     message: "tracedecay not found on PATH. Install it from this repo first:\n  \
-                          cargo binstall --git https://github.com/ScriptedAlchemy/tokensave tracedecay\n  \
-                          cargo install --git https://github.com/ScriptedAlchemy/tokensave tracedecay"
+                          cargo binstall --git https://github.com/ScriptedAlchemy/tracedecay tracedecay\n  \
+                          cargo install --git https://github.com/ScriptedAlchemy/tracedecay tracedecay"
                         .to_string(),
                 }
             })?;

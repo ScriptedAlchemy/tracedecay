@@ -1,6 +1,6 @@
 # Rust Parser Migration
 
-Migrate tracedecay's tree-sitter grammar dependencies from C/C++ generated parsers to pure-Rust generated parsers, eliminating an entire class of `abort()`-based failures. Motivated by [issue #50](https://github.com/ScriptedAlchemy/tokensave/issues/50), follow-up to [#49](https://github.com/ScriptedAlchemy/tokensave/issues/49).
+Migrate tracedecay's tree-sitter grammar dependencies from C/C++ generated parsers to pure-Rust generated parsers, eliminating an entire class of `abort()`-based failures. Motivated by [issue #50](https://github.com/ScriptedAlchemy/tracedecay/issues/50), follow-up to [#49](https://github.com/ScriptedAlchemy/tracedecay/issues/49).
 
 ---
 
