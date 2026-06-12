@@ -156,6 +156,20 @@ fn main() {
         emit_dashboard_asset_inputs()
     );
 
+    // Generator provenance: baked into generated agent plugins (manifest +
+    // module header) so a stale installed plugin is distinguishable from
+    // the binary that should have generated it. Advisory only — may lag a
+    // commit until the next build-script rerun.
+    let git_sha = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo::rustc-env=TOKENSAVE_GIT_SHA={git_sha}");
+
     // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
     // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was
     // built against the incompatible tree-sitter 0.20 API.

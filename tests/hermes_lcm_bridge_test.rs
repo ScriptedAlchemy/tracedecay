@@ -1073,7 +1073,7 @@ plugin.tools.subprocess.run = fake_run
 engine = plugin.TokenSaveContextEngine()
 engine.initialize(hermes_home="/tmp/hermes-profile")
 engine.on_session_start(session_id="session-1", project_root="/tmp/project")
-result = engine.should_compress_preflight(
+result = engine._preflight_probe(
     [{"role": "user", "content": "hello"}],
     current_tokens=987,
 )
@@ -1569,8 +1569,9 @@ assert project_args["hermes_home"] == str(pathlib.Path("~/.hermes").expanduser()
 
 profile_engine = plugin.TokenSaveContextEngine()
 profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
-profile_result = profile_engine.should_compress_preflight(messages=[], current_tokens=100)
+profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100)
 assert profile_result["status"] == "ok"
+assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
 assert profile_argv[0] == plugin.tools.TOKENSAVE_BIN
 assert profile_argv[1:4] == ["tool", "tokensave_lcm_preflight", "--json"]
@@ -1823,14 +1824,16 @@ assert empty_payload["degraded"] is True
 assert "empty answer" in empty_payload["error"]
 assert empty_payload["needs_synthesis"] is False
 
+# Non-timeout synthesis failures (RuntimeError / provider SDK / httpx)
+# must degrade with the retrieval intact, never escape as a handler
+# exception that loses the retrieval behind a generic registry error.
 agent.auxiliary_client.mode = "unexpected"
 responses.append(needs_synthesis())
-try:
-    engine.expand_query(prompt="What changed?", query="orchard")
-except RuntimeError as exc:
-    assert "schema bug" in str(exc)
-else:
-    raise AssertionError("unexpected synthesis exceptions must propagate")
+failed_payload = engine.expand_query(prompt="What changed?", query="orchard")
+assert failed_payload["degraded"] is True
+assert "schema bug" in failed_payload["error"]
+assert failed_payload["needs_synthesis"] is False
+assert failed_payload["matches"], "retrieval must survive synthesis failures"
 "#,
     )
     .unwrap();
@@ -3279,8 +3282,14 @@ assert tool == "tokensave_lcm_compress"
 assert args["context_length"] == 1000000
 assert args["threshold_tokens"] == 800000
 
-# should_compress mirrors post-response gating and returns a bool.
-assert engine.should_compress(prompt_tokens=1) is True
+# should_compress gates locally below the tracked threshold (no spawn)...
+calls.clear()
+assert engine.should_compress(prompt_tokens=1) is False
+assert calls == []
+# ...and defers to the preflight probe once tokens reach the threshold.
+assert engine.should_compress(prompt_tokens=800000) is True
+tool, _args = calls.pop()
+assert tool == "tokensave_lcm_preflight"
 "#,
         "generated plugin should propagate update_model/session_start context windows into preflight/compress",
     );
@@ -3721,9 +3730,11 @@ engine.on_session_start(
 )
 
 messages = [{"role": "user", "content": "hello"}]
-preflight = engine.should_compress_preflight(messages, current_tokens=128)
+preflight = engine._preflight_probe(messages, current_tokens=128)
 assert isinstance(preflight, dict), preflight
 assert preflight["error"].startswith("tokensave tool failed:"), preflight
+# ABC contract: the bool probe must not treat the error dict as truthy.
+assert engine.should_compress_preflight(messages, current_tokens=128) is False
 
 status = engine.status()
 assert isinstance(status, dict)

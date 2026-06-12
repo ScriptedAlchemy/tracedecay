@@ -23,6 +23,7 @@ Everything runs offline: no model calls (compress stays below threshold).
 import json
 import os
 import sys
+import time
 
 PASS = 0
 
@@ -71,10 +72,16 @@ def main():
     registered = set(loaded.tools_registered)
     assert "tokensave_search" in registered, sorted(registered)
     assert "tokensave_context" in registered, sorted(registered)
+    assert "tokensave_message_search" in registered, sorted(registered)
     assert "tokensave_lcm_compress" not in registered, sorted(registered)
     assert "tokensave_lcm_preflight" not in registered, sorted(registered)
+    # memory.provider is tokensave here, so the provider-owned fact trio
+    # must not register as direct duplicates.
+    assert "tokensave_fact_store" not in registered, sorted(registered)
+    assert "tokensave_fact_feedback" not in registered, sorted(registered)
+    assert "tokensave_memory_status" not in registered, sorted(registered)
     ok(
-        "code-graph tools register on stock; live-ingest LCM verbs stay gated",
+        "code-graph tools register on stock; LCM + provider-owned tools stay gated",
         f"{len(registered)} tools",
     )
 
@@ -104,7 +111,9 @@ def main():
     ok("stock ContextEngine ABC surface works", "update_from_response")
 
     assert engine.should_compress(1000) is False
-    ok("should_compress round-trips through tokensave_lcm_preflight")
+    ok("should_compress gates locally below the tracked threshold")
+    assert engine.should_compress_preflight([], current_tokens=1000) is False
+    ok("should_compress_preflight honors the bool ABC contract")
 
     status = unwrap_tool_json(engine.handle_tool_call("lcm_status", {}))
     assert status.get("session_id") == "stock-check-session", status
@@ -163,12 +172,18 @@ def main():
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
 
-    # Passive-ingest / recall hooks (sync_turn, prefetch, on_memory_write).
-    prefetched = provider.prefetch("stock hermes integration")
-    assert isinstance(prefetched, str) and "stock hermes integration" in prefetched, (
-        prefetched
-    )
-    ok("prefetch recalls stored facts")
+    # Passive-ingest / recall hooks (sync_turn, queue_prefetch, on_memory_write).
+    # prefetch() is the fast inline half: recall happens in queue_prefetch's
+    # background thread and is consumed on the next turn.
+    assert provider.prefetch("stock hermes integration") == ""
+    provider.queue_prefetch("stock hermes integration")
+    deadline = time.time() + 15
+    prefetched = ""
+    while time.time() < deadline and not prefetched:
+        prefetched = provider.prefetch("stock hermes integration")
+        time.sleep(0.1)
+    assert "stock hermes integration" in prefetched, prefetched
+    ok("queue_prefetch recalls stored facts for the next prefetch")
     provider.sync_turn(
         "hello", "hi there", session_id="stock-check-session", messages=messages
     )
