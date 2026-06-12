@@ -1033,6 +1033,54 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
 }
 
 #[test]
+fn curate_hygiene_scans_unvectored_facts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let conn = project_db_conn(&fixture).await;
+        conn.execute(
+            "INSERT INTO memory_facts
+                (fact_id, content, category, tags, trust_score, created_at, updated_at, source, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            libsql::params![
+                901_i64,
+                "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH",
+                "project",
+                "[]",
+                0.5_f64,
+                1_700_000_200_i64,
+                1_700_000_200_i64,
+                "test",
+                "{}"
+            ],
+        )
+        .await
+        .unwrap_or_else(|err| panic!("failed to insert unvectored hygiene fact: {err}"));
+
+        let agent = http_agent();
+        let (status, curate) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+
+        assert_eq!(status, 200);
+        let secret_like = curate["hygiene"]["secret_like"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected hygiene.secret_like array"));
+        assert!(
+            secret_like
+                .iter()
+                .any(|action| action["fact_id"].as_i64() == Some(901)),
+            "hygiene scan must include secret-like facts without HRR vectors: {curate}"
+        );
+    });
+}
+
+#[test]
 fn curation_delete_lifecycle() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

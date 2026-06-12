@@ -1301,43 +1301,102 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());
 
+    let encoder = HolographicEncoder;
+    let retriever = FactRetriever::new(db.conn());
+    let mut original_request = fact_request(
+        "Use pnpm for installs in this repository",
+        MemoryCategory::Tool,
+        0.8,
+    );
+    original_request.entities = vec!["OldPackageManager".to_string()];
     let original = store
-        .add_fact(
-            fact_request(
-                "Use pnpm for installs in this repository",
-                MemoryCategory::Tool,
-                0.8,
-            ),
-            DEFAULT_TRUST,
-        )
+        .add_fact(original_request, DEFAULT_TRUST)
         .await
         .unwrap();
     assert_eq!(original.diff.diff, AddFactDiffKind::Add);
     let original_fact = original.fact.expect("original fact should be stored");
+    let original_vector = fact_hrr_vector(&db, original_fact.fact_id).await;
+    store.rebuild_dirty_banks().await.unwrap();
+    assert!(
+        dirty_bank_names(&db).await.is_empty(),
+        "test setup should start with clean banks before the duplicate add"
+    );
 
     // Case/whitespace variant: near-exact AND content-normalized equivalent,
     // so the insert is skipped and the existing fact is returned.
+    let mut normalized_duplicate = fact_request(
+        "USE  PNPM   for installs in this Repository",
+        MemoryCategory::Tool,
+        0.8,
+    );
+    normalized_duplicate.entities = vec!["NewPackageManager".to_string()];
+    normalized_duplicate.metadata = serde_json::json!({"source": "normalized"});
     let skipped = store
-        .add_fact(
-            fact_request(
-                "USE  PNPM   for installs in this Repository",
-                MemoryCategory::Tool,
-                0.8,
-            ),
-            DEFAULT_TRUST,
-        )
+        .add_fact(normalized_duplicate, DEFAULT_TRUST)
         .await
         .unwrap();
     assert_eq!(skipped.diff.diff, AddFactDiffKind::NearDuplicate);
     assert_eq!(skipped.diff.closest_fact_id, Some(original_fact.fact_id));
+    let skipped_fact = skipped.fact.expect("existing fact returned");
+    assert_eq!(skipped_fact.fact_id, original_fact.fact_id);
+    assert!(skipped_fact
+        .entities
+        .contains(&"NewPackageManager".to_string()));
+    assert!(skipped_fact
+        .entities
+        .contains(&"OldPackageManager".to_string()));
     assert_eq!(
-        skipped.fact.expect("existing fact returned").fact_id,
-        original_fact.fact_id
+        skipped_fact.metadata,
+        serde_json::json!({"source": "normalized"})
     );
     assert_eq!(
         scalar_count(&db, "SELECT COUNT(*) FROM memory_facts").await,
         1,
         "normalized-equivalent add must not insert a second row"
+    );
+    let updated_vector = fact_hrr_vector(&db, original_fact.fact_id).await;
+    assert_ne!(
+        updated_vector, original_vector,
+        "normalized-equivalent entity merge must refresh the stored vector"
+    );
+    assert_eq!(
+        updated_vector,
+        encoder.encode_fact(&skipped_fact.content, &skipped_fact.entities)
+    );
+    assert!(
+        dirty_bank_names(&db).await.contains(&"tool".to_string()),
+        "normalized-equivalent vector refresh must dirty its memory bank"
+    );
+
+    let probe_results = retriever
+        .probe(
+            "NewPackageManager",
+            Some(MemoryCategory::Tool),
+            Some(0.3),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        probe_results
+            .iter()
+            .any(|result| result.fact.fact_id == original_fact.fact_id),
+        "probe by newly merged entity must find the existing fact"
+    );
+    let search_results = retriever
+        .search(
+            "NewPackageManager",
+            Some(MemoryCategory::Tool),
+            Some(0.3),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        search_results
+            .iter()
+            .any(|result| result.fact.fact_id == original_fact.fact_id),
+        "search by newly merged entity must find the existing fact"
     );
 
     // Near-exact but NOT normalized-equivalent (trailing punctuation):

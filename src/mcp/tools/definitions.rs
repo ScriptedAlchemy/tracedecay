@@ -106,6 +106,7 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
+        def_retrieve(),
         def_context(),
         def_callers(),
         def_callees(),
@@ -242,6 +243,24 @@ fn def_search() -> ToolDefinition {
                 }
             },
             "required": ["query"]
+        }),
+    )
+}
+
+fn def_retrieve() -> ToolDefinition {
+    def(
+        "tokensave_retrieve",
+        "Retrieve Truncated Response",
+        "Retrieve the full original text for a local response handle emitted by a truncated MCP response. Handles are project-local, expire automatically, and never reference remote storage.",
+        json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "Response handle from a truncated MCP response envelope."
+                }
+            },
+            "required": ["handle"]
         }),
     )
 }

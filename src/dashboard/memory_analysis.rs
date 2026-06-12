@@ -298,6 +298,9 @@ pub(crate) struct SimilarityComputation {
     /// contribute to `total_pairs` and `distribution`, so the cache holds
     /// O(cap) pairs instead of all O(n²) (~48 MB at n = 2000).
     pub(crate) pairs: Vec<ScoredPair>,
+    /// Supersession hygiene candidates from every scored pair at or above the
+    /// supersession floor where either side carries a negation/state-change cue.
+    pub(crate) supersession_pairs: Vec<ScoredPair>,
     /// Count of all finite pairs scored, retained or not.
     pub(crate) total_pairs: i64,
     /// [`score_distribution`] over all scored pairs, precomputed so requests
@@ -320,16 +323,28 @@ pub(crate) fn build_similarity_computation(
     while retain < scored.len() && scored[retain].0 >= SIMILARITY_DEFAULT_THRESHOLD {
         retain += 1;
     }
-    let pairs = scored
-        .into_iter()
-        .take(retain)
-        .map(|(similarity, a, b)| ScoredPair::analyze(&facts, similarity, a, b))
-        .collect();
+    let mut pairs = Vec::new();
+    let mut supersession_pairs = Vec::new();
+    for (idx, (similarity, a, b)) in scored.into_iter().enumerate() {
+        if idx < retain {
+            pairs.push(ScoredPair::analyze(&facts, similarity, a, b));
+        }
+        if similarity < SUPERSESSION_SIMILARITY_THRESHOLD {
+            if idx >= retain {
+                break;
+            }
+            continue;
+        }
+        if pair_has_supersession_cue(&facts, a, b) {
+            supersession_pairs.push(ScoredPair::analyze(&facts, similarity, a, b));
+        }
+    }
     SimilarityComputation {
         key,
         dim,
         facts,
         pairs,
+        supersession_pairs,
         total_pairs,
         distribution,
     }
@@ -344,6 +359,19 @@ pub(crate) const ACCESS_RELUCTANCE_EXTREME_SIMILARITY: f64 = 0.98;
 /// negation/state-change cue only signals supersession when the two facts are
 /// substantially similar (mirrors the write-time conflict threshold).
 pub(crate) const SUPERSESSION_SIMILARITY_THRESHOLD: f64 = 0.7;
+
+fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
+    let a_content = facts[a]
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let b_content = facts[b]
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    crate::memory::diff::contains_negation_cue(a_content)
+        || crate::memory::diff::contains_negation_cue(b_content)
+}
 
 /// Propose hard-delete actions for `likely_duplicate` pairs from pre-scored facts.
 ///
@@ -452,15 +480,16 @@ fn fact_i64(fact: &Value, key: &str) -> i64 {
 /// through the existing ops contract. They are NEVER auto-applied: the
 /// `/curate` apply path only executes the dedup `actions` list.
 pub(crate) fn propose_hygiene_actions(
-    facts: &[Value],
-    pairs: &[ScoredPair],
+    scan_facts: &[Value],
+    pair_facts: &[Value],
+    supersession_pairs: &[ScoredPair],
     dedup_loser_ids: &std::collections::HashSet<i64>,
 ) -> Value {
     let mut secret_like: Vec<Value> = Vec::new();
     let mut transient: Vec<Value> = Vec::new();
     let mut flagged: std::collections::HashSet<i64> = dedup_loser_ids.clone();
 
-    for fact in facts {
+    for fact in scan_facts {
         let fact_id = fact_i64(fact, "fact_id");
         if flagged.contains(&fact_id) {
             continue;
@@ -492,12 +521,12 @@ pub(crate) fn propose_hygiene_actions(
     // an LLM or human confirms which one is current before applying.
     let mut supersession: Vec<Value> = Vec::new();
     let mut proposed: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for pair in pairs {
+    for pair in supersession_pairs {
         if pair.similarity < SUPERSESSION_SIMILARITY_THRESHOLD {
             continue;
         }
-        let a = &facts[pair.a];
-        let b = &facts[pair.b];
+        let a = &pair_facts[pair.a];
+        let b = &pair_facts[pair.b];
         let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
         let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
         if !crate::memory::diff::contains_negation_cue(a_content)
@@ -663,7 +692,8 @@ mod tests {
             json!({"fact_id": 4, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 9}),
         ];
         let pairs = vec![ScoredPair::analyze(&facts, 0.85, 2, 3)];
-        let hygiene = propose_hygiene_actions(&facts, &pairs, &std::collections::HashSet::new());
+        let hygiene =
+            propose_hygiene_actions(&facts, &facts, &pairs, &std::collections::HashSet::new());
 
         let secret = hygiene["secret_like"]
             .as_array()
@@ -702,7 +732,7 @@ mod tests {
         let consumed: std::collections::HashSet<i64> = [1].into_iter().collect();
         // Below the supersession similarity floor the cue pair is ignored.
         let weak_pair = vec![ScoredPair::analyze(&facts, 0.5, 1, 2)];
-        let hygiene = propose_hygiene_actions(&facts, &weak_pair, &consumed);
+        let hygiene = propose_hygiene_actions(&facts, &facts, &weak_pair, &consumed);
         assert!(hygiene["transient"]
             .as_array()
             .is_some_and(std::vec::Vec::is_empty));
@@ -747,5 +777,32 @@ mod tests {
         assert_eq!(computation.distribution["min"], -0.2);
         assert_eq!(computation.distribution["max"], 0.99);
         assert!(computation.pairs[0].similarity >= computation.pairs[1].similarity);
+    }
+
+    #[test]
+    fn build_similarity_computation_keeps_supersession_pairs_below_pair_cap() {
+        let facts = vec![
+            json!({"fact_id": 1, "content": "We use Redis for caching sessions", "trust_score": 0.8, "created_at": 1}),
+            json!({"fact_id": 2, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 2}),
+            json!({"fact_id": 3, "content": "unrelated retained pair left", "trust_score": 0.8}),
+            json!({"fact_id": 4, "content": "unrelated retained pair right", "trust_score": 0.8}),
+        ];
+        let mut scored = vec![(0.95, 2, 3); SIMILARITY_PAIR_CAP as usize];
+        scored.push((SUPERSESSION_SIMILARITY_THRESHOLD, 0, 1));
+
+        let computation = build_similarity_computation((4, 0, 10, 7), 4, facts, scored);
+
+        assert_eq!(computation.pairs.len(), SIMILARITY_PAIR_CAP as usize);
+        let hygiene = propose_hygiene_actions(
+            &computation.facts,
+            &computation.facts,
+            &computation.supersession_pairs,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(
+            hygiene["supersession"].as_array().map(Vec::len),
+            Some(1),
+            "supersession candidates at the floor must not be lost below the response pair cap"
+        );
     }
 }

@@ -37,6 +37,8 @@ const NEGATION_CUES: &[&str] = &[
     "instead of",
     "rather than",
     "replaced",
+    "supersedes",
+    "superseded",
     "deprecated",
 ];
 
@@ -108,6 +110,9 @@ mod tests {
         assert!(contains_negation_cue("Use tokio instead of async-std"));
         assert!(contains_negation_cue("The v1 API is deprecated"));
         assert!(contains_negation_cue("ESLint replaced TSLint here"));
+        assert!(contains_negation_cue(
+            "pnpm supersedes the earlier npm preference"
+        ));
         assert!(!contains_negation_cue("This is not a conflict marker"));
         assert!(!contains_negation_cue("Do not store secrets in memory"));
     }

@@ -11,7 +11,7 @@ use crate::errors::{Result, TokenSaveError};
 use crate::tokensave::TokenSave;
 
 use super::super::ToolResult;
-use super::truncated_json_envelope;
+use super::truncated_json_envelope_with_handle;
 
 use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
 
@@ -50,7 +50,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
             let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                    "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })
@@ -79,7 +79,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
                 .unwrap_or_default();
                 return Ok(ToolResult {
                     value: json!({
-                        "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                     }),
                     touched_files: vec![],
                 });
@@ -120,7 +120,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
 
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })

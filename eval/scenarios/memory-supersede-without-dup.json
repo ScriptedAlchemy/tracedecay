@@ -2,10 +2,10 @@
   "schema_version": 1,
   "id": "memory-supersede-without-dup",
   "title": "Preference pivots update the existing fact instead of duplicating it",
-  "description": "When a stored preference is superseded (npm -> pnpm), the existing fact must be updated or replaced, never duplicated. Once the sibling near-dup diff / supersession-proposal write path lands, even a naive duplicate add must be defended against.",
+  "description": "When a stored preference is superseded (npm -> pnpm), a well-behaved agent updates the existing fact. If a naive add leaves both facts, curation dry-run must propose deleting the older superseded preference.",
   "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
-  "contract": "pending-sibling",
-  "contract_notes": "Sibling branch work (src/memory + agents) adds near-dup detection and supersession proposals on the add path. Until it lands, the violation phase reports PENDING-SIBLING: the duplicate is detected by the instrument but nothing defends against it.",
+  "contract": "stable",
+  "contract_notes": "Write-time add remains report-only for supersession, but deterministic curation dry-run enforces hygiene by proposing deletion of the older superseded fact.",
   "setup": {
     "facts": [
       {
@@ -38,10 +38,14 @@
           "tool": "fact_store",
           "args": {
             "action": "add",
-            "content": "User prefers pnpm as the package manager for this project.",
+            "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference).",
             "category": "user_pref",
             "source": "eval-agent"
           }
+        },
+        {
+          "kind": "curate",
+          "apply": false
         }
       ]
     }
@@ -59,7 +63,7 @@
       "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%package manager%'",
       "op": "eq",
       "value": 1,
-      "phase": "both"
+      "phase": "well-behaved-only"
     },
     {
       "kind": "sql",
@@ -67,7 +71,7 @@
       "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%pnpm%'",
       "op": "eq",
       "value": 1,
-      "phase": "both"
+      "phase": "well-behaved-only"
     },
     {
       "kind": "sql",
@@ -75,7 +79,14 @@
       "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%prefers npm%'",
       "op": "eq",
       "value": 0,
-      "phase": "both"
+      "phase": "well-behaved-only"
+    },
+    {
+      "kind": "curate-deletes-source",
+      "name": "dry_run_proposes_deleting_seeded_npm_preference",
+      "source": "eval-seed",
+      "expected": true,
+      "phase": "violation-only"
     }
   ]
 }

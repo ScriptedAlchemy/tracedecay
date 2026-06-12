@@ -10,11 +10,9 @@
 //! Scenario taxonomy adapted from the mnemon harness eval suite
 //! (<https://github.com/mnemon-dev/mnemon>, Apache-2.0).
 //!
-//! Scenarios marked `"contract": "pending-sibling"` assert against machinery
-//! that is still landing on this branch (write-path secret rejection, near-dup
-//! supersession). Their violation phase reports `PENDING-SIBLING` instead of
-//! failing while the instrument — not the machinery — is what catches the
-//! violation.
+//! Stable scenarios fail when a violation is accepted and leaves a bad end-state.
+//! The harness still understands `pending-sibling` for future branch-split work,
+//! but shipped hygiene contracts should be marked stable.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -110,6 +108,8 @@ enum Assertion {
         name: String,
         source: String,
         expected: bool,
+        #[serde(default)]
+        phase: AssertionPhase,
     },
 }
 
@@ -130,12 +130,21 @@ enum AssertionPhase {
     #[default]
     Both,
     WellBehavedOnly,
+    ViolationOnly,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
     WellBehaved,
     Violation,
+}
+
+fn should_skip_assertion(phase: Phase, assertion_phase: AssertionPhase) -> bool {
+    matches!(
+        (phase, assertion_phase),
+        (Phase::Violation, AssertionPhase::WellBehavedOnly)
+            | (Phase::WellBehaved, AssertionPhase::ViolationOnly)
+    )
 }
 
 struct AssertionOutcome {
@@ -401,17 +410,31 @@ fn op_symbol(op: CompareOp) -> &'static str {
 }
 
 fn curate_delete_ids(report: &Value) -> HashSet<i64> {
-    report
+    let mut ids: HashSet<i64> = report
         .get("actions")
         .and_then(Value::as_array)
-        .map(|actions| {
-            actions
-                .iter()
-                .filter(|action| action.get("op").and_then(Value::as_str) == Some("delete"))
-                .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter(|action| action.get("op").and_then(Value::as_str) == Some("delete"))
+        .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
+        .collect();
+
+    for key in ["secret_like", "transient", "supersession"] {
+        if let Some(entries) = report
+            .get("hygiene")
+            .and_then(|hygiene| hygiene.get(key))
+            .and_then(Value::as_array)
+        {
+            ids.extend(
+                entries
+                    .iter()
+                    .filter(|action| action.get("op").and_then(Value::as_str) == Some("delete"))
+                    .filter_map(|action| action.get("fact_id").and_then(Value::as_i64)),
+            );
+        }
+    }
+
+    ids
 }
 
 fn evaluate_assertions(
@@ -432,8 +455,7 @@ fn evaluate_assertions(
                 phase: assertion_phase,
                 deterministic_only: _,
             } => {
-                if phase == Phase::Violation && *assertion_phase == AssertionPhase::WellBehavedOnly
-                {
+                if should_skip_assertion(phase, *assertion_phase) {
                     continue;
                 }
                 let actual = query_scalar(fixture, sql);
@@ -447,7 +469,11 @@ fn evaluate_assertions(
                 name,
                 source,
                 expected,
+                phase: assertion_phase,
             } => {
+                if should_skip_assertion(phase, *assertion_phase) {
+                    continue;
+                }
                 let Some(report) = dry_run_report else {
                     if phase == Phase::Violation {
                         continue;

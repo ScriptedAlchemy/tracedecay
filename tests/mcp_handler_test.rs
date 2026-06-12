@@ -274,6 +274,24 @@ async fn find_node_id(cg: &TokenSave, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+#[test]
+fn retrieve_tool_schema_uses_handle_only() {
+    let tools = get_tool_definitions();
+    let retrieve = tools
+        .iter()
+        .find(|tool| tool.name == "tokensave_retrieve")
+        .expect("tokensave_retrieve definition");
+    let properties = retrieve
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("retrieve properties");
+
+    assert!(properties.contains_key("handle"));
+    assert!(!properties.contains_key("retrieve_handle"));
+    assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+}
+
 // 1. tokensave_search
 // ---------------------------------------------------------------------------
 
@@ -294,6 +312,59 @@ async fn test_search() {
     assert!(
         text.contains("helper"),
         "search results should contain 'helper'"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_tool_returns_full_stored_response() {
+    let (cg, _dir) = setup_project().await;
+    let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
+    let stored = tokensave::mcp::response_handles::store_response_handle(
+        cg.project_root(),
+        original,
+        tokensave::tokensave::current_timestamp(),
+    )
+    .unwrap();
+
+    let stored_payload: Value = serde_json::from_str(
+        &fs::read_to_string(
+            cg.project_root()
+                .join(".tokensave/response-handles")
+                .join(format!("{}.json", stored.handle)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(stored_payload.get("handle").is_none());
+    assert!(stored_payload.get("original_chars").is_none());
+
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_retrieve",
+        json!({ "handle": stored.handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["handle"], stored.handle);
+    assert_eq!(payload["content"], original);
+    assert_eq!(payload["expired"], false);
+
+    let alias_result = handle_tool_call(
+        &cg,
+        "tokensave_retrieve",
+        json!({ "retrieve_handle": stored.handle }),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        alias_result.is_err(),
+        "tokensave_retrieve must accept only the canonical `handle` field"
     );
 }
 

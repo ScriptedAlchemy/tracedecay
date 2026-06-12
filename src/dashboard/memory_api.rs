@@ -1132,7 +1132,13 @@ pub(crate) async fn build_delete_plan(
         .iter()
         .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
         .collect();
-    let hygiene = propose_hygiene_actions(&computation.facts, &computation.pairs, &dedup_loser_ids);
+    let hygiene_facts = fetch_facts(state, "", total).await?;
+    let hygiene = propose_hygiene_actions(
+        &hygiene_facts,
+        &computation.facts,
+        &computation.supersession_pairs,
+        &dedup_loser_ids,
+    );
 
     let mut counts = Map::new();
     if !actions.is_empty() {

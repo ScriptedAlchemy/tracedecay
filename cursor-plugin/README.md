@@ -107,6 +107,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tokensave:tokensave_recursion",
     "tokensave:tokensave_redundancy",
     "tokensave:tokensave_rename_preview",
+    "tokensave:tokensave_retrieve",
     "tokensave:tokensave_runtime",
     "tokensave:tokensave_search",
     "tokensave:tokensave_signature",

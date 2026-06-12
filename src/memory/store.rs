@@ -141,8 +141,12 @@ impl<'a> MemoryStore<'a> {
                 if let Some(closest_id) = diff.closest_fact_id {
                     if let Some(closest) = self.get_fact(closest_id).await? {
                         if normalized_equivalent(&content, &closest.content) {
+                            let fact = self
+                                .merge_duplicate_add(closest, &entities, &request.metadata)
+                                .await?;
+                            self.mark_fact_banks_dirty(fact.category).await?;
                             return Ok(AddFactOutcome {
-                                fact: Some(closest),
+                                fact: Some(fact),
                                 diff: AddFactDiff {
                                     reason: Some(format!(
                                         "content-normalized equivalent of fact #{closest_id}; insert skipped"
@@ -187,33 +191,9 @@ impl<'a> MemoryStore<'a> {
                 "inserted or existing fact was not found by content",
             ));
         };
-        let mut merged_entities = existing.entities.clone();
-        let original_entities = merged_entities.clone();
-        for entity in entities {
-            if !merged_entities
-                .iter()
-                .any(|stored| stored.eq_ignore_ascii_case(&entity))
-            {
-                merged_entities.push(entity);
-            }
-        }
-        self.replace_fact_entities(existing.fact_id, &merged_entities)
+        let fact = self
+            .merge_duplicate_add(existing, &entities, &request.metadata)
             .await?;
-        if merged_entities != original_entities {
-            self.update_fact_vector(
-                existing.fact_id,
-                &existing.content,
-                &merged_entities,
-                "add_fact",
-            )
-            .await?;
-        }
-        let fact = self.get_fact(existing.fact_id).await?.ok_or_else(|| {
-            db_message(
-                "add_fact",
-                "inserted fact was not found when reading it back",
-            )
-        })?;
         self.mark_fact_banks_dirty(fact.category).await?;
         if pre_existing.is_none() {
             self.log_oplog(
@@ -230,6 +210,56 @@ impl<'a> MemoryStore<'a> {
         Ok(AddFactOutcome {
             fact: Some(fact),
             diff,
+        })
+    }
+
+    async fn merge_duplicate_add(
+        &self,
+        existing: FactRecord,
+        entities: &[String],
+        metadata: &serde_json::Value,
+    ) -> Result<FactRecord> {
+        let mut merged_entities = existing.entities.clone();
+        let original_entities = merged_entities.clone();
+        for entity in entities {
+            if !merged_entities
+                .iter()
+                .any(|stored| stored.eq_ignore_ascii_case(entity))
+            {
+                merged_entities.push(entity.clone());
+            }
+        }
+        self.replace_fact_entities(existing.fact_id, &merged_entities)
+            .await?;
+        if merged_entities != original_entities {
+            self.update_fact_vector(
+                existing.fact_id,
+                &existing.content,
+                &merged_entities,
+                "add_fact",
+            )
+            .await?;
+        }
+
+        let mut merged_metadata = existing.metadata.clone();
+        if merge_metadata_object(&mut merged_metadata, metadata) {
+            let metadata_json = to_json_string(&merged_metadata, "add_fact")?;
+            self.conn
+                .execute(
+                    "UPDATE memory_facts
+                     SET metadata = ?1, updated_at = ?2
+                     WHERE fact_id = ?3",
+                    params![metadata_json, current_timestamp(), existing.fact_id],
+                )
+                .await
+                .map_err(|e| db_error("add_fact", e))?;
+        }
+
+        self.get_fact(existing.fact_id).await?.ok_or_else(|| {
+            db_message(
+                "add_fact",
+                "inserted fact was not found when reading it back",
+            )
         })
     }
 
@@ -1274,6 +1304,32 @@ fn merge_entities(content: &str, explicit: &[String]) -> Vec<String> {
         }
     }
     entities
+}
+
+fn merge_metadata_object(existing: &mut serde_json::Value, incoming: &serde_json::Value) -> bool {
+    let Some(incoming) = incoming.as_object() else {
+        return false;
+    };
+    if incoming.is_empty() {
+        return false;
+    }
+
+    if existing.is_null() {
+        *existing = serde_json::Value::Object(incoming.clone());
+        return true;
+    }
+    let Some(existing) = existing.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    for (key, value) in incoming {
+        if existing.get(key) != Some(value) {
+            existing.insert(key.clone(), value.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn to_json_string<T: serde::Serialize>(value: &T, operation: &str) -> Result<String> {

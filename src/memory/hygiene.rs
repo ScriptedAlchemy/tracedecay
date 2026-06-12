@@ -27,9 +27,10 @@ fn regex_set() -> &'static Vec<(Regex, &'static str)> {
             ),
             (
                 // Well-known credential prefixes (OpenAI, GitHub, Slack, AWS,
-                // GitLab). Each requires its full opaque tail so prose like
-                // "sk-something" cannot match.
-                r"\b(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b",
+                // GitLab). The broad OpenAI form requires a long opaque tail;
+                // the shorter test-key form requires a numeric suffix so prose
+                // like "sk-test fixture profile" cannot match.
+                r"\b(sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b",
                 "known credential prefix",
             ),
             (
@@ -169,6 +170,7 @@ mod tests {
     #[test]
     fn detects_known_prefixes_and_credentialish_assignments() {
         assert!(detect_secret_like("sk-proj1234567890abcdefghijklmn").is_some());
+        assert!(detect_secret_like("Deploys used sk-test-742913 before rotation").is_some());
         assert!(detect_secret_like("ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_some());
         assert!(detect_secret_like("AKIAIOSFODNN7EXAMPLE is the access key").is_some());
         assert!(detect_secret_like("api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH").is_some());
@@ -192,6 +194,7 @@ mod tests {
             detect_secret_like("The token budget for LCM expansion defaults to 4000").is_none()
         );
         assert!(detect_secret_like("secret sauce of the planner is union-find").is_none());
+        assert!(detect_secret_like("Use the sk-test fixture profile for dry runs").is_none());
         assert!(detect_secret_like("CamelCaseIdentifiersAreFineEvenWhenLong").is_none());
     }
 

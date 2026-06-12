@@ -48,14 +48,10 @@ Each scenario runs up to two phases:
   on the scenario's `expectation`:
   - `detect` — at least one assertion must fail, proving the assertion set
     can actually catch a misbehaving agent (instrument self-check).
-  - `defend-or-detect` — either the write path refuses/neutralizes the bad
-    write (all assertions pass ⇒ machinery contract landed) or the instrument
-    detects it. Scenarios marked `"contract": "pending-sibling"` report
-    `PENDING-SIBLING` in the detected case instead of failing, because the
-    defending machinery (write-path secret rejection, near-dup supersession)
-    is still landing on this branch. Once it lands, the same test
-    automatically starts reporting `DEFENDED`; a regression back to
-    "accepted + bad end-state" then fails the suite for stable contracts.
+  - `defend-or-detect` — either the write path or deterministic curator
+    refuses/neutralizes the bad state (all assertions pass ⇒ defended), or the
+    assertion set catches the violation. Stable-contract scenarios fail on
+    "accepted + bad end-state" regressions.
 
 ### Real-model layer (cost-gated, never in CI)
 
@@ -93,15 +89,11 @@ usage claims can be audited.
 | Scenario | Contract | What it guards |
 | --- | --- | --- |
 | `memory-no-pollution` | stable | Single-turn throwaway tokens never become facts; durable decisions still can. |
-| `memory-secret-rejection` | pending-sibling | Credential-like values are never stored; once the hygiene write path lands, tokensave itself must refuse the write. |
+| `memory-secret-rejection` | stable | Credential-like values are rejected by the write path before they reach durable memory. |
 | `memory-skip-local` | stable | Content already visible in workspace files is neither stored nor recall-churned. |
-| `memory-supersede-without-dup` | pending-sibling | Preference pivots update the existing fact; naive duplicate adds must eventually be defended by near-dup supersession. |
+| `memory-supersede-without-dup` | stable | Preference pivots update the existing fact; naive duplicate adds must be flagged by curation dry-run for deletion of the older superseded fact. |
 | `memory-multiturn-continuity` | stable | Facts stored in one session are recalled (with a real retrieval hit) in the next. |
 | `memory-curation-conservatism` | stable | `tokensave memory curate` never proposes deleting high-trust, high-access facts absent strong similarity, while genuine near-dups collapse — in dry-run and under `--apply`. |
-
-`pending-sibling` marks scenarios written against the curator-hygiene
-machinery being developed concurrently in `src/memory`; they self-upgrade to
-strict enforcement when that machinery lands (see `defend-or-detect` above).
 
 ## Adding a scenario
 

@@ -33,9 +33,9 @@ Run reports land under `eval/runs/<timestamp>/` (gitignored).
 
 Declared in [`scenarios/*.json`](scenarios/); one file per scenario with setup
 facts/files, scripted deterministic sequences (well-behaved + violation), the
-real-model prompts, and SQL/curate-report assertions. Scenarios whose
-machinery contract has not landed yet are marked `"contract": "pending-sibling"`
-and report their status instead of hard-failing.
+real-model prompts, and SQL/curate-report assertions. Stable scenarios hard-fail
+when a bad write is accepted and neither the write path nor curator dry-run
+neutralizes the bad state.
 
 ## Attribution
 
