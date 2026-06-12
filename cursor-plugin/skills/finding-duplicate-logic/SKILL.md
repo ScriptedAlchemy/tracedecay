@@ -1,6 +1,6 @@
 ---
 name: finding-duplicate-logic
-description: Check whether code already exists before writing it, and find functionally duplicated implementations. Use before writing any new helper/util ("is there already a function that does this?"), for "find duplicate code", "have we implemented X twice?", or planning a consolidation.
+description: Use before writing a new helper or utility to check whether equivalent code already exists, or when finding duplicate logic, similar symbols, repeated implementations, and consolidation candidates.
 ---
 
 # Finding duplicate logic

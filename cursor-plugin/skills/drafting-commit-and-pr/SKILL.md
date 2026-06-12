@@ -1,6 +1,6 @@
 ---
 name: drafting-commit-and-pr
-description: Draft a commit message, PR description, or changelog from the semantic meaning of your changes. Use for "write a commit message", "draft the PR description", "generate release notes", or summarizing a changeset. Does not commit or push.
+description: Use when drafting a commit message, PR description, release notes, or changelog from semantic diff context; drafts text only and must not commit, push, or create PRs.
 ---
 
 # Drafting commit & PR text

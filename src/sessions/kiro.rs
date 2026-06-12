@@ -409,7 +409,7 @@ fn legacy_chat_messages(
 ) -> Vec<SessionMessageRecord> {
     let base_ts = metadata
         .and_then(|meta| meta.get("startTime"))
-        .and_then(parse_timestamp_ms);
+        .and_then(parse_timestamp_secs);
     let mut out = Vec::new();
     for (index, entry) in chat.iter().enumerate() {
         let role = match entry.get("role").and_then(Value::as_str) {
@@ -465,7 +465,7 @@ fn modern_messages(
             .get("timestamp")
             .or_else(|| entry.get("createdAt"))
             .or_else(|| entry.get("startTime"))
-            .and_then(parse_timestamp_ms);
+            .and_then(parse_timestamp_secs);
         out.push(SessionMessageRecord {
             provider: PROVIDER.to_string(),
             message_id: format!("{session_id}:{index}"),
@@ -499,10 +499,10 @@ fn normalized_role(entry: &Value) -> Option<&'static str> {
     }
 }
 
-fn parse_timestamp_ms(value: &Value) -> Option<i64> {
+fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     if let Some(ts) = value.as_i64() {
-        return Some(if ts < 1_000_000_000_000 {
-            ts.saturating_mul(1000)
+        return Some(if ts >= 1_000_000_000_000 {
+            ts / 1000
         } else {
             ts
         });
@@ -510,7 +510,7 @@ fn parse_timestamp_ms(value: &Value) -> Option<i64> {
     value
         .as_str()
         .and_then(crate::accounting::parser::parse_timestamp)
-        .map(|secs| (secs as i64).saturating_mul(1000))
+        .map(|secs| secs as i64)
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {

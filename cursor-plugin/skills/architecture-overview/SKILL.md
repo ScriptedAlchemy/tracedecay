@@ -1,6 +1,6 @@
 ---
 name: architecture-overview
-description: Map the structure of the repo or a directory — modules, public surfaces, dependencies, layering, and coupling hotspots. Use for onboarding, "explain the architecture", "how is this organized", "draw me the module map", "find circular dependencies", or "what are the most coupled files". For quality scoring and tech-debt ranking, use code-health-report instead.
+description: Use when mapping repo or directory architecture, module structure, public APIs, dependency layers, circular dependencies, coupling hotspots, or onboarding; use tokensave:code-health-report for quality scoring and tech-debt ranking.
 ---
 
 # Architecture overview

@@ -1,6 +1,6 @@
 ---
 name: code-health-report
-description: Produce a code-health scorecard for the repo or a directory — composite health signal, inequality, complexity, duplication, documentation gaps, risk-weighted test gaps, and structural hotspots. Use for "code health report", "tech-debt audit", "what's the worst code", complexity/duplication review, or tracking quality across a work session.
+description: Use when producing a code-health scorecard, tech-debt audit, worst-code ranking, complexity/duplication/doc-gap/test-risk report, or before/after health review; use architecture-overview for module maps.
 ---
 
 # Code-health report

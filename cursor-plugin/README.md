@@ -28,7 +28,7 @@ Hook commands derive the active project from Cursor's event payload /
 
 Slash workflows ship as skills with `disable-model-invocation: true`
 (`/tokensave-map-architecture`, `/tokensave-check-health`,
-`/tokensave-review-diff`, …) — Cursor's Commands surface was absorbed into
+`/tokensave-curate-memory`, `/tokensave-review-diff`, …) — Cursor's Commands surface was absorbed into
 Skills, so this bundle no longer ships a `commands/` directory. Their slugs
 keep the `tokensave-` prefix so typing `/tokensave` lists every command, and
 the suffix is a verb phrase so the human-facing title (Cursor displays the
@@ -107,6 +107,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tokensave:tokensave_recursion",
     "tokensave:tokensave_redundancy",
     "tokensave:tokensave_rename_preview",
+    "tokensave:tokensave_retrieve",
     "tokensave:tokensave_runtime",
     "tokensave:tokensave_search",
     "tokensave:tokensave_signature",
@@ -133,6 +134,9 @@ Notes:
 - Two borderline entries: `tokensave_diagnostics` runs your toolchain
   (cargo/tsc/pyright) and `tokensave_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.
+- `tokensave_retrieve` only dereferences the required `handle` from a
+  project-local truncated MCP response. Use it when omitted details are needed;
+  it restores that exact cached response and does not re-run the source tool.
 - Do **not** use `tokensave:*` — it would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.

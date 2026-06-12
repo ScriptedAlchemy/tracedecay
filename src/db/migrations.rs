@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 13;
+const LATEST_VERSION: u32 = 14;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -293,6 +293,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         11 => migrate_v11(conn).await,
         12 => migrate_v12(conn).await,
         13 => migrate_v13(conn).await,
+        14 => migrate_v14(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -374,6 +375,80 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+/// v14: Memory-lifecycle additions — fact access tracking and the memory
+/// operation log.
+///
+/// Adds `access_count` / `last_recalled_at` to `memory_facts` (bumped only
+/// when a recall search RETURNS a fact, unlike `retrieval_count`, which also
+/// counts probe/list scans) and creates `memory_oplog`, an append-only audit
+/// of memory mutations. Idempotent: columns are probed before ALTER and the
+/// table/index use IF NOT EXISTS, so databases created from the fresh schema
+/// (which already includes both) pass through unchanged.
+async fn migrate_v14(conn: &Connection) -> Result<()> {
+    let existing: std::collections::HashSet<String> = {
+        let mut rows = conn
+            .query("PRAGMA table_info(memory_facts)", ())
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("v14: failed to read table_info: {e}"),
+                operation: "migrate_v14".to_string(),
+            })?;
+        let mut names = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            message: format!("v14: failed to iterate table_info: {e}"),
+            operation: "migrate_v14".to_string(),
+        })? {
+            let name: String = row.get(1).map_err(|e| TokenSaveError::Database {
+                message: format!("v14: failed to read column name: {e}"),
+                operation: "migrate_v14".to_string(),
+            })?;
+            names.insert(name);
+        }
+        names
+    };
+
+    for (column, ddl) in [
+        (
+            "access_count",
+            "ALTER TABLE memory_facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_recalled_at",
+            "ALTER TABLE memory_facts ADD COLUMN last_recalled_at INTEGER",
+        ),
+    ] {
+        if !existing.contains(column) {
+            conn.execute(ddl, ())
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("v14: failed to add column {column}: {e}"),
+                    operation: "migrate_v14".to_string(),
+                })?;
+        }
+    }
+
+    conn.execute_batch(MEMORY_OPLOG_SCHEMA)
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v14: failed to create memory_oplog: {e}"),
+            operation: "migrate_v14".to_string(),
+        })?;
+    Ok(())
+}
+
+/// Append-only audit log of memory mutations (add/update/remove/feedback and
+/// curation applies). `detail_json` never carries fact content beyond what
+/// the op needs — deletes record a content hash, not the content.
+const MEMORY_OPLOG_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_oplog (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL DEFAULT 0,
+        op TEXT NOT NULL,
+        fact_id INTEGER,
+        detail_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_oplog_ts ON memory_oplog(ts);";
 
 // ---------------------------------------------------------------------------
 // Migration V1: initial schema
@@ -979,11 +1054,13 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
             tags TEXT NOT NULL DEFAULT '[]',
             trust_score REAL NOT NULL DEFAULT 0.5,
             retrieval_count INTEGER NOT NULL DEFAULT 0,
+            access_count INTEGER NOT NULL DEFAULT 0,
             helpful_count INTEGER NOT NULL DEFAULT 0,
             unhelpful_count INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0,
             last_retrieved_at INTEGER,
+            last_recalled_at INTEGER,
             last_feedback_at INTEGER,
             source TEXT NOT NULL DEFAULT 'manual',
             metadata TEXT NOT NULL DEFAULT '{}',
@@ -1086,6 +1163,13 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
         message: format!("{operation}: failed to create holographic memory schema: {e}"),
         operation: operation.to_string(),
     })?;
+
+    conn.execute_batch(MEMORY_OPLOG_SCHEMA)
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("{operation}: failed to create memory oplog schema: {e}"),
+            operation: operation.to_string(),
+        })?;
 
     Ok(())
 }
