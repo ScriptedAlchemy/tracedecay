@@ -1,5 +1,7 @@
 # TokenSave: From 1.0 to 6.1, the Story So Far
 
+> **Note:** The project described here has since been renamed **TraceDecay**. This page is a historical narrative of the TokenSave era (1.0 through 6.1) and intentionally keeps the original names for the product, commands, tools, and releases as they existed at the time.
+
 [Illustration: generate a landscape oriented image of a glowing semantic knowledge graph floating above a laptop screen, with nodes and edges made of light connecting code symbols, a small orange crab perched on the laptop corner observing the graph, dark workspace background with subtle warm lighting, photographic style with shallow depth of field]
 
 TokenSave reached 1.0.0 on March 24, 2026. It could index Rust projects, serve a handful of MCP tools over stdio, and save Claude Code from burning tokens on redundant file scans. Useful, but narrow. A few months and ninety-plus releases later, it speaks more than fifty programming languages, keeps its index fresh on demand with no background process, installs itself into more than a dozen different AI coding agents, maintains optional per-branch code graphs, tracks token savings down to the individual tool call, and edits files through atomic, anchor-based primitives. All in a single ~25 MB binary with zero runtime dependencies.
@@ -263,7 +265,7 @@ If you don't remember whether you registered autostart, these discovery commands
 - **Linux:** `systemctl --user list-units | grep tokensave`
 - **Windows:** `sc.exe query state= all | findstr -i tokensave`
 
-CLI-only users (anyone who runs `tokensave` commands without an attached agent) lose automatic background syncing. The recommended replacement is a git post-commit hook -- a starter script lives at `scripts/post-commit` in the tokensave repo. Drop it into `.git/hooks/post-commit` in each project where you want the index to update on commit.
+CLI-only users (anyone who runs `tokensave` commands without an attached agent) lose automatic background syncing. The recommended replacement is a git post-commit hook -- a starter script lives at `scripts/post-commit` in the TraceDecay repo. Drop it into `.git/hooks/post-commit` in each project where you want the index to update on commit.
 
 ### What this means for you
 
@@ -275,9 +277,9 @@ If you use TokenSave purely from the CLI without an attached agent, this is a re
 
 ## What Comes Next
 
-The competitive landscape is getting interesting. Dual-Graph (GrapeRoot) approaches the problem as a context prefill layer, intercepting prompts and pre-loading ranked files. code-review-graph takes a similar tree-sitter/SQLite approach to tokensave but adds multi-repo search, execution flow analysis, and community detection. OpenWolf goes in a completely different direction with lifecycle hooks that block redundant file reads and carry forward correction memory across sessions.
+The competitive landscape is getting interesting. Dual-Graph (GrapeRoot) approaches the problem as a context prefill layer, intercepting prompts and pre-loading ranked files. code-review-graph takes a similar tree-sitter/SQLite approach to TraceDecay but adds multi-repo search, execution flow analysis, and community detection. OpenWolf goes in a completely different direction with lifecycle hooks that block redundant file reads and carry forward correction memory across sessions.
 
-Each tool has ideas worth learning from. CodeGraph's `codegraph_explore` tool, which combines search, traversal, and source extraction into a single call with budget signalling, represents a genuinely better interaction pattern for Explore agents. code-review-graph's multi-repo registry and accuracy benchmarks are features tokensave should adopt. OpenWolf's redundant-read blocking attacks a class of waste that graph queries alone don't address.
+Each tool has ideas worth learning from. CodeGraph's `codegraph_explore` tool, which combines search, traversal, and source extraction into a single call with budget signalling, represents a genuinely better interaction pattern for Explore agents. code-review-graph's multi-repo registry and accuracy benchmarks are features TraceDecay should adopt. OpenWolf's redundant-read blocking attacks a class of waste that graph queries alone don't address.
 
 The language coverage is broad — the functional family (Haskell, Elixir, OCaml, F#, Clojure, Erlang), the shader languages (GLSL, WGSL, HLSL, Metal), R, SQL, Julia, and most recently Svelte and Astro have all landed — but not complete. Vue single-file components, Solidity, and HCL/Terraform are plausible next targets. The feature-flag system makes adding them straightforward without bloating the default binary.
 
@@ -287,7 +289,7 @@ TokenSave started as a way to make Claude Code stop reading the same files over 
 
 ---
 
-Learn more at [tokensave.dev](https://tokensave.dev).
+Learn more at [the TraceDecay repository on GitHub](https://github.com/ScriptedAlchemy/tokensave).
 
 Want more like this?
 I write regularly about Rust, design patterns, and performance tips.

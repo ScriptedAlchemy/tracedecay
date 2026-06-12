@@ -1,8 +1,8 @@
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use tokensave::db::Database;
-use tokensave::sync::*;
-use tokensave::types::FileRecord;
+use tracedecay::db::Database;
+use tracedecay::sync::*;
+use tracedecay::types::FileRecord;
 
 #[test]
 fn test_content_hash_deterministic() {

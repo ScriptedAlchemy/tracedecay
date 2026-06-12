@@ -168,7 +168,7 @@ pub fn fetch_latest_stable_version() -> Option<String> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let release: GitHubRelease = agent
         .get(GITHUB_RELEASES_URL)
-        .header("User-Agent", "tokensave")
+        .header("User-Agent", "tracedecay")
         .call()
         .ok()?
         .body_mut()
@@ -185,7 +185,7 @@ pub fn fetch_latest_beta_version() -> Option<String> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
     let releases: Vec<GitHubRelease> = agent
         .get(GITHUB_RELEASES_LIST_URL)
-        .header("User-Agent", "tokensave")
+        .header("User-Agent", "tracedecay")
         .call()
         .ok()?
         .body_mut()
@@ -264,7 +264,7 @@ pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
         }
 }
 
-/// How tokensave was installed, detected from the binary path.
+/// How tracedecay was installed, detected from the binary path.
 pub enum InstallMethod {
     Cargo,
     Brew,
@@ -272,7 +272,7 @@ pub enum InstallMethod {
     Unknown,
 }
 
-/// Detects how tokensave was installed by inspecting the binary path.
+/// Detects how tracedecay was installed by inspecting the binary path.
 pub fn detect_install_method() -> InstallMethod {
     let Ok(exe) = std::env::current_exe() else {
         return InstallMethod::Unknown;
@@ -291,10 +291,10 @@ pub fn detect_install_method() -> InstallMethod {
 
 /// Returns the upgrade command string.
 ///
-/// Always suggests `tokensave upgrade` which handles all install methods
+/// Always suggests `tracedecay upgrade` which handles all install methods
 /// and channels automatically.
 pub fn upgrade_command(_method: &InstallMethod) -> &'static str {
-    "tokensave upgrade"
+    "tracedecay upgrade"
 }
 
 #[cfg(test)]

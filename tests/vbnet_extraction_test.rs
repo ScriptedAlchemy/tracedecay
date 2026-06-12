@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::VbNetExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::VbNetExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_vb_file_node_is_root() {

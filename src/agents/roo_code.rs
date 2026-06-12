@@ -1,7 +1,7 @@
 //! Roo Code agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Roo Code's
-//! `cline_mcp_settings.json` under the `mcpServers.tokensave` key.
+//! Handles registration of the tracedecay MCP server in Roo Code's
+//! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
 
 use std::path::{Path, PathBuf};
 
@@ -33,12 +33,12 @@ impl AgentIntegration for RooCodeIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let settings_path = roo_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
-        install_mcp_server(&settings_path, &ctx.tokensave_bin)?;
+        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Restart VS Code — tokensave tools are now available in Roo Code");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Restart VS Code — tracedecay tools are now available in Roo Code");
         Ok(())
     }
 
@@ -47,7 +47,7 @@ impl AgentIntegration for RooCodeIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_mcp_server(&project_path.join(".roo/mcp.json"), &ctx.tokensave_bin)
+        install_mcp_server(&project_path.join(".roo/mcp.json"), &ctx.tracedecay_bin)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -55,7 +55,7 @@ impl AgentIntegration for RooCodeIntegration {
         uninstall_mcp_server(&settings_path);
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Roo Code.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Roo Code.");
         eprintln!("Restart VS Code for changes to take effect.");
         Ok(())
     }
@@ -73,15 +73,15 @@ impl AgentIntegration for RooCodeIntegration {
         Some(roo_ext_dir(home).join("settings/cline_mcp_settings.json"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let settings_path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
         if !settings_path.exists() {
             return false;
         }
         let json = load_json_file(&settings_path);
-        json.get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some()
+        let servers = json.get("mcpServers");
+        servers.and_then(|v| v.get("tracedecay")).is_some()
+            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -89,7 +89,7 @@ impl AgentIntegration for RooCodeIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -104,15 +104,15 @@ fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
             return Err(e);
         }
     };
-    settings["mcpServers"]["tokensave"] = json!({
-        "command": tokensave_bin,
+    settings["mcpServers"]["tracedecay"] = json!({
+        "command": tracedecay_bin,
         "args": ["serve"],
         "disabled": false
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
@@ -137,15 +137,17 @@ fn uninstall_mcp_server(settings_path: &Path) {
         .and_then(|v| v.as_object_mut())
     else {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
     };
 
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -164,7 +166,7 @@ fn uninstall_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             settings_path.display()
         );
     }
@@ -174,20 +176,20 @@ fn uninstall_mcp_server(settings_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Roo Code's `cline_mcp_settings.json` has tokensave MCP server registered.
+/// Check Roo Code's `cline_mcp_settings.json` has tracedecay MCP server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
 
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent roo-code` if you use Roo Code",
+            "{} not found — run `tracedecay install --agent roo-code` if you use Roo Code",
             settings_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     if server.and_then(|v| v.as_object()).is_some() {
         dc.pass(&format!(
@@ -196,7 +198,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent roo-code`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent roo-code`",
             settings_path.display()
         ));
     }

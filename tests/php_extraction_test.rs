@@ -1,9 +1,9 @@
 #[cfg(feature = "lang-php")]
 mod php_tests {
 
-    use tokensave::extraction::LanguageExtractor;
-    use tokensave::extraction::PhpExtractor;
-    use tokensave::types::*;
+    use tracedecay::extraction::LanguageExtractor;
+    use tracedecay::extraction::PhpExtractor;
+    use tracedecay::types::*;
 
     #[test]
     fn test_php_file_node() {

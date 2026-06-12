@@ -1,15 +1,15 @@
-//! LCM dashboard API, backed by tokensave's LCM session store.
+//! LCM dashboard API, backed by tracedecay's LCM session store.
 //!
 //! Port of the hermes-lcm `dashboard/plugin_api.py` onto the session-store
 //! tables `lcm_raw_messages`, `lcm_summary_nodes`, and `lcm_summary_sources`.
 //! The store served is selected by [`super::resolve_lcm_store`]: the
-//! project-local `.tokensave/sessions.db` (where transcript ingest writes)
-//! by default, or the global DB under a `TOKENSAVE_GLOBAL_DB` override /
+//! project-local `.tracedecay/sessions.db` (where transcript ingest writes)
+//! by default, or the global DB under a `TRACEDECAY_GLOBAL_DB` override /
 //! fallback. Every payload reports the active store via the additive
 //! `path` + `storage_scope` fields. Payload shapes otherwise mirror the
 //! original routes so the ported UI bundle works unchanged.
 //!
-//! Schema mapping (hermes-lcm → tokensave):
+//! Schema mapping (hermes-lcm → tracedecay):
 //! - `messages`               → `lcm_raw_messages` (`source` ← `provider`,
 //!   `token_estimate` ← ~chars/4, `pinned`/`tool_name` not tracked)
 //! - `summary_nodes`          → `lcm_summary_nodes` (`summary` ←

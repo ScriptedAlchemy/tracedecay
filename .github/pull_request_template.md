@@ -21,7 +21,7 @@
 - [ ] Tested manually (describe below if applicable)
 
 <!-- For new language extractors: fixture file added, extraction test added. -->
-<!-- For sync/DB changes: tested with `tokensave sync --doctor` on a real project. -->
+<!-- For sync/DB changes: tested with `tracedecay sync --doctor` on a real project. -->
 
 ## Checklist
 

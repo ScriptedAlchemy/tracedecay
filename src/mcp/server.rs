@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::errors::Result;
 use crate::global_db::GlobalDb;
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
 use super::tools::{explore_call_budget, get_tool_definitions_with_budget, handle_tool_call};
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
@@ -45,12 +45,13 @@ const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 // by default; see `crate::global_db::global_accounting_mode` for the env
 // override precedence.
 
-/// Hand-maintained schema documentation for the `tokensave://schema` resource.
+/// Hand-maintained schema documentation for the `tracedecay://schema` resource.
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
-const SCHEMA_MARKDOWN: &str = r"# tokensave SQLite schema
+const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
 
-The on-disk database lives at `.tokensave/tokensave.db` (per-branch variants
-under multi-branch mode). All tables are plain SQLite; safe to query with any
+The on-disk database lives at `.tracedecay/tracedecay.db` (legacy projects
+fall back to `.tokensave/tokensave.db`; per-branch variants under multi-branch
+mode). All tables are plain SQLite; safe to query with any
 client. WAL mode is used, so readers do not block writers.
 
 ## Tables
@@ -109,7 +110,7 @@ Common keys: `tokens_saved`, schema-version markers.
 - `ast_hash`, `cfg_hash`, `call_seq_hash`, `shingles`
 - `body_tokens`, `source_hash`
 
-### `read_cache` — rendered `tokensave_read` responses
+### `read_cache` — rendered `tracedecay_read` responses
 - primary key: `(project_id, session_id, file_path, mode, args_hash)`
 - stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
 
@@ -157,7 +158,7 @@ LIMIT 20;
 ```
 
 ### Files modified since last index
-Compare `files.modified_at` against the live filesystem mtime — `tokensave_affected` does this with extra git plumbing.
+Compare `files.modified_at` against the live filesystem mtime — `tracedecay_affected` does this with extra git plumbing.
 
 ### Largest functions by line span
 ```sql
@@ -169,7 +170,7 @@ LIMIT 20;
 ```
 
 ## Gotchas
-- `nodes.id` is a content hash, so it changes when the symbol moves. For cross-run lookups use `qualified_name` (or `tokensave_by_qualified_name`).
+- `nodes.id` is a content hash, so it changes when the symbol moves. For cross-run lookups use `qualified_name` (or `tracedecay_by_qualified_name`).
 - `edges.kind = 'calls'` may reference a *trait method* node rather than the resolved concrete impl — trait dispatch is not currently rewritten.
 - `derives_macro` edges record `#[derive(...)]` usage but generated impls are not in the graph.
 ";
@@ -201,7 +202,7 @@ fn format_per_file_staleness_banner(
         let age = file_mtime_secs(project_root, path).map_or(0, |m| now_secs.saturating_sub(m));
         lines.push(format!("  - {path} (edited {})", humanize_age(age)));
     }
-    lines.push("Run `tokensave sync` to refresh the index.".to_string());
+    lines.push("Run `tracedecay sync` to refresh the index.".to_string());
     lines.join("\n")
 }
 
@@ -284,7 +285,7 @@ struct VersionCheckState {
     checked_at: Option<Instant>,
 }
 
-/// The MCP server wrapping a `TokenSave` instance.
+/// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> tool_call_counts (never nested)
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
@@ -294,7 +295,7 @@ pub struct McpServer {
     /// handler await, so a swap never contends with in-flight calls. Calls
     /// already running when a swap lands finish against the old snapshot;
     /// each call is internally consistent.
-    cg: tokio::sync::RwLock<Arc<TokenSave>>,
+    cg: tokio::sync::RwLock<Arc<TraceDecay>>,
     stats: ServerStats,
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
@@ -323,7 +324,7 @@ pub struct McpServer {
     shutdown_done: AtomicBool,
     /// When true, every `tools/call` response gains a `_meta.duration_us`
     /// field measuring the handler's pure execution time. Toggled by
-    /// `tokensave serve --timings`. Off by default to keep responses clean.
+    /// `tracedecay serve --timings`. Off by default to keep responses clean.
     timings_enabled: AtomicBool,
     /// UNIX timestamp (secs) of the most recent staleness check started by
     /// the server. Read-modify-update via `compare_exchange` in
@@ -368,7 +369,7 @@ impl McpServer {
     /// where nested ignored directories (`apps/*/node_modules`,
     /// `packages/*/target`) drove unbounded event traffic and `FileId`
     /// cache growth.
-    pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
+    pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let global_db: Option<Arc<GlobalDb>> = if crate::global_db::global_accounting_enabled() {
@@ -461,18 +462,18 @@ impl McpServer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Test-only accessor for the backing `TokenSave`. Exposed so
+    /// Test-only accessor for the backing `TraceDecay`. Exposed so
     /// integration tests can drive the staleness pipeline directly,
     /// bypassing the 30 s cooldown in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
     #[doc(hidden)]
-    pub async fn cg(&self) -> Arc<TokenSave> {
+    pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
     }
 
-    /// Clones out the currently served `TokenSave` instance. The lock is
+    /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
-    async fn cg_snapshot(&self) -> Arc<TokenSave> {
+    async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
     }
 
@@ -484,10 +485,10 @@ impl McpServer {
     /// current snapshot. On drift, the write lock serializes the swap and
     /// the drift check is repeated under it so concurrent calls reopen at
     /// most once. If reopening fails the previous instance is kept — the
-    /// drift guards in [`TokenSave::ensure_branch_writable`] and
+    /// drift guards in [`TraceDecay::ensure_branch_writable`] and
     /// [`Self::maybe_sync_if_stale`] still protect writes, exactly as
     /// before this hot-swap existed.
-    async fn reopen_if_branch_drifted(&self) -> Arc<TokenSave> {
+    async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         let current = self.cg_snapshot().await;
         if !current.branch_drifted() {
             return current;
@@ -501,7 +502,7 @@ impl McpServer {
             match guard.reopen_for_current_branch().await {
                 Ok(fresh) => {
                     eprintln!(
-                        "[tokensave] branch changed to '{}' — reopened the index for it",
+                        "[tracedecay] branch changed to '{}' — reopened the index for it",
                         fresh.active_branch().unwrap_or("<detached>")
                     );
                     *guard = Arc::new(fresh);
@@ -509,7 +510,7 @@ impl McpServer {
                 }
                 Err(e) => {
                     eprintln!(
-                        "[tokensave] branch drift detected but reopen failed: {e}; \
+                        "[tracedecay] branch drift detected but reopen failed: {e}; \
                          continuing to serve branch '{}'",
                         guard.serving_branch().unwrap_or("<none>")
                     );
@@ -615,7 +616,7 @@ impl McpServer {
         let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
             if let Err(e) = cg.sync_if_stale_silent(&stale).await {
-                eprintln!("[tokensave] startup catch-up sync failed: {e}");
+                eprintln!("[tracedecay] startup catch-up sync failed: {e}");
                 self.startup_catch_up_done.store(true, Ordering::Release);
                 return;
             }
@@ -734,7 +735,7 @@ impl McpServer {
         let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
             if let Err(e) = cg.sync_if_stale_silent(&stale).await {
-                eprintln!("[tokensave] lazy sync failed: {e}");
+                eprintln!("[tracedecay] lazy sync failed: {e}");
                 return;
             }
         }
@@ -816,8 +817,8 @@ impl McpServer {
                     let latest = cache.latest.as_deref()?;
                     return if crate::cloud::is_newer_minor_version(current, latest) {
                         Some(format!(
-                            "⚠️ tokensave v{current} is installed, but v{latest} is available. \
-                             Run `tokensave upgrade` to update."
+                            "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+                             Run `tracedecay upgrade` to update."
                         ))
                     } else {
                         None
@@ -841,8 +842,8 @@ impl McpServer {
         let latest = latest?;
         if crate::cloud::is_newer_minor_version(current, &latest) {
             Some(format!(
-                "⚠️ tokensave v{current} is installed, but v{latest} is available. \
-                 Run `tokensave upgrade` to update."
+                "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+                 Run `tracedecay upgrade` to update."
             ))
         } else {
             None
@@ -1010,7 +1011,7 @@ impl McpServer {
         let cg = self.cg_snapshot().await;
         // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
-            eprintln!("[tokensave] warning: failed to persist tokens_saved on shutdown: {e}");
+            eprintln!("[tracedecay] warning: failed to persist tokens_saved on shutdown: {e}");
         }
 
         // Update global DB with final count and checkpoint it
@@ -1040,11 +1041,11 @@ impl McpServer {
 
         // Checkpoint WAL to merge it into the main database file
         if let Err(e) = cg.checkpoint().await {
-            eprintln!("[tokensave] warning: failed to checkpoint WAL on shutdown: {e}");
+            eprintln!("[tracedecay] warning: failed to checkpoint WAL on shutdown: {e}");
         }
 
         eprintln!(
-            "[tokensave] shutdown: {} tool calls, ~{} tokens saved, uptime {}s",
+            "[tracedecay] shutdown: {} tool calls, ~{} tokens saved, uptime {}s",
             tool_calls,
             tokens_saved,
             uptime.as_secs()
@@ -1109,19 +1110,19 @@ impl McpServer {
                     "logging": {}
                 },
                 "serverInfo": {
-                    "name": "tokensave",
+                    "name": "tracedecay",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": "tokensave is a code-graph MCP server. \
-                    Start with tokensave_context for any code exploration task \
+                "instructions": "tracedecay is a code-graph MCP server. \
+                    Start with tracedecay_context for any code exploration task \
                     — it returns relevant symbols, relationships, and code \
-                    snippets for a natural-language query. Use tokensave_search \
+                    snippets for a natural-language query. Use tracedecay_search \
                     to find specific symbols by name. Discovery and analysis \
                     tools are read-only and safe to call in parallel. Edit \
                     and session-memory tools can mutate local project state \
                     and declare readOnlyHint=false. \
-                    When a tool result contains a `tokensave_metrics:` line, \
-                    report the savings to the user (e.g. 'TokenSave\\'d ~N tokens')."
+                    When a tool result contains a `tracedecay_metrics:` line, \
+                    report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
             }),
         )
     }
@@ -1146,33 +1147,33 @@ impl McpServer {
             json!({
                 "resources": [
                     {
-                        "uri": "tokensave://status",
+                        "uri": "tracedecay://status",
                         "name": "Graph Status",
                         "description": "Code graph statistics: node/edge/file counts, languages, DB size, and index freshness.",
                         "mimeType": "application/json"
                     },
                     {
-                        "uri": "tokensave://files",
+                        "uri": "tracedecay://files",
                         "name": "File List",
                         "description": "All indexed project files grouped by directory with symbol counts.",
                         "mimeType": "text/plain"
                     },
                     {
-                        "uri": "tokensave://overview",
+                        "uri": "tracedecay://overview",
                         "name": "Project Overview",
                         "description": "High-level project summary: language distribution, largest modules, and top entry points.",
                         "mimeType": "text/plain"
                     },
                     {
-                        "uri": "tokensave://branches",
+                        "uri": "tracedecay://branches",
                         "name": "Tracked Branches",
                         "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
                         "mimeType": "application/json"
                     },
                     {
-                        "uri": "tokensave://schema",
+                        "uri": "tracedecay://schema",
                         "name": "SQLite Schema",
-                        "description": "Documentation for the .tokensave/tokensave.db schema: tables, columns, indexes, and common query recipes. Use when MCP tools don't cover your query and you need to drop down to raw SQL.",
+                        "description": "Documentation for the .tracedecay/tracedecay.db schema: tables, columns, indexes, and common query recipes. Use when MCP tools don't cover your query and you need to drop down to raw SQL.",
                         "mimeType": "text/markdown"
                     }
                 ]
@@ -1193,11 +1194,11 @@ impl McpServer {
         };
 
         match uri {
-            "tokensave://status" => self.read_resource_status(id).await,
-            "tokensave://files" => self.read_resource_files(id).await,
-            "tokensave://overview" => self.read_resource_overview(id).await,
-            "tokensave://branches" => self.read_resource_branches(id).await,
-            "tokensave://schema" => Self::read_resource_schema(id),
+            "tracedecay://status" => self.read_resource_status(id).await,
+            "tracedecay://files" => self.read_resource_files(id).await,
+            "tracedecay://overview" => self.read_resource_overview(id).await,
+            "tracedecay://branches" => self.read_resource_branches(id).await,
+            "tracedecay://schema" => Self::read_resource_schema(id),
             _ => JsonRpcResponse::error(
                 id,
                 ErrorCode::InvalidParams,
@@ -1213,7 +1214,7 @@ impl McpServer {
             id,
             json!({
                 "contents": [{
-                    "uri": "tokensave://schema",
+                    "uri": "tracedecay://schema",
                     "mimeType": "text/markdown",
                     "text": SCHEMA_MARKDOWN
                 }]
@@ -1230,7 +1231,7 @@ impl McpServer {
                     id,
                     json!({
                         "contents": [{
-                            "uri": "tokensave://status",
+                            "uri": "tracedecay://status",
                             "mimeType": "application/json",
                             "text": text
                         }]
@@ -1278,7 +1279,7 @@ impl McpServer {
                     id,
                     json!({
                         "contents": [{
-                            "uri": "tokensave://files",
+                            "uri": "tracedecay://files",
                             "mimeType": "text/plain",
                             "text": text
                         }]
@@ -1339,7 +1340,7 @@ impl McpServer {
             id,
             json!({
                 "contents": [{
-                    "uri": "tokensave://overview",
+                    "uri": "tracedecay://overview",
                     "mimeType": "text/plain",
                     "text": text
                 }]
@@ -1349,15 +1350,15 @@ impl McpServer {
 
     async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
-        let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
+        let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
         let current = cg.active_branch();
 
-        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tokensave_dir) {
+        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tracedecay_dir) {
             Some(meta) => meta
                 .branches
                 .iter()
                 .map(|(name, entry)| {
-                    let db_path = tokensave_dir.join(&entry.db_file);
+                    let db_path = tracedecay_dir.join(&entry.db_file);
                     let size_bytes = db_path.metadata().map_or(0, |m| m.len());
                     json!({
                         "name": name,
@@ -1382,7 +1383,7 @@ impl McpServer {
             id,
             json!({
                 "contents": [{
-                    "uri": "tokensave://branches",
+                    "uri": "tracedecay://branches",
                     "mimeType": "application/json",
                     "text": text
                 }]
@@ -1421,12 +1422,12 @@ impl McpServer {
         self.maybe_sync_if_stale().await;
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
-        eprintln!("[tokensave] tool call: {tool_name}");
+        eprintln!("[tracedecay] tool call: {tool_name}");
         if let Ok(mut counts) = self.tool_call_counts.lock() {
             *counts.entry(tool_name.to_string()).or_insert(0) += 1;
         }
 
-        let server_stats = if tool_name == "tokensave_status" {
+        let server_stats = if tool_name == "tracedecay_status" {
             Some(self.server_stats_json().await)
         } else {
             None
@@ -1475,7 +1476,7 @@ impl McpServer {
                 self.persist_saved_tokens(net_saved_tokens).await;
                 crate::monitor::write_entry(
                     cg.project_root(),
-                    "tokensave",
+                    "tracedecay",
                     tool_name,
                     net_saved_tokens,
                     raw_file_tokens,
@@ -1490,7 +1491,7 @@ impl McpServer {
                         .and_then(|c| c.as_array_mut())
                     {
                         content.push(json!({"type": "text", "text": format!(
-                            "\ntokensave_metrics: before={raw_file_tokens} after={response_tokens}"
+                            "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
                         )}));
                     }
                 }
@@ -1503,7 +1504,7 @@ impl McpServer {
                 if let Some(gdb) = self.global_db.clone() {
                     let project_path_str = cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
-                    let ts = crate::tokensave::current_timestamp();
+                    let ts = crate::tracedecay::current_timestamp();
                     self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
                     let finished = self.ledger_writes_finished.clone();
                     let notify = self.ledger_write_notify.clone();
@@ -1536,7 +1537,7 @@ impl McpServer {
                             "method": "notifications/message",
                             "params": {
                                 "level": "warning",
-                                "logger": "tokensave",
+                                "logger": "tracedecay",
                                 "data": warning
                             }
                         }));
@@ -1564,7 +1565,7 @@ impl McpServer {
                             // so existing scrapers keep working.
                             let stale_json = serde_json::to_string(&stale_files)
                                 .unwrap_or_else(|_| "[]".to_string());
-                            let marker = format!("\ntokensave_graph_stale: {stale_json}");
+                            let marker = format!("\ntracedecay_graph_stale: {stale_json}");
                             debug_assert!(
                                 result.value.is_object(),
                                 "tool result must be a JSON object so graph_stale can be attached"
@@ -1614,12 +1615,12 @@ impl McpServer {
                         let mins = (age_secs % 3600) / 60;
                         let warning = if hours >= 24 {
                             format!(
-                                "WARNING: Index last synced {}d {}h ago. Run `tokensave sync` to update.",
+                                "WARNING: Index last synced {}d {}h ago. Run `tracedecay sync` to update.",
                                 hours / 24, hours % 24
                             )
                         } else {
                             format!(
-                                "WARNING: Index last synced {hours}h {mins}m ago. Run `tokensave sync` to update."
+                                "WARNING: Index last synced {hours}h {mins}m ago. Run `tracedecay sync` to update."
                             )
                         };
                         if let Some(content) = result
@@ -1684,7 +1685,7 @@ impl McpServer {
         }
 
         // Surface the verbose worktree-mismatch warning when present, so
-        // `tokensave_status` is the one tool whose output is loud about
+        // `tracedecay_status` is the one tool whose output is loud about
         // serving a borrowed index (#312).
         if let Some(ref m) = self.worktree_mismatch {
             stats["worktree_mismatch"] = json!({
@@ -1728,7 +1729,7 @@ mod staleness_banner_tests {
         assert!(banner.contains("src/a.rs ("));
         assert!(banner.contains("src/b.rs ("));
         assert!(banner.contains("ago)"));
-        assert!(banner.contains("tokensave sync"));
+        assert!(banner.contains("tracedecay sync"));
         // Critical UX shift: should NOT say "STALE INDEX" — the whole
         // point of #428 is to scope the warning, not blanket-distrust
         // the entire response.

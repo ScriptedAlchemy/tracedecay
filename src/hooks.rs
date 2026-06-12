@@ -1,7 +1,7 @@
 //! Hook handlers for Claude Code, Kiro, Cursor, and Codex integrations.
 //!
 //! These functions are invoked by each agent's hook system to intercept tool
-//! calls, redirect exploration work to tokensave MCP tools, keep the index
+//! calls, redirect exploration work to tracedecay MCP tools, keep the index
 //! fresh after edits / git state changes, and track per-session token savings.
 //! Each agent sends its own event schema on stdin and expects its own output
 //! shape, so the handlers are kept agent-specific rather than shared blindly.
@@ -21,30 +21,26 @@ macro_rules! read_hook_event {
         match read_stdin_to_string() {
             Ok(event) => event,
             Err(e) => {
-                eprintln!("tokensave hook: failed to read stdin: {e}");
+                eprintln!("tracedecay hook: failed to read stdin: {e}");
                 return 1;
             }
         }
     }};
 }
 
-const TOKENSAVE_RESEARCH_BLOCK_REASON: &str = "STOP: Use tokensave MCP tools \
-(tokensave_context, tokensave_search, tokensave_callees, tokensave_callers, \
-tokensave_impact, tokensave_files, tokensave_affected) instead of agents for \
-code research. Tokensave is faster and more precise for symbol relationships, \
+const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
+(tracedecay_context, tracedecay_search, tracedecay_callees, tracedecay_callers, \
+tracedecay_impact, tracedecay_files, tracedecay_affected) instead of agents for \
+code research. TraceDecay is faster and more precise for symbol relationships, \
 call paths, and code structure. Only use agents for code exploration if you \
-have already tried tokensave and it cannot answer the question.";
+have already tried tracedecay and it cannot answer the question.";
 
 fn research_block_reason(hint: Option<ToolHint>) -> String {
+    let base = crate::config::brand_env("RESEARCH_BLOCK_REASON")
+        .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
     hint.map_or_else(
-        || TOKENSAVE_RESEARCH_BLOCK_REASON.to_string(),
-        |hint| {
-            format!(
-                "{}\n\n{}",
-                TOKENSAVE_RESEARCH_BLOCK_REASON,
-                format_tool_hint(&hint)
-            )
-        },
+        || base.clone(),
+        |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
     )
 }
 
@@ -53,7 +49,7 @@ fn research_block_reason(hint: Option<ToolHint>) -> String {
 /// Reads the `TOOL_INPUT` environment variable (JSON), inspects the
 /// `subagent_type` and `prompt` fields, and prints a JSON decision to
 /// stdout. Blocks Explore agents and exploration-style prompts, directing
-/// Claude to use tokensave MCP tools instead.
+/// Claude to use tracedecay MCP tools instead.
 pub fn hook_pre_tool_use() {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
     let decision = evaluate_hook_decision(&tool_input);
@@ -98,7 +94,7 @@ pub fn evaluate_hook_decision(tool_input: &str) -> String {
         return block_msg().to_string();
     }
 
-    // Check if the prompt is exploration/research work that tokensave can handle
+    // Check if the prompt is exploration/research work that tracedecay can handle
     if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str()) {
         if is_code_research_prompt(prompt) {
             return block_msg().to_string();
@@ -163,14 +159,14 @@ pub fn hook_cursor_subagent_start() -> i32 {
 /// Cursor `postToolUse` hook handler.
 ///
 /// Emits soft `additional_context` hints steering exploration tools (Grep,
-/// Glob, Read, semantic search, shell `rg`) toward tokensave MCP tools.
+/// Glob, Read, semantic search, shell `rg`) toward tracedecay MCP tools.
 /// Registered on `postToolUse` rather than `preToolUse` because Cursor's
 /// documented `preToolUse` output schema has no context-injection field —
 /// `additional_context` is only honored on `postToolUse`. The hook runs
 /// unmatched (the docs enumerate no matcher value for Cursor's semantic
 /// search tool) and irrelevant tools fail open with no output. Each hint
 /// category is emitted at most once per session via [`ToolHintDedupe`]
-/// persisted under `.tokensave/`.
+/// persisted under `.tracedecay/`.
 pub fn hook_cursor_post_tool_use() -> i32 {
     let event = read_hook_event!();
     if let Some(decision) = cursor_post_tool_use_decision(&event) {
@@ -258,7 +254,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// Cursor `sessionStart` hook handler (fire-and-forget).
 ///
 /// Emits Cursor's `sessionStart` output shape (`additional_context` + `env`)
-/// steering the agent toward tokensave MCP tools and reporting index freshness
+/// steering the agent toward tracedecay MCP tools and reporting index freshness
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
@@ -284,7 +280,7 @@ pub async fn hook_cursor_session_start() -> i32 {
 /// tokens-saved counter.
 async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
     let (initialized, staleness, tokens_saved) = match root {
-        Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
+        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
             let (staleness, tokens_saved) = cursor_index_signals_for_root(r).await;
             (true, staleness, tokens_saved)
         }
@@ -293,12 +289,12 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
     build_cursor_session_context(initialized, staleness.as_deref(), tokens_saved)
 }
 
-/// Builds the tokensave steering `additional_context` for Codex session/prompt
-/// hooks. Unlike Cursor, Codex has no always-applied tokensave rule, so this
+/// Builds the tracedecay steering `additional_context` for Codex session/prompt
+/// hooks. Unlike Cursor, Codex has no always-applied tracedecay rule, so this
 /// context carries the full tool-routing steering plus index freshness.
 async fn codex_session_context_for_root(root: Option<&Path>) -> String {
     let (initialized, staleness) = match root {
-        Some(r) if crate::tokensave::TokenSave::is_initialized(r) => {
+        Some(r) if crate::tracedecay::TraceDecay::is_initialized(r) => {
             let (staleness, _) = cursor_index_signals_for_root(r).await;
             (true, staleness)
         }
@@ -323,7 +319,7 @@ pub async fn hook_cursor_after_shell() -> i32 {
 /// Cursor `workspaceOpen` hook handler.
 ///
 /// Runs a one-shot catch-up incremental `sync()` when the workspace has a
-/// tokensave index, picking up changes made while no agent was attached. We
+/// tracedecay index, picking up changes made while no agent was attached. We
 /// don't load plugins, so the output is an empty object. Fail-open.
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
@@ -332,17 +328,17 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     0
 }
 
-/// Subagent types shipped by the tokensave Cursor plugin itself. These are
-/// already tokensave-first by construction, so the research deny below must
+/// Subagent types shipped by the tracedecay Cursor plugin itself. These are
+/// already tracedecay-first by construction, so the research deny below must
 /// never fire for them. Cursor's hooks docs only enumerate the built-in
 /// subagent types (`generalPurpose`, `explore`, `shell`, …); live Cursor
 /// reports plugin agents under their bare agent-file name (e.g.
-/// `code-explorer`), optionally namespaced (`tokensave:code-explorer`), so
+/// `code-explorer`), optionally namespaced (`tracedecay:code-explorer`), so
 /// matching is done on the normalized name after any `:` prefix.
-const TOKENSAVE_PLUGIN_SUBAGENTS: &[&str] =
+const TRACEDECAY_PLUGIN_SUBAGENTS: &[&str] =
     &["codeexplorer", "codehealthauditor", "sessionhistorian"];
 
-fn is_tokensave_plugin_subagent(subagent_type: &str) -> bool {
+fn is_tracedecay_plugin_subagent(subagent_type: &str) -> bool {
     let bare = subagent_type
         .rsplit(':')
         .next()
@@ -351,13 +347,27 @@ fn is_tokensave_plugin_subagent(subagent_type: &str) -> bool {
         .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
         .to_ascii_lowercase();
-    TOKENSAVE_PLUGIN_SUBAGENTS.contains(&bare.as_str())
+    if let Some(configured) = crate::config::brand_env("PLUGIN_SUBAGENTS") {
+        if configured
+            .split(',')
+            .map(|name| {
+                name.chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+            })
+            .any(|name| name == bare)
+        {
+            return true;
+        }
+    }
+    TRACEDECAY_PLUGIN_SUBAGENTS.contains(&bare.as_str())
 }
 
 /// Pure decision logic for Cursor `subagentStart` hook events.
 ///
 /// Returns a Cursor hook response only when a research-oriented subagent should
-/// be denied in favor of tokensave MCP tools. The plugin's own tokensave-first
+/// be denied in favor of tracedecay MCP tools. The plugin's own tracedecay-first
 /// agents (code-explorer, code-health-auditor, session-historian) are
 /// allow-listed before the research-prompt check so they are never denied.
 pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
@@ -366,7 +376,7 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
         .get("subagent_type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if is_tokensave_plugin_subagent(subagent_type) {
+    if is_tracedecay_plugin_subagent(subagent_type) {
         return None;
     }
     let task = parsed
@@ -401,7 +411,7 @@ pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
 /// Pure decision logic for Cursor `postToolUse` hook events.
 ///
 /// Returns a soft `additional_context` payload (Cursor's documented
-/// `postToolUse` output shape) for exploration tools tokensave can replace.
+/// `postToolUse` output shape) for exploration tools tracedecay can replace.
 /// Invalid or unrelated tool events fail open with no output. Session-level
 /// dedupe lives in [`cursor_post_tool_use_decision`]; this stays pure for
 /// tests.
@@ -417,7 +427,7 @@ pub fn evaluate_cursor_post_tool_use(event_json: &str) -> Option<String> {
 }
 
 /// Impure `postToolUse` path: [`evaluate_cursor_post_tool_use`] plus
-/// per-session hint dedupe persisted under the project's `.tokensave/` dir.
+/// per-session hint dedupe persisted under the project's `.tracedecay/` dir.
 pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let hint = decide_hint(&cursor_tool_hint_input(&parsed))?;
@@ -433,22 +443,22 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
 /// Suppresses hints that were already emitted for this session.
 ///
 /// The `(session_id, category)` pairs are persisted in
-/// `.tokensave/tool_hints_seen.json` so each hint category surfaces at most
+/// `.tracedecay/tool_hints_seen.json` so each hint category surfaces at most
 /// once per Cursor session across short-lived hook processes. Hints are also
-/// suppressed entirely when the workspace has no tokensave index (suggesting
-/// tokensave tools there would be misleading). When no session id is present
+/// suppressed entirely when the workspace has no tracedecay index (suggesting
+/// tracedecay tools there would be misleading). When no session id is present
 /// the hint is emitted as-is — dedupe is impossible but the hint is still
 /// useful (fail-open).
 fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
     let root = cursor_project_root_from_event(event_json)?;
-    if !crate::tokensave::TokenSave::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return None;
     }
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let Some(session_id) = event_session_id(&parsed) else {
         return Some(hint);
     };
-    let path = crate::config::get_tokensave_dir(&root).join("tool_hints_seen.json");
+    let path = crate::config::get_tracedecay_dir(&root).join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     if !dedupe.should_emit(session_id, hint.category) {
         return None;
@@ -487,6 +497,9 @@ fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
     };
     if let Some(cwd) = cursor_event_cwd(event) {
         push_unique(cwd);
+    }
+    if let Some(project_root) = crate::config::brand_env("PROJECT_ROOT") {
+        push_unique(PathBuf::from(project_root));
     }
     if let Some(file_path) = event
         .get("file_path")
@@ -809,7 +822,7 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 ///
 /// Cursor sends an absolute `file_path` (plus an `edits` array). We strip the
 /// resolved `project_root` prefix and normalize to forward slashes so the set
-/// can be passed straight to [`TokenSave::sync_if_stale_silent`], which does a
+/// can be passed straight to [`TraceDecay::sync_if_stale_silent`], which does a
 /// targeted single-file sync instead of a full-tree scan. Paths outside the
 /// project root are skipped.
 pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {
@@ -866,7 +879,7 @@ pub fn cursor_should_run_sync(now_secs: i64, last_secs: Option<i64>, debounce_se
     }
 }
 
-/// Model-invocable workflow skills shipped in the tokensave Cursor plugin's
+/// Model-invocable workflow skills shipped in the tracedecay Cursor plugin's
 /// `skills/` directory (slash dispatchers with `disable-model-invocation:
 /// true` are excluded). Kept as one constant so the session steering context
 /// and the bundle coverage test in `agents::cursor` stay in sync.
@@ -878,6 +891,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "cleaning-up-dead-code",
     "code-health-report",
     "cross-branch-investigation",
+    "curating-project-memory",
     "drafting-commit-and-pr",
     "exploring-types-and-traits",
     "finding-duplicate-logic",
@@ -911,40 +925,40 @@ pub fn build_cursor_session_context(
     if initialized {
         match staleness_hint {
             Some(hint) => {
-                s.push_str("tokensave index status: ");
+                s.push_str("tracedecay index status: ");
                 s.push_str(hint);
                 s.push_str(".\n");
             }
-            None => s.push_str("tokensave index status: initialized.\n"),
+            None => s.push_str("tracedecay index status: initialized.\n"),
         }
-        s.push_str("Workflow skills: tokensave:");
+        s.push_str("Workflow skills: tracedecay:");
         s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
-        s.push_str(" — each maps a common workflow to the right tokensave tools.\n");
+        s.push_str(" — each maps a common workflow to the right tracedecay tools.\n");
         if let Some(saved) = tokens_saved.filter(|saved| *saved > 0) {
-            s.push_str("Tokens saved by tokensave this session: ");
+            s.push_str("Tokens saved by tracedecay this session: ");
             s.push_str(&saved.to_string());
             s.push_str(".\n");
         }
     } else {
         s.push_str(
-            "tokensave index status: no .tokensave/ index found in this workspace — \
-             run `tokensave init` to enable tokensave MCP tools.\n",
+            "tracedecay index status: no project index found in this workspace — \
+             run `tracedecay init` to enable tracedecay MCP tools.\n",
         );
     }
     s
 }
 
 /// Builds the Codex session/prompt steering context. Codex has no
-/// always-applied tokensave rule, so the full tool-routing steering lives
+/// always-applied tracedecay rule, so the full tool-routing steering lives
 /// here.
 pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str(
-        "tokensave is available via MCP. Prefer tokensave MCP tools \
-         (tokensave_context, tokensave_search, tokensave_callers, tokensave_callees, \
-         tokensave_impact, tokensave_files, tokensave_affected) over broad file reads \
+        "tracedecay is available via MCP. Prefer tracedecay MCP tools \
+         (tracedecay_context, tracedecay_search, tracedecay_callers, tracedecay_callees, \
+         tracedecay_impact, tracedecay_files, tracedecay_affected) over broad file reads \
          or shell search for codebase exploration, symbol lookup, call graphs, and \
-         impact analysis. Fall back to file reads only when tokensave cannot answer.\n",
+         impact analysis. Fall back to file reads only when tracedecay cannot answer.\n",
     );
     if initialized {
         match staleness_hint {
@@ -957,8 +971,8 @@ pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&st
         }
     } else {
         s.push_str(
-            "Index status: no .tokensave/ index found in this workspace — \
-             run `tokensave init` to enable tokensave tools.\n",
+            "Index status: no project index found in this workspace — \
+             run `tracedecay init` to enable tracedecay tools.\n",
         );
     }
     s
@@ -979,13 +993,13 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
 }
 
 /// Builds the Cursor `sessionStart` output JSON (`additional_context` + `env`).
-/// When `project_root` is known, exposes it as `TOKENSAVE_PROJECT_ROOT` so
+/// When `project_root` is known, exposes it as `TRACEDECAY_PROJECT_ROOT` so
 /// subsequent session hooks can reuse it.
 pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context: &str) -> String {
     let mut env = serde_json::Map::new();
     if let Some(root) = project_root {
         env.insert(
-            "TOKENSAVE_PROJECT_ROOT".to_string(),
+            "TRACEDECAY_PROJECT_ROOT".to_string(),
             Value::String(root.to_string_lossy().to_string()),
         );
     }
@@ -999,7 +1013,7 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 /// Opens the index once and reads both session-steering signals: the
 /// staleness hint and the session tokens-saved counter.
 async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u64>) {
-    let Ok(cg) = crate::tokensave::TokenSave::open(root).await else {
+    let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await else {
         return (None, None);
     };
     let last = cg.last_sync_timestamp().await;
@@ -1017,14 +1031,14 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    if !crate::tokensave::TokenSave::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
     let rels = cursor_after_file_edit_rel_paths(event_json, &root);
     if rels.is_empty() {
         return;
     }
-    if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&root).await {
         let _ = cg.sync_if_stale_silent(&rels).await;
     }
 }
@@ -1032,11 +1046,11 @@ async fn targeted_sync_for_cursor_after_file_edit(event_json: &str) {
 /// Branch-aware, fail-open handler for git state-changing shell commands.
 ///
 /// Branch switches (`checkout`/`switch`/`worktree add`) bootstrap/maintain
-/// tokensave branch tracking via [`crate::branch::add_branch_tracking`] —
+/// tracedecay branch tracking via [`crate::branch::add_branch_tracking`] —
 /// which is idempotent and supersedes a plain sync. Other state-changing
 /// commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) run a full
 /// incremental `sync()`, coalesced by a short marker-based guard so back-to-back
-/// git commands don't stack. Only acts when `.tokensave/` already exists.
+/// git commands don't stack. Only acts when `.tracedecay/` already exists.
 async fn sync_after_cursor_shell_event(event_json: &str) {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
@@ -1053,7 +1067,7 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
         return;
     };
     // Never bootstrap indexing in an unindexed repo.
-    if !crate::tokensave::TokenSave::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
 
@@ -1079,34 +1093,34 @@ async fn sync_after_cursor_shell_event(event_json: &str) {
 
 /// Runs a full incremental `sync()`, coalescing back-to-back invocations via a
 /// short marker-based debounce so a burst of git commands doesn't stack syncs.
-/// `marker_file` names the per-agent marker inside the `.tokensave/` dir. The
+/// `marker_file` names the per-agent marker inside the `.tracedecay/` dir. The
 /// sync lock additionally no-ops genuinely concurrent runs. Fail-open.
 async fn run_coalesced_incremental_sync(root: &Path, marker_file: &str) {
-    let marker = crate::config::get_tokensave_dir(root).join(marker_file);
+    let marker = crate::config::get_tracedecay_dir(root).join(marker_file);
     let now = now_unix_secs();
     if !cursor_should_run_sync(now, read_marker_secs(&marker), 3) {
         return;
     }
     write_marker_secs(&marker, now);
 
-    if let Ok(cg) = crate::tokensave::TokenSave::open(root).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await {
         match cg.sync().await {
-            Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => {}
-            Err(e) => eprintln!("tokensave sync failed: {e}"),
+            Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => {}
+            Err(e) => eprintln!("tracedecay sync failed: {e}"),
         }
     }
 }
 
 /// Branch-aware workspace catch-up for Cursor `workspaceOpen`.
 ///
-/// When the workspace has a tokensave index, ensures the current branch's DB
+/// When the workspace has a tracedecay index, ensures the current branch's DB
 /// exists (branch-add if missing — which also syncs) and otherwise runs a
 /// catch-up incremental `sync()`. Idempotent and fail-open.
 async fn workspace_open_for_cursor_event(event_json: &str) {
     let Some(root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    if !crate::tokensave::TokenSave::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
 
@@ -1155,7 +1169,7 @@ fn now_unix_secs() -> i64 {
 /// Codex `SessionStart` hook handler (fire-and-forget).
 ///
 /// Emits `hookSpecificOutput.additionalContext` steering the agent toward
-/// tokensave MCP tools and reporting index freshness for the session `cwd`.
+/// tracedecay MCP tools and reporting index freshness for the session `cwd`.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -1170,7 +1184,7 @@ pub async fn hook_codex_session_start() -> i32 {
 /// Codex `UserPromptSubmit` hook handler.
 ///
 /// Resets the per-project local counter for the new turn and injects the same
-/// tokensave steering context as `SessionStart`. Never blocks the prompt.
+/// tracedecay steering context as `SessionStart`. Never blocks the prompt.
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
@@ -1188,7 +1202,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 
 /// Codex `SubagentStart` hook handler.
 ///
-/// Steers research/explore subagents toward tokensave MCP tools. Codex cannot
+/// Steers research/explore subagents toward tracedecay MCP tools. Codex cannot
 /// hard-stop a subagent at start (`continue: false` is ignored for this event),
 /// so this injects `additionalContext` instead of denying.
 pub fn hook_codex_subagent_start() -> i32 {
@@ -1228,7 +1242,7 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 /// Pure decision logic for Codex `SubagentStart` events.
 ///
 /// Returns a Codex `additionalContext` payload steering research/explore
-/// subagents toward tokensave MCP tools, or `None` for execution-style
+/// subagents toward tracedecay MCP tools, or `None` for execution-style
 /// subagents. Inspects `agent_type` (Codex's documented field) and any
 /// prompt/task/description text.
 pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
@@ -1263,7 +1277,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
     None
 }
 
-/// Resolves the tokensave project root for a Codex event from its `cwd`.
+/// Resolves the tracedecay project root for a Codex event from its `cwd`.
 pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
     let cwd = event_cwd(event_json)?;
     crate::config::discover_project_root(&cwd)
@@ -1277,7 +1291,7 @@ pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
 /// (which may be a subdirectory of the discovered project root), so we resolve
 /// each against `cwd` and then make it relative to `project_root`. Absolute
 /// paths outside the root are skipped. The result feeds the targeted
-/// [`TokenSave::sync_if_stale_silent`] single-file sync.
+/// [`TraceDecay::sync_if_stale_silent`] single-file sync.
 pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
     const PREFIXES: [&str; 4] = [
         "*** Add File:",
@@ -1343,7 +1357,7 @@ async fn codex_post_tool_use(event_json: &str) {
         return;
     };
     // Never bootstrap indexing in an unindexed repo.
-    if !crate::tokensave::TokenSave::is_initialized(&root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
 
@@ -1352,7 +1366,7 @@ async fn codex_post_tool_use(event_json: &str) {
         if rels.is_empty() {
             return;
         }
-        if let Ok(cg) = crate::tokensave::TokenSave::open(&root).await {
+        if let Ok(cg) = crate::tracedecay::TraceDecay::open(&root).await {
             let _ = cg.sync_if_stale_silent(&rels).await;
         }
     } else if is_codex_bash_tool(tool_name) {
@@ -1381,7 +1395,7 @@ async fn reset_counter_for_codex_event(event_json: &str) {
     let Some(project_root) = codex_project_root_from_event(event_json) else {
         return;
     };
-    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
         let _ = cg.reset_local_counter().await;
     }
 }
@@ -1389,7 +1403,7 @@ async fn reset_counter_for_codex_event(event_json: &str) {
 /// Pure decision logic for Kiro `preToolUse` hook events.
 ///
 /// Returns a block reason only for Kiro delegation/subagent tool calls whose
-/// task text looks like codebase research that tokensave MCP tools should
+/// task text looks like codebase research that tracedecay MCP tools should
 /// answer first.
 pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
@@ -1480,7 +1494,7 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// so this hook only needs to reset the counter for the new turn.
 pub async fn hook_prompt_submit() {
     let project_path = crate::config::resolve_path(None);
-    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_path).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_path).await {
         let _ = cg.reset_local_counter().await;
     }
 }
@@ -1505,14 +1519,14 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// Kiro `postToolUse` hook handler used to keep the graph fresh after writes.
 ///
 /// The installed Kiro agent maps this to `fs_write`. The hook discovers the
-/// nearest initialized tokensave project from Kiro's `cwd` field and runs a
+/// nearest initialized tracedecay project from Kiro's `cwd` field and runs a
 /// silent incremental sync. Missing indexes and concurrent syncs are no-ops.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
     match sync_for_kiro_event(&event).await {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("tokensave sync failed: {e}");
+            eprintln!("tracedecay sync failed: {e}");
             1
         }
     }
@@ -1522,7 +1536,7 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
-    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
         let _ = cg.reset_local_counter().await;
     }
 }
@@ -1556,7 +1570,7 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
     let Some(project_root) = cursor_project_root_from_event(event_json) else {
         return;
     };
-    if let Ok(cg) = crate::tokensave::TokenSave::open(&project_root).await {
+    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
         let _ = cg.reset_local_counter().await;
     }
 }
@@ -1566,7 +1580,7 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
 const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
 /// Largest transcript tail a low-priority Cursor catch-up hook will read.
 /// Oversized backlogs stay queued instead of blocking hook execution. Public
-/// so ingest-health reporting (`tokensave_status`, doctor) can flag a backlog
+/// so ingest-health reporting (`tracedecay_status`, doctor) can flag a backlog
 /// the hooks will never drain on their own.
 pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
@@ -1620,9 +1634,9 @@ async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = kiro_project_root(event_json) else {
         return Ok(());
     };
-    let cg = crate::tokensave::TokenSave::open(&project_root).await?;
+    let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
     match cg.sync().await {
-        Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
+        Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -1631,12 +1645,12 @@ async fn sync_for_cursor_event(event_json: &str) -> crate::errors::Result<()> {
     let Some(project_root) = cursor_project_root_from_event(event_json) else {
         return Ok(());
     };
-    if !crate::tokensave::TokenSave::is_initialized(&project_root) {
+    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
         return Ok(());
     }
-    let cg = crate::tokensave::TokenSave::open(&project_root).await?;
+    let cg = crate::tracedecay::TraceDecay::open(&project_root).await?;
     match cg.sync().await {
-        Ok(_) | Err(crate::errors::TokenSaveError::SyncLock { .. }) => Ok(()),
+        Ok(_) | Err(crate::errors::TraceDecayError::SyncLock { .. }) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -1715,7 +1729,7 @@ fn event_session_id(parsed: &Value) -> Option<String> {
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {
-    format!("tokensave hint: {}\n{}", hint.message, hint.context)
+    format!("tracedecay hint: {}\n{}", hint.message, hint.context)
 }
 
 fn append_tool_hint(context: &mut String, hint: &ToolHint) {
@@ -1767,7 +1781,7 @@ pub async fn hook_stop() {
 
     // Read tokens saved for efficiency calculation
     let project_path = crate::config::resolve_path(None);
-    let tokens_saved = if let Ok(cg) = crate::tokensave::TokenSave::open(&project_path).await {
+    let tokens_saved = if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_path).await {
         cg.get_tokens_saved().await.unwrap_or(0)
     } else {
         0

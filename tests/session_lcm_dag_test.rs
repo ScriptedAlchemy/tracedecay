@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::{
     LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
 
@@ -82,7 +82,7 @@ async fn insert_external_raw_message(
     message.role = "tool".to_string();
     message.kind = Some("tool_result".to_string());
 
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     db.lcm_store(&storage_root)
         .ingest_raw_message(&message)
         .await

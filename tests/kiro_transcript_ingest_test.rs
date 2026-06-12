@@ -1,14 +1,14 @@
 use tempfile::TempDir;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::kiro::KiroSource;
-use tokensave::sessions::source::ingest_source;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::kiro::KiroSource;
+use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 
@@ -42,7 +42,7 @@ fn write_legacy_chat(
     workspace_hash: &str,
     execution_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tokensave::agents::kiro_data_dir(home);
+    let data_dir = tracedecay::agents::kiro_data_dir(home);
     let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
     std::fs::create_dir_all(&ws_storage).unwrap();
     std::fs::write(
@@ -84,7 +84,7 @@ fn write_workspace_session_json(
     project: &std::path::Path,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tokensave::agents::kiro_data_dir(home);
+    let data_dir = tracedecay::agents::kiro_data_dir(home);
     let encoded = encode_workspace_path(project);
     let session_dir = data_dir
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
@@ -97,8 +97,8 @@ fn write_workspace_session_json(
             "sessionId": session_id,
             "modelId": "claude-sonnet-4.6",
             "messages": [
-                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_i64},
-                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_i64}
+                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_000_i64},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_000_i64}
             ]
         }))
         .unwrap(),
@@ -136,6 +136,19 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
         hit.message.model.as_deref() == Some("claude-sonnet-4-6")
             || hit.message.model.as_deref() == Some("claude-sonnet-4.6")
     }));
+    let session = db.get_session("kiro", "kiro-workflow-1").await.unwrap();
+    assert_eq!(session.started_at, Some(1_800_000_000));
+    assert_eq!(session.ended_at, Some(1_800_000_001));
+    let first = db
+        .get_session_message("kiro", "kiro-workflow-1:0")
+        .await
+        .unwrap();
+    assert_eq!(first.timestamp, Some(1_800_000_000));
+    let second = db
+        .get_session_message("kiro", "kiro-workflow-1:1")
+        .await
+        .unwrap();
+    assert_eq!(second.timestamp, Some(1_800_000_001));
 
     assert_eq!(
         ingest_source(&db, &source, &project, None)
@@ -165,6 +178,19 @@ async fn kiro_workspace_sessions_json_is_ingested() {
         )
         .await;
     assert_eq!(results.len(), 2);
+    let session = db.get_session("kiro", "sess-modern").await.unwrap();
+    assert_eq!(session.started_at, Some(1_800_000_000));
+    assert_eq!(session.ended_at, Some(1_800_000_010));
+    let first = db
+        .get_session_message("kiro", "sess-modern:0")
+        .await
+        .unwrap();
+    assert_eq!(first.timestamp, Some(1_800_000_000));
+    let second = db
+        .get_session_message("kiro", "sess-modern:1")
+        .await
+        .unwrap();
+    assert_eq!(second.timestamp, Some(1_800_000_010));
 }
 
 #[tokio::test]

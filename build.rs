@@ -151,10 +151,11 @@ fn main() {
         }
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
-    println!(
-        "cargo::rustc-env=TOKENSAVE_DASHBOARD_ASSET_STAMP={}",
-        emit_dashboard_asset_inputs()
-    );
+    let asset_stamp = emit_dashboard_asset_inputs();
+    println!("cargo::rustc-env=TRACEDECAY_DASHBOARD_ASSET_STAMP={asset_stamp}");
+    // Legacy compatibility for any older embedded consumers still checking the
+    // pre-rename stamp name. The runtime dashboard reads TRACEDECAY_*.
+    println!("cargo::rustc-env=TOKENSAVE_DASHBOARD_ASSET_STAMP={asset_stamp}");
 
     // Generator provenance: baked into generated agent plugins (manifest +
     // module header) so a stale installed plugin is distinguishable from
@@ -168,7 +169,7 @@ fn main() {
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .filter(|sha| !sha.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo::rustc-env=TOKENSAVE_GIT_SHA={git_sha}");
+    println!("cargo::rustc-env=TRACEDECAY_GIT_SHA={git_sha}");
 
     // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
     // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was

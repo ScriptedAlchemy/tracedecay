@@ -154,7 +154,7 @@ pub(crate) async fn expand(
             let raw = raw::load_raw_message_by_store_id(conn, store_id).await?;
             // Raw store_id expansion works across sessions like hermes-lcm
             // `lcm_expand` store_id mode (grep scope=all -> expand the hit),
-            // but stays provider-scoped: providers are a TokenSave concept
+            // but stays provider-scoped: providers are a TraceDecay concept
             // with no Hermes equivalent.
             if raw.provider != request.provider {
                 return Err(LcmError::SummarySourceNotOwnedBySession);

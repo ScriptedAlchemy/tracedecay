@@ -5,6 +5,7 @@
 //! building, call graph traversal, impact analysis, and more.
 
 /// MCP server implementation.
+pub mod response_handles;
 pub mod server;
 
 /// Tool definitions and dispatch.

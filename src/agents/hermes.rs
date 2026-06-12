@@ -1,12 +1,12 @@
 //! Hermes agent integration.
 //!
-//! Installs a Hermes profile plugin that exposes tokensave tools as
+//! Installs a Hermes profile plugin that exposes tracedecay tools as
 //! Hermes-native plugin tools.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::get_tool_definitions;
 
 use super::{
@@ -28,17 +28,19 @@ impl AgentIntegration for HermesIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let profile = normalize_profile(ctx.profile.as_deref())?;
+        let legacy_plugin_dir = hermes_legacy_plugin_dir(&ctx.home, profile.as_deref());
+        uninstall_plugin_if_present(&legacy_plugin_dir)?;
         install_plugin(
             &hermes_plugin_dir(&ctx.home, profile.as_deref()),
-            &ctx.tokensave_bin,
+            &ctx.tracedecay_bin,
             ctx.project_root.as_deref(),
             ctx.dashboard,
         )?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Start Hermes — tokensave plugin tools are now available");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Start Hermes — tracedecay plugin tools are now available");
         Ok(())
     }
 
@@ -50,11 +52,16 @@ impl AgentIntegration for HermesIntegration {
         let profile = normalize_profile(ctx.profile.as_deref())?;
         let plugin_dir = match profile.as_deref() {
             Some(profile) => hermes_plugin_dir(&ctx.home, Some(profile)),
+            None => project_path.join(".hermes/plugins/tracedecay"),
+        };
+        let legacy_plugin_dir = match profile.as_deref() {
+            Some(profile) => hermes_legacy_plugin_dir(&ctx.home, Some(profile)),
             None => project_path.join(".hermes/plugins/tokensave"),
         };
+        uninstall_plugin_if_present(&legacy_plugin_dir)?;
         install_plugin(
             &plugin_dir,
-            &ctx.tokensave_bin,
+            &ctx.tracedecay_bin,
             ctx.project_root.as_deref(),
             ctx.dashboard,
         )?;
@@ -68,7 +75,7 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let refreshed = update_plugin_artifacts(&ctx.home, &ctx.tokensave_bin)?;
+        let refreshed = update_plugin_artifacts(&ctx.home, &ctx.tracedecay_bin)?;
         if refreshed.is_empty() {
             Ok(UpdatePluginOutcome::NotInstalled)
         } else {
@@ -79,8 +86,9 @@ impl AgentIntegration for HermesIntegration {
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let profile = normalize_profile(ctx.profile.as_deref())?;
         uninstall_plugin(&hermes_plugin_dir(&ctx.home, profile.as_deref()))?;
+        uninstall_plugin(&hermes_legacy_plugin_dir(&ctx.home, profile.as_deref()))?;
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Hermes.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Hermes.");
         eprintln!("Restart Hermes for changes to take effect.");
         Ok(())
     }
@@ -98,8 +106,11 @@ impl AgentIntegration for HermesIntegration {
         Some(hermes_profile_dir(home, None).join("config.yaml"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         hermes_plugin_dir(home, None).join("plugin.yaml").exists()
+            || hermes_legacy_plugin_dir(home, None)
+                .join("plugin.yaml")
+                .exists()
     }
 }
 
@@ -115,6 +126,10 @@ fn hermes_profile_dir(home: &Path, profile: Option<&str>) -> PathBuf {
 }
 
 fn hermes_plugin_dir(home: &Path, profile: Option<&str>) -> PathBuf {
+    hermes_profile_dir(home, profile).join("plugins/tracedecay")
+}
+
+fn hermes_legacy_plugin_dir(home: &Path, profile: Option<&str>) -> PathBuf {
     hermes_profile_dir(home, profile).join("plugins/tokensave")
 }
 
@@ -134,7 +149,7 @@ fn normalize_profile(profile: Option<&str>) -> Result<Option<String>> {
             .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-');
     if !valid {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "invalid Hermes profile '{profile}': expected [a-z0-9][a-z0-9_-]{{0,63}}"
             ),
@@ -149,16 +164,16 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path
     let Some(first) = existing.first() else {
         if let Some(plugin) = candidates.first() {
             dc.warn(&format!(
-                "{} not found — run `tokensave install --agent hermes` if you use Hermes",
+                "{} not found — run `tracedecay install --agent hermes` if you use Hermes",
                 plugin.display()
             ));
         } else {
-            dc.warn("Hermes tokensave plugin not found — run `tokensave install --agent hermes` if you use Hermes");
+            dc.warn("Hermes tracedecay plugin not found — run `tracedecay install --agent hermes` if you use Hermes");
         }
         return;
     };
     dc.pass(&format!(
-        "Hermes tokensave plugin found at {}",
+        "Hermes tracedecay plugin found at {}",
         first.display()
     ));
 
@@ -171,12 +186,12 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path
         match read_manifest_version(manifest_path) {
             Some(version) if version == env!("CARGO_PKG_VERSION") => {}
             Some(version) => dc.warn(&format!(
-                "{} was generated by tokensave {version} (installed binary is {}) — re-run `tokensave install --agent hermes` to refresh it",
+                "{} was generated by tracedecay {version} (installed binary is {}) — re-run `tracedecay install --agent hermes` to refresh it",
                 manifest_path.display(),
                 env!("CARGO_PKG_VERSION"),
             )),
             None => dc.warn(&format!(
-                "{} has no manifest version — re-run `tokensave install --agent hermes` to refresh it",
+                "{} has no manifest version — re-run `tracedecay install --agent hermes` to refresh it",
                 manifest_path.display(),
             )),
         }
@@ -185,7 +200,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path
         if let Some(pin) = effective_pinned_project_root(plugin_dir) {
             if !Path::new(&pin).is_dir() {
                 dc.warn(&format!(
-                    "{} pins project_root {pin}, which does not exist — re-run `tokensave install --agent hermes --project-root <path>`",
+                    "{} pins project_root {pin}, which does not exist — re-run `tracedecay install --agent hermes --project-root <path>`",
                     plugin_dir.display(),
                 ));
             }
@@ -209,7 +224,7 @@ fn hermes_healthcheck_plugin_paths(home: &Path, project_path: &Path) -> Vec<Path
     let mut seen = std::collections::BTreeSet::new();
     let mut plugins = Vec::new();
     for root in roots {
-        let plugin = root.join("plugins/tokensave/plugin.yaml");
+        let plugin = root.join("plugins/tracedecay/plugin.yaml");
         if seen.insert(plugin.clone()) {
             plugins.push(plugin);
         }
@@ -233,7 +248,8 @@ fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
     profiles
 }
 
-/// Reads `plugins.tokensave.project_root` from a Hermes profile config.yaml.
+/// Reads `plugins.tracedecay.project_root` from a Hermes profile config.yaml.
+/// Falls back to legacy `plugins.tokensave.project_root` when present.
 ///
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
@@ -242,8 +258,19 @@ pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<Stri
     let config = std::fs::read_to_string(config_path).ok()?;
     let lines: Vec<&str> = config.lines().collect();
     let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;
-    let TokensaveBlock::Block { start, end } =
-        find_tokensave_block_in(&lines, plugins_start, plugins_end)?
+    read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay").or_else(
+        || read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tokensave"),
+    )
+}
+
+fn read_pinned_project_root_from_block(
+    lines: &[&str],
+    plugins_start: usize,
+    plugins_end: usize,
+    plugin_key: &str,
+) -> Option<String> {
+    let PluginBlock::Block { start, end } =
+        find_plugin_block_in(lines, plugins_start, plugins_end, plugin_key)?
     else {
         return None;
     };
@@ -272,7 +299,7 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
 }
 
 /// The pin currently in effect for a generated plugin: the
-/// `plugins.tokensave.project_root` key of the profile config.yaml.
+/// `plugins.tracedecay.project_root` key of the profile config.yaml.
 ///
 /// A pin pointing at the profile home itself is the legacy storage-home
 /// conflation (storage is profile-scoped now and code tools resolve per
@@ -288,7 +315,7 @@ fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
 
 /// Project root baked into the deployed dashboard page: an explicit code
 /// project pin when one exists, otherwise the profile home itself — the
-/// hermes-profile stores (`<home>/.tokensave/`) are where the plugin keeps
+/// hermes-profile stores (`<home>/.tracedecay/`) are where the plugin keeps
 /// LCM/memory state, so the dashboard serves them instead of whatever cwd
 /// the Hermes host happens to spawn it from.
 fn dashboard_project_root(plugin_dir: &Path, pinned_project_root: Option<&str>) -> Option<String> {
@@ -313,18 +340,18 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
 
 fn install_plugin(
     plugin_dir: &Path,
-    tokensave_bin: &str,
+    tracedecay_bin: &str,
     project_root: Option<&Path>,
     deploy_dashboard: bool,
 ) -> Result<()> {
     // An explicit pin wins; otherwise preserve whatever pin a previous
-    // install wrote to the config block, so `tokensave reinstall` does not
+    // install wrote to the config block, so `tracedecay reinstall` does not
     // silently unpin.
     let pinned_project_root = match project_root {
         Some(path) => Some(path.display().to_string()),
         None => effective_pinned_project_root(plugin_dir),
     };
-    write_plugin_files(plugin_dir, tokensave_bin)?;
+    write_plugin_files(plugin_dir, tracedecay_bin)?;
     // The dashboard plugin page is part of the default install; the
     // `--no-dashboard` opt-out also removes a previously deployed page so
     // the flag is a real toggle rather than install-order dependent.
@@ -332,7 +359,7 @@ fn install_plugin(
         let dashboard_root = dashboard_project_root(plugin_dir, pinned_project_root.as_deref());
         super::hermes_dashboard::install_dashboard(
             plugin_dir,
-            tokensave_bin,
+            tracedecay_bin,
             dashboard_root.as_deref(),
         )?;
     } else {
@@ -344,7 +371,7 @@ fn install_plugin(
     }
 
     eprintln!(
-        "\x1b[32m✔\x1b[0m Wrote Hermes tokensave plugin to {}",
+        "\x1b[32m✔\x1b[0m Wrote Hermes tracedecay plugin to {}",
         plugin_dir.display()
     );
     Ok(())
@@ -353,15 +380,15 @@ fn install_plugin(
 /// Writes the generated agent-plugin files (manifest, schemas, tools,
 /// entrypoint, skill). Shared by `install_plugin` and the config-preserving
 /// `update_plugin_artifacts` path; never touches config.yaml.
-fn write_plugin_files(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
-    std::fs::create_dir_all(plugin_dir).map_err(|e| TokenSaveError::Config {
+fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
+    std::fs::create_dir_all(plugin_dir).map_err(|e| TraceDecayError::Config {
         message: format!("failed to create {}: {e}", plugin_dir.display()),
     })?;
-    std::fs::create_dir_all(plugin_dir.join("skills/tokensave")).map_err(|e| {
-        TokenSaveError::Config {
+    std::fs::create_dir_all(plugin_dir.join("skills/tracedecay")).map_err(|e| {
+        TraceDecayError::Config {
             message: format!(
                 "failed to create {}: {e}",
-                plugin_dir.join("skills/tokensave").display()
+                plugin_dir.join("skills/tracedecay").display()
             ),
         }
     })?;
@@ -369,39 +396,65 @@ fn write_plugin_files(plugin_dir: &Path, tokensave_bin: &str) -> Result<()> {
     write_text_file(&plugin_dir.join("plugin.yaml"), &plugin_manifest())?;
     write_text_file(&plugin_dir.join("schemas.py"), &plugin_schemas())?;
     write_text_file(&plugin_dir.join("schemas.json"), &plugin_schemas_json()?)?;
-    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tokensave_bin))?;
+    write_text_file(&plugin_dir.join("tools.py"), &plugin_tools(tracedecay_bin))?;
     write_text_file(&plugin_dir.join("__init__.py"), &plugin_init())?;
     write_text_file(&plugin_dir.join("cli.py"), PLUGIN_CLI_PY)?;
-    write_text_file(&plugin_dir.join("skills/tokensave/SKILL.md"), HERMES_SKILL)
+    write_text_file(&plugin_dir.join("skills/tracedecay/SKILL.md"), HERMES_SKILL)
 }
 
-/// Refreshes generated plugin artifacts for every detected Hermes install
-/// without writing to any config.yaml.
+/// Refreshes generated plugin artifacts for every detected Hermes install.
 ///
 /// Detection covers the default profile (`~/.hermes`), every named profile
 /// (`~/.hermes/profiles/*`), a `HERMES_HOME` override, and a project-local
 /// `.hermes` in the current directory — a plugin install is "detected" when
 /// its generated `plugin.yaml` exists. For each install the existing
-/// `plugins.tokensave.project_root` pin is *read* from the profile config
-/// and re-baked into the refreshed dashboard deploy; the dashboard page is
-/// refreshed only where one is already deployed, so a `--no-dashboard`
-/// choice sticks.
-fn update_plugin_artifacts(home: &Path, tokensave_bin: &str) -> Result<Vec<PathBuf>> {
+/// `plugins.tracedecay.project_root` pin is *read* from the profile config
+/// (with a legacy `plugins.tokensave.project_root` fallback) and re-baked into
+/// the refreshed dashboard deploy. The profile config is then rewritten through
+/// the install path so legacy `tokensave` keys migrate to steady-state
+/// `tracedecay` keys after a rebrand refresh.
+fn update_plugin_artifacts(home: &Path, tracedecay_bin: &str) -> Result<Vec<PathBuf>> {
     let mut refreshed = Vec::new();
     for plugin_dir in detected_plugin_dirs(home) {
-        let pinned_project_root = effective_pinned_project_root(&plugin_dir);
-        write_plugin_files(&plugin_dir, tokensave_bin)?;
-        if plugin_dir.join("dashboard/manifest.json").is_file() {
+        let legacy_plugin_dir = plugin_dir
+            .parent()
+            .map(|plugins_dir| plugins_dir.join("tokensave"));
+        let pinned_project_root = effective_pinned_project_root(&plugin_dir).or_else(|| {
+            legacy_plugin_dir
+                .as_deref()
+                .and_then(effective_pinned_project_root)
+        });
+        let had_dashboard = plugin_dir.join("dashboard/manifest.json").is_file()
+            || legacy_plugin_dir
+                .as_ref()
+                .is_some_and(|legacy| legacy.join("dashboard/manifest.json").is_file());
+        if let Some(legacy_plugin_dir) = legacy_plugin_dir.as_deref() {
+            uninstall_plugin_if_present(legacy_plugin_dir)?;
+        }
+        write_plugin_files(&plugin_dir, tracedecay_bin)?;
+        if had_dashboard {
             let dashboard_root =
                 dashboard_project_root(&plugin_dir, pinned_project_root.as_deref());
             super::hermes_dashboard::install_dashboard(
                 &plugin_dir,
-                tokensave_bin,
+                tracedecay_bin,
                 dashboard_root.as_deref(),
             )?;
         }
+        if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
+            if let Err(err) = enable_plugin(
+                &profile_dir.join("config.yaml"),
+                pinned_project_root.as_deref(),
+            ) {
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m refreshed Hermes tracedecay plugin at {} but could not migrate {}: {err}",
+                    plugin_dir.display(),
+                    profile_dir.join("config.yaml").display()
+                );
+            }
+        }
         eprintln!(
-            "\x1b[32m✔\x1b[0m Refreshed Hermes tokensave plugin at {}",
+            "\x1b[32m✔\x1b[0m Refreshed Hermes tracedecay plugin at {}",
             plugin_dir.display()
         );
         refreshed.push(plugin_dir);
@@ -428,9 +481,11 @@ fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
     roots
         .into_iter()
         .filter_map(|root| {
-            let plugin_dir = root.join("plugins/tokensave");
-            (plugin_dir.join("plugin.yaml").is_file() && seen.insert(plugin_dir.clone()))
-                .then_some(plugin_dir)
+            let plugin_dir = root.join("plugins/tracedecay");
+            let legacy_plugin_dir = root.join("plugins/tokensave");
+            let detected = plugin_dir.join("plugin.yaml").is_file()
+                || legacy_plugin_dir.join("plugin.yaml").is_file();
+            (detected && seen.insert(plugin_dir.clone())).then_some(plugin_dir)
         })
         .collect()
 }
@@ -438,9 +493,9 @@ fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
 fn enable_plugin(config_path: &Path, pinned_project_root: Option<&str>) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
     let updated = enable_plugin_config(&existing, pinned_project_root).map_err(|message| {
-        TokenSaveError::Config {
+        TraceDecayError::Config {
             message: format!(
-                "{message} in {}.\nFix the config by hand, then re-run: tokensave install --agent hermes",
+                "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
                 config_path.display()
             ),
         }
@@ -466,21 +521,30 @@ fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("tools.py"))?;
     remove_generated_file(&plugin_dir.join("__init__.py"))?;
     remove_generated_file(&plugin_dir.join("cli.py"))?;
+    remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_generated_file(&plugin_dir.join("skills/tokensave/SKILL.md"))?;
+    remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
     remove_empty_dir(&plugin_dir.join("skills/tokensave"))?;
     remove_empty_dir(&plugin_dir.join("skills"))?;
     super::hermes_dashboard::uninstall_dashboard(plugin_dir)?;
 
     if remove_empty_dir(plugin_dir)? {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed Hermes tokensave plugin from {}",
+            "\x1b[32m✔\x1b[0m Removed Hermes tracedecay plugin from {}",
             plugin_dir.display()
         );
     } else {
         eprintln!(
-            "  Left {} in place because it contains files not generated by tokensave",
+            "  Left {} in place because it contains files not generated by tracedecay",
             plugin_dir.display()
         );
+    }
+    Ok(())
+}
+
+fn uninstall_plugin_if_present(plugin_dir: &Path) -> Result<()> {
+    if plugin_dir.exists() {
+        uninstall_plugin(plugin_dir)?;
     }
     Ok(())
 }
@@ -489,7 +553,7 @@ fn disable_plugin(config_path: &Path) -> Result<()> {
     let Ok(existing) = std::fs::read_to_string(config_path) else {
         return Ok(());
     };
-    let updated = disable_plugin_config(&existing).map_err(|message| TokenSaveError::Config {
+    let updated = disable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
         message: format!(
             "{message} in {}; leaving Hermes plugin files in place",
             config_path.display()
@@ -516,7 +580,7 @@ fn enable_plugin_config(
 
 fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
-        return Ok("plugins:\n  enabled:\n    - tokensave\n".to_string());
+        return Ok("plugins:\n  enabled:\n    - tracedecay\n".to_string());
     }
 
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
@@ -529,7 +593,7 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str("plugins:\n  enabled:\n    - tokensave\n");
+        out.push_str("plugins:\n  enabled:\n    - tracedecay\n");
         return Ok(out);
     }
 
@@ -539,6 +603,7 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     {
         ChildSection::Block { start, end } => {
+            lines = remove_list_item(lines, start, end, "tracedecay");
             lines = remove_list_item(lines, start, end, "tokensave");
         }
         ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
@@ -550,25 +615,36 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     {
         ChildSection::Block { start, end } => {
-            if !list_contains_item_strings(&lines, start, end, "tokensave") {
+            lines = remove_list_item(lines, start, end, "tokensave");
+            let (plugins_start, plugins_end) =
+                find_top_level_section_from_strings(&lines, "plugins")
+                    .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
+            let ChildSection::Block { start, end } =
+                find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
+                    .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
+            else {
+                return Err("unsupported Hermes plugins config".to_string());
+            };
+            if !list_contains_item_strings(&lines, start, end, "tracedecay") {
                 // Match the existing list's item indentation (Hermes writes
                 // 2-space items); only default to 4 when the list is empty.
                 let indent = list_item_indent(&lines, start, end).unwrap_or(4);
-                lines.insert(start + 1, format!("{}- tokensave", " ".repeat(indent)));
+                lines.insert(start + 1, format!("{}- tracedecay", " ".repeat(indent)));
             }
         }
         ChildSection::EmptyFlow { line } => {
-            // Rewrite `enabled: []` into a block list containing tokensave.
+            // Rewrite `enabled: []` into a block list containing tracedecay.
             lines[line] = "  enabled:".to_string();
-            lines.insert(line + 1, "    - tokensave".to_string());
+            lines.insert(line + 1, "    - tracedecay".to_string());
         }
         ChildSection::Missing => {
             lines.insert(plugins_start + 1, "  enabled:".to_string());
-            lines.insert(plugins_start + 2, "    - tokensave".to_string());
+            lines.insert(plugins_start + 2, "    - tracedecay".to_string());
         }
     }
 
-    Ok(join_lines(&lines, had_trailing_newline))
+    let updated = join_lines(&lines, had_trailing_newline);
+    remove_pinned_project_root_from_block(&updated, "tokensave")
 }
 
 fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
@@ -585,6 +661,7 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     {
         ChildSection::Block { start, end } => {
+            lines = remove_list_item(lines, start, end, "tracedecay");
             lines = remove_list_item(lines, start, end, "tokensave");
         }
         ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
@@ -596,7 +673,7 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
 
 fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
-        return Ok("memory:\n  provider: tokensave\n".to_string());
+        return Ok("memory:\n  provider: tracedecay\n".to_string());
     }
 
     validate_top_level_memory_shape(existing)?;
@@ -608,20 +685,23 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str("memory:\n  provider: tokensave\n");
+        out.push_str("memory:\n  provider: tracedecay\n");
         return Ok(out);
     };
 
     let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
         .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
     if let Some(provider_line) = provider_line {
-        if lines[provider_line].trim() != "provider: tokensave" {
+        let provider = lines[provider_line].trim();
+        if provider == "provider: tokensave" {
+            lines[provider_line] = "  provider: tracedecay".to_string();
+        } else if provider != "provider: tracedecay" {
             return Err(
                 "Hermes memory provider already configured; refusing to overwrite it".to_string(),
             );
         }
     } else {
-        lines.insert(memory_start + 1, "  provider: tokensave".to_string());
+        lines.insert(memory_start + 1, "  provider: tracedecay".to_string());
     }
 
     Ok(join_lines(&lines, had_trailing_newline))
@@ -642,7 +722,8 @@ fn disable_memory_provider_config(existing: &str) -> std::result::Result<String,
         .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
     let mut removed_provider = false;
     if let Some(provider_line) = provider_line {
-        if lines[provider_line].trim() == "provider: tokensave" {
+        let provider = lines[provider_line].trim();
+        if provider == "provider: tracedecay" || provider == "provider: tokensave" {
             lines.remove(provider_line);
             removed_provider = true;
         }
@@ -654,14 +735,14 @@ fn disable_memory_provider_config(existing: &str) -> std::result::Result<String,
     Ok(join_lines(&lines, had_trailing_newline))
 }
 
-/// Sets `context.engine: tokensave` so Hermes activates the registered
+/// Sets `context.engine: tracedecay` so Hermes activates the registered
 /// context engine (selection is config-driven; the host never auto-activates
 /// plugin engines). The built-in default `compressor` is replaced; any other
 /// configured engine is left alone with an error, mirroring the
 /// memory-provider guard.
 fn enable_context_engine_config(existing: &str) -> std::result::Result<String, String> {
     if existing.trim().is_empty() {
-        return Ok("context:\n  engine: tokensave\n".to_string());
+        return Ok("context:\n  engine: tracedecay\n".to_string());
     }
 
     validate_top_level_section_shape(existing, "context")?;
@@ -673,7 +754,7 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str("context:\n  engine: tokensave\n");
+        out.push_str("context:\n  engine: tracedecay\n");
         return Ok(out);
     };
 
@@ -686,10 +767,10 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             .map(str::trim)
             .unwrap_or_default();
         match parse_yaml_scalar(current).as_deref() {
-            None | Some("compressor") => {
-                lines[engine_line] = "  engine: tokensave".to_string();
+            None | Some("compressor") | Some("tokensave") => {
+                lines[engine_line] = "  engine: tracedecay".to_string();
             }
-            Some("tokensave") => {}
+            Some("tracedecay") => {}
             Some(_) => {
                 return Err(
                     "Hermes context engine already configured; refusing to overwrite it"
@@ -698,7 +779,7 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             }
         }
     } else {
-        lines.insert(context_start + 1, "  engine: tokensave".to_string());
+        lines.insert(context_start + 1, "  engine: tracedecay".to_string());
     }
 
     Ok(join_lines(&lines, had_trailing_newline))
@@ -719,7 +800,8 @@ fn disable_context_engine_config(existing: &str) -> std::result::Result<String, 
         .ok_or_else(|| "unsupported Hermes context config".to_string())?;
     let mut removed_engine = false;
     if let Some(engine_line) = engine_line {
-        if lines[engine_line].trim() == "engine: tokensave" {
+        let engine = lines[engine_line].trim();
+        if engine == "engine: tracedecay" || engine == "engine: tokensave" {
             lines.remove(engine_line);
             removed_engine = true;
         }
@@ -731,26 +813,28 @@ fn disable_context_engine_config(existing: &str) -> std::result::Result<String, 
     Ok(join_lines(&lines, had_trailing_newline))
 }
 
-/// Shape of the `plugins.tokensave` child mapping.
+/// Shape of the `plugins.tracedecay` child mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokensaveBlock {
+enum PluginBlock {
     Missing,
-    /// Block-style `tokensave:` at `start`; entries end (exclusive) at `end`.
+    /// Block-style `<plugin_name>:` at `start`; entries end (exclusive) at `end`.
     Block {
         start: usize,
         end: usize,
     },
-    /// Flow-style empty mapping `tokensave: {}` on `line`.
+    /// Flow-style empty mapping `<plugin_name>: {}` on `line`.
     EmptyFlow {
         line: usize,
     },
 }
 
-fn find_tokensave_block_in(
+fn find_plugin_block_in(
     lines: &[&str],
     plugins_start: usize,
     plugins_end: usize,
-) -> Option<TokensaveBlock> {
+    plugin_name: &str,
+) -> Option<PluginBlock> {
+    let block_header = format!("{plugin_name}:");
     let mut start = None;
     for (idx, line) in lines
         .iter()
@@ -763,20 +847,20 @@ fn find_tokensave_block_in(
         }
         if line_indent(line) == 2 {
             let trimmed = line.trim();
-            if trimmed == "tokensave:" {
+            if trimmed == block_header {
                 start = Some(idx);
                 break;
             }
-            if let Some(rest) = trimmed.strip_prefix("tokensave:") {
+            if let Some(rest) = trimmed.strip_prefix(&block_header) {
                 if rest.trim() == "{}" {
-                    return Some(TokensaveBlock::EmptyFlow { line: idx });
+                    return Some(PluginBlock::EmptyFlow { line: idx });
                 }
                 return None;
             }
         }
     }
     let Some(start) = start else {
-        return Some(TokensaveBlock::Missing);
+        return Some(PluginBlock::Missing);
     };
     // Entries live at indent >= 4; the block ends at the first non-blank,
     // non-comment line at indent <= 2 (a sibling plugins key or new section).
@@ -793,10 +877,10 @@ fn find_tokensave_block_in(
             (line_indent(line) <= 2).then_some(idx)
         })
         .unwrap_or(plugins_end);
-    Some(TokensaveBlock::Block { start, end })
+    Some(PluginBlock::Block { start, end })
 }
 
-/// Writes `plugins.tokensave.project_root` — the conventional config home
+/// Writes `plugins.tracedecay.project_root` — the conventional config home
 /// for the install-time project pin. Expects the `plugins:` section to exist
 /// (the enable chain creates it first).
 fn set_pinned_project_root_config(
@@ -811,18 +895,18 @@ fn set_pinned_project_root_config(
     let (plugins_start, plugins_end) = find_top_level_section(existing, "plugins")
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    match find_tokensave_block_in(&borrowed, plugins_start, plugins_end)
+    match find_plugin_block_in(&borrowed, plugins_start, plugins_end, "tracedecay")
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     {
-        TokensaveBlock::Missing => {
-            lines.insert(plugins_start + 1, "  tokensave:".to_string());
+        PluginBlock::Missing => {
+            lines.insert(plugins_start + 1, "  tracedecay:".to_string());
             lines.insert(plugins_start + 2, pin_line);
         }
-        TokensaveBlock::EmptyFlow { line } => {
-            lines[line] = "  tokensave:".to_string();
+        PluginBlock::EmptyFlow { line } => {
+            lines[line] = "  tracedecay:".to_string();
             lines.insert(line + 1, pin_line);
         }
-        TokensaveBlock::Block { start, end } => {
+        PluginBlock::Block { start, end } => {
             let existing_pin = lines
                 .iter()
                 .enumerate()
@@ -839,17 +923,25 @@ fn set_pinned_project_root_config(
     Ok(join_lines(&lines, had_trailing_newline))
 }
 
-/// Removes `plugins.tokensave.project_root`, then the `tokensave:` block when
+/// Removes `plugins.tracedecay.project_root`, then the `tracedecay:` block when
 /// nothing else (user-added keys) remains in it.
 fn remove_pinned_project_root_config(existing: &str) -> std::result::Result<String, String> {
+    let without_new = remove_pinned_project_root_from_block(existing, "tracedecay")?;
+    remove_pinned_project_root_from_block(&without_new, "tokensave")
+}
+
+fn remove_pinned_project_root_from_block(
+    existing: &str,
+    plugin_key: &str,
+) -> std::result::Result<String, String> {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     let had_trailing_newline = existing.ends_with('\n');
     let Some((plugins_start, plugins_end)) = find_top_level_section(existing, "plugins") else {
         return Ok(existing.to_string());
     };
     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let TokensaveBlock::Block { start, end } =
-        find_tokensave_block_in(&borrowed, plugins_start, plugins_end)
+    let PluginBlock::Block { start, end } =
+        find_plugin_block_in(&borrowed, plugins_start, plugins_end, plugin_key)
             .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     else {
         return Ok(existing.to_string());
@@ -1104,7 +1196,7 @@ fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
 
 pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("failed to create {}: {e}", parent.display()),
         })?;
     }
@@ -1118,13 +1210,13 @@ pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
     let new_path = PathBuf::from(format!("{}.new", path.display()));
     if let Err(e) = std::fs::write(&new_path, contents) {
         std::fs::remove_file(&new_path).ok();
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!("failed to write {}: {e}", new_path.display()),
         });
     }
     if let Err(e) = std::fs::rename(&new_path, path) {
         std::fs::remove_file(&new_path).ok();
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "failed to replace {} with {}: {e}",
                 path.display(),
@@ -1140,7 +1232,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
         Ok(current) => Some(current),
         Err(e) if e.kind() == ErrorKind::NotFound => None,
         Err(e) => {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!("failed to read {}: {e}", path.display()),
             });
         }
@@ -1149,7 +1241,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("failed to create {}: {e}", parent.display()),
         })?;
     }
@@ -1157,7 +1249,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
     let new_path = PathBuf::from(format!("{}.new", path.display()));
     if let Err(e) = std::fs::write(&new_path, contents) {
         std::fs::remove_file(&new_path).ok();
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!("failed to write {}: {e}", new_path.display()),
         });
     }
@@ -1167,7 +1259,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
             .as_ref()
             .map(|path| format!(" Backup is at {}.", path.display()))
             .unwrap_or_default();
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "failed to replace {} with {}: {e}.{backup_hint}",
                 path.display(),
@@ -1182,7 +1274,7 @@ pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(TokenSaveError::Config {
+        Err(e) => Err(TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", path.display()),
         }),
     }
@@ -1194,7 +1286,7 @@ pub(super) fn remove_empty_dir(path: &Path) -> Result<bool> {
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty) => {
             Ok(false)
         }
-        Err(e) => Err(TokenSaveError::Config {
+        Err(e) => Err(TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", path.display()),
         }),
     }
@@ -1207,26 +1299,26 @@ fn plugin_manifest() -> String {
         .collect::<Vec<_>>()
         .join("\n");
     // `version` tracks the generating binary so `hermes plugins list` and
-    // `tokensave doctor` can detect stale generated plugins after upgrades.
+    // `tracedecay doctor` can detect stale generated plugins after upgrades.
     format!(
-        "name: tokensave\n\
+        "name: tracedecay\n\
          kind: standalone\n\
          version: {version}\n\
          generator_commit: {commit}\n\
-         description: TokenSave code-graph tools, memory provider, and LCM context engine for Hermes\n\
-         author: tokensave (generated by `tokensave install --agent hermes`)\n\
+         description: TraceDecay code-graph tools, memory provider, and LCM context engine for Hermes\n\
+         author: tracedecay (generated by `tracedecay install --agent hermes`)\n\
          provides_tools:\n{tools}\n\
          provides_hooks:\n\
            - pre_llm_call\n\
          provides_commands:\n\
-           - /tokensave_status\n",
+           - /tracedecay_status\n",
         version = env!("CARGO_PKG_VERSION"),
-        commit = env!("TOKENSAVE_GIT_SHA"),
+        commit = env!("TRACEDECAY_GIT_SHA"),
     )
 }
 
 fn plugin_schemas() -> String {
-    r#""""Generated tokensave tool schemas for Hermes."""
+    r#""""Generated tracedecay tool schemas for Hermes."""
 import json
 from pathlib import Path
 
@@ -1249,33 +1341,34 @@ fn plugin_schemas_json() -> Result<String> {
         .collect::<Vec<_>>();
     serde_json::to_string_pretty(&defs)
         .map(|json| format!("{json}\n"))
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("failed to serialize Hermes schemas.json: {e}"),
         })
 }
 
-fn plugin_tools(tokensave_bin: &str) -> String {
-    let bin = serde_json::to_string(tokensave_bin).unwrap_or_else(|_| "\"tokensave\"".to_string());
+fn plugin_tools(tracedecay_bin: &str) -> String {
+    let bin =
+        serde_json::to_string(tracedecay_bin).unwrap_or_else(|_| "\"tracedecay\"".to_string());
     format!(
-        r#""""Generated tokensave tool handlers for Hermes."""
+        r#""""Generated tracedecay tool handlers for Hermes."""
 import json
 import os
 import subprocess
 import tempfile
 
-TOKENSAVE_BIN = {bin}
+TRACEDECAY_BIN = {bin}
 # Default per-call ceiling. Long-running verbs (LCM ingest/compression over
 # long transcripts, doctor/diagnose repair passes) keep a higher ceiling.
-TOKENSAVE_TIMEOUT_SECONDS = 120
-TOKENSAVE_LONG_TIMEOUT_SECONDS = 600
+TRACEDECAY_TIMEOUT_SECONDS = 120
+TRACEDECAY_LONG_TIMEOUT_SECONDS = 600
 LONG_RUNNING_TOOLS = frozenset((
-    "tokensave_lcm_compress",
-    "tokensave_lcm_preflight",
-    "tokensave_lcm_doctor",
-    "tokensave_diagnose",
+    "tracedecay_lcm_compress",
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_doctor",
+    "tracedecay_diagnose",
     # First hermes search runs the state.db catch-up sweep, which can
     # exceed the default ceiling on large profile histories.
-    "tokensave_message_search",
+    "tracedecay_message_search",
 ))
 MAX_CAPTURE_CHARS = 4000
 # Linux caps a single argv string at MAX_ARG_STRLEN (128 KiB). Payloads at or
@@ -1289,10 +1382,10 @@ ARGS_FILE_THRESHOLD_BYTES = 100000
 # to resolve. Without an explicit project pin these anchor at the Hermes
 # home so results never shard per working directory.
 PROFILE_STORE_TOOLS = frozenset((
-    "tokensave_fact_store",
-    "tokensave_fact_feedback",
-    "tokensave_memory_status",
-    "tokensave_message_search",
+    "tracedecay_fact_store",
+    "tracedecay_fact_feedback",
+    "tracedecay_memory_status",
+    "tracedecay_message_search",
 ))
 
 _PLUGIN_CONFIG_CACHE = {{}}
@@ -1305,7 +1398,7 @@ def hermes_home_dir(hermes_home=None):
     )
 
 def plugin_config_block(hermes_home=None):
-    """Return the `plugins.tokensave` mapping from the profile config.yaml.
+    """Return the `plugins.tracedecay` mapping from the profile config.yaml.
 
     This is the conventional Hermes home for plugin settings (the same
     `plugins.<name>` block bundled plugins use). Cached per config file
@@ -1327,7 +1420,9 @@ def plugin_config_block(hermes_home=None):
         with open(path, encoding="utf-8-sig") as config_file:
             config = yaml.safe_load(config_file) or {{}}
         plugins = config.get("plugins")
-        candidate = plugins.get("tokensave") if isinstance(plugins, dict) else None
+        candidate = plugins.get("tracedecay") if isinstance(plugins, dict) else None
+        if not isinstance(candidate, dict):
+            candidate = plugins.get("tokensave") if isinstance(plugins, dict) else None
         if isinstance(candidate, dict):
             block = candidate
     except Exception:
@@ -1375,7 +1470,7 @@ def error_payload(message: str, result=None) -> str:
             payload["stderr"] = stderr
     return json.dumps(payload)
 
-def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
+def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
     args_file = None
     try:
         tool_args = args or {{}}
@@ -1391,7 +1486,7 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
         #      code-project anchor for code-graph tools and must never
         #      reroute memory/transcript state away from the profile store.
         #   3. Code-graph tools fall back to the install-time pin when one
-        #      exists, else resolve per cwd: `tokensave tool` walks up from
+        #      exists, else resolve per cwd: `tracedecay tool` walks up from
         #      the working directory to the nearest initialised project.
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
         if not project_root:
@@ -1399,21 +1494,21 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
                 project_root = hermes_home_dir()
             else:
                 project_root = config_pinned_project_root()
-        argv = [TOKENSAVE_BIN, "tool"]
+        argv = [TRACEDECAY_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
         argv.extend([name, "--json", "--args"])
         if len(payload.encode("utf-8")) >= ARGS_FILE_THRESHOLD_BYTES:
-            fd, args_file = tempfile.mkstemp(prefix="tokensave-args-", suffix=".json")
+            fd, args_file = tempfile.mkstemp(prefix="tracedecay-args-", suffix=".json")
             with os.fdopen(fd, "w", encoding="utf-8") as args_handle:
                 args_handle.write(payload)
             argv.append("@" + args_file)
         else:
             argv.append(payload)
         timeout_seconds = (
-            TOKENSAVE_LONG_TIMEOUT_SECONDS
+            TRACEDECAY_LONG_TIMEOUT_SECONDS
             if name in LONG_RUNNING_TOOLS
-            else TOKENSAVE_TIMEOUT_SECONDS
+            else TRACEDECAY_TIMEOUT_SECONDS
         )
         result = subprocess.run(
             argv,
@@ -1424,7 +1519,7 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
             shell=False,
         )
         if result.returncode != 0:
-            return error_payload(f"tokensave tool exited with status {{result.returncode}}", result)
+            return error_payload(f"tracedecay tool exited with status {{result.returncode}}", result)
         output = result.stdout.strip()
         if not output:
             return "{{}}"
@@ -1432,11 +1527,11 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
             json.loads(output)
             return output
         except json.JSONDecodeError:
-            return error_payload("tokensave tool returned invalid JSON", result)
+            return error_payload("tracedecay tool returned invalid JSON", result)
     except subprocess.TimeoutExpired as exc:
-        return error_payload("tokensave tool timed out", exc)
+        return error_payload("tracedecay tool timed out", exc)
     except Exception as exc:
-        return json.dumps({{"error": f"tokensave tool failed: {{exc}}"}})
+        return json.dumps({{"error": f"tracedecay tool failed: {{exc}}"}})
     finally:
         if args_file is not None:
             try:
@@ -1446,16 +1541,16 @@ def call_tokensave_tool(name: str, args: dict, **kwargs) -> str:
 
 def make_handler(name: str):
     def handler(args: dict, **kwargs) -> str:
-        return call_tokensave_tool(name, args, **kwargs)
+        return call_tracedecay_tool(name, args, **kwargs)
     return handler
 "#
     )
 }
 
 fn plugin_init() -> String {
-    // Provenance header: lets `tokensave doctor` and humans detect a live
+    // Provenance header: lets `tracedecay doctor` and humans detect a live
     // install that was clobbered by an older/newer generator build.
-    let body = r#""""tokensave Hermes plugin registration."""
+    let body = r#""""tracedecay Hermes plugin registration."""
 import json
 import hashlib
 import logging
@@ -1534,8 +1629,22 @@ MEMORY_FACT_ACTIONS = {
 }
 
 MEMORY_ACTION_DESCRIPTIONS = {
-    "fact_add": "Add a holographic memory fact.",
-    "fact_search": "Search holographic memory facts by query.",
+    "fact_add": (
+        "Add a holographic memory fact. The result includes a write-time diff "
+        "report (diff/closest_fact_id/similarity/reason): 'near_duplicate' "
+        "means a very similar fact already exists (consider updating it "
+        "instead), 'possible_conflict' means a negation/state-change cue "
+        "suggests supersession (confirm which fact is current), and "
+        "'rejected_secret_like' means the content looked like a credential "
+        "and was NOT stored. Calibrate trust instead of defaulting high: "
+        "reserve >=0.85 for verified/durable facts, use ~0.7 for ordinary "
+        "observations and ~0.5 when unsure - aim for a spread across facts."
+    ),
+    "fact_search": (
+        "Search holographic memory facts by query. Recall memory FIRST "
+        "before reaching for external or web search - prior sessions often "
+        "already answered the question."
+    ),
     "fact_probe": "Find facts connected to one entity.",
     "fact_related": "List entities related to one entity.",
     "fact_reason": "Reason over facts that connect multiple entities.",
@@ -1545,26 +1654,26 @@ MEMORY_ACTION_DESCRIPTIONS = {
     "fact_list": "List holographic memory facts.",
 }
 
-MEMORY_TOOL_MAP = {"fact_store": {"tokensave_name": "tokensave_fact_store"}}
+MEMORY_TOOL_MAP = {"fact_store": {"tracedecay_name": "tracedecay_fact_store"}}
 for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
     MEMORY_TOOL_MAP[_hermes_name] = {
-        "tokensave_name": "tokensave_fact_store",
+        "tracedecay_name": "tracedecay_fact_store",
         "fixed_args": {"action": _action},
     }
-MEMORY_TOOL_MAP["fact_feedback"] = {"tokensave_name": "tokensave_fact_feedback"}
-MEMORY_TOOL_MAP["memory_status"] = {"tokensave_name": "tokensave_memory_status"}
+MEMORY_TOOL_MAP["fact_feedback"] = {"tracedecay_name": "tracedecay_fact_feedback"}
+MEMORY_TOOL_MAP["memory_status"] = {"tracedecay_name": "tracedecay_memory_status"}
 
 LCM_TOOL_ALIASES = {
-    "lcm_grep": "tokensave_lcm_grep",
-    "lcm_load_session": "tokensave_lcm_load_session",
-    "lcm_describe": "tokensave_lcm_describe",
-    "lcm_expand": "tokensave_lcm_expand",
-    "lcm_expand_query": "tokensave_lcm_expand_query",
-    "lcm_status": "tokensave_lcm_status",
-    "lcm_doctor": "tokensave_lcm_doctor",
+    "lcm_grep": "tracedecay_lcm_grep",
+    "lcm_load_session": "tracedecay_lcm_load_session",
+    "lcm_describe": "tracedecay_lcm_describe",
+    "lcm_expand": "tracedecay_lcm_expand",
+    "lcm_expand_query": "tracedecay_lcm_expand_query",
+    "lcm_status": "tracedecay_lcm_status",
+    "lcm_doctor": "tracedecay_lcm_doctor",
 }
 LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
-LCM_DIRECT_TO_NATIVE = {tokensave_name: native_name for native_name, tokensave_name in LCM_TOOL_ALIASES.items()}
+LCM_DIRECT_TO_NATIVE = {tracedecay_name: native_name for native_name, tracedecay_name in LCM_TOOL_ALIASES.items()}
 
 LCM_NATIVE_SCHEMAS = [
     {
@@ -1735,19 +1844,19 @@ LCM_NATIVE_SCHEMAS = [
 # ``messages`` parameter used for lossless LCM ingest). Everything else in
 # TOOL_SCHEMAS works without that capability.
 MESSAGE_DEPENDENT_TOOLS = frozenset((
-    "tokensave_lcm_compress",
-    "tokensave_lcm_preflight",
+    "tracedecay_lcm_compress",
+    "tracedecay_lcm_preflight",
 ))
 
 # Direct duplicates of the memory provider's own tool surface
 # (fact_store / fact_feedback / memory_status). Skipped at register() time
-# when tokensave is the active memory.provider so the same store is not
-# exposed twice per API call. tokensave_message_search stays registered —
+# when tracedecay is the active memory.provider so the same store is not
+# exposed twice per API call. tracedecay_message_search stays registered —
 # the provider does not expose transcript search.
 MEMORY_PROVIDER_TOOLS = frozenset((
-    "tokensave_fact_store",
-    "tokensave_fact_feedback",
-    "tokensave_memory_status",
+    "tracedecay_fact_store",
+    "tracedecay_fact_feedback",
+    "tracedecay_memory_status",
 ))
 
 # Tool names successfully registered with this host. Consulted by the
@@ -1799,7 +1908,7 @@ def _pre_llm_call(*args, **kwargs):
     # Inject guidance ONLY on the first turn: the hook result is appended to
     # the user message, so emitting it every turn would change every turn
     # boundary and break the conversation's prompt-cache prefix. Skip it
-    # entirely when no tokensave tools actually registered on this host —
+    # entirely when no tracedecay tools actually registered on this host —
     # advertising unregistered tools invites hallucinated calls.
     if not kwargs.get("is_first_turn"):
         return None
@@ -1808,19 +1917,19 @@ def _pre_llm_call(*args, **kwargs):
     if not _plugin_toggle("nudge", True):
         return None
     return (
-        "Prefer tokensave tools for codebase exploration, symbol lookup, call graphs, "
+        "Prefer tracedecay tools for codebase exploration, symbol lookup, call graphs, "
         "impact analysis, affected files, and architectural navigation before broad file reads."
     )
 
-def _tokensave_status(raw_args: str = ""):
-    raw = tools.call_tokensave_tool("tokensave_status", {})
+def _tracedecay_status(raw_args: str = ""):
+    raw = tools.call_tracedecay_tool("tracedecay_status", {})
     try:
         payload = json.loads(json.loads(raw)["content"][0]["text"])
     except Exception:
         return raw
     if not isinstance(payload, dict) or payload.get("error"):
         return raw
-    lines = ["tokensave status:"]
+    lines = ["tracedecay status:"]
     for label, key in (
         ("project", "project_root"),
         ("files", "file_count"),
@@ -1850,20 +1959,20 @@ def _bridge_preview(value, limit: int = 2048) -> str:
     return preview
 
 
-def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
-    raw = tools.call_tokensave_tool(name, args, **kwargs)
+def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
+    raw = tools.call_tracedecay_tool(name, args, **kwargs)
     try:
         outer = json.loads(raw)
     except json.JSONDecodeError:
         return {
-            "error": "tokensave tool returned invalid JSON",
+            "error": "tracedecay tool returned invalid JSON",
             "raw_preview": _bridge_preview(raw),
         }
     if isinstance(outer, dict) and "error" in outer:
         return outer
     if not isinstance(outer, dict):
         return {
-            "error": "tokensave tool response missing text content",
+            "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
     content = outer.get("content")
@@ -1874,7 +1983,7 @@ def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
         or not isinstance(content[0].get("text"), str)
     ):
         return {
-            "error": "tokensave tool response missing text content",
+            "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
     text = content[0]["text"]
@@ -1882,13 +1991,13 @@ def call_tokensave_json(name: str, args: dict, **kwargs) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         return {
-            "error": "tokensave tool returned invalid nested JSON",
+            "error": "tracedecay tool returned invalid nested JSON",
             "text_preview": _bridge_preview(text),
         }
 
-def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) -> dict:
+def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
-        if schema.get("name") == tokensave_name:
+        if schema.get("name") == tracedecay_name:
             parameters = json.loads(json.dumps(schema.get("parameters", {})))
             if action is not None:
                 properties = parameters.get("properties")
@@ -1910,7 +2019,7 @@ def _memory_schema(tokensave_name: str, hermes_name: str, action: str = None) ->
             }
     return {
         "name": hermes_name,
-        "description": f"Tokensave memory tool {hermes_name}.",
+        "description": f"Tracedecay memory tool {hermes_name}.",
         "parameters": {"type": "object", "properties": {}},
     }
 
@@ -1939,10 +2048,10 @@ def _normalize_memory_tool_call(name, arguments):
         return tool_name, _decode_tool_args(tool_args)
     return name, _decode_tool_args(arguments)
 
-def _tokensave_binary_available() -> bool:
-    if os.path.dirname(tools.TOKENSAVE_BIN):
-        return Path(tools.TOKENSAVE_BIN).is_file() and os.access(tools.TOKENSAVE_BIN, os.X_OK)
-    return shutil.which(tools.TOKENSAVE_BIN) is not None
+def _tracedecay_binary_available() -> bool:
+    if os.path.dirname(tools.TRACEDECAY_BIN):
+        return Path(tools.TRACEDECAY_BIN).is_file() and os.access(tools.TRACEDECAY_BIN, os.X_OK)
+    return shutil.which(tools.TRACEDECAY_BIN) is not None
 
 def _storage_args(project_root=None, hermes_home=None):
     """Storage args for LCM/session state: always the Hermes profile store.
@@ -1961,7 +2070,7 @@ def _storage_args(project_root=None, hermes_home=None):
     home = hermes_home or _resolve_hermes_home()
     return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
 
-# Conventional config home: a `plugins.tokensave` block in the profile
+# Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
 # use). Keys are flat and mirror the host-config attribute names the
 # `_configured_*` / `_lcm_*_setting` helpers read. Every key the plugin
@@ -1969,8 +2078,8 @@ def _storage_args(project_root=None, hermes_home=None):
 # register_config_defaults()/get_config_field_meta() expose the real
 # surface instead of just the install pin.
 PLUGIN_CONFIG_FIELDS = {
-    "project_root": ("", "Code project pinned for code-graph tool calls (set by `tokensave install --agent hermes --project-root`)."),
-    "nudge": (True, "Inject the first-turn tokensave tool guidance nudge."),
+    "project_root": ("", "Code project pinned for code-graph tool calls (set by `tracedecay install --agent hermes --project-root`)."),
+    "nudge": (True, "Inject the first-turn tracedecay tool guidance nudge."),
     "sync_turn": (True, "Mirror each completed turn into the LCM raw store."),
     "prefetch": (True, "Background fact recall injected at turn start."),
     "context_threshold": ("", "Compression trigger as a fraction of the context window (default: hermes compression.threshold)."),
@@ -2007,11 +2116,11 @@ PLUGIN_CONFIG_DEFAULTS = {
 
 def _plugin_config_defaults():
     # The install-time pin lives in the profile config.yaml itself
-    # (plugins.tokensave.project_root), so the defaults carry no pin.
+    # (plugins.tracedecay.project_root), so the defaults carry no pin.
     return dict(PLUGIN_CONFIG_DEFAULTS)
 
 def _plugin_toggle(name, default=True):
-    """Read a boolean kill switch from the plugins.tokensave config block.
+    """Read a boolean kill switch from the plugins.tracedecay config block.
 
     config.yaml is the home for behavioral settings (host policy: .env is
     for secrets only).
@@ -2029,7 +2138,7 @@ def _plugin_toggle(name, default=True):
     return bool(value)
 
 class _ConfigChain:
-    """Attribute-style config wrapper layering plugins.tokensave under a host config object."""
+    """Attribute-style config wrapper layering plugins.tracedecay under a host config object."""
 
     def __init__(self, primary, block):
         self._primary = primary
@@ -2046,7 +2155,7 @@ class _ConfigChain:
         return value
 
 def _with_plugin_block(config, hermes_home=None):
-    """Layer the profile's plugins.tokensave config block under a host config.
+    """Layer the profile's plugins.tracedecay config block under a host config.
 
     Host-provided values always win; the block fills the gaps so profile
     config.yaml settings reach the engine/provider without bespoke env vars.
@@ -2085,9 +2194,13 @@ def _configured_project_root(config):
     if config is None:
         return None
     if isinstance(config, dict):
-        value = config.get("project_root") or config.get("tokensave_project_root")
+        value = (
+            config.get("project_root")
+            or config.get("tracedecay_project_root")
+            or config.get("tokensave_project_root")
+        )
         return str(value) if value else None
-    for attr in ("project_root", "tokensave_project_root"):
+    for attr in ("project_root", "tracedecay_project_root", "tokensave_project_root"):
         value = getattr(config, attr, None)
         if value:
             return str(value)
@@ -2436,7 +2549,7 @@ def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> d
         ),
         "max_assembly_tokens": _lcm_int_setting(config, "LCM_MAX_ASSEMBLY_TOKENS", "max_assembly_tokens", default=0),
         # Hermes derives an assembly cap of context_length - reserve_tokens_floor
-        # when both are positive; pass both through so tokensave can apply the
+        # when both are positive; pass both through so tracedecay can apply the
         # same derivation (reserve_tokens_floor defaults to 0 = disabled).
         "reserve_tokens_floor": _lcm_int_setting(
             config,
@@ -3118,7 +3231,7 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
     return payload
 
 def _handle_lcm_expand_query(args, **kwargs) -> str:
-    retrieval = call_tokensave_json("tokensave_lcm_expand_query", args or {}, **kwargs)
+    retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args or {}, **kwargs)
     agent = kwargs.get("agent")
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
@@ -3272,7 +3385,7 @@ def _engine_session_property(field):
 
     return property(_get, _set)
 
-class TokenSaveContextEngine(ContextEngine):
+class TraceDecayContextEngine(ContextEngine):
     def __init__(self, config=None, hermes_home=None):
         # Per-session mutable state, guarded by an RLock. Calls that carry
         # no session id (compress, update_from_response, should_compress,
@@ -3328,7 +3441,7 @@ class TokenSaveContextEngine(ContextEngine):
 
     @property
     def name(self) -> str:
-        return "tokensave"
+        return "tracedecay"
 
     def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         if session_id is not None:
@@ -3367,7 +3480,7 @@ class TokenSaveContextEngine(ContextEngine):
             )
             if next_hermes_home:
                 self.hermes_home = next_hermes_home
-        # Re-layer the profile's plugins.tokensave block now that the host
+        # Re-layer the profile's plugins.tracedecay block now that the host
         # config and hermes_home are settled for this session.
         self.config = _with_plugin_block(self._host_config, self.hermes_home)
         next_project_root = (
@@ -3464,7 +3577,7 @@ class TokenSaveContextEngine(ContextEngine):
 
     def _report_compression_boundary(self, session_id, bound_session_id, kwargs):
         # Mirrors Hermes' compression-boundary session starts: hand the
-        # bound/old session ids to tokensave so it can record a boundary-skip
+        # bound/old session ids to tracedecay so it can record a boundary-skip
         # cooldown when carry-over did not continue from the bound session.
         boundary_reason = str(kwargs.get("boundary_reason") or "")
         old_session_id = str(kwargs.get("old_session_id") or "")
@@ -3484,7 +3597,7 @@ class TokenSaveContextEngine(ContextEngine):
         if bound_session_id:
             args["bound_session_id"] = bound_session_id
         try:
-            tools.call_tokensave_tool("tokensave_lcm_session_boundary", args)
+            tools.call_tracedecay_tool("tracedecay_lcm_session_boundary", args)
         except Exception as exc:
             logger.warning("LCM session boundary report failed: %s", exc)
 
@@ -3530,7 +3643,7 @@ class TokenSaveContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
-        return call_tokensave_json("tokensave_lcm_preflight", args, **kwargs)
+        return call_tracedecay_json("tracedecay_lcm_preflight", args, **kwargs)
 
     def should_compress(self, prompt_tokens=None, **kwargs):
         # The host probes this on EVERY agent-loop iteration (up to ~90
@@ -3552,7 +3665,7 @@ class TokenSaveContextEngine(ContextEngine):
 
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
-        return call_tokensave_json("tokensave_lcm_status", args, **kwargs)
+        return call_tracedecay_json("tracedecay_lcm_status", args, **kwargs)
 
     def get_tool_schemas(self):
         return _lcm_tool_schemas()
@@ -3608,7 +3721,7 @@ class TokenSaveContextEngine(ContextEngine):
             "ignore_message_patterns",
         ))
         try:
-            tools.call_tokensave_tool("tokensave_lcm_preflight", args, **_copy_without_none({
+            tools.call_tracedecay_tool("tracedecay_lcm_preflight", args, **_copy_without_none({
                 "project_root": kwargs.get("project_root"),
             }))
             self._last_preflight_signature = signature
@@ -3618,11 +3731,11 @@ class TokenSaveContextEngine(ContextEngine):
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
         native_name = tool_name
-        tokensave_name = LCM_TOOL_ALIASES.get(native_name)
-        if tokensave_name is None and native_name in LCM_DIRECT_TOOL_NAMES:
-            tokensave_name = native_name
+        tracedecay_name = LCM_TOOL_ALIASES.get(native_name)
+        if tracedecay_name is None and native_name in LCM_DIRECT_TOOL_NAMES:
+            tracedecay_name = native_name
             native_name = LCM_DIRECT_TO_NATIVE.get(native_name, native_name)
-        if tokensave_name is None:
+        if tracedecay_name is None:
             return tools.error_payload(f"unknown LCM tool: {tool_name}")
 
         messages = kwargs.get("messages")
@@ -3639,9 +3752,9 @@ class TokenSaveContextEngine(ContextEngine):
         if self.active_session_id:
             tool_args.setdefault("session_id", self.active_session_id)
 
-        if tokensave_name == "tokensave_lcm_expand_query":
+        if tracedecay_name == "tracedecay_lcm_expand_query":
             return _handle_lcm_expand_query(tool_args, agent=self.agent, **preflight_kwargs)
-        return tools.call_tokensave_tool(tokensave_name, tool_args, **preflight_kwargs)
+        return tools.call_tracedecay_tool(tracedecay_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
         kwargs = dict(kwargs)
@@ -3656,7 +3769,7 @@ class TokenSaveContextEngine(ContextEngine):
                 args[key] = kwargs[key]
         if "context_max_tokens" not in args:
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
-        retrieval = call_tokensave_json("tokensave_lcm_expand_query", args, **kwargs)
+        retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
         synthesis_kwargs = dict(kwargs)
         if synthesis_kwargs.get("model") is None:
             expansion_model = _lcm_expansion_model(self.config)
@@ -3978,7 +4091,7 @@ class TokenSaveContextEngine(ContextEngine):
         The hermes ContextEngine ABC contract is a message list: the host
         appends to the returned value, re-estimates tokens on it, and adopts
         it as the live transcript (agent/conversation_compression.py). The
-        raw tokensave result dict is kept on ``self.last_compress_result``
+        raw tracedecay result dict is kept on ``self.last_compress_result``
         for diagnostics/tests. On error or no-op the input list is returned
         unchanged so the host takes its abort/no-op path instead of
         corrupting the conversation.
@@ -3994,7 +4107,7 @@ class TokenSaveContextEngine(ContextEngine):
                 **kwargs,
             )
         except Exception as exc:
-            logger.warning("tokensave compression failed: %s", exc)
+            logger.warning("tracedecay compression failed: %s", exc)
             self._last_compress_aborted = True
             self._last_summary_error = str(exc)
             return original
@@ -4064,7 +4177,7 @@ class TokenSaveContextEngine(ContextEngine):
         attempt_args = dict(args)
 
         while attempts < max_auxiliary_attempts:
-            first = call_tokensave_json("tokensave_lcm_compress", attempt_args, **kwargs)
+            first = call_tracedecay_json("tracedecay_lcm_compress", attempt_args, **kwargs)
             if first.get("status") != "needs_summary":
                 return _with_auxiliary_metadata(
                     first,
@@ -4129,7 +4242,7 @@ class TokenSaveContextEngine(ContextEngine):
                 "summary_text": summary["text"],
                 "route": provided_route,
             }
-            result = call_tokensave_json("tokensave_lcm_compress", provided_args, **kwargs)
+            result = call_tracedecay_json("tracedecay_lcm_compress", provided_args, **kwargs)
             return _with_auxiliary_metadata(
                 result,
                 attempts=attempts,
@@ -4138,8 +4251,8 @@ class TokenSaveContextEngine(ContextEngine):
                 fallback_used=fallback_used,
             )
 
-class TokensaveMemoryProvider(MemoryProvider):
-    provider_id = "tokensave"
+class TracedecayMemoryProvider(MemoryProvider):
+    provider_id = "tracedecay"
 
     def __init__(self):
         self.hermes_home = None
@@ -4150,10 +4263,10 @@ class TokensaveMemoryProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
-        return "tokensave"
+        return "tracedecay"
 
     def is_available(self) -> bool:
-        return _tokensave_binary_available()
+        return _tracedecay_binary_available()
 
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
@@ -4167,32 +4280,32 @@ class TokensaveMemoryProvider(MemoryProvider):
     def post_setup(self, hermes_home, config):
         """`hermes memory setup` hand-off: verify the binary and warm the store.
 
-        tokensave_memory_status repairs derived holographic vectors/banks
+        tracedecay_memory_status repairs derived holographic vectors/banks
         and creates the profile store on first touch, so one call doubles
         as install repair + initialization.
         """
         del config
-        if not _tokensave_binary_available():
+        if not _tracedecay_binary_available():
             print(
-                f"  tokensave binary not found at {tools.TOKENSAVE_BIN} — "
-                "install it (cargo install tokensave) and re-run `hermes memory setup`."
+                f"  tracedecay binary not found at {tools.TRACEDECAY_BIN} — "
+                "install it (cargo install tracedecay) and re-run `hermes memory setup`."
             )
             return
         home = str(hermes_home or self.hermes_home or _resolve_hermes_home())
-        status = call_tokensave_json("tokensave_memory_status", {}, project_root=home)
+        status = call_tracedecay_json("tracedecay_memory_status", {}, project_root=home)
         if isinstance(status, dict) and not status.get("error"):
             facts = status.get("fact_count", status.get("facts"))
             suffix = f" ({facts} facts)" if facts is not None else ""
-            print(f"  tokensave memory store ready at {home}{suffix}.")
+            print(f"  tracedecay memory store ready at {home}{suffix}.")
         else:
             detail = status.get("error") if isinstance(status, dict) else status
-            print(f"  tokensave memory store check failed: {detail}")
+            print(f"  tracedecay memory store check failed: {detail}")
 
     def system_prompt_block(self):
         # Built once per session by the host during system prompt assembly —
         # cache-stable, unlike per-turn pre_llm_call injection.
         return (
-            "tokensave memory is active: durable facts live in the holographic "
+            "tracedecay memory is active: durable facts live in the holographic "
             "fact store. Use fact_store(action='add') for facts worth keeping "
             "across sessions and fact_store(action='search') for explicit "
             "recall; relevant facts are also prefetched automatically."
@@ -4219,13 +4332,13 @@ class TokensaveMemoryProvider(MemoryProvider):
             try:
                 recall = self._recall_facts(text)
             except Exception as exc:
-                logger.debug("tokensave queue_prefetch failed: %s", exc)
+                logger.debug("tracedecay queue_prefetch failed: %s", exc)
                 return
             with self._prefetch_lock:
                 self._prefetch_cache[key] = recall
 
         threading.Thread(
-            target=_worker, name="tokensave-memory-prefetch", daemon=True
+            target=_worker, name="tracedecay-memory-prefetch", daemon=True
         ).start()
 
     def prefetch(self, query, *, session_id=""):
@@ -4250,12 +4363,12 @@ class TokensaveMemoryProvider(MemoryProvider):
         if not text:
             return ""
         try:
-            payload = call_tokensave_json(
-                "tokensave_fact_store",
+            payload = call_tracedecay_json(
+                "tracedecay_fact_store",
                 {"action": "search", "query": text[:512], "limit": 3},
             )
         except Exception as exc:
-            logger.debug("tokensave memory prefetch failed: %s", exc)
+            logger.debug("tracedecay memory prefetch failed: %s", exc)
             return ""
         if not isinstance(payload, dict) or payload.get("error"):
             return ""
@@ -4280,7 +4393,7 @@ class TokensaveMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
         """Persist the completed turn into the LCM raw store.
 
-        Uses tokensave_lcm_preflight's lossless active-message ingest (the
+        Uses tracedecay_lcm_preflight's lossless active-message ingest (the
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
@@ -4304,9 +4417,9 @@ class TokensaveMemoryProvider(MemoryProvider):
         args = _storage_args(None, self.hermes_home)
         args.update({"session_id": sid, "messages": turn_messages})
         try:
-            tools.call_tokensave_tool("tokensave_lcm_preflight", args)
+            tools.call_tracedecay_tool("tracedecay_lcm_preflight", args)
         except Exception as exc:
-            logger.debug("tokensave sync_turn ingest failed: %s", exc)
+            logger.debug("tracedecay sync_turn ingest failed: %s", exc)
 
     def on_memory_write(self, action, target, content, metadata=None):
         """Mirror built-in memory tool writes into the fact store."""
@@ -4328,29 +4441,29 @@ class TokensaveMemoryProvider(MemoryProvider):
             "metadata": fact_metadata,
         }
         try:
-            tools.call_tokensave_tool("tokensave_fact_store", fact_args)
+            tools.call_tracedecay_tool("tracedecay_fact_store", fact_args)
         except Exception as exc:
-            logger.debug("tokensave on_memory_write mirror failed: %s", exc)
+            logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
 
     def get_config_schema(self):
         # Consumed by `hermes memory setup` / `hermes memory status`.
         return [
             {
                 "key": "project_root",
-                "description": "Absolute path of the project tokensave serves (install-time pin)",
+                "description": "Absolute path of the project tracedecay serves (install-time pin)",
                 "default": tools.config_pinned_project_root() or "",
             },
         ]
 
     def get_config_defaults(self):
-        # Hermes layers these under DEFAULT_CONFIG so plugins.tokensave
+        # Hermes layers these under DEFAULT_CONFIG so plugins.tracedecay
         # exists in loaded configs without core changes.
-        return {"plugins": {"tokensave": _plugin_config_defaults()}}
+        return {"plugins": {"tracedecay": _plugin_config_defaults()}}
 
     def get_config_field_meta(self):
         # Dashboard config-page hints for every provider-owned dot-path.
         return {
-            f"plugins.tokensave.{key}": {
+            f"plugins.tracedecay.{key}": {
                 "category": "plugins",
                 "description": description,
             }
@@ -4359,7 +4472,7 @@ class TokensaveMemoryProvider(MemoryProvider):
 
     def save_config(self, values, hermes_home):
         # `hermes memory setup` hands collected non-secret values here; the
-        # conventional home is the plugins.tokensave block. Prefer hermes'
+        # conventional home is the plugins.tracedecay block. Prefer hermes'
         # canonical raw-read + save path (config lock, atomic write,
         # managed-config guard) and only fall back to raw YAML outside a
         # hermes install.
@@ -4375,17 +4488,17 @@ class TokensaveMemoryProvider(MemoryProvider):
                 plugins_cfg = existing.get("plugins")
                 if not isinstance(plugins_cfg, dict):
                     plugins_cfg = {}
-                block = plugins_cfg.get("tokensave")
+                block = plugins_cfg.get("tracedecay")
                 if not isinstance(block, dict):
                     block = {}
                 block.update(updates)
-                plugins_cfg["tokensave"] = block
+                plugins_cfg["tracedecay"] = block
                 existing["plugins"] = plugins_cfg
                 _hermes_cli_config.save_config(existing)
                 return
             except Exception as exc:
                 logger.warning(
-                    "tokensave save_config via hermes_cli.config failed; falling back to raw YAML: %s",
+                    "tracedecay save_config via hermes_cli.config failed; falling back to raw YAML: %s",
                     exc,
                 )
         config_path = Path(hermes_home) / "config.yaml"
@@ -4398,16 +4511,16 @@ class TokensaveMemoryProvider(MemoryProvider):
             plugins_cfg = existing.get("plugins")
             if not isinstance(plugins_cfg, dict):
                 plugins_cfg = {}
-            block = plugins_cfg.get("tokensave")
+            block = plugins_cfg.get("tracedecay")
             if not isinstance(block, dict):
                 block = {}
             block.update(updates)
-            plugins_cfg["tokensave"] = block
+            plugins_cfg["tracedecay"] = block
             existing["plugins"] = plugins_cfg
             with open(config_path, "w", encoding="utf-8") as config_file:
                 yaml.dump(existing, config_file, default_flow_style=False)
         except Exception as exc:
-            logger.warning("tokensave memory provider save_config failed: %s", exc)
+            logger.warning("tracedecay memory provider save_config failed: %s", exc)
 
     def get_tool_schemas(self):
         # Collapsed surface (12 -> 3): fact_store(action=...) covers the nine
@@ -4415,9 +4528,9 @@ class TokensaveMemoryProvider(MemoryProvider):
         # handle_tool_call for compatibility with older transcripts/configs
         # but no longer cost per-call schema footprint.
         return [
-            _memory_schema("tokensave_fact_store", "fact_store"),
-            _memory_schema("tokensave_fact_feedback", "fact_feedback"),
-            _memory_schema("tokensave_memory_status", "memory_status"),
+            _memory_schema("tracedecay_fact_store", "fact_store"),
+            _memory_schema("tracedecay_fact_feedback", "fact_feedback"),
+            _memory_schema("tracedecay_memory_status", "memory_status"),
         ]
 
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
@@ -4425,23 +4538,23 @@ class TokensaveMemoryProvider(MemoryProvider):
         mapping = MEMORY_TOOL_MAP.get(tool_name)
         if mapping is None:
             return tools.error_payload(f"unknown memory tool: {tool_name}")
-        tokensave_name = mapping["tokensave_name"]
+        tracedecay_name = mapping["tracedecay_name"]
         fixed_args = mapping.get("fixed_args")
         if fixed_args:
             tool_args = dict(tool_args)
             tool_args.update(fixed_args)
-        return tools.call_tokensave_tool(tokensave_name, tool_args, **kwargs)
+        return tools.call_tracedecay_tool(tracedecay_name, tool_args, **kwargs)
 
 def register(ctx):
     ctx.register_hook("pre_llm_call", _pre_llm_call)
-    # Declare the plugins.tokensave config block so its keys exist in
+    # Declare the plugins.tracedecay config block so its keys exist in
     # load_config() even before the user edits config.yaml.
     register_config_defaults = getattr(ctx, "register_config_defaults", None)
     if callable(register_config_defaults):
         try:
-            register_config_defaults({"plugins": {"tokensave": _plugin_config_defaults()}})
+            register_config_defaults({"plugins": {"tracedecay": _plugin_config_defaults()}})
         except Exception as exc:
-            logger.warning("tokensave config defaults registration failed: %s", exc)
+            logger.warning("tracedecay config defaults registration failed: %s", exc)
     # Declare the extraction side-LLM as a proper auxiliary task so users can
     # pin its provider/model under auxiliary.lcm_extraction instead of the
     # generic auto-resolved "extraction" defaults.
@@ -4451,30 +4564,30 @@ def register(ctx):
             register_auxiliary_task(
                 "lcm_extraction",
                 display_name="LCM extraction",
-                description="tokensave pre-compaction decision/insight extraction",
+                description="tracedecay pre-compaction decision/insight extraction",
                 defaults={"provider": "auto", "model": "", "timeout": 60},
             )
         except Exception as exc:
-            logger.debug("tokensave auxiliary task registration failed: %s", exc)
+            logger.debug("tracedecay auxiliary task registration failed: %s", exc)
         else:
             _EXTRACTION_TASK["key"] = "lcm_extraction"
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
         register_command(
-            "/tokensave_status",
-            _tokensave_status,
-            description="Show tokensave project status.",
+            "/tracedecay_status",
+            _tracedecay_status,
+            description="Show tracedecay project status.",
         )
 
     if callable(getattr(ctx, "register_memory_provider", None)):
-        ctx.register_memory_provider(TokensaveMemoryProvider())
+        ctx.register_memory_provider(TracedecayMemoryProvider())
 
     context_config = getattr(ctx, "config", None)
     context_hermes_home = (
         getattr(ctx, "hermes_home", None)
         or getattr(ctx, "_hermes_home", None)
     )
-    context_engine = TokenSaveContextEngine(
+    context_engine = TraceDecayContextEngine(
         config=context_config,
         hermes_home=context_hermes_home,
     )
@@ -4494,28 +4607,28 @@ def register(ctx):
     #     context_engine.get_tool_schemas()).
     register_tool = getattr(ctx, "register_tool", None)
     host_forwards_messages = _host_forwards_registered_tool_messages(ctx)
-    tokensave_is_memory_provider = _active_memory_provider(ctx) == "tokensave"
+    tracedecay_is_memory_provider = _active_memory_provider(ctx) == "tracedecay"
     if callable(register_tool):
         for schema in schemas.TOOL_SCHEMAS:
             name = schema["name"]
             if name in MESSAGE_DEPENDENT_TOOLS and not host_forwards_messages:
                 continue
-            if name in MEMORY_PROVIDER_TOOLS and tokensave_is_memory_provider:
+            if name in MEMORY_PROVIDER_TOOLS and tracedecay_is_memory_provider:
                 # The active memory provider already exposes this store as
                 # fact_store/fact_feedback/memory_status — registering the
                 # prefixed twins would double the schema footprint.
                 continue
-            handler = _handle_lcm_expand_query if name == "tokensave_lcm_expand_query" else tools.make_handler(name)
+            handler = _handle_lcm_expand_query if name == "tracedecay_lcm_expand_query" else tools.make_handler(name)
             try:
                 register_tool(
                     name=name,
-                    toolset="tokensave",
+                    toolset="tracedecay",
                     schema=schema,
                     handler=handler,
                 )
             except Exception as exc:
                 logger.warning(
-                    "tokensave tool registration failed for %s; continuing: %s",
+                    "tracedecay tool registration failed for %s; continuing: %s",
                     name,
                     exc,
                 )
@@ -4534,43 +4647,43 @@ def register(ctx):
                     )
                 except Exception as exc:
                     logger.warning(
-                        "tokensave LCM tool registration failed for %s; continuing with context-engine schemas: %s",
+                        "tracedecay LCM tool registration failed for %s; continuing with context-engine schemas: %s",
                         name,
                         exc,
                     )
         else:
             logger.info(
-                "tokensave LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
+                "tracedecay LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
             )
     else:
         logger.info(
-            "tokensave direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
+            "tracedecay direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
         )
 
     skills_dir = Path(__file__).parent / "skills"
-    skill_path = skills_dir / "tokensave" / "SKILL.md"
+    skill_path = skills_dir / "tracedecay" / "SKILL.md"
     register_skill = getattr(ctx, "register_skill", None)
     if skill_path.exists() and callable(register_skill):
         # Newer Hermes derives the namespace from the plugin name and
         # rejects ':' in skill names, so register the bare name.
         try:
-            register_skill("tokensave", skill_path)
+            register_skill("tracedecay", skill_path)
         except Exception as exc:
-            logger.warning("tokensave skill registration failed: %s", exc)
+            logger.warning("tracedecay skill registration failed: %s", exc)
 "#;
     format!(
-        "# Generated by tokensave {} (commit {}). Do not edit; refresh with `tokensave update-plugin`.\n{body}",
+        "# Generated by tracedecay {} (commit {}). Do not edit; refresh with `tracedecay update-plugin`.\n{body}",
         env!("CARGO_PKG_VERSION"),
-        env!("TOKENSAVE_GIT_SHA"),
+        env!("TRACEDECAY_GIT_SHA"),
     )
 }
 
-/// `hermes tokensave ...` CLI passthrough. Hermes' memory-plugin CLI
+/// `hermes tracedecay ...` CLI passthrough. Hermes' memory-plugin CLI
 /// discovery (`plugins/memory/__init__.py::discover_plugin_cli_commands`)
 /// loads `cli.py` from the ACTIVE provider's directory and wires
-/// `register_cli(subparser)` + `tokensave_command(args)` into argparse, so
+/// `register_cli(subparser)` + `tracedecay_command(args)` into argparse, so
 /// the verbs work without any core change (honcho pattern).
-const PLUGIN_CLI_PY: &str = r#""""CLI commands for the tokensave memory provider (`hermes tokensave ...`)."""
+const PLUGIN_CLI_PY: &str = r#""""CLI commands for the tracedecay memory provider (`hermes tracedecay ...`)."""
 import subprocess
 import sys
 
@@ -4578,15 +4691,15 @@ from . import tools
 
 
 def register_cli(subparser):
-    """Build the ``hermes tokensave`` argparse subcommand tree."""
-    subs = subparser.add_subparsers(dest="tokensave_command")
+    """Build the ``hermes tracedecay`` argparse subcommand tree."""
+    subs = subparser.add_subparsers(dest="tracedecay_command")
     subs.add_parser(
         "status",
-        help="Show tokensave status for the current project (default subcommand)",
+        help="Show tracedecay status for the current project (default subcommand)",
     )
     subs.add_parser(
         "doctor",
-        help="Check the tokensave installation and Hermes integration",
+        help="Check the tracedecay installation and Hermes integration",
     )
     curate = subs.add_parser(
         "curate",
@@ -4604,16 +4717,16 @@ def register_cli(subparser):
 
 def _run(argv):
     try:
-        completed = subprocess.run([tools.TOKENSAVE_BIN, *argv], check=False)
+        completed = subprocess.run([tools.TRACEDECAY_BIN, *argv], check=False)
     except OSError as exc:
-        print(f"tokensave binary not runnable ({tools.TOKENSAVE_BIN}): {exc}")
+        print(f"tracedecay binary not runnable ({tools.TRACEDECAY_BIN}): {exc}")
         return 1
     return completed.returncode
 
 
-def tokensave_command(args):
-    """Route ``hermes tokensave`` subcommands to the tokensave binary."""
-    sub = getattr(args, "tokensave_command", None)
+def tracedecay_command(args):
+    """Route ``hermes tracedecay`` subcommands to the tracedecay binary."""
+    sub = getattr(args, "tracedecay_command", None)
     if sub == "doctor":
         code = _run(["doctor", "--agent", "hermes"])
     elif sub == "curate":
@@ -4630,12 +4743,34 @@ def tokensave_command(args):
 "#;
 
 const HERMES_SKILL: &str = r"---
-name: tokensave
-description: Prefer tokensave tools for codebase exploration and graph queries.
+name: tracedecay
+description: Prefer tracedecay tools for codebase exploration, graph queries, and memory recall.
 ---
 
-# Use tokensave
+# Use tracedecay
 
-Use tokensave tools before broad file reads for codebase exploration, symbol lookup,
+Use tracedecay tools before broad file reads for codebase exploration, symbol lookup,
 call graph traversal, impact analysis, affected files, and architectural navigation.
+
+## Memory
+
+- **Recall before external search.** Run `fact_search` (and `lcm_grep` for past
+  conversations) before reaching for web or external search — prior sessions
+  often already answered the question.
+- **Calibrate trust; don't default everything high.** Aim for a spread across
+  stored facts rather than uniform high trust:
+  - `>= 0.85` — verified, durable facts (confirmed decisions, observed behavior,
+    user-stated preferences).
+  - `~ 0.7` — ordinary well-sourced observations.
+  - `~ 0.5` — plausible but unverified; prefer not storing over storing noise.
+- **Read the add result's diff report.** `fact_add` returns
+  `diff` / `closest_fact_id` / `similarity` / `reason`:
+  - `near_duplicate` — a very similar fact exists; prefer `fact_update` on the
+    existing fact over piling on duplicates.
+  - `possible_conflict` — a negation/state-change cue suggests supersession;
+    confirm which fact is current and update or remove the stale one.
+  - `rejected_secret_like` — the content looked like a credential and was NOT
+    stored; never try to re-store secrets.
+- **Never store secrets, transient run output (ports, PIDs, temp paths, run
+  logs), or facts you have not verified.**
 ";

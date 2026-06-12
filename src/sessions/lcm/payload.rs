@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use libsql::{params, Connection};
 
 use crate::sessions::SessionMessageRecord;
-use crate::tokensave::current_timestamp;
+use crate::tracedecay::current_timestamp;
 
 use super::{raw, util, LcmError, LcmPayloadExpansion, LcmPayloadRef};
 

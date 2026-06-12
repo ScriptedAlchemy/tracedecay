@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::PascalExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::PascalExtractor;
+use tracedecay::types::*;
 
 fn extract(source: &str) -> ExtractionResult {
     let extractor = PascalExtractor;

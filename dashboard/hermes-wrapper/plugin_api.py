@@ -1,13 +1,14 @@
-"""TokenSave dashboard plugin for Hermes — tokensave-backed API routes.
+"""TraceDecay dashboard plugin for Hermes — tracedecay-backed API routes.
 
-Mounted at /api/plugins/tokensave/ by the Hermes dashboard plugin system.
+Mounted at /api/plugins/tracedecay/ by the Hermes dashboard plugin system.
 
 This is a THIN reverse proxy onto the canonical implementation: a local
-``tokensave dashboard`` HTTP server (see the tokensave repo, ``src/dashboard``).
+``tracedecay dashboard`` HTTP server (see the tracedecay repo, ``src/dashboard``).
 It does not reimplement any data access. The wrapper:
 
-- lazily spawns ``tokensave dashboard --port 0`` bound to 127.0.0.1 (or uses
-  an externally managed server via ``TOKENSAVE_DASHBOARD_URL``),
+- lazily spawns ``tracedecay dashboard --port 0`` bound to 127.0.0.1 (or uses
+  an externally managed server via ``TRACEDECAY_DASHBOARD_URL``,
+  with ``TOKENSAVE_DASHBOARD_URL`` as a legacy fallback),
 - forwards ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
   ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
   ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
@@ -16,19 +17,22 @@ It does not reimplement any data access. The wrapper:
   future Hermes-specific extensions) can feature-detect the backend.
 
 Auth: requests inherit the Hermes dashboard session-token middleware (this
-router is mounted under ``/api/plugins/...``); the upstream tokensave server
+router is mounted under ``/api/plugins/...``); the upstream tracedecay server
 only listens on loopback.
 
 Configuration (environment always wins, then deploy-time defaults below):
 
-- ``TOKENSAVE_DASHBOARD_URL``      use an existing server instead of spawning.
-- ``TOKENSAVE_BIN``                path to the tokensave binary.
-- ``TOKENSAVE_DASHBOARD_PROJECT``  project root to serve (must be
-  ``tokensave init``-ed); defaults to the Hermes process cwd.
+- ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
+  (legacy fallback: ``TOKENSAVE_DASHBOARD_URL``).
+- ``TRACEDECAY_BIN``                path to the tracedecay binary
+  (legacy fallback: ``TOKENSAVE_BIN``).
+- ``TRACEDECAY_DASHBOARD_PROJECT``  project root to serve (must be
+  ``tracedecay init``-ed); defaults to the Hermes process cwd
+  (legacy fallback: ``TOKENSAVE_DASHBOARD_PROJECT``).
 
 Hermes-only extension: ``POST /curation/llm-plan`` layers LLM-based curation
 (ported from the holographic_plus curator's one-shot review tier) on top of
-the tokensave server, which itself only does similarity math. See the
+the tracedecay server, which itself only does similarity math. See the
 "LLM curation" section below.
 """
 
@@ -40,6 +44,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -72,12 +77,20 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Deploy-time defaults, rewritten in the installed copy by
-# `tokensave install --agent hermes` (src/agents/hermes_dashboard.rs in the
-# tokensave repo): the installer pins the binary that performed the install
-# and the profile's pinned project root. The TOKENSAVE_BIN /
-# TOKENSAVE_DASHBOARD_PROJECT environment variables always win at runtime.
-DEPLOYED_TOKENSAVE_BIN = None
+# `tracedecay install --agent hermes` (src/agents/hermes_dashboard.rs in the
+# tracedecay repo): the installer pins the binary that performed the install
+# and the profile's pinned project root. TRACEDECAY_BIN /
+# TRACEDECAY_DASHBOARD_PROJECT (and legacy TOKENSAVE_* fallbacks) always win
+# at runtime.
+DEPLOYED_TRACEDECAY_BIN = None
 DEPLOYED_PROJECT_ROOT = None
+
+_LISTENING_URL_RE = re.compile(r"https?://[^\s]+")
+
+
+def _env(name: str) -> str | None:
+    """Read TRACEDECAY_<name> first, fall back to TOKENSAVE_<name>."""
+    return os.environ.get(f"TRACEDECAY_{name}") or os.environ.get(f"TOKENSAVE_{name}")
 
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _PROXY_TIMEOUT_SECONDS = 30.0
@@ -116,7 +129,7 @@ except Exception:  # pragma: no cover - exotic libc
 # which survives until interpreter shutdown — restoring the intended
 # "die with the Hermes host process" semantics.
 _spawn_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="tokensave-dashboard-spawn"
+    max_workers=1, thread_name_prefix="tracedecay-dashboard-spawn"
 )
 
 
@@ -149,56 +162,65 @@ def _drain_pipe(pipe: IO[str] | None, sink: deque | None = None) -> None:
         pass
 
 
-def _find_tokensave_bin() -> str | None:
-    explicit = os.environ.get("TOKENSAVE_BIN")
+def _find_tracedecay_bin() -> str | None:
+    explicit = _env("BIN")
     if explicit and Path(explicit).is_file():
         return explicit
-    if DEPLOYED_TOKENSAVE_BIN and Path(DEPLOYED_TOKENSAVE_BIN).is_file():
-        return DEPLOYED_TOKENSAVE_BIN
-    found = shutil.which("tokensave")
+    if DEPLOYED_TRACEDECAY_BIN and Path(DEPLOYED_TRACEDECAY_BIN).is_file():
+        return DEPLOYED_TRACEDECAY_BIN
+    found = shutil.which("tracedecay") or shutil.which("tokensave")
     if found:
         return found
     # Vendored engine build inside the hermes_intelligence plugin checkout.
     here = Path(__file__).resolve().parent.parent
     for profile in ("release", "debug"):
-        candidate = here / "tokensave_engine" / "target" / profile / "tokensave"
-        if candidate.is_file():
-            return str(candidate)
+        for engine_dir, binary_name in (
+            ("tracedecay_engine", "tracedecay"),
+            ("tokensave_engine", "tokensave"),
+        ):
+            candidate = here / engine_dir / "target" / profile / binary_name
+            if candidate.is_file():
+                return str(candidate)
     return None
 
 
 def _project_root() -> str:
     return (
-        os.environ.get("TOKENSAVE_DASHBOARD_PROJECT")
+        _env("DASHBOARD_PROJECT")
         or DEPLOYED_PROJECT_ROOT
         or os.getcwd()
     )
 
 
 def _dashboard_env() -> dict[str, str]:
-    """Environment for the spawned tokensave dashboard process.
+    """Environment for the spawned tracedecay dashboard process.
 
     `subprocess.Popen` inherits by default, but constructing the child env
     explicitly makes the Hermes profile contract visible and stable: the
-    spawned Rust server must resolve `HERMES_HOME` and any `TOKENSAVE_*`
-    overrides exactly like the wrapper process did.
+    spawned Rust server must resolve `HERMES_HOME` and any `TRACEDECAY_*`
+    / legacy `TOKENSAVE_*` overrides exactly like the wrapper process did.
     """
     env = os.environ.copy()
     for key, value in os.environ.items():
-        if key == "HERMES_HOME" or key.startswith("TOKENSAVE_"):
+        if (
+            key == "HERMES_HOME"
+            or key.startswith("TRACEDECAY_")
+            or key.startswith("TOKENSAVE_")
+        ):
             env[key] = value
     return env
 
 
 def _spawn_dashboard() -> str:
-    """Starts ``tokensave dashboard`` and returns its base URL."""
-    binary = _find_tokensave_bin()
+    """Starts ``tracedecay dashboard`` and returns its base URL."""
+    binary = _find_tracedecay_bin()
     if not binary:
         raise HTTPException(
             status_code=503,
             detail=(
-                "tokensave binary not found. Install tokensave or set "
-                "TOKENSAVE_BIN / TOKENSAVE_DASHBOARD_URL."
+                "tracedecay binary not found. Install tracedecay or set "
+                "TRACEDECAY_BIN / TRACEDECAY_DASHBOARD_URL "
+                "(legacy fallbacks: TOKENSAVE_BIN / TOKENSAVE_DASHBOARD_URL)."
             ),
         )
     project = _project_root()
@@ -233,7 +255,9 @@ def _spawn_dashboard() -> str:
         target=_drain_pipe, args=(process.stderr, stderr_tail), daemon=True
     ).start()
 
-    # The first stdout line is stable: "tokensave dashboard listening on <url>"
+    # The first stdout line is stable: "tracedecay dashboard listening on <url>"
+    # (legacy binaries may still print "tokensave dashboard listening on …").
+    # Extract the URL itself so both prefixes work.
     url_ready = threading.Event()
     url_holder: dict[str, str] = {}
 
@@ -244,8 +268,10 @@ def _spawn_dashboard() -> str:
         for line in process.stdout:
             stripped = line.strip()
             if not url_ready.is_set() and "listening on" in stripped:
-                url_holder["url"] = stripped.rsplit(" ", 1)[-1].rstrip("/")
-                url_ready.set()
+                match = _LISTENING_URL_RE.search(stripped)
+                if match:
+                    url_holder["url"] = match.group(0).rstrip("/")
+                    url_ready.set()
         # EOF (process died): unblock the waiter even without a URL.
         url_ready.set()
 
@@ -259,7 +285,7 @@ def _spawn_dashboard() -> str:
         raise HTTPException(
             status_code=503,
             detail=(
-                "tokensave dashboard failed to start for project "
+                "tracedecay dashboard failed to start for project "
                 f"{project!r}: " + (" / ".join(error_lines) or "no output")
             ),
             headers={"Retry-After": "5"},
@@ -269,7 +295,7 @@ def _spawn_dashboard() -> str:
 
     global _process
     _process = process
-    logger.info("tokensave dashboard started at %s (project %s)", url, project)
+    logger.info("tracedecay dashboard started at %s (project %s)", url, project)
     return url
 
 
@@ -307,7 +333,7 @@ def _wait_until_ready(
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "tokensave dashboard exited during startup for project "
+                    "tracedecay dashboard exited during startup for project "
                     f"{project!r}: " + (" / ".join(error_lines) or "no output")
                 ),
                 headers={"Retry-After": "5"},
@@ -325,7 +351,7 @@ def _wait_until_ready(
     raise HTTPException(
         status_code=503,
         detail=(
-            f"tokensave dashboard for project {project!r} did not become "
+            f"tracedecay dashboard for project {project!r} did not become "
             f"ready within {_READY_TIMEOUT_SECONDS:.0f}s: {last_error}"
         ),
         headers={"Retry-After": "5"},
@@ -351,15 +377,15 @@ atexit.register(_shutdown)
 
 
 def _upstream_base() -> str:
-    """Returns the base URL of the tokensave dashboard server, starting it
+    """Returns the base URL of the tracedecay dashboard server, starting it
     on first use unless an external URL is configured.
 
     Spawn failures are cached for ``_SPAWN_RETRY_BACKOFF_SECONDS`` so a
-    persistently failing spawn (e.g. project root not tokensave-initialized)
+    persistently failing spawn (e.g. project root not tracedecay-initialized)
     fails fast with a clear 503 instead of serializing every request behind a
     repeated ``_SPAWN_TIMEOUT_SECONDS`` spawn attempt under the module lock.
     """
-    configured = os.environ.get("TOKENSAVE_DASHBOARD_URL")
+    configured = _env("DASHBOARD_URL")
     if configured:
         return configured.rstrip("/")
     global _base_url, _last_spawn_failure
@@ -373,7 +399,7 @@ def _upstream_base() -> str:
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        f"tokensave dashboard spawn failed recently; retrying in "
+                        f"tracedecay dashboard spawn failed recently; retrying in "
                         f"{remaining:.0f}s. Last error: {detail}"
                     ),
                 )
@@ -424,11 +450,11 @@ def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None
             last_exc = exc
             if attempt + 1 < attempts:
                 logger.warning(
-                    "tokensave dashboard proxy request failed (%s); retrying once", exc
+                    "tracedecay dashboard proxy request failed (%s); retrying once", exc
                 )
                 continue
-            logger.exception("tokensave dashboard proxy request failed")
-    raise HTTPException(status_code=502, detail=f"tokensave dashboard unreachable: {last_exc}")
+            logger.exception("tracedecay dashboard proxy request failed")
+    raise HTTPException(status_code=502, detail=f"tracedecay dashboard unreachable: {last_exc}")
 
 
 class _DummyRequest:
@@ -442,7 +468,7 @@ class _DummyRequest:
 
 @router.get("/capabilities")
 def get_capabilities() -> JSONResponse:
-    """Backend feature discovery (proxied from the tokensave server).
+    """Backend feature discovery (proxied from the tracedecay server).
 
     Hermes-specific extensions added to this wrapper in later phases should
     merge their own flags into this payload so the UI can feature-detect.
@@ -451,7 +477,7 @@ def get_capabilities() -> JSONResponse:
     try:
         payload = json.loads(bytes(response.body).decode("utf-8"))
         payload["mode"] = "hermes"
-        # Standalone tokensave reports llm_curation: false (similarity-only
+        # Standalone tracedecay reports llm_curation: false (similarity-only
         # dedup). Under Hermes the wrapper layers LLM curation on top using
         # Hermes' model access, so feature-detecting UIs can show the option.
         features = payload.get("features")
@@ -574,14 +600,14 @@ async def post_savings(path: str, request: Request) -> JSONResponse:
 #
 # Ported from plugins/memory/holographic_plus/curator.py's one-shot LLM review
 # tier (`_call_llm_oneshot` + `_LLM_SYSTEM_PROMPT` + `_extract_json_plan`),
-# adapted to the tokensave curation contract:
+# adapted to the tracedecay curation contract:
 #
 #   POST <upstream>/api/plugins/holographic/curate/apply
 #     {"ops": [{"op": "delete", "fact_id": int, "reason"?: str}
 #              | {"op": "merge", "winner_id": int, "loser_ids": [int],
 #                 "merged_content"?: str}]}
 #
-# tokensave has no archive state (curation hard-deletes), so the original
+# tracedecay has no archive state (curation hard-deletes), so the original
 # verdict vocabulary is narrowed: merge stays merge; supersede becomes a
 # delete of the stale fact; reflect (time-aware consolidation) becomes a
 # merge with `merged_content`; recategorize/retag have no contract op and are
@@ -589,7 +615,7 @@ async def post_savings(path: str, request: Request) -> JSONResponse:
 # spirit: only act on same-subject same-claim facts, conservative by default.
 #
 # Flow (POST /curation/llm-plan):
-#   1. Fetch similar pairs from the tokensave server (`/similarity`) and
+#   1. Fetch similar pairs from the tracedecay server (`/similarity`) and
 #      cluster them (union-find over shared fact ids).
 #   2. One LLM call via Hermes' auxiliary client (task="memory_curator", the
 #      same task key the original curator used, so provider/model resolution
@@ -597,7 +623,7 @@ async def post_savings(path: str, request: Request) -> JSONResponse:
 #   3. Validate proposed ops against the reviewed cluster ids (the original's
 #      evidence guard) and an optional confidence floor.
 #   4. dry_run=true (default): return the plan for UI preview.
-#      dry_run=false: POST the contract-shaped ops to the tokensave apply
+#      dry_run=false: POST the contract-shaped ops to the tracedecay apply
 #      endpoint and return its per-op results alongside the plan.
 # ---------------------------------------------------------------------------
 
@@ -638,13 +664,31 @@ _CURATION_SYSTEM_PROMPT = (
     "\"merged_content\" (string) when the winner's text should be replaced "
     "by a consolidated fact.\n"
     "  delete: {\"fact_id\": <id>}\n"
-    "Only reference fact ids that appear in the input clusters. "
-    "Return ONLY the JSON object."
+    "Only reference fact ids that appear in the input clusters or in "
+    "hygiene_candidates. Return ONLY the JSON object.\n\n"
+    # Keep this hygiene paragraph in sync with CURATION_SYSTEM_PROMPT in
+    # src/dashboard/memory_curate.rs (the CLI half of the same contract).
+    "Hygiene categories: the input may also carry \"hygiene_candidates\" - "
+    "deterministic rule-flagged evidence with status=\"candidate\", "
+    "review_required=true, and recommended_op hints. Review these candidates "
+    "with the same conservatism; do not treat them as already-approved "
+    "operations. secret_like: flagged as credential-like content; delete "
+    "unless it is clearly a false positive (e.g. prose ABOUT secret handling "
+    "with no actual credential). transient: looks like ephemeral run output "
+    "(ports, PIDs, temp paths, run logs); delete unless it encodes a durable "
+    "decision. supersession: a negation/state-change cue pairs an older fact "
+    "with a newer one; confirm from the texts which fact is current, delete "
+    "the stale one, or emit a time-aware merge when both matter. Usage "
+    "signals: members may carry access_count / last_recalled_at "
+    "(recall-search returns). Treat high access as evidence a fact is "
+    "actively used - avoid deleting the more-accessed fact of a pair unless "
+    "the duplication is near-exact. Low trust alone is never a delete reason; "
+    "use it only to temper confidence."
 )
 
 
 def _get_upstream_json(path: str) -> dict:
-    """GET an upstream tokensave path and return the parsed JSON object."""
+    """GET an upstream tracedecay path and return the parsed JSON object."""
     base = _upstream_base()
     url = f"{base}{path}"
     req = urllib.request.Request(url, method="GET")
@@ -654,12 +698,12 @@ def _get_upstream_json(path: str) -> dict:
     except urllib.error.HTTPError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"tokensave dashboard returned {exc.code} for {path}",
+            detail=f"tracedecay dashboard returned {exc.code} for {path}",
         ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"tokensave dashboard unreachable: {exc}",
+            detail=f"tracedecay dashboard unreachable: {exc}",
         ) from exc
     if not isinstance(payload, dict):
         raise HTTPException(
@@ -669,7 +713,7 @@ def _get_upstream_json(path: str) -> dict:
 
 
 def _post_upstream_json(path: str, payload: dict) -> tuple[int, Any]:
-    """POST JSON to an upstream tokensave path; returns (status, body)."""
+    """POST JSON to an upstream tracedecay path; returns (status, body)."""
     base = _upstream_base()
     url = f"{base}{path}"
     req = urllib.request.Request(
@@ -689,7 +733,7 @@ def _post_upstream_json(path: str, payload: dict) -> tuple[int, Any]:
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"tokensave dashboard unreachable: {exc}",
+            detail=f"tracedecay dashboard unreachable: {exc}",
         ) from exc
 
 
@@ -759,6 +803,10 @@ def _build_curation_clusters(
                     "trust_score": fact.get("trust_score"),
                     "created_at": fact.get("created_at"),
                     "updated_at": fact.get("updated_at"),
+                    # Usage signals for the delete-reluctance instruction:
+                    # recall-search returns only (probe/list scans excluded).
+                    "access_count": fact.get("access_count", 0),
+                    "last_recalled_at": fact.get("last_recalled_at"),
                 }
             )
         clusters.append(
@@ -882,7 +930,7 @@ def _validate_llm_ops(
 
 
 def _contract_op(op: dict) -> dict:
-    """Strip wrapper annotations down to the tokensave apply contract shape."""
+    """Strip wrapper annotations down to the tracedecay apply contract shape."""
     if op["op"] == "delete":
         out = {"op": "delete", "fact_id": op["fact_id"]}
         if op.get("reason"):
@@ -940,20 +988,47 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
             continue
 
     clusters = _build_curation_clusters(pairs, facts_by_id, max_clusters)
+
+    # Deterministic hygiene candidates (secret_like / transient / supersession)
+    # come from the tracedecay server's rule-based dry-run plan; the LLM here
+    # is the review layer that confirms them through the same ops contract.
+    hygiene_candidates: dict[str, Any] = {}
+    try:
+        _, curate_report = _post_upstream_json(
+            "/api/plugins/holographic/curate", {"dry_run": True}
+        )
+        if isinstance(curate_report, dict) and isinstance(
+            curate_report.get("hygiene_candidates"), dict
+        ):
+            hygiene_candidates = curate_report["hygiene_candidates"]
+    except HTTPException:
+        hygiene_candidates = {}
+    hygiene_ids = {
+        int(entry["fact_id"])
+        for entries in hygiene_candidates.values()
+        if isinstance(entries, list)
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("fact_id") is not None
+    }
+
     plan: dict[str, Any] = {
         "dry_run": dry_run,
         "clusters_reviewed": len(clusters),
         "clusters": clusters,
+        "hygiene_candidates": hygiene_candidates,
         "ops": [],
         "rejected_ops": [],
         "applied": None,
     }
-    if not clusters:
+    if not clusters and not hygiene_ids:
         return JSONResponse(plan)
 
     user_message = (
         "Review these candidate clusters and return ops as strict JSON.\n\n"
-        + json.dumps({"clusters": clusters}, default=str)
+        + json.dumps(
+            {"clusters": clusters, "hygiene_candidates": hygiene_candidates},
+            default=str,
+        )
     )
     content = _call_curation_llm(
         [
@@ -968,9 +1043,11 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
             detail="curation LLM returned no valid JSON ops",
         )
 
+    # Evidence guard: cluster members plus rule-flagged hygiene candidates
+    # are the only legal op targets.
     allowed_ids = {
         member["fact_id"] for cluster in clusters for member in cluster["members"]
-    }
+    } | hygiene_ids
     valid_ops, rejected_ops = _validate_llm_ops(
         parsed["ops"], allowed_ids, min_confidence
     )

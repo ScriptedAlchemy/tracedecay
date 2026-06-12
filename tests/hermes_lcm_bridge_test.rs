@@ -5,8 +5,8 @@ use std::process::Command;
 
 use common::pyyaml_shim_pythonpath;
 use tempfile::TempDir;
-use tokensave::agents::{AgentIntegration, HermesIntegration, InstallContext};
-use tokensave::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
+use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
 const PLUGIN_LOAD_PRELUDE: &str = r#"
 import importlib.machinery
@@ -16,7 +16,7 @@ import pathlib
 import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
-# Hermetic profile home: the generated code reads plugins.tokensave from
+# Hermetic profile home: the generated code reads plugins.tracedecay from
 # {HERMES_HOME}/config.yaml, so point it at the temp install instead of the
 # developer's real ~/.hermes.
 os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
@@ -26,7 +26,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -40,7 +40,7 @@ spec.loader.exec_module(plugin)
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
         project_root: None,
@@ -69,7 +69,7 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -124,7 +124,7 @@ plugin.register(ctx)
 assert [name for name, _ in ctx.hooks] == ["pre_llm_call"]
 assert len(ctx.memory_providers) == 1
 assert len(ctx.context_engines) == 1
-assert isinstance(ctx.context_engines[0], plugin.TokenSaveContextEngine)
+assert isinstance(ctx.context_engines[0], plugin.TraceDecayContextEngine)
 "#,
         "generated plugin registration should continue when host lacks register_tool",
     );
@@ -199,14 +199,14 @@ plugin.register(ctx)
 # Code-graph / memory / transcript tools register even without message
 # forwarding; only the live-ingest LCM verbs whose schemas carry the
 # in-memory messages list (and the context-engine tool mirrors) are gated.
-assert "tokensave_search" in ctx.tools
-assert "tokensave_context" in ctx.tools
-assert "tokensave_lcm_compress" not in ctx.tools
-assert "tokensave_lcm_preflight" not in ctx.tools
+assert "tracedecay_search" in ctx.tools
+assert "tracedecay_context" in ctx.tools
+assert "tracedecay_lcm_compress" not in ctx.tools
+assert "tracedecay_lcm_preflight" not in ctx.tools
 assert "lcm_grep" not in ctx.tools
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert engine.name == "tokensave"
+assert engine.name == "tracedecay"
 assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
 "#,
         "generated plugin should gate only message-dependent tools when host does not forward messages",
@@ -220,10 +220,10 @@ fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
         r#"
 import json
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
-assert engine.name == "tokensave"
+assert engine.name == "tracedecay"
 
 schemas = engine.get_tool_schemas()
 schemas_by_name = {schema["name"]: schema for schema in schemas}
@@ -238,8 +238,8 @@ expected_native = {
     "lcm_doctor",
 }
 assert expected_native.issubset(schema_names)
-assert "tokensave_lcm_preflight" not in schema_names
-assert "tokensave_lcm_compress" not in schema_names
+assert "tracedecay_lcm_preflight" not in schema_names
+assert "tracedecay_lcm_compress" not in schema_names
 assert all(name.startswith("lcm_") for name in schema_names)
 
 grep_params = schemas_by_name["lcm_grep"]["parameters"]
@@ -281,18 +281,18 @@ assert status_params["properties"] == {}
 assert doctor_params["properties"] == {}
 
 status = engine.get_status()
-assert status["engine"] == "tokensave"
+assert status["engine"] == "tracedecay"
 assert status["session_id"] == "session-1"
 assert status["storage_scope"] == "hermes_profile"
 assert status["context_engine_tool_names"] == sorted(schema_names)
 
 calls = []
 
-def fake_call_tokensave_tool(name, args, **kwargs):
+def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, args, kwargs))
     return json.dumps({"ok": True, "tool": name})
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 native_result = engine.handle_tool_call(
     "lcm_grep",
@@ -318,21 +318,21 @@ expand_result = engine.handle_tool_call(
     "lcm_expand",
     {"store_id": 42, "session_id": "session-foreign", "max_tokens": 77, "source_offset": 3, "source_limit": 2},
 )
-direct_result = engine.handle_tool_call("tokensave_lcm_grep", {"query": "direct", "session_scope": "all"})
+direct_result = engine.handle_tool_call("tracedecay_lcm_grep", {"query": "direct", "session_scope": "all"})
 implicit_current_result = engine.handle_tool_call("lcm_grep", {"query": "implicit"})
 
-assert json.loads(native_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
-assert json.loads(load_result) == {"ok": True, "tool": "tokensave_lcm_load_session"}
-assert json.loads(describe_node_result) == {"ok": True, "tool": "tokensave_lcm_describe"}
-assert json.loads(describe_payload_result) == {"ok": True, "tool": "tokensave_lcm_describe"}
-assert json.loads(expand_result) == {"ok": True, "tool": "tokensave_lcm_expand"}
-assert json.loads(direct_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
-assert json.loads(implicit_current_result) == {"ok": True, "tool": "tokensave_lcm_grep"}
-assert calls[0][0] == "tokensave_lcm_preflight"
+assert json.loads(native_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
+assert json.loads(load_result) == {"ok": True, "tool": "tracedecay_lcm_load_session"}
+assert json.loads(describe_node_result) == {"ok": True, "tool": "tracedecay_lcm_describe"}
+assert json.loads(describe_payload_result) == {"ok": True, "tool": "tracedecay_lcm_describe"}
+assert json.loads(expand_result) == {"ok": True, "tool": "tracedecay_lcm_expand"}
+assert json.loads(direct_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
+assert json.loads(implicit_current_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
+assert calls[0][0] == "tracedecay_lcm_preflight"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
 assert calls[0][1]["session_id"] == "session-1"
 assert calls[0][1]["storage_scope"] == "hermes_profile"
-assert calls[1][0] == "tokensave_lcm_grep"
+assert calls[1][0] == "tracedecay_lcm_grep"
 assert calls[1][1]["query"] == "orchard"
 assert calls[1][1]["scope"] == "current"
 assert calls[1][1]["sort"] == "relevance"
@@ -348,9 +348,9 @@ assert calls[1][1]["storage_scope"] == "hermes_profile"
 assert calls[1][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[1][1]["session_id"] == "session-1"
 assert calls[1][2] == {}
-assert calls[2][0] == "tokensave_lcm_preflight"
+assert calls[2][0] == "tracedecay_lcm_preflight"
 assert calls[2][1]["messages"] == [{"role": "assistant", "content": "load turn"}]
-assert calls[3][0] == "tokensave_lcm_load_session"
+assert calls[3][0] == "tracedecay_lcm_load_session"
 assert calls[3][1]["content_limit"] == 123
 assert calls[3][1]["roles"] == ["user", "tool"]
 assert calls[3][1]["start_time"] == 1
@@ -359,13 +359,13 @@ assert "max_content_chars" not in calls[3][1]
 assert "role" not in calls[3][1]
 assert "time_from" not in calls[3][1]
 assert "time_to" not in calls[3][1]
-assert calls[4][0] == "tokensave_lcm_describe"
+assert calls[4][0] == "tracedecay_lcm_describe"
 assert calls[4][1]["target"] == {"kind": "summary_node", "node_id": "7"}
 assert "node_id" not in calls[4][1]
-assert calls[5][0] == "tokensave_lcm_describe"
+assert calls[5][0] == "tracedecay_lcm_describe"
 assert calls[5][1]["target"] == {"kind": "external_payload", "payload_ref": "payload_123.payload"}
 assert "externalized_ref" not in calls[5][1]
-assert calls[6][0] == "tokensave_lcm_expand"
+assert calls[6][0] == "tracedecay_lcm_expand"
 assert calls[6][1]["target"] == {"kind": "raw_message", "store_id": 42}
 assert calls[6][1]["session_id"] == "session-foreign"
 assert calls[6][1]["content_limit"] == 308
@@ -373,14 +373,14 @@ assert calls[6][1]["source_offset"] == 3
 assert calls[6][1]["source_limit"] == 2
 assert "store_id" not in calls[6][1]
 assert "max_tokens" not in calls[6][1]
-assert calls[7][0] == "tokensave_lcm_grep"
+assert calls[7][0] == "tracedecay_lcm_grep"
 assert calls[7][1]["query"] == "direct"
 assert calls[7][1]["scope"] == "all"
 assert "session_scope" not in calls[7][1]
 assert calls[7][1]["storage_scope"] == "hermes_profile"
 assert calls[7][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[7][1]["session_id"] == "session-1"
-assert calls[8][0] == "tokensave_lcm_grep"
+assert calls[8][0] == "tracedecay_lcm_grep"
 assert calls[8][1]["query"] == "implicit"
 assert calls[8][1]["scope"] == "current"
 assert "session_scope" not in calls[8][1]
@@ -411,7 +411,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -425,13 +425,13 @@ os.environ["HERMES_HOME"] = "/tmp/hermes-from-env"
 
 calls = []
 
-def fake_call_tokensave_tool(name, args, **kwargs):
+def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, args, kwargs))
     return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1")
 assert engine.hermes_home == "/tmp/hermes-from-env"
 status = engine.get_status()
@@ -444,11 +444,11 @@ engine.handle_tool_call(
     messages=[{"role": "user", "content": "profile current turn"}],
 )
 
-assert calls[0][0] == "tokensave_lcm_preflight"
+assert calls[0][0] == "tracedecay_lcm_preflight"
 assert calls[0][1]["storage_scope"] == "hermes_profile"
 assert calls[0][1]["hermes_home"] == "/tmp/hermes-from-env"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "profile current turn"}]
-assert calls[1][0] == "tokensave_lcm_grep"
+assert calls[1][0] == "tracedecay_lcm_grep"
 assert calls[1][1]["storage_scope"] == "hermes_profile"
 assert calls[1][1]["hermes_home"] == "/tmp/hermes-from-env"
 "#,
@@ -465,13 +465,13 @@ import json
 
 calls = []
 
-def fake_call_tokensave_tool(name, args, **kwargs):
+def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, dict(args), dict(kwargs)))
     return json.dumps({"status": "ok", "tool": name})
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
 same_messages = [{"role": "user", "content": "unchanged context"}]
@@ -481,8 +481,8 @@ for _ in range(3):
     engine.handle_tool_call("lcm_status", {}, messages=same_messages)
 engine.handle_tool_call("lcm_status", {}, messages=changed_messages)
 
-preflight_calls = [call for call in calls if call[0] == "tokensave_lcm_preflight"]
-status_calls = [call for call in calls if call[0] == "tokensave_lcm_status"]
+preflight_calls = [call for call in calls if call[0] == "tracedecay_lcm_preflight"]
+status_calls = [call for call in calls if call[0] == "tracedecay_lcm_status"]
 
 assert len(status_calls) == 4
 assert len(preflight_calls) == 2
@@ -508,8 +508,8 @@ os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
 
 compress_calls = []
 
-def fake_call_tokensave_json(name, args, **kwargs):
-    if name != "tokensave_lcm_compress":
+def fake_call_tracedecay_json(name, args, **kwargs):
+    if name != "tracedecay_lcm_compress":
         raise AssertionError(name)
     compress_calls.append((name, dict(args)))
     summarizer_mode = (args.get("summarizer") or {}).get("mode")
@@ -553,7 +553,7 @@ def fake_call_tokensave_json(name, args, **kwargs):
         }
     raise AssertionError(f"unexpected summarizer mode: {summarizer_mode}")
 
-plugin.call_tokensave_json = fake_call_tokensave_json
+plugin.call_tracedecay_json = fake_call_tracedecay_json
 
 class _FakeMessage:
     def __init__(self, content):
@@ -580,7 +580,7 @@ class _AuxClient:
 
 agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.agent = agent
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
@@ -616,7 +616,7 @@ os.environ["LCM_EXTRACTION_ENABLED"] = "true"
 
 compress_calls = []
 
-def fake_call_tokensave_json(name, args, **kwargs):
+def fake_call_tracedecay_json(name, args, **kwargs):
     compress_calls.append(dict(args))
     mode = (args.get("summarizer") or {}).get("mode")
     if mode == "hermes_auxiliary":
@@ -650,7 +650,7 @@ def fake_call_tokensave_json(name, args, **kwargs):
         },
     }
 
-plugin.call_tokensave_json = fake_call_tokensave_json
+plugin.call_tracedecay_json = fake_call_tracedecay_json
 
 class _FakeMessage:
     def __init__(self, content):
@@ -672,7 +672,7 @@ class _AuxClient:
 
 agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.agent = agent
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
@@ -706,7 +706,7 @@ with tempfile.TemporaryDirectory() as tmp:
     expected = str(home / ".hermes")
     assert not pathlib.Path(expected).exists()
 
-    engine = plugin.TokenSaveContextEngine()
+    engine = plugin.TraceDecayContextEngine()
     engine.initialize(session_id="session-1")
 
     def normalized(path):
@@ -735,7 +735,7 @@ import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
 tools_path = plugin_dir / "tools.py"
-spec = importlib.util.spec_from_file_location("tokensave_hermes_tools_kwargs", tools_path)
+spec = importlib.util.spec_from_file_location("tracedecay_hermes_tools_kwargs", tools_path)
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
 
@@ -751,8 +751,8 @@ def fake_run(argv, **kwargs):
     return Result()
 
 tools.subprocess.run = fake_run
-tools.call_tokensave_tool(
-    "tokensave_lcm_grep",
+tools.call_tracedecay_tool(
+    "tracedecay_lcm_grep",
     {"query": "orchard"},
     messages=[{"role": "user", "content": "current turn"}],
 )
@@ -782,7 +782,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -806,7 +806,7 @@ plugin.register(ctx)
 
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert engine.name == "tokensave"
+assert engine.name == "tracedecay"
 assert engine.hermes_home == "/tmp/hermes-from-config"
 "#,
         "generated registration should resolve configured hermes_home",
@@ -820,7 +820,7 @@ fn generated_context_engine_registers_when_supported() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -857,7 +857,7 @@ agent_module.context_engine = context_engine_module
 sys.modules["agent"] = agent_module
 sys.modules["agent.context_engine"] = context_engine_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -886,7 +886,7 @@ ctx = FullCtx()
 plugin.register(ctx)
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
-assert isinstance(engine, plugin.TokenSaveContextEngine)
+assert isinstance(engine, plugin.TraceDecayContextEngine)
 assert isinstance(engine, ContextEngine)
 
 engine.initialize(
@@ -922,22 +922,22 @@ assert fallback_args == {
 
 calls = []
 
-def fake_call_tokensave_tool(name, args, **kwargs):
+def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, args, kwargs))
     return "{}"
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
-profile_engine = plugin.TokenSaveContextEngine()
+profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
 profile_engine.should_compress_preflight(messages=[], current_tokens=123)
 name, args, kwargs = calls.pop()
-assert name == "tokensave_lcm_preflight"
+assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "session-1"
 assert args["storage_scope"] == "hermes_profile"
 assert args["hermes_home"] == "/tmp/hermes"
 
-project_engine = plugin.TokenSaveContextEngine()
+project_engine = plugin.TraceDecayContextEngine()
 project_engine.on_session_start(
     session_id="session-2",
     hermes_home="/tmp/hermes",
@@ -945,29 +945,29 @@ project_engine.on_session_start(
 )
 project_engine.should_compress_preflight(messages=[], current_tokens=456)
 name, args, kwargs = calls.pop()
-assert name == "tokensave_lcm_preflight"
+assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "session-2"
 assert args["storage_scope"] == "hermes_profile"
 assert args["hermes_home"] == "/tmp/hermes"
 assert "project_root" not in args
 
-project_engine = plugin.TokenSaveContextEngine()
+project_engine = plugin.TraceDecayContextEngine()
 project_engine.initialize(session_id="initial", project_root="/tmp/project")
 project_engine.on_session_start(session_id="next")
 project_engine.should_compress_preflight(messages=[], current_tokens=789)
 name, args, kwargs = calls.pop()
-assert name == "tokensave_lcm_preflight"
+assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "next"
 assert args["storage_scope"] == "hermes_profile"
 assert args["hermes_home"] == os.path.expanduser("~/.hermes")
 assert "project_root" not in args
 
-profile_engine = plugin.TokenSaveContextEngine()
+profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
 profile_engine.on_session_start(session_id="next")
 profile_engine.should_compress_preflight(messages=[], current_tokens=321)
 name, args, kwargs = calls.pop()
-assert name == "tokensave_lcm_preflight"
+assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "next"
 assert args["storage_scope"] == "hermes_profile"
 assert args["hermes_home"] == "/tmp/hermes"
@@ -1001,13 +1001,13 @@ plugin.register(legacy)
 }
 
 #[test]
-fn context_engine_preflight_uses_tokensave_tool_json_args() {
+fn context_engine_preflight_uses_tracedecay_tool_json_args() {
     let home = TempDir::new().unwrap();
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1036,7 +1036,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1073,7 +1073,7 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 
 plugin.tools.subprocess.run = fake_run
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(hermes_home="/tmp/hermes-profile")
 engine.on_session_start(session_id="session-1", project_root="/tmp/project")
 result = engine._preflight_probe(
@@ -1087,8 +1087,8 @@ assert result["messages"] == []
 
 assert len(calls) == 1
 argv = calls[0]
-assert argv[0] == plugin.tools.TOKENSAVE_BIN
-assert argv[1:4] == ["tool", "tokensave_lcm_preflight", "--json"]
+assert argv[0] == plugin.tools.TRACEDECAY_BIN
+assert argv[1:4] == ["tool", "tracedecay_lcm_preflight", "--json"]
 assert "--project" not in argv
 args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
@@ -1120,7 +1120,7 @@ assert args == {
         .expect("python3 should run generated Hermes preflight bridge check");
     assert!(
         output.status.success(),
-        "generated context engine should call tokensave_lcm_preflight through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
+        "generated context engine should call tracedecay_lcm_preflight through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1133,7 +1133,7 @@ fn context_engine_session_start_reports_compression_boundary() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1159,7 +1159,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1185,14 +1185,14 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 
 plugin.tools.subprocess.run = fake_run
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-a", project_root="/tmp/project")
 
 # Plain session starts must not call the boundary tool.
 engine.on_session_start(session_id="session-a")
 assert calls == []
 
-# Compression boundary session starts hand bound/old session ids to tokensave
+# Compression boundary session starts hand bound/old session ids to tracedecay
 # so the Rust side can decide whether the boundary skipped carry-over.
 engine.on_session_start(
     session_id="session-b",
@@ -1201,8 +1201,8 @@ engine.on_session_start(
 )
 assert len(calls) == 1
 argv = calls[0]
-assert argv[0] == plugin.tools.TOKENSAVE_BIN
-assert argv[1:4] == ["tool", "tokensave_lcm_session_boundary", "--json"]
+assert argv[0] == plugin.tools.TRACEDECAY_BIN
+assert argv[1:4] == ["tool", "tracedecay_lcm_session_boundary", "--json"]
 assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
@@ -1234,20 +1234,20 @@ assert len(calls) == 1
         .expect("python3 should run generated Hermes session boundary bridge check");
     assert!(
         output.status.success(),
-        "generated context engine should report compression boundaries through tokensave_lcm_session_boundary\nstdout:\n{}\nstderr:\n{}",
+        "generated context engine should report compression boundaries through tracedecay_lcm_session_boundary\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn context_engine_compress_uses_tokensave_tool_json_args() {
+fn context_engine_compress_uses_tracedecay_tool_json_args() {
     let home = TempDir::new().unwrap();
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1276,7 +1276,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1312,7 +1312,7 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 
 plugin.tools.subprocess.run = fake_run
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-2", project_root="/tmp/project")
 messages = [{"role": "assistant", "content": "hello"}]
 result = engine.compress(
@@ -1323,14 +1323,14 @@ result = engine.compress(
 
 # Host ABC contract: compress() returns a message LIST (here: the input,
 # since the placeholder result carries no usable replay window); the raw
-# tokensave result stays on the engine for diagnostics.
+# tracedecay result stays on the engine for diagnostics.
 assert result == messages
 assert engine.last_compress_result == {"status": "not_implemented", "message": "placeholder parsed"}
 
 assert len(calls) == 1
 argv = calls[0]
-assert argv[0] == plugin.tools.TOKENSAVE_BIN
-assert argv[1:4] == ["tool", "tokensave_lcm_compress", "--json"]
+assert argv[0] == plugin.tools.TRACEDECAY_BIN
+assert argv[1:4] == ["tool", "tracedecay_lcm_compress", "--json"]
 assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
@@ -1362,7 +1362,7 @@ assert args == {
         .expect("python3 should run generated Hermes compress bridge check");
     assert!(
         output.status.success(),
-        "generated context engine should call tokensave_lcm_compress through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
+        "generated context engine should call tracedecay_lcm_compress through the JSON bridge\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1375,7 +1375,7 @@ fn context_engine_projects_config_defaults_into_preflight_and_compress_args() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1404,7 +1404,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1441,7 +1441,7 @@ config = {
     "reserve_tokens_floor": 4096,
     "incremental_max_depth": 2,
 }
-engine = plugin.TokenSaveContextEngine(config=config)
+engine = plugin.TraceDecayContextEngine(config=config)
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
 engine.should_compress_preflight(
@@ -1497,7 +1497,7 @@ fn context_engine_expand_query_and_profile_storage_project_flags() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1523,7 +1523,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1547,7 +1547,7 @@ def mcp_response(inner):
 def fake_run(argv, check, capture_output, text, timeout, shell):
     calls.append(argv)
     tool_name = argv[4] if "--project" in argv else argv[2]
-    if tool_name == "tokensave_lcm_expand_query":
+    if tool_name == "tracedecay_lcm_expand_query":
         inner = {
             "status": "ok",
             "prompt": "What changed?",
@@ -1561,41 +1561,41 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 
 plugin.tools.subprocess.run = fake_run
 
-project_engine = plugin.TokenSaveContextEngine()
+project_engine = plugin.TraceDecayContextEngine()
 project_engine.initialize(session_id="session-1", project_root="/tmp/project")
 answer = project_engine.expand_query(prompt="What changed?", query="orchard")
 assert answer["status"] == "ok"
 project_argv = calls.pop()
-assert project_argv[0] == plugin.tools.TOKENSAVE_BIN
+assert project_argv[0] == plugin.tools.TRACEDECAY_BIN
 # LCM session state is profile-scoped even for project-pinned engines.
-assert project_argv[1:4] == ["tool", "tokensave_lcm_expand_query", "--json"]
+assert project_argv[1:4] == ["tool", "tracedecay_lcm_expand_query", "--json"]
 assert "--project" not in project_argv
 project_args = json.loads(project_argv[project_argv.index("--args") + 1])
 assert project_args["storage_scope"] == "hermes_profile"
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert project_args["hermes_home"] == os.path.expanduser("~/.hermes")
 
-profile_engine = plugin.TokenSaveContextEngine()
+profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
 profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100)
 assert profile_result["status"] == "ok"
 assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
-assert profile_argv[0] == plugin.tools.TOKENSAVE_BIN
-assert profile_argv[1:4] == ["tool", "tokensave_lcm_preflight", "--json"]
+assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
+assert profile_argv[1:4] == ["tool", "tracedecay_lcm_preflight", "--json"]
 assert "--project" not in profile_argv
 profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
 assert profile_args["storage_scope"] == "hermes_profile"
 assert profile_args["hermes_home"] == "/tmp/hermes-profile"
 
-explicit = plugin.tools.call_tokensave_tool(
-    "tokensave_lcm_status",
+explicit = plugin.tools.call_tracedecay_tool(
+    "tracedecay_lcm_status",
     {"storage_scope": "hermes_profile", "hermes_home": "/tmp/hermes-profile"},
     project_root="/tmp/project",
 )
 assert json.loads(explicit)["content"]
 explicit_argv = calls.pop()
-assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lcm_status", "--json"]
+assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_status", "--json"]
 "#,
     )
     .unwrap();
@@ -1609,7 +1609,7 @@ assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tokensave_lc
         .expect("python3 should run generated Hermes project flag bridge check");
     assert!(
         output.status.success(),
-        "generated bridge should pass project-local roots through tokensave tool --project without affecting profile calls\nstdout:\n{}\nstderr:\n{}",
+        "generated bridge should pass project-local roots through tracedecay tool --project without affecting profile calls\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1622,7 +1622,7 @@ fn auxiliary_summary_strips_reasoning_tags() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1646,7 +1646,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1671,7 +1671,7 @@ class Aux:
         return "<think>hidden chain</think>\nUseful compact summary"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 summary = engine._call_auxiliary_summary(
     "Summarize",
@@ -1712,7 +1712,7 @@ fn context_engine_expand_query_synthesizes_and_degrades() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1739,7 +1739,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1773,8 +1773,8 @@ def needs_synthesis():
         },
     }
 
-def fake_call_tokensave_tool(name, args, **kwargs):
-    assert name == "tokensave_lcm_expand_query"
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    assert name == "tracedecay_lcm_expand_query"
     assert args["session_id"] == "session-1"
     assert args["storage_scope"] == "hermes_profile"
     assert args["hermes_home"] == os.environ["HERMES_HOME"]
@@ -1782,7 +1782,7 @@ def fake_call_tokensave_tool(name, args, **kwargs):
     assert args["query"] == "orchard"
     return mcp_response(responses.pop(0))
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 class Aux:
     def __init__(self):
@@ -1800,7 +1800,7 @@ class Aux:
         return "<reasoning>hidden</reasoning>Final answer from context"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 
 responses.append(needs_synthesis())
@@ -1866,7 +1866,7 @@ fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -1891,7 +1891,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -1964,7 +1964,7 @@ class Aux:
         return "<thinking>hidden chain</thinking>\nUseful compact summary"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": old_one}],
@@ -2016,7 +2016,7 @@ fn context_engine_compress_rejects_oversized_auxiliary_summary() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -2041,7 +2041,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2113,7 +2113,7 @@ class OversizedAux:
         return huge_summary
 
 agent = type("Agent", (), {"auxiliary_client": OversizedAux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": source_content}],
@@ -2169,7 +2169,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2252,7 +2252,7 @@ class ContextLimitedAux:
         return "Smaller chunk summary"
 
 agent = type("Agent", (), {"auxiliary_client": ContextLimitedAux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
@@ -2290,7 +2290,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2348,7 +2348,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2422,7 +2422,7 @@ class BadTemplateAux:
         raise RuntimeError("template exploded")
 
 agent = type("Agent", (), {"auxiliary_client": BadTemplateAux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
@@ -2450,7 +2450,7 @@ fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -2474,7 +2474,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2495,7 +2495,7 @@ class RoutingAux:
         return "<reasoning>scratch</reasoning>Fallback route summary"
 
 agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 summary = engine._call_auxiliary_summary(
     "Summarize",
@@ -2533,7 +2533,7 @@ class FailingAux:
         raise RuntimeError("route unavailable")
 
 failing_agent = type("Agent", (), {"auxiliary_client": FailingAux()})()
-failing_engine = plugin.TokenSaveContextEngine()
+failing_engine = plugin.TraceDecayContextEngine()
 failing_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
 fallback = failing_engine._call_auxiliary_summary(
     "Summarize",
@@ -2548,7 +2548,7 @@ assert "default" not in failing_engine._cooldown_until
 import os
 os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"] = "1"
 os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"] = "30"
-tuned_engine = plugin.TokenSaveContextEngine()
+tuned_engine = plugin.TraceDecayContextEngine()
 tuned_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
 tuned_engine._call_auxiliary_summary(
     "Summarize",
@@ -2608,7 +2608,7 @@ sys.modules["hermes_cli"] = hermes_cli
 sys.modules["hermes_cli.auth"] = auth
 sys.modules["hermes_cli.runtime_provider"] = runtime_provider
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2647,7 +2647,7 @@ class Aux:
         return "Routed summary"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 summary = engine._call_auxiliary_summary(
     "Summarize",
@@ -2681,7 +2681,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2754,7 +2754,7 @@ class EscalatingAux:
         return "Bullet summary of decisions"
 
 agent = type("Agent", (), {"auxiliary_client": EscalatingAux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": source_content}],
@@ -2793,7 +2793,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2820,7 +2820,7 @@ class Aux:
         return "L2 concise summary"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 summary = engine._summarize_with_escalation(
     source_messages,
@@ -2859,7 +2859,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -2936,7 +2936,7 @@ class Aux:
         return accepted_summary
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
 result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
@@ -2974,7 +2974,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3017,7 +3017,7 @@ os.environ.update({
 })
 
 config = {"fresh_tail_count": 64, "context_length": 100000, "context_threshold": 0.9}
-engine = plugin.TokenSaveContextEngine(config=config)
+engine = plugin.TraceDecayContextEngine(config=config)
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
 
@@ -3072,7 +3072,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3098,7 +3098,7 @@ def fake_run(argv, check, capture_output, text, timeout, shell):
 plugin.tools.subprocess.run = fake_run
 
 def preflight_threshold(config, hermes_home=None):
-    engine = plugin.TokenSaveContextEngine(config=config)
+    engine = plugin.TraceDecayContextEngine(config=config)
     engine.initialize(
         session_id="session-1",
         project_root="/tmp/project",
@@ -3138,7 +3138,7 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ.pop("HERMES_HOME", None)
     cfg = pathlib.Path(tmp) / "config.yaml"
     cfg.write_text("compression:\n  enabled: true\n  threshold: 0.55\n")
-    engine = plugin.TokenSaveContextEngine(config={"context_length": 100000})
+    engine = plugin.TraceDecayContextEngine(config={"context_length": 100000})
     engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
     args = plugin._lcm_config_args(engine.config, engine.hermes_home)
     assert args["threshold_tokens"] == 55000
@@ -3169,7 +3169,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3197,7 +3197,7 @@ plugin.tools.subprocess.run = fake_run
 os.environ["LCM_FRESH_TAIL_COUNT"] = "0"
 os.environ["LCM_LEAF_CHUNK_TOKENS"] = "0"
 
-engine = plugin.TokenSaveContextEngine(config={"fresh_tail_count": 9, "leaf_chunk_tokens": 9000})
+engine = plugin.TraceDecayContextEngine(config={"fresh_tail_count": 9, "leaf_chunk_tokens": 9000})
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
 
@@ -3227,7 +3227,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3239,17 +3239,17 @@ spec.loader.exec_module(plugin)
 
 calls = []
 
-def fake_call_tokensave_tool(tool, args, **kwargs):
+def fake_call_tracedecay_tool(tool, args, **kwargs):
     calls.append((tool, dict(args)))
-    if tool == "tokensave_lcm_preflight":
+    if tool == "tracedecay_lcm_preflight":
         payload = {"status": "ok", "should_compress": True, "reason": "test", "replay_messages": []}
     else:
         payload = {"status": "ok", "reason": "test", "replay_messages": [], "summary_nodes": [], "frontier": {"provider": "cursor", "conversation_id": "session-1", "current_session_id": "session-1", "current_frontier_store_id": None, "last_finalized_session_id": None, "last_finalized_frontier_store_id": None, "maintenance_debt": []}}
     return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
-engine = plugin.TokenSaveContextEngine(
+engine = plugin.TraceDecayContextEngine(
     config={"context_length": 100000, "context_threshold": 0.8}
 )
 engine.initialize(session_id="session-1", project_root="/tmp/project")
@@ -3286,7 +3286,7 @@ assert args["threshold_tokens"] == 800000
 # compress must forward the same runtime window and threshold.
 engine.compress([{"role": "user", "content": "compress me"}], current_tokens=1)
 tool, args = calls.pop()
-assert tool == "tokensave_lcm_compress"
+assert tool == "tracedecay_lcm_compress"
 assert args["context_length"] == 1000000
 assert args["threshold_tokens"] == 800000
 
@@ -3297,7 +3297,7 @@ assert calls == []
 # ...and defers to the preflight probe once tokens reach the threshold.
 assert engine.should_compress(prompt_tokens=800000) is True
 tool, _args = calls.pop()
-assert tool == "tokensave_lcm_preflight"
+assert tool == "tracedecay_lcm_preflight"
 "#,
         "generated plugin should propagate update_model/session_start context windows into preflight/compress",
     );
@@ -3325,7 +3325,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3337,7 +3337,7 @@ spec.loader.exec_module(plugin)
 
 tool_calls = []
 
-def fake_call_tokensave_tool(tool, args, **kwargs):
+def fake_call_tracedecay_tool(tool, args, **kwargs):
     tool_calls.append((tool, dict(args)))
     payload = {
         "status": "ok",
@@ -3351,7 +3351,7 @@ def fake_call_tokensave_tool(tool, args, **kwargs):
     }
     return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 class FakeAuxClient:
     def __init__(self):
@@ -3369,7 +3369,7 @@ os.environ["LCM_EXPANSION_CONTEXT_TOKENS"] = "4321"
 os.environ["LCM_EXPANSION_TIMEOUT_MS"] = "9000"
 
 agent = FakeAgent()
-engine = plugin.TokenSaveContextEngine(
+engine = plugin.TraceDecayContextEngine(
     config={
         "expansion_model": "cfg-expansion-model",
         "expansion_context_tokens": 32000,
@@ -3384,7 +3384,7 @@ assert result["needs_synthesis"] is False
 assert result["answer"] == "synthetic answer"
 
 tool, args = tool_calls.pop()
-assert tool == "tokensave_lcm_expand_query"
+assert tool == "tracedecay_lcm_expand_query"
 assert args["context_max_tokens"] == 4321
 
 llm_call = agent.auxiliary_client.calls.pop()
@@ -3417,7 +3417,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3434,7 +3434,7 @@ config = {
     "summary_fallback_models": ["backup", "primary"],
     "summary_timeout_ms": 30000,
 }
-engine = plugin.TokenSaveContextEngine(config=config)
+engine = plugin.TraceDecayContextEngine(config=config)
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 routes = engine._auxiliary_routes()
 assert [route.get("model") for route in routes] == ["primary", "backup"]
@@ -3444,7 +3444,7 @@ assert [route.get("timeout") for route in routes] == [30.0, 30.0]
 # home has no config.yaml timeout override.
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["HERMES_HOME"] = tmp
-    bare_engine = plugin.TokenSaveContextEngine()
+    bare_engine = plugin.TraceDecayContextEngine()
     bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
     bare_routes = bare_engine._auxiliary_routes()
     assert len(bare_routes) == 1
@@ -3455,7 +3455,7 @@ with tempfile.TemporaryDirectory() as tmp:
 with tempfile.TemporaryDirectory() as tmp:
     cfg = pathlib.Path(tmp) / "config.yaml"
     cfg.write_text("auxiliary:\n  compression:\n    timeout: 12.5\n")
-    yaml_engine = plugin.TokenSaveContextEngine()
+    yaml_engine = plugin.TraceDecayContextEngine()
     yaml_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
     yaml_routes = yaml_engine._auxiliary_routes()
     assert yaml_routes[0]["timeout"] == 12.5
@@ -3463,13 +3463,13 @@ with tempfile.TemporaryDirectory() as tmp:
 with tempfile.TemporaryDirectory() as tmp:
     cfg = pathlib.Path(tmp) / "config.yaml"
     cfg.write_text("auxiliary:\n  compression:\n    timeout: not-a-number\n")
-    malformed_engine = plugin.TokenSaveContextEngine()
+    malformed_engine = plugin.TraceDecayContextEngine()
     malformed_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
     malformed_routes = malformed_engine._auxiliary_routes()
     assert malformed_routes[0]["timeout"] == 60.0
 
 with tempfile.TemporaryDirectory() as tmp:
-    missing_engine = plugin.TokenSaveContextEngine()
+    missing_engine = plugin.TraceDecayContextEngine()
     missing_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
     missing_routes = missing_engine._auxiliary_routes()
     assert missing_routes[0]["timeout"] == 60.0
@@ -3521,13 +3521,13 @@ assert agent.auxiliary_client.calls[0]["timeout"] == 30.0
 }
 
 #[test]
-fn call_tokensave_json_normalizes_malformed_mcp_envelopes() {
+fn call_tracedecay_json_normalizes_malformed_mcp_envelopes() {
     let home = TempDir::new().unwrap();
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -3552,7 +3552,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3564,27 +3564,27 @@ spec.loader.exec_module(plugin)
 
 responses = []
 
-def fake_call_tokensave_tool(name, args, **kwargs):
+def fake_call_tracedecay_tool(name, args, **kwargs):
     return responses.pop(0)
 
-plugin.tools.call_tokensave_tool = fake_call_tokensave_tool
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 def call_with_outer(outer):
     responses.append(json.dumps(outer))
-    return plugin.call_tokensave_json("tokensave_lcm_preflight", {})
+    return plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
 
 missing_content = call_with_outer({})
-assert missing_content["error"] == "tokensave tool response missing text content"
+assert missing_content["error"] == "tracedecay tool response missing text content"
 
 empty_content = call_with_outer({"content": []})
-assert empty_content["error"] == "tokensave tool response missing text content"
+assert empty_content["error"] == "tracedecay tool response missing text content"
 
 non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
-assert non_text_content["error"] == "tokensave tool response missing text content"
+assert non_text_content["error"] == "tracedecay tool response missing text content"
 
 responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
-invalid_nested_json = plugin.call_tokensave_json("tokensave_lcm_preflight", {})
-assert invalid_nested_json["error"] == "tokensave tool returned invalid nested JSON"
+invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested JSON"
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
 assert call_with_outer(outer_error) == outer_error
@@ -3610,7 +3610,7 @@ assert call_with_outer(outer_error) == outer_error
 // output, malformed stdout JSON, and empty stdout all stay machine-readable
 // for the host.
 #[test]
-fn call_tokensave_tool_reports_subprocess_failures_as_json_errors() {
+fn call_tracedecay_tool_reports_subprocess_failures_as_json_errors() {
     run_generated_plugin_script(
         "check_subprocess_failure_modes.py",
         r#"
@@ -3629,7 +3629,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3652,11 +3652,11 @@ def write_fake_binary(name, body_posix, body_windows):
     return str(path)
 
 # Missing binary: the OSError is wrapped, never raised.
-tools.TOKENSAVE_BIN = str(plugin_dir / "definitely-missing-tokensave")
-missing = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
-assert missing["error"].startswith("tokensave tool failed:"), missing
+tools.TRACEDECAY_BIN = str(plugin_dir / "definitely-missing-tracedecay")
+missing = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
+assert missing["error"].startswith("tracedecay tool failed:"), missing
 # The JSON bridge surfaces the same error dict without raising.
-assert "error" in plugin.call_tokensave_json("tokensave_lcm_status", {})
+assert "error" in plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 
 # Subprocess dies mid-handshake: nonzero exit with partial stdout and stderr
 # is reported with the exit status and bounded captures.
@@ -3667,39 +3667,39 @@ assert "error" in plugin.call_tokensave_json("tokensave_lcm_status", {})
 def trim_capture(text):
     return text.rstrip("\r\n") if os.name == "nt" else text
 
-tools.TOKENSAVE_BIN = write_fake_binary(
-    "fake-tokensave-crash",
+tools.TRACEDECAY_BIN = write_fake_binary(
+    "fake-tracedecay-crash",
     'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
     'echo {"content\n>&2 echo handshake aborted\nexit /b 3\n',
 )
-crashed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
-assert crashed["error"] == "tokensave tool exited with status 3", crashed
+crashed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
+assert crashed["error"] == "tracedecay tool exited with status 3", crashed
 assert trim_capture(crashed["stdout"]) == '{"content', crashed
 assert trim_capture(crashed["stderr"]) == "handshake aborted", crashed
 
 # Exit 0 with malformed JSON on stdout.
-tools.TOKENSAVE_BIN = write_fake_binary(
-    "fake-tokensave-badjson",
+tools.TRACEDECAY_BIN = write_fake_binary(
+    "fake-tracedecay-badjson",
     "printf 'not-json-at-all'\nexit 0\n",
     "echo not-json-at-all\nexit /b 0\n",
 )
-malformed = json.loads(tools.call_tokensave_tool("tokensave_lcm_status", {}))
-assert malformed["error"] == "tokensave tool returned invalid JSON", malformed
+malformed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
+assert malformed["error"] == "tracedecay tool returned invalid JSON", malformed
 assert trim_capture(malformed["stdout"]) == "not-json-at-all", malformed
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
-tools.TOKENSAVE_BIN = write_fake_binary("fake-tokensave-empty", "exit 0\n", "exit /b 0\n")
-assert tools.call_tokensave_tool("tokensave_lcm_status", {}) == "{}"
+tools.TRACEDECAY_BIN = write_fake_binary("fake-tracedecay-empty", "exit 0\n", "exit /b 0\n")
+assert tools.call_tracedecay_tool("tracedecay_lcm_status", {}) == "{}"
 "#,
         "generated tool bridge should normalize subprocess failures into JSON errors",
     );
 }
 
-// With the tokensave binary unavailable, the context engine must degrade
+// With the tracedecay binary unavailable, the context engine must degrade
 // gracefully: preflight/status/compress return error dicts and session-start
 // boundary reporting never raises into the host.
 #[test]
-fn context_engine_degrades_when_tokensave_binary_missing() {
+fn context_engine_degrades_when_tracedecay_binary_missing() {
     run_generated_plugin_script(
         "check_engine_missing_binary_degradation.py",
         r#"
@@ -3715,7 +3715,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3725,9 +3725,9 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
-plugin.tools.TOKENSAVE_BIN = str(plugin_dir / "definitely-missing-tokensave")
+plugin.tools.TRACEDECAY_BIN = str(plugin_dir / "definitely-missing-tracedecay")
 
-engine = plugin.TokenSaveContextEngine()
+engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-degraded", project_root=str(plugin_dir))
 
 # Boundary reporting on session start swallows the failure.
@@ -3740,13 +3740,13 @@ engine.on_session_start(
 messages = [{"role": "user", "content": "hello"}]
 preflight = engine._preflight_probe(messages, current_tokens=128)
 assert isinstance(preflight, dict), preflight
-assert preflight["error"].startswith("tokensave tool failed:"), preflight
+assert preflight["error"].startswith("tracedecay tool failed:"), preflight
 # ABC contract: the bool probe must not treat the error dict as truthy.
 assert engine.should_compress_preflight(messages, current_tokens=128) is False
 
 status = engine.status()
 assert isinstance(status, dict)
-assert status["error"].startswith("tokensave tool failed:"), status
+assert status["error"].startswith("tracedecay tool failed:"), status
 
 # compress() honors the host ABC contract even while degraded: the input
 # list comes back unchanged, the abort flag is set, and the raw error dict
@@ -3754,14 +3754,14 @@ assert status["error"].startswith("tokensave tool failed:"), status
 compressed = engine.compress(messages, current_tokens=128)
 assert compressed == messages, compressed
 assert engine._last_compress_aborted is True
-assert engine.last_compress_result["error"].startswith("tokensave tool failed:")
+assert engine.last_compress_result["error"].startswith("tracedecay tool failed:")
 
 # Tool dispatch through the engine surface stays JSON-stringly typed.
 raw = engine.handle_tool_call("lcm_status", {})
 assert isinstance(raw, str)
 assert "error" in raw
 "#,
-        "context engine should degrade to error dicts when the tokensave binary is missing",
+        "context engine should degrade to error dicts when the tracedecay binary is missing",
     );
 }
 
@@ -3854,7 +3854,7 @@ fn generated_context_engine_satisfies_abstract_update_from_response() {
         .install(&make_install_ctx(home.path()))
         .unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     let script = plugin_dir.join("check_update_from_response.py");
     std::fs::write(
         &script,
@@ -3888,7 +3888,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -3907,7 +3907,7 @@ class Ctx:
         self.context_engines.append(engine)
 
 ctx = Ctx()
-# This instantiates TokenSaveContextEngine; an unimplemented abstract method
+# This instantiates TraceDecayContextEngine; an unimplemented abstract method
 # raises TypeError here.
 plugin.register(ctx)
 assert len(ctx.context_engines) == 1
@@ -3947,7 +3947,7 @@ assert engine.last_total_tokens == 0
 }
 
 /// Newer Hermes derives the skill namespace from the plugin name and rejects
-/// ':' inside skill names, so registration must use the bare "tokensave".
+/// ':' inside skill names, so registration must use the bare "tracedecay".
 #[test]
 fn generated_register_uses_colon_free_skill_name() {
     run_generated_plugin_script(
@@ -3965,11 +3965,11 @@ class Ctx:
 
 ctx = Ctx()
 plugin.register(ctx)
-assert ctx.skills, "expected the tokensave skill to be registered"
-assert ctx.skills[0][0] == "tokensave", ctx.skills
+assert ctx.skills, "expected the tracedecay skill to be registered"
+assert ctx.skills[0][0] == "tracedecay", ctx.skills
 assert ctx.skills[0][1].name == "SKILL.md"
 "#,
-        "generated registration must register the skill under the bare 'tokensave' name",
+        "generated registration must register the skill under the bare 'tracedecay' name",
     );
 }
 
@@ -4005,7 +4005,7 @@ engine.on_session_start(session_id="s2", project_root="/explicit/root")
 assert engine.project_root == "/explicit/root", engine.project_root
 
 # Without a pin or explicit root, cwd remains the fallback.
-unpinned = plugin.TokenSaveContextEngine(config={})
+unpinned = plugin.TraceDecayContextEngine(config={})
 assert unpinned.project_root is None
 unpinned.on_session_start(session_id="s3", cwd="/cwd/fallback")
 assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
@@ -4015,7 +4015,7 @@ assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
 }
 
 /// The install-time `--project-root` pin must flow through both dispatch
-/// layers: `tools.call_tokensave_tool` adds `--project <pin>` to every CLI
+/// layers: `tools.call_tracedecay_tool` adds `--project <pin>` to every CLI
 /// invocation that has no explicit project, and the context engine resolves
 /// `project_root` as kwargs > config > pin > cwd.
 #[test]
@@ -4023,7 +4023,7 @@ fn generated_plugin_honors_install_time_project_root_pin() {
     let home = TempDir::new().unwrap();
     let ctx = InstallContext {
         home: home.path().to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
@@ -4031,7 +4031,7 @@ fn generated_plugin_honors_install_time_project_root_pin() {
     };
     HermesIntegration.install(&ctx).unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -4056,7 +4056,7 @@ parent_spec.submodule_search_locations = []
 parent_module = importlib.util.module_from_spec(parent_spec)
 sys.modules[parent_name] = parent_module
 
-module_name = f"{parent_name}.tokensave"
+module_name = f"{parent_name}.tracedecay"
 spec = importlib.util.spec_from_file_location(
     module_name,
     plugin_dir / "__init__.py",
@@ -4067,7 +4067,7 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
 tools = plugin.tools
-# The pin lives in the profile config.yaml (plugins.tokensave.project_root);
+# The pin lives in the profile config.yaml (plugins.tracedecay.project_root);
 # the generated tools.py carries no pin constant.
 assert not hasattr(tools, "PINNED_PROJECT_ROOT")
 assert tools.config_pinned_project_root() == "/pinned/project", tools.config_pinned_project_root()
@@ -4085,29 +4085,29 @@ def fake_run(argv, **kwargs):
     return FakeResult()
 
 tools.subprocess.run = fake_run
-tools.call_tokensave_tool("tokensave_status", {})
+tools.call_tracedecay_tool("tracedecay_status", {})
 assert captured, "expected a subprocess invocation"
 argv = captured[-1]
 idx = argv.index("--project")
 assert argv[idx + 1] == "/pinned/project", argv
 
 # An explicit project still wins over the pin.
-tools.call_tokensave_tool("tokensave_status", {}, project_root="/explicit/root")
+tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root")
 argv = captured[-1]
 idx = argv.index("--project")
 assert argv[idx + 1] == "/explicit/root", argv
 
 # Engine resolution: pin applies by default, config beats pin, kwargs beat
 # config, and cwd no longer overrides any pin.
-engine = plugin.TokenSaveContextEngine(config={})
+engine = plugin.TraceDecayContextEngine(config={})
 assert engine.project_root == "/pinned/project", engine.project_root
 engine.on_session_start(session_id="s1", cwd="/somewhere/else")
 assert engine.project_root == "/pinned/project", engine.project_root
 
-configured = plugin.TokenSaveContextEngine(config={"project_root": "/from/config"})
+configured = plugin.TraceDecayContextEngine(config={"project_root": "/from/config"})
 assert configured.project_root == "/from/config", configured.project_root
 
-explicit = plugin.TokenSaveContextEngine(config={})
+explicit = plugin.TraceDecayContextEngine(config={})
 explicit.on_session_start(session_id="s2", project_root="/explicit/root")
 assert explicit.project_root == "/explicit/root", explicit.project_root
 "#,

@@ -1,13 +1,13 @@
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 
 fn agent_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(tokensave::agents::available_integrations())
+    PossibleValuesParser::new(tracedecay::agents::available_integrations())
 }
 
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
-    name = "tokensave",
+    name = "tracedecay",
     about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
     version
 )]
@@ -18,7 +18,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new TokenSave project (full index)
+    /// Initialize a new TraceDecay project (full index)
     Init {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -26,7 +26,7 @@ pub enum Commands {
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,
     },
-    /// Incremental sync (project must already be initialized with `tokensave init`)
+    /// Incremental sync (project must already be initialized with `tracedecay init`)
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -61,10 +61,10 @@ pub enum Commands {
         #[arg(long)]
         runtime: bool,
     },
-    /// Invoke an MCP tool from the CLI (e.g. `tokensave tool search foo`).
+    /// Invoke an MCP tool from the CLI (e.g. `tracedecay tool search foo`).
     ///
-    /// Run `tokensave tool` (no name) to list every available tool.
-    /// Run `tokensave tool <name> --help` to see that tool's parameters.
+    /// Run `tracedecay tool` (no name) to list every available tool.
+    /// Run `tracedecay tool <name> --help` to see that tool's parameters.
     //
     // `disable_help_flag = true` lets `-h`/`--help` flow through to our parser
     // so we can print the per-tool schema instead of clap's generic help.
@@ -74,7 +74,7 @@ pub enum Commands {
         /// nearest initialised project walking up from cwd.
         #[arg(long)]
         project: Option<String>,
-        /// MCP tool name (with or without the `tokensave_` prefix). Omit to list all tools.
+        /// MCP tool name (with or without the `tracedecay_` prefix). Omit to list all tools.
         name: Option<String>,
         /// Tool arguments as alternating `--key value` flags, plus reserved flags
         /// `--json`, `--project <path>`, `--args <json>`, and `-h`/`--help`.
@@ -100,10 +100,10 @@ pub enum Commands {
         all_profiles: bool,
         /// Pin the generated plugin to a project root (absolute path; only
         /// used with --agent hermes). All plugin tool calls then resolve that
-        /// project's .tokensave/ stores regardless of the Hermes cwd.
+        /// project's .tracedecay/ stores regardless of the Hermes cwd.
         #[arg(long, conflicts_with = "all_profiles")]
         project_root: Option<String>,
-        /// Skip deploying the tokensave dashboard plugin page into the
+        /// Skip deploying the tracedecay dashboard plugin page into the
         /// Hermes dashboard (and remove a previously deployed one; only
         /// used with --agent hermes).
         #[arg(long)]
@@ -114,12 +114,12 @@ pub enum Commands {
     /// Refresh generated plugin code/assets for detected installs without
     /// touching agent config files.
     ///
-    /// Rewrites only tokensave-generated artifacts — the Hermes plugin
+    /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
     /// (.py files, schemas.json, dashboard page) for every detected profile,
     /// the Cursor plugin bundle, and the Kiro managed agent — re-baking the
     /// current binary path and version. Config files (Hermes config.yaml and
     /// its project_root pin, mcp.json, settings, prompt rules) are left
-    /// byte-for-byte intact; use `tokensave reinstall` to refresh those.
+    /// byte-for-byte intact; use `tracedecay reinstall` to refresh those.
     #[command(name = "update-plugin", visible_alias = "update-plugins")]
     UpdatePlugin,
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
@@ -135,7 +135,7 @@ pub enum Commands {
         #[arg(long, conflicts_with = "profile")]
         all_profiles: bool,
     },
-    /// Extraction worker (spawned by tokensave itself; not for direct use).
+    /// Extraction worker (spawned by tracedecay itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]
     ExtractWorker,
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
@@ -204,7 +204,7 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port to listen on (0 = pick a free port)
-        #[arg(long, default_value_t = tokensave::dashboard::DEFAULT_PORT)]
+        #[arg(long, default_value_t = tracedecay::dashboard::DEFAULT_PORT)]
         port: u16,
         /// Open the dashboard URL in the default browser after the server starts
         #[arg(long)]
@@ -257,7 +257,7 @@ pub enum Commands {
         /// "on" to enable, "off" to disable, omit to show current setting
         action: Option<String>,
     },
-    /// Check tokensave installation, configuration, and agent integration
+    /// Check tracedecay installation, configuration, and agent integration
     Doctor {
         /// Check only this agent (default: all agents)
         #[arg(long, value_parser = agent_value_parser())]
@@ -320,13 +320,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
-    /// Wipe local tokensave DBs (current folder, parents, and children)
+    /// Wipe local tracedecay DBs (current folder, parents, and children)
     Wipe {
         /// Wipe ALL tracked projects so the global DB ends empty
         #[arg(short, long)]
         all: bool,
     },
-    /// List tokensave projects (current folder, parents, and children)
+    /// List tracedecay projects (current folder, parents, and children)
     List {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]
@@ -355,10 +355,10 @@ pub enum MemoryAction {
         #[arg(long, value_name = "FILE")]
         llm_ops: Option<String>,
         /// Maximum candidate clusters included in the LLM review request
-        #[arg(long, default_value_t = tokensave::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
         max_clusters: usize,
         /// Confidence floor below which LLM ops are rejected
-        #[arg(long, default_value_t = tokensave::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
         min_confidence: f64,
         /// Project path (default: current directory, with discovery)
         #[arg(short, long)]

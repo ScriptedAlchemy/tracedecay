@@ -1,4 +1,4 @@
-# Default benchmark queries for `tokensave bench`.
+# Default benchmark queries for `tracedecay bench`.
 #
 # Each query simulates an agent asking for context on a real task. The harness
 # runs the query through `cg.build_context(...)`, measures the bytes returned,
@@ -8,7 +8,7 @@
 # These queries are intentionally generic — they target patterns present in
 # most application codebases (CLIs, daemons, services) rather than this repo
 # specifically. For tighter recall numbers on a specific project, write your
-# own query file and pass it via `tokensave bench --queries <file>`.
+# own query file and pass it via `tracedecay bench --queries <file>`.
 
 [[query]]
 task = "How is configuration loaded at startup?"

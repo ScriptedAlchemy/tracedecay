@@ -1,19 +1,19 @@
 //! Tests that the hidden `extract-worker` subcommand cannot be invoked
-//! by users in a way that would let them turn the tokensave binary into
+//! by users in a way that would let them turn the tracedecay binary into
 //! an arbitrary code-execution vector.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn worker_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_tokensave")
+    env!("CARGO_BIN_EXE_tracedecay")
 }
 
 #[test]
 fn worker_without_token_env_var_exits_nonzero() {
     let mut child = Command::new(worker_bin())
         .arg("extract-worker")
-        .env_remove("TOKENSAVE_WORKER_TOKEN")
+        .env_remove("TRACEDECAY_WORKER_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -23,7 +23,7 @@ fn worker_without_token_env_var_exits_nonzero() {
     let status = child.wait().expect("wait");
     assert!(
         !status.success(),
-        "worker must reject invocation without TOKENSAVE_WORKER_TOKEN env var"
+        "worker must reject invocation without TRACEDECAY_WORKER_TOKEN env var"
     );
 }
 
@@ -31,7 +31,7 @@ fn worker_without_token_env_var_exits_nonzero() {
 fn worker_with_malformed_token_env_var_exits_nonzero() {
     let mut child = Command::new(worker_bin())
         .arg("extract-worker")
-        .env("TOKENSAVE_WORKER_TOKEN", "not-hex-at-all")
+        .env("TRACEDECAY_WORKER_TOKEN", "not-hex-at-all")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -47,7 +47,7 @@ fn worker_with_wrong_length_token_exits_nonzero() {
     // 16 hex chars = 8 bytes, but TOKEN_LEN is 32.
     let mut child = Command::new(worker_bin())
         .arg("extract-worker")
-        .env("TOKENSAVE_WORKER_TOKEN", "deadbeefdeadbeef")
+        .env("TRACEDECAY_WORKER_TOKEN", "deadbeefdeadbeef")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -65,7 +65,7 @@ fn worker_with_correct_env_but_wrong_stdin_token_exits_nonzero() {
     let token_hex = "0".repeat(64); // 32 bytes of zeros, hex-encoded
     let mut child = Command::new(worker_bin())
         .arg("extract-worker")
-        .env("TOKENSAVE_WORKER_TOKEN", &token_hex)
+        .env("TRACEDECAY_WORKER_TOKEN", &token_hex)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

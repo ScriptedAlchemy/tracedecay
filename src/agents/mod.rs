@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use crate::errors::Result;
-use crate::errors::TokenSaveError;
+use crate::errors::TraceDecayError;
 use crate::mcp::tools::get_tool_definitions;
 
 pub use antigravity::AntigravityIntegration;
@@ -51,7 +51,7 @@ pub use zed::ZedIntegration;
 // AgentIntegration trait
 // ---------------------------------------------------------------------------
 
-/// A CLI agent that can be configured to use tokensave via MCP.
+/// A CLI agent that can be configured to use tracedecay via MCP.
 pub trait AgentIntegration {
     /// Human-readable name (e.g. "Claude Code").
     fn name(&self) -> &'static str;
@@ -70,10 +70,10 @@ pub trait AgentIntegration {
     /// Register MCP server, permissions, hooks, and prompt rules under a
     /// project/workspace directory instead of the user's global config.
     fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TokenSaveError::Config {
+        Err(TraceDecayError::Config {
             message: format!(
-                "{} does not support `tokensave install --local` yet. \
-                 Run `tokensave install --agent {}` for a global install.",
+                "{} does not support `tracedecay install --local` yet. \
+                 Run `tracedecay install --agent {}` for a global install.",
                 self.name(),
                 self.id()
             ),
@@ -85,7 +85,7 @@ pub trait AgentIntegration {
     ///
     /// Agents that need to react to their own installation override this — for
     /// example, Cursor registers the project's current git branch for
-    /// tokensave indexing. Keeping per-agent post-install behavior behind the
+    /// tracedecay indexing. Keeping per-agent post-install behavior behind the
     /// trait means the `install` / `reinstall` command flow never has to
     /// special-case individual agents by id.
     fn post_install<'a>(
@@ -95,15 +95,15 @@ pub trait AgentIntegration {
         Box::pin(std::future::ready(()))
     }
 
-    /// Refresh tokensave-generated artifacts (plugin code, baked binary
+    /// Refresh tracedecay-generated artifacts (plugin code, baked binary
     /// paths, embedded assets) for every *detected* existing installation,
     /// without writing to any agent config file. Pins, MCP registrations,
     /// settings, and prompt rules are left byte-for-byte intact.
     ///
     /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
-    /// keep their entire tokensave integration inside shared config files
+    /// keep their entire tracedecay integration inside shared config files
     /// (MCP entries, hook blocks, prompt rules), so there is nothing to
-    /// refresh that would not be a config write — `tokensave reinstall`
+    /// refresh that would not be a config write — `tracedecay reinstall`
     /// remains the path that reconciles those.
     fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         Ok(UpdatePluginOutcome::ConfigOnly)
@@ -121,9 +121,9 @@ pub trait AgentIntegration {
         false
     }
 
-    /// Returns true if tokensave MCP server is already registered in this
+    /// Returns true if tracedecay MCP server is already registered in this
     /// agent's config. Used for migration backfill.
-    fn has_tokensave(&self, _home: &Path) -> bool {
+    fn has_tracedecay(&self, _home: &Path) -> bool {
         false
     }
 
@@ -148,23 +148,23 @@ pub enum UpdatePluginOutcome {
     /// this machine — nothing was written.
     NotInstalled,
     /// The integration only writes shared config files; there are no
-    /// tokensave-generated artifacts to refresh without touching config.
+    /// tracedecay-generated artifacts to refresh without touching config.
     ConfigOnly,
 }
 
 /// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].
 pub struct InstallContext {
     pub home: PathBuf,
-    pub tokensave_bin: String,
+    pub tracedecay_bin: String,
     pub tool_permissions: Vec<String>,
     pub profile: Option<String>,
     /// Hermes only: pin the generated plugin's project root so every tool
-    /// call resolves this project's `.tokensave/` stores regardless of the
-    /// host's working directory (`tokensave install --agent hermes
+    /// call resolves this project's `.tracedecay/` stores regardless of the
+    /// host's working directory (`tracedecay install --agent hermes
     /// --project-root <path>`). `None` preserves any existing pin.
     pub project_root: Option<PathBuf>,
     /// Hermes only: deploy the dashboard wrapper plugin page alongside the
-    /// agent plugin (default; `tokensave install --agent hermes
+    /// agent plugin (default; `tracedecay install --agent hermes
     /// --no-dashboard` opts out and removes a previous deploy). Other agents
     /// ignore this field.
     pub dashboard: bool,
@@ -213,7 +213,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kiro" => Ok(Box::new(KiroIntegration)),
         "kimi" => Ok(Box::new(KimiIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: format!(
                 "unknown agent: \"{id}\". Available agents: {}",
                 available_integrations().join(", ")
@@ -300,7 +300,7 @@ impl DoctorCounters {
 // ---------------------------------------------------------------------------
 
 /// Load a JSON file, returning an empty object on missing/invalid.
-/// Use this for **read-only** paths (healthcheck, `has_tokensave`, etc.).
+/// Use this for **read-only** paths (healthcheck, `has_tracedecay`, etc.).
 /// For install/edit paths, use [`load_json_file_strict`] instead.
 pub fn load_json_file(path: &Path) -> serde_json::Value {
     if path.exists() {
@@ -325,13 +325,13 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let contents = std::fs::read_to_string(path).map_err(|e| TokenSaveError::Config {
+    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read {}: {e}", path.display()),
     })?;
     if contents.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    serde_json::from_str(&contents).map_err(|e| TokenSaveError::Config {
+    serde_json::from_str(&contents).map_err(|e| TraceDecayError::Config {
         message: format!(
             "cannot parse {} as JSON: {e}\n  \
              Hint: fix the JSON syntax manually and re-run the command,\n  \
@@ -362,7 +362,7 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
 
     // Read original content
-    let content = std::fs::read(path).map_err(|e| TokenSaveError::Config {
+    let content = std::fs::read(path).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to read {} for backup: {e}\n  \
              Hint: check file permissions",
@@ -373,7 +373,7 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     // Write to staging file
     std::fs::write(&staging_path, &content).map_err(|e| {
         std::fs::remove_file(&staging_path).ok();
-        TokenSaveError::Config {
+        TraceDecayError::Config {
             message: format!(
                 "failed to write backup staging file {}: {e}\n  \
                  Hint: check available disk space and permissions",
@@ -385,7 +385,7 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     // Atomic rename staging → .bak
     std::fs::rename(&staging_path, &backup_path).map_err(|e| {
         std::fs::remove_file(&staging_path).ok();
-        TokenSaveError::Config {
+        TraceDecayError::Config {
             message: format!(
                 "failed to create backup {}: {e}\n  \
                  Hint: check file permissions",
@@ -454,16 +454,16 @@ pub fn safe_write_json_file(
     backup: Option<&Path>,
 ) -> Result<()> {
     // 1. Serialize
-    let pretty = serde_json::to_string_pretty(value).map_err(|e| TokenSaveError::Config {
+    let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize JSON for {}: {e}", path.display()),
     })?;
 
     // 2. Re-parse to verify the serialized output is valid JSON
     if serde_json::from_str::<serde_json::Value>(&pretty).is_err() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "internal error: serialized JSON for {} failed re-parse validation.\n  \
-                 This is a bug in tokensave — please report it.",
+                 This is a bug in tracedecay — please report it.",
                 path.display()
             ),
         });
@@ -471,7 +471,7 @@ pub fn safe_write_json_file(
 
     // 3. Ensure parent dir
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
         })?;
     }
@@ -482,7 +482,7 @@ pub fn safe_write_json_file(
     let new_path = PathBuf::from(format!("{}.new", path.display()));
     if let Err(e) = std::fs::write(&new_path, &content) {
         std::fs::remove_file(&new_path).ok(); // clean up partial write
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "failed to write new config file {}: {e}",
                 new_path.display()
@@ -504,7 +504,7 @@ pub fn safe_write_json_file(
         } else {
             "\n  The original file was NOT modified.".to_string()
         };
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "failed to rename {} → {}: {e}{hint}",
                 new_path.display(),
@@ -523,7 +523,7 @@ pub fn safe_write_json_file(
 /// until the final rename, so a failed write leaves the original untouched.
 pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Config {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
         })?;
     }
@@ -531,7 +531,7 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
     let new_path = PathBuf::from(format!("{}.new", path.display()));
     if let Err(e) = std::fs::write(&new_path, contents) {
         std::fs::remove_file(&new_path).ok();
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!("failed to write new text file {}: {e}", new_path.display()),
         });
     }
@@ -547,7 +547,7 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
         } else {
             "\n  The original file was NOT modified.".to_string()
         };
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "failed to rename {} → {}: {e}{hint}",
                 new_path.display(),
@@ -581,17 +581,17 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
     safe_write_json_file(path, value, backup.as_deref()).is_ok()
 }
 
-/// Finds the tokensave binary path.
+/// Finds the tracedecay binary path.
 ///
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
-pub fn which_tokensave() -> Option<String> {
+pub fn which_tracedecay() -> Option<String> {
     // Check the current executable first
     if let Ok(exe) = std::env::current_exe() {
         if exe
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("tokensave"))
+            .is_some_and(|n| n.starts_with("tracedecay"))
         {
             return Some(normalize_path_separators(&exe.to_string_lossy()));
         }
@@ -600,9 +600,9 @@ pub fn which_tokensave() -> Option<String> {
     let path_var = std::env::var("PATH").ok()?;
     let separator = if cfg!(windows) { ';' } else { ':' };
     let bin_name = if cfg!(windows) {
-        "tokensave.exe"
+        "tracedecay.exe"
     } else {
-        "tokensave"
+        "tracedecay"
     };
     path_var.split(separator).find_map(|dir| {
         let candidate = PathBuf::from(dir).join(bin_name);
@@ -618,19 +618,19 @@ fn normalize_path_separators(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-pub(crate) fn hook_command(tokensave_bin: &str, subcommand: &str) -> String {
-    hook_command_for_platform(tokensave_bin, subcommand, cfg!(windows))
+pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
+    hook_command_for_platform(tracedecay_bin, subcommand, cfg!(windows))
 }
 
 pub(crate) fn hook_command_for_platform(
-    tokensave_bin: &str,
+    tracedecay_bin: &str,
     subcommand: &str,
     windows: bool,
 ) -> String {
     let quoted = if windows {
-        quote_windows_command_arg(&normalize_path_separators(tokensave_bin))
+        quote_windows_command_arg(&normalize_path_separators(tracedecay_bin))
     } else {
-        quote_posix_command_arg(tokensave_bin)
+        quote_posix_command_arg(tracedecay_bin)
     };
     format!("{quoted} {subcommand}")
 }
@@ -687,7 +687,7 @@ fn relative_project_path(
 pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -> Result<()> {
     let root = project_root
         .canonicalize()
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to resolve project root {}: {e}",
                 project_root.display()
@@ -702,7 +702,7 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "refusing to write project-local config outside {}: {}",
                 root.display(),
@@ -730,7 +730,7 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
                 continue;
             };
             if meta.file_type().is_symlink() {
-                return Err(TokenSaveError::Config {
+                return Err(TraceDecayError::Config {
                     message: format!(
                         "refusing to write project-local config through symlink: {}",
                         current.display()
@@ -741,14 +741,14 @@ pub(crate) fn ensure_project_local_safe_path(project_root: &Path, path: &Path) -
     }
 
     let canonical_candidate =
-        canonicalize_existing_prefix(&absolute).map_err(|e| TokenSaveError::Config {
+        canonicalize_existing_prefix(&absolute).map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to resolve project-local config path {}: {e}",
                 absolute.display()
             ),
         })?;
     if !canonical_candidate.starts_with(&root) {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
                 "refusing to write project-local config outside {}: {}",
                 root.display(),
@@ -892,14 +892,14 @@ pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
-    let contents = std::fs::read_to_string(path).map_err(|e| TokenSaveError::Config {
+    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read {}: {e}", path.display()),
     })?;
     if contents.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
     let stripped = strip_jsonc_comments(&contents);
-    serde_json::from_str(&stripped).map_err(|e| TokenSaveError::Config {
+    serde_json::from_str(&stripped).map_err(|e| TraceDecayError::Config {
         message: format!(
             "cannot parse {} as JSONC: {e}\n  \
              Hint: fix the JSON syntax manually and re-run the command,\n  \
@@ -992,13 +992,13 @@ pub fn kiro_data_dir(home: &Path) -> PathBuf {
     }
 }
 
-/// Returns agent IDs that have tokensave configured under `home` but are
+/// Returns agent IDs that have tracedecay configured under `home` but are
 /// absent from `current`. Pure — does no I/O on the config file.
 pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<String> {
     let mut additions = Vec::new();
     for ag in all_integrations() {
         let id = ag.id().to_string();
-        if ag.has_tokensave(home) && !current.contains(&id) {
+        if ag.has_tracedecay(home) && !current.contains(&id) {
             additions.push(id);
         }
     }
@@ -1007,11 +1007,11 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
 
 /// Backfill `installed_agents` for users upgrading from older versions.
 ///
-/// Always scans every agent and adds any that have tokensave configured
+/// Always scans every agent and adds any that have tracedecay configured
 /// (e.g. an `~/.claude.json` MCP server entry) but are absent from
 /// `installed_agents`. Without the additive scan, a user who installed
 /// agent A first and agent B later would have only A in the list, so
-/// `tokensave reinstall` would silently skip B and its tool permissions
+/// `tracedecay reinstall` would silently skip B and its tool permissions
 /// would never be refreshed when new tools ship.
 pub fn migrate_installed_agents(home: &Path, config: &mut crate::user_config::UserConfig) {
     let additions = detect_missing_installed_agents(home, &config.installed_agents);
@@ -1028,18 +1028,18 @@ mod migrate_tests {
     use super::*;
     use std::fs;
 
-    /// Writes a minimal `~/.claude.json` so `ClaudeIntegration::has_tokensave`
+    /// Writes a minimal `~/.claude.json` so `ClaudeIntegration::has_tracedecay`
     /// returns true for the given fake home.
     fn install_claude_marker(home: &Path) {
         let claude_json = home.join(".claude.json");
         fs::write(
             &claude_json,
-            r#"{"mcpServers":{"tokensave":{"command":"tokensave","args":["serve"]}}}"#,
+            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
         )
         .unwrap();
     }
 
-    /// Regression test for the bug where `tokensave reinstall` skipped Claude
+    /// Regression test for the bug where `tracedecay reinstall` skipped Claude
     /// when another agent (e.g. copilot) was already in `installed_agents`.
     /// `migrate_installed_agents` previously returned early as soon as the
     /// list was non-empty, so Claude never got tracked and its tool perms
@@ -1110,7 +1110,7 @@ pub fn pick_integrations_interactive(
         .collect();
 
     if detected.is_empty() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "No supported agents detected on this system".to_string(),
         });
     }
@@ -1128,15 +1128,15 @@ pub fn pick_integrations_interactive(
         let id = ag.id().to_string();
         let already = installed.contains(&id);
         if already {
-            eprint!("Keep tokensave for {}? [Y/n] ", ag.name());
+            eprint!("Keep TraceDecay for {}? [Y/n] ", ag.name());
         } else {
-            eprint!("Install tokensave for {}? [Y/n] ", ag.name());
+            eprint!("Install TraceDecay for {}? [Y/n] ", ag.name());
         }
 
         let mut input = String::new();
         std::io::stdin()
             .read_line(&mut input)
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to read input: {e}"),
             })?;
         let answer = input.trim().to_lowercase();
@@ -1155,13 +1155,13 @@ pub fn pick_integrations_interactive(
 /// Load a TOML file as a document.
 ///
 /// Returns an empty table when the file does not exist. When the file exists
-/// but cannot be parsed as a TOML document, returns a [`TokenSaveError::Config`]
+/// but cannot be parsed as a TOML document, returns a [`TraceDecayError::Config`]
 /// so callers do not silently overwrite the user's data (see issue #63).
 pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
     if !path.exists() {
         return Ok(toml::Value::Table(toml::map::Map::new()));
     }
-    let contents = std::fs::read_to_string(path).map_err(|e| TokenSaveError::Config {
+    let contents = std::fs::read_to_string(path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read {}: {e}", path.display()),
     })?;
     if contents.trim().is_empty() {
@@ -1170,7 +1170,7 @@ pub fn load_toml_file(path: &Path) -> Result<toml::Value> {
     // NOTE: `str.parse::<toml::Value>()` parses a single TOML value in toml v1,
     // not a document — using it here would treat any well-formed config.toml as
     // unparseable and silently drop its contents. Use `toml::from_str` instead.
-    let table: toml::Table = toml::from_str(&contents).map_err(|e| TokenSaveError::Config {
+    let table: toml::Table = toml::from_str(&contents).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to parse {} as TOML: {e}. Refusing to overwrite — fix the file or remove it manually.",
             path.display()
@@ -1188,7 +1188,7 @@ fn backup_file(path: &Path) -> Result<()> {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     let backup = std::path::PathBuf::from(backup);
-    std::fs::copy(path, &backup).map_err(|e| TokenSaveError::Config {
+    std::fs::copy(path, &backup).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to back up {} to {}: {e}",
             path.display(),
@@ -1207,7 +1207,7 @@ fn backup_file(path: &Path) -> Result<()> {
 pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
     backup_file(path)?;
     let contents = toml::to_string_pretty(value).unwrap_or_else(|_| String::new());
-    std::fs::write(path, contents).map_err(|e| TokenSaveError::Config {
+    std::fs::write(path, contents).map_err(|e| TraceDecayError::Config {
         message: format!("failed to write {}: {e}", path.display()),
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
@@ -1218,23 +1218,30 @@ pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
 // Git post-commit hook
 // ---------------------------------------------------------------------------
 
-/// The marker comment used to identify tokensave's section in a hook script.
-const HOOK_MARKER: &str = "# tokensave: auto-sync";
+/// The marker comment used to identify tracedecay's section in a hook script.
+///
+/// NOTE: Legacy hooks written by the old "tracedecay" binary used the marker
+/// "# tracedecay: auto-sync". Those are not detected by this constant, so
+/// existing tracedecay git hooks will not be treated as already-present and a
+/// second tracedecay block may be appended on offer. This is intentional
+/// (install path only writes new identity) — users can manually remove the
+/// old block.
+const HOOK_MARKER: &str = "# tracedecay: auto-sync";
 
 /// The hook snippet appended to (or written as) the post-commit script.
-fn post_commit_snippet(tokensave_bin: &str) -> String {
-    let bin = tokensave_bin.replace('\\', "/");
+fn post_commit_snippet(tracedecay_bin: &str) -> String {
+    let bin = tracedecay_bin.replace('\\', "/");
     format!(
         "{HOOK_MARKER}\n\
          {bin} sync >/dev/null 2>&1 &\n"
     )
 }
 
-/// If a global git `post-commit` hook is not already set up for tokensave,
+/// If a global git `post-commit` hook is not already set up for tracedecay,
 /// interactively asks the user whether to install one. Silently succeeds if
 /// the hook is already present, if stdin is not a terminal, or if the user
 /// declines.
-pub fn offer_git_post_commit_hook(tokensave_bin: &str) {
+pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
     let Some(home) = home_dir() else { return };
 
     // Determine the global hooks directory by reading core.hooksPath from
@@ -1252,7 +1259,7 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str) {
     if hook_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&hook_path) {
             if contents.contains(HOOK_MARKER) {
-                eprintln!("  Global git post-commit hook already contains tokensave, skipping");
+                eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
                 return;
             }
         }
@@ -1265,7 +1272,7 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str) {
 
     eprintln!();
     eprint!(
-        "Install a global git post-commit hook to auto-run \x1b[1mtokensave sync\x1b[0m after each commit? [y/N] "
+        "Install a global git post-commit hook to auto-run \x1b[1mtracedecay sync\x1b[0m after each commit? [y/N] "
     );
 
     let mut answer = String::new();
@@ -1300,7 +1307,7 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str) {
     }
 
     // Append to or create the hook file.
-    let snippet = post_commit_snippet(tokensave_bin);
+    let snippet = post_commit_snippet(tracedecay_bin);
 
     if hook_path.exists() {
         use std::io::Write;
@@ -1698,7 +1705,7 @@ pub fn read_only_tool_names() -> Vec<String> {
 pub fn expected_tool_perms() -> Vec<String> {
     get_tool_definitions()
         .iter()
-        .map(|t| format!("mcp__tokensave__{}", t.name))
+        .map(|t| format!("mcp__tracedecay__{}", t.name))
         .collect()
 }
 
@@ -1983,7 +1990,7 @@ mod safe_config_tests {
 
     // ----- THE KEY REGRESSION TEST -----
     // This is the exact bug the fix addresses: load_json_file silently
-    // returned {} on parse failure, and the install wrote {} + tokensave
+    // returned {} on parse failure, and the install wrote {} + tracedecay
     // back, destroying the user's config.
 
     #[test]
@@ -2031,17 +2038,17 @@ mod safe_config_tests {
         // Simulate install
         let backup = backup_config_file(&path).unwrap();
         let mut config = load_json_file_strict(&path).unwrap();
-        config["mcp"]["tokensave"] = serde_json::json!({
+        config["mcp"]["tracedecay"] = serde_json::json!({
             "type": "local",
-            "command": ["tokensave", "serve"]
+            "command": ["tracedecay", "serve"]
         });
         safe_write_json_file(&path, &config, backup.as_deref()).unwrap();
 
         // Verify
         let result: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        // Tokensave was added
-        assert!(result["mcp"]["tokensave"].is_object());
+        // TraceDecay was added
+        assert!(result["mcp"]["tracedecay"].is_object());
         // Existing keys survived
         assert_eq!(result["theme"], "dark");
         assert_eq!(
@@ -2053,7 +2060,7 @@ mod safe_config_tests {
         // Backup exists with original content
         let bak_content: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(backup.unwrap()).unwrap()).unwrap();
-        assert!(bak_content.get("tokensave").is_none());
+        assert!(bak_content.get("tracedecay").is_none());
         assert_eq!(bak_content["theme"], "dark");
     }
 
@@ -2112,16 +2119,16 @@ mod path_normalize_tests {
     #[test]
     fn normalizes_windows_backslashes() {
         assert_eq!(
-            normalize_path_separators(r"C:\Users\dev\scoop\shims\tokensave.exe"),
-            "C:/Users/dev/scoop/shims/tokensave.exe"
+            normalize_path_separators(r"C:\Users\dev\scoop\shims\tracedecay.exe"),
+            "C:/Users/dev/scoop/shims/tracedecay.exe"
         );
     }
 
     #[test]
     fn leaves_unix_paths_unchanged() {
         assert_eq!(
-            normalize_path_separators("/usr/local/bin/tokensave"),
-            "/usr/local/bin/tokensave"
+            normalize_path_separators("/usr/local/bin/tracedecay"),
+            "/usr/local/bin/tracedecay"
         );
     }
 }
@@ -2134,22 +2141,22 @@ mod local_install_safety_tests {
     #[test]
     fn windows_hook_command_quotes_windows_paths_with_spaces() {
         let command = hook_command_for_platform(
-            r"C:\Program Files\tokensave\tokensave.exe",
+            r"C:\Program Files\tracedecay\tracedecay.exe",
             "hook-test",
             true,
         );
 
         assert_eq!(
             command,
-            r#""C:/Program Files/tokensave/tokensave.exe" hook-test"#
+            r#""C:/Program Files/tracedecay/tracedecay.exe" hook-test"#
         );
     }
 
     #[test]
     fn posix_hook_command_keeps_single_quote_escaping() {
-        let command = hook_command_for_platform("/tmp/tokensave's/bin", "hook-test", false);
+        let command = hook_command_for_platform("/tmp/tracedecay's/bin", "hook-test", false);
 
-        assert_eq!(command, "'/tmp/tokensave'\\''s/bin' hook-test");
+        assert_eq!(command, "'/tmp/tracedecay'\\''s/bin' hook-test");
     }
 
     #[cfg(unix)]

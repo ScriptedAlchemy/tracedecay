@@ -1,5 +1,5 @@
 use std::path::Path;
-use tokensave::tokensave::TokenSave;
+use tracedecay::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServeGlobalDbResolution {
@@ -10,7 +10,7 @@ pub enum ServeGlobalDbResolution {
 
 pub fn global_db_ambiguity_message(paths: &[String]) -> String {
     let mut message =
-        "Multiple tokensave projects found — pass -p <path> to select one:".to_string();
+        "Multiple tracedecay projects found — pass -p <path> to select one:".to_string();
     for path in paths {
         message.push_str("\n  ");
         message.push_str(path);
@@ -18,21 +18,21 @@ pub fn global_db_ambiguity_message(paths: &[String]) -> String {
     message
 }
 
-/// Opens an existing project, or tells the user to run `tokensave init` first.
-pub async fn ensure_initialized(project_path: &Path) -> tokensave::errors::Result<TokenSave> {
-    if TokenSave::is_initialized(project_path) {
-        return TokenSave::open(project_path).await;
+/// Opens an existing project, or tells the user to run `tracedecay init` first.
+pub async fn ensure_initialized(project_path: &Path) -> tracedecay::errors::Result<TraceDecay> {
+    if TraceDecay::is_initialized(project_path) {
+        return TraceDecay::open(project_path).await;
     }
-    Err(tokensave::errors::TokenSaveError::Config {
+    Err(tracedecay::errors::TraceDecayError::Config {
         message: format!(
-            "no TokenSave index found at '{}' — run 'tokensave init' first",
+            "no TraceDecay index found at '{}' — run 'tracedecay init' first",
             project_path.display()
         ),
     })
 }
 
 fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
-    paths.retain(|path| TokenSave::is_initialized(Path::new(path)));
+    paths.retain(|path| TraceDecay::is_initialized(Path::new(path)));
     paths
 }
 
@@ -42,7 +42,7 @@ fn initialized_project_paths(mut paths: Vec<String>) -> Vec<String> {
 /// project), then a project that is a descendant of cwd (project is under cwd).
 /// Ties at the winning depth are ambiguous and require an explicit path.
 pub async fn resolve_serve_from_global_db() -> ServeGlobalDbResolution {
-    let Some(gdb) = tokensave::global_db::GlobalDb::open().await else {
+    let Some(gdb) = tracedecay::global_db::GlobalDb::open().await else {
         return ServeGlobalDbResolution::None;
     };
     let mut paths = initialized_project_paths(gdb.list_project_paths().await);
@@ -115,7 +115,7 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
     let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let roots = parsed.pointer("/params/roots").and_then(|v| v.as_array())?;
 
-    let registered = match tokensave::global_db::GlobalDb::open().await {
+    let registered = match tracedecay::global_db::GlobalDb::open().await {
         Some(gdb) => initialized_project_paths(gdb.list_project_paths().await),
         None => Vec::new(),
     };
@@ -134,7 +134,7 @@ pub async fn resolve_serve_from_mcp_roots(out: &mut Option<String>) -> Option<st
             return Some(std::path::PathBuf::from(hit));
         }
         // Walk up from the root to find the nearest enclosing project.
-        if let Some(discovered) = tokensave::config::discover_project_root(&root_path) {
+        if let Some(discovered) = tracedecay::config::discover_project_root(&root_path) {
             return Some(discovered);
         }
     }

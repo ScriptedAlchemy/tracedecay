@@ -1,4 +1,4 @@
-//! Handler for the `tokensave_dashboard` MCP tool.
+//! Handler for the `tracedecay_dashboard` MCP tool.
 //!
 //! Starts (or stops) the project dashboard HTTP server as a managed background
 //! tokio task inside the running MCP server process. Idempotent: returns the
@@ -7,11 +7,11 @@
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::truncated_json_envelope;
+use super::truncated_json_envelope_with_handle;
 
 use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
 
@@ -30,8 +30,21 @@ fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
-/// Handles `tokensave_dashboard` tool calls.
-pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
+        return Ok(host);
+    }
+
+    Err(TraceDecayError::Config {
+        message: format!(
+            "tracedecay_dashboard host is loopback-only; use 127.0.0.1, localhost, or ::1 (got {host:?})"
+        ),
+    })
+}
+
+/// Handles `tracedecay_dashboard` tool calls.
+pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
@@ -50,7 +63,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
             let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                    "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })
@@ -59,6 +72,8 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
             let host = args
                 .get("host")
                 .and_then(|v| v.as_str())
+                .map(validate_mcp_dashboard_host)
+                .transpose()?
                 .unwrap_or("127.0.0.1")
                 .to_string();
             let port = args
@@ -79,7 +94,7 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
                 .unwrap_or_default();
                 return Ok(ToolResult {
                     value: json!({
-                        "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                     }),
                     touched_files: vec![],
                 });
@@ -120,14 +135,14 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
 
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })
         }
-        other => Err(TokenSaveError::Config {
+        other => Err(TraceDecayError::Config {
             message: format!(
-                "unknown action for tokensave_dashboard: {other} (use 'start' or 'stop')"
+                "unknown action for tracedecay_dashboard: {other} (use 'start' or 'stop')"
             ),
         }),
     }

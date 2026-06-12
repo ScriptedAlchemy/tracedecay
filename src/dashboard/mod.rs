@@ -1,16 +1,16 @@
-//! `tokensave dashboard` — local HTTP server for the dashboard UIs.
+//! `tracedecay dashboard` — local HTTP server for the dashboard UIs.
 //!
 //! Serves two dashboard plugin bundles ported from Hermes (the
 //! holographic-memory explorer and the LCM explorer) behind a small
 //! standalone shell, plus the JSON API both UIs expect — re-implemented on
-//! top of tokensave's own data:
+//! top of tracedecay's own data:
 //!
 //! - `/api/plugins/holographic/*`  → project memory store
 //!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `lcm_summary_nodes` in the project-local
-//!   `.tokensave/sessions.db` where transcript ingest writes; see
-//!   [`resolve_lcm_store`] for the `TOKENSAVE_GLOBAL_DB` override and the
+//!   `.tracedecay/sessions.db` where transcript ingest writes; see
+//!   [`resolve_lcm_store`] for the `TRACEDECAY_GLOBAL_DB` override and the
 //!   global-DB fallback)
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
@@ -44,13 +44,15 @@ use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
-/// Default port for `tokensave dashboard` (chosen to avoid common dev-server
+/// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
 pub const DEFAULT_PORT: u16 = 7341;
+
+pub(crate) type CuratePreviewFingerprint = (i64, i64, i64, i64);
 
 /// Cached last curation preview, written by `POST /curate?dry_run=true`.
 #[derive(Debug, Clone)]
@@ -60,6 +62,8 @@ pub(crate) struct CuratePreviewEntry {
     pub(crate) saved_at: String,
     /// Active fact count at the time the preview was generated (for stale detection).
     pub(crate) active_facts_at_save: i64,
+    /// `(active count, max updated_at, sum fact_id, sum updated_at)` at preview generation.
+    pub(crate) memory_fingerprint_at_save: CuratePreviewFingerprint,
 }
 
 #[derive(Clone)]
@@ -99,14 +103,15 @@ pub(crate) struct LcmStoreSelection {
 ///
 /// Transcript ingest writes per project: Cursor's end-of-turn hooks and the
 /// MCP serve startup catch-up sweep (Claude/Codex/Vibe/Cline-like) both
-/// upsert into `<project>/.tokensave/sessions.db`, never into
-/// `~/.tokensave/global.db`. So the dashboard serves the project-local store
+/// upsert into `<project>/.tracedecay/sessions.db`, never into
+/// `~/.tracedecay/global.db`. So the dashboard serves the project-local store
 /// by default — opened with the same writable schema-ensuring path the MCP
 /// LCM tools use for `storage_scope = "project_local"`, creating it on first
 /// run.
 ///
-/// An explicit `TOKENSAVE_GLOBAL_DB` override always wins (scope `"global"`):
-/// tests, the smoke harness, and the Hermes wrapper use it to pin the
+/// An explicit `TRACEDECAY_GLOBAL_DB` override always wins (scope `"global"`;
+/// legacy `TOKENSAVE_GLOBAL_DB` is still accepted): tests, the smoke harness,
+/// and the Hermes wrapper use it to pin the
 /// dashboard to a specific store. The legacy global DB is also the fallback
 /// if the project store cannot be opened.
 pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStoreSelection {
@@ -131,8 +136,8 @@ pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStor
 }
 
 /// Builds the dashboard state shared by the CLI `run` path and the
-/// `tokensave_dashboard` MCP tool.
-pub(crate) async fn build_state(cg: &TokenSave) -> DashboardState {
+/// `tracedecay_dashboard` MCP tool.
+pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
     if let Err(err) = cg.memory_status().await {
         eprintln!("Warning: dashboard memory repair failed: {err}");
     }
@@ -164,7 +169,7 @@ pub(crate) async fn build_state(cg: &TokenSave) -> DashboardState {
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
 /// Cline-like, and Cursor's historical backlog), mirroring the MCP serve
-/// startup sweep so a standalone `tokensave dashboard` reflects transcripts
+/// startup sweep so a standalone `tracedecay dashboard` reflects transcripts
 /// written while no MCP server was running. Cursor's live turns still arrive
 /// via hooks; the sweep shares their parse offsets so it only picks up
 /// transcripts the hooks never saw. Fail-open and incremental
@@ -183,8 +188,8 @@ fn spawn_session_catch_up_ingest(project_root: PathBuf) {
     });
 }
 
-fn config_error(message: impl Into<String>) -> TokenSaveError {
-    TokenSaveError::Config {
+fn config_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
         message: message.into(),
     }
 }
@@ -193,7 +198,7 @@ fn config_error(message: impl Into<String>) -> TokenSaveError {
 /// Binds `host:port` (`port` 0 lets the OS pick) and prints the URL on
 /// stderr; the URL line on stdout is stable output for wrappers to parse.
 /// Pass `open: true` to also open the URL in the default browser (CLI --open).
-pub async fn run(cg: &TokenSave, host: &str, port: u16, open: bool) -> Result<()> {
+pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<()> {
     let state = build_state(cg).await;
     if state.lcm_scope == "project_local" {
         spawn_session_catch_up_ingest(state.project_root.clone());
@@ -204,7 +209,7 @@ pub async fn run(cg: &TokenSave, host: &str, port: u16, open: bool) -> Result<()
 
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
-    println!("tokensave dashboard listening on {url}");
+    println!("tracedecay dashboard listening on {url}");
     eprintln!("Serving project {}", cg.project_root().display());
     eprintln!("Press Ctrl+C to stop.");
 
@@ -223,7 +228,7 @@ pub async fn run(cg: &TokenSave, host: &str, port: u16, open: bool) -> Result<()
         .map_err(|e| config_error(format!("dashboard server error: {e}")))
 }
 
-/// Shared bind logic for both CLI `run` and the MCP `tokensave_dashboard` tool
+/// Shared bind logic for both CLI `run` and the MCP `tracedecay_dashboard` tool
 /// (so port 0 allocation and URL formatting are consistent, no duplication).
 pub(crate) async fn bind_dashboard(
     host: &str,
@@ -280,6 +285,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/holographic/curate/apply",
             post(memory_api::curate_apply),
         )
+        .route("/api/plugins/holographic/oplog", get(memory_api::oplog))
         // LCM plugin API (mirrors hermes-lcm dashboard/plugin_api.py)
         .route("/api/plugins/hermes-lcm/overview", get(lcm_api::overview))
         .route("/api/plugins/hermes-lcm/search", get(lcm_api::search))
@@ -316,7 +322,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     Json(json!({
-        "name": "tokensave-dashboard",
+        "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
         "mode": "standalone",
         "project_root": state.project_root.display().to_string(),
@@ -353,7 +359,7 @@ async fn plugins_list() -> Json<Value> {
             "entry": "dist/index.js",
             "css": "dist/style.css",
             "has_api": true,
-            "source": "tokensave",
+            "source": "tracedecay",
         },
         {
             "name": "hermes-lcm",
@@ -363,7 +369,7 @@ async fn plugins_list() -> Json<Value> {
             "entry": "dist/index.js",
             "css": "dist/style.css",
             "has_api": true,
-            "source": "tokensave",
+            "source": "tracedecay",
         },
         {
             "name": "graph",
@@ -373,7 +379,7 @@ async fn plugins_list() -> Json<Value> {
             "entry": "dist/index.js",
             "css": "dist/style.css",
             "has_api": true,
-            "source": "tokensave",
+            "source": "tracedecay",
         },
         {
             "name": "savings",
@@ -383,7 +389,7 @@ async fn plugins_list() -> Json<Value> {
             "entry": "dist/index.js",
             "css": "dist/style.css",
             "has_api": true,
-            "source": "tokensave",
+            "source": "tracedecay",
         }
     ]))
 }

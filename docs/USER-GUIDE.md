@@ -1,8 +1,8 @@
-# Tokensave User Guide
+# TraceDecay User Guide
 
-Thanks for downloading Tokensave!
+Thanks for downloading TraceDecay!
 
-Tokensave is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies — so they spend fewer tokens scanning files and more time writing code.
+TraceDecay is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies — so they spend fewer tokens scanning files and more time writing code.
 
 Everything runs locally. Your code never leaves your machine.
 
@@ -10,7 +10,7 @@ Everything runs locally. Your code never leaves your machine.
 
 ## Table of Contents
 
-1. [Installing Tokensave](#installing-tokensave)
+1. [Installing TraceDecay](#installing-tracedecay)
 2. [Your First Index](#your-first-index)
 3. [Connecting to Your Agent](#connecting-to-your-agent)
 4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
@@ -21,40 +21,40 @@ Everything runs locally. Your code never leaves your machine.
 9. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
 10. [Supported Languages](#supported-languages)
 11. [Privacy and Network](#privacy-and-network)
-12. [Updating Tokensave](#updating-tokensave)
+12. [Updating TraceDecay](#updating-tracedecay)
 13. [Configuration Files](#configuration-files)
 14. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Installing Tokensave
+## Installing TraceDecay
 
 Pick whichever method suits your platform.
 
 **Homebrew (macOS):**
 
 ```bash
-brew install ScriptedAlchemy/tap/tokensave
+brew install ScriptedAlchemy/tap/tracedecay
 ```
 
 **Scoop (Windows):**
 
 ```powershell
-scoop bucket add tokensave https://github.com/ScriptedAlchemy/scoop-bucket
-scoop install tokensave
+scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
+scoop install tracedecay
 ```
 
 **Cargo (any platform):**
 
 ```bash
-cargo install tokensave
+cargo install tracedecay
 ```
 
 If you only work with a subset of languages, you can install a smaller binary:
 
 ```bash
-cargo install tokensave --features medium        # 20 languages
-cargo install tokensave --no-default-features    # 11 languages (lite)
+cargo install tracedecay --features medium        # 20 languages
+cargo install tracedecay --no-default-features    # 11 languages (lite)
 ```
 
 **Prebuilt binaries:**
@@ -69,45 +69,45 @@ Navigate to any project directory and run:
 
 ```bash
 cd /path/to/your/project
-tokensave init
+tracedecay init
 ```
 
-Tokensave will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in a local database at `.tokensave/tokensave.db`. You'll see a spinner with file-by-file progress and an ETA.
+TraceDecay will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in a local database at `.tracedecay/tracedecay.db`. (Projects indexed before the rename keep working: an existing `.tokensave/` directory is still honored as a fallback.) You'll see a spinner with file-by-file progress and an ETA.
 
-Once it finishes, run `tokensave status` to see what was indexed:
+Once it finishes, run `tracedecay status` to see what was indexed:
 
 ```bash
-tokensave status
+tracedecay status
 ```
 
 This prints an overview of your project: the number of files, symbols, edges (relationships between symbols), language distribution, and how many tokens the index has saved you so far. If you just want the summary line without the ASCII art, pass `--short`:
 
 ```bash
-tokensave status --short
+tracedecay status --short
 ```
 
 For machine-readable output, use `--json`.
 
 ### Why `init` and `sync` are separate
 
-Initialization (`tokensave init`) and incremental updates (`tokensave sync`) are deliberately separate commands.
+Initialization (`tracedecay init`) and incremental updates (`tracedecay sync`) are deliberately separate commands.
 
-Tokensave installs a global git post-commit hook that runs `tokensave sync` after every commit to keep the index fresh. If `sync` were allowed to create a new database when none existed, it would silently bootstrap a `.tokensave/` directory in every git repository on your machine -- even ones you never intended to index. By requiring an explicit `init`, only projects you opt into get a database. The hook runs harmlessly (exits with a non-zero status, output suppressed) in all other repos.
+TraceDecay installs a global git post-commit hook that runs `tracedecay sync` after every commit to keep the index fresh. If `sync` were allowed to create a new database when none existed, it would silently bootstrap a `.tracedecay/` directory in every git repository on your machine -- even ones you never intended to index. By requiring an explicit `init`, only projects you opt into get a database. The hook runs harmlessly (exits with a non-zero status, output suppressed) in all other repos.
 
 In short:
-- **`tokensave init`** -- one-time setup. Creates the database and performs a full index. Errors if already initialized.
-- **`tokensave sync`** -- ongoing updates. Requires an existing database. Errors if the project was never initialized.
+- **`tracedecay init`** -- one-time setup. Creates the database and performs a full index. Errors if already initialized.
+- **`tracedecay sync`** -- ongoing updates. Requires an existing database. Errors if the project was never initialized.
 
 ### Incremental syncs
 
-After the initial full index, every subsequent `tokensave sync` is incremental. It detects which files changed since the last sync (via content hashing) and only re-indexes those files. On a typical commit-sized change, this takes under a second.
+After the initial full index, every subsequent `tracedecay sync` is incremental. It detects which files changed since the last sync (via content hashing) and only re-indexes those files. On a typical commit-sized change, this takes under a second.
 
 ### Force re-index
 
-If you ever need to rebuild the entire index from scratch (for example, after a major Tokensave upgrade), pass `--force`:
+If you ever need to rebuild the entire index from scratch (for example, after a major TraceDecay upgrade), pass `--force`:
 
 ```bash
-tokensave sync --force
+tracedecay sync --force
 ```
 
 ### Skipping folders
@@ -115,7 +115,7 @@ tokensave sync --force
 If there are directories you never want indexed (vendored code, generated output, etc.), pass `--skip-folder`:
 
 ```bash
-tokensave sync --skip-folder vendor --skip-folder generated
+tracedecay sync --skip-folder vendor --skip-folder generated
 ```
 
 ### Seeing what changed
@@ -123,7 +123,7 @@ tokensave sync --skip-folder vendor --skip-folder generated
 The `--doctor` flag lists every file that was added, modified, or removed during the sync, so you can verify exactly what the index updated:
 
 ```bash
-tokensave sync --doctor
+tracedecay sync --doctor
 ```
 
 ### Diagnosing slow syncs
@@ -131,7 +131,7 @@ tokensave sync --doctor
 If a sync appears stuck or is taking longer than expected, add `--verbose` (`-v`) to see per-phase diagnostics with file counts and timings:
 
 ```bash
-tokensave sync --verbose
+tracedecay sync --verbose
 ```
 
 Example output:
@@ -151,138 +151,138 @@ This also works with `--force` for full re-index diagnostics.
 
 ### Respecting .gitignore
 
-By default, tokensave respects your `.gitignore` rules and skips ignored files during indexing. You can check the current setting or toggle it:
+By default, tracedecay respects your `.gitignore` rules and skips ignored files during indexing. You can check the current setting or toggle it:
 
 ```bash
-tokensave gitignore              # show current setting
-tokensave gitignore on           # enable (default)
-tokensave gitignore off          # disable — index everything
+tracedecay gitignore              # show current setting
+tracedecay gitignore on           # enable (default)
+tracedecay gitignore off          # disable — index everything
 ```
 
-Don't forget to add `.tokensave` to your `.gitignore` so the database doesn't get committed:
+Don't forget to add `.tracedecay` to your `.gitignore` so the database doesn't get committed:
 
 ```bash
-echo .tokensave >> .gitignore
+echo .tracedecay >> .gitignore
 ```
 
 ---
 
 ## Connecting to Your Agent
 
-Tokensave works as an MCP (Model Context Protocol) server. AI coding agents connect to it to query your codebase instead of scanning files directly. The `install` command sets everything up automatically.
+TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents connect to it to query your codebase instead of scanning files directly. The `install` command sets everything up automatically.
 
 ### Claude Code
 
 ```bash
-tokensave install
+tracedecay install
 ```
 
-This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs a `PreToolUse` hook that redirects Claude away from spawning expensive Explore agents, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tokensave tools.
+This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs a `PreToolUse` hook that redirects Claude away from spawning expensive Explore agents, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools.
 
 ### Other agents
 
-Tokensave supports fifteen agents. Pass `--agent` to install for a specific one:
+TraceDecay supports fifteen agents. Pass `--agent` to install for a specific one:
 
 ```bash
-tokensave install --agent claude      # Claude Code (default)
-tokensave install --agent opencode    # OpenCode
-tokensave install --agent codex       # OpenAI Codex CLI
-tokensave install --agent gemini      # Gemini CLI
-tokensave install --agent hermes      # Hermes Agent
-tokensave install --agent hermes --profile work
-tokensave install --agent copilot     # GitHub Copilot CLI
-tokensave install --agent cursor      # Cursor
-tokensave install --agent zed         # Zed
-tokensave install --agent cline       # Cline
-tokensave install --agent roo-code    # Roo Code
-tokensave install --agent antigravity # Antigravity (Windsurf)
-tokensave install --agent kilo        # Kilo CLI
-tokensave install --agent kiro        # AWS Kiro
-tokensave install --agent kimi        # Moonshot Kimi CLI
-tokensave install --agent vibe        # Mistral Vibe
+tracedecay install --agent claude      # Claude Code (default)
+tracedecay install --agent opencode    # OpenCode
+tracedecay install --agent codex       # OpenAI Codex CLI
+tracedecay install --agent gemini      # Gemini CLI
+tracedecay install --agent hermes      # Hermes Agent
+tracedecay install --agent hermes --profile work
+tracedecay install --agent copilot     # GitHub Copilot CLI
+tracedecay install --agent cursor      # Cursor
+tracedecay install --agent zed         # Zed
+tracedecay install --agent cline       # Cline
+tracedecay install --agent roo-code    # Roo Code
+tracedecay install --agent antigravity # Antigravity (Windsurf)
+tracedecay install --agent kilo        # Kilo CLI
+tracedecay install --agent kiro        # AWS Kiro
+tracedecay install --agent kimi        # Moonshot Kimi CLI
+tracedecay install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tokensave tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tokensave`; the plugin bundles MCP, hooks, and the tokensave rule.
+Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tracedecay tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tracedecay`; the plugin bundles MCP, hooks, and the tracedecay rule.
 
-Codex setup registers tokensave in `~/.codex/config.toml` (MCP server + per-tool
+Codex setup registers tracedecay in `~/.codex/config.toml` (MCP server + per-tool
 auto-approval), writes prompt rules to `~/.codex/AGENTS.md`, and installs a
 Claude-style lifecycle hook set in `~/.codex/hooks.json` (SessionStart,
 UserPromptSubmit, SubagentStart, and PostToolUse). Codex requires you to **trust**
 new or changed command hooks before they run — run `/hooks` inside Codex to review
-and trust the tokensave hooks. See "Codex lifecycle hooks" below for what each one
+and trust the tracedecay hooks. See "Codex lifecycle hooks" below for what each one
 does and the known blind spots.
 
-Hermes setup writes a `tokensave` plugin into the selected Hermes profile and
+Hermes setup writes a `tracedecay` plugin into the selected Hermes profile and
 enables it in that profile's `config.yaml` under `plugins.enabled`. Without
-`--profile`, tokensave writes `~/.hermes/plugins/tokensave/` and
+`--profile`, tracedecay writes `~/.hermes/plugins/tracedecay/` and
 `~/.hermes/config.yaml`; with `--profile work`, it writes
-`~/.hermes/profiles/work/plugins/tokensave/` and
+`~/.hermes/profiles/work/plugins/tracedecay/` and
 `~/.hermes/profiles/work/config.yaml`. Profile names are normalized to lowercase
 and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use
-`tokensave uninstall --agent hermes --profile work` to remove a named profile
-install. `tokensave reinstall` and `tokensave doctor --agent hermes` currently
+`tracedecay uninstall --agent hermes --profile work` to remove a named profile
+install. `tracedecay reinstall` and `tracedecay doctor --agent hermes` currently
 operate on the default Hermes profile only.
 
-The plugin registers one Hermes-native wrapper per tokensave tool, adds a
-lightweight `pre_llm_call` steering hook, registers a `/tokensave_status` slash
+The plugin registers one Hermes-native wrapper per tracedecay tool, adds a
+lightweight `pre_llm_call` steering hook, registers a `/tracedecay_status` slash
 command when the installed Hermes version supports plugin commands, and bundles
-a `tokensave:tokensave` plugin skill. It also registers a `tokensave` memory
+a `tracedecay:tracedecay` plugin skill. It also registers a `tracedecay` memory
 provider (holographic facts via `fact_store` / `fact_feedback` /
-`memory_status`) and a `tokensave` context engine that compresses long
+`memory_status`) and a `tracedecay` context engine that compresses long
 conversations into a plugin-local LCM session database. The context engine exposes native
 `lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`,
 `lcm_expand_query`, `lcm_status`, and `lcm_doctor` tools (backed by the
-`tokensave_lcm_*` MCP tools), stores sessions under the active Hermes home for
+`tracedecay_lcm_*` MCP tools), stores sessions under the active Hermes home for
 profile installs or under the project for project-local installs, and honors
 the documented `LCM_*` environment knobs over host config defaults. The
-wrappers call `tokensave tool <name> --json --args <json>` from Hermes'
+wrappers call `tracedecay tool <name> --json --args <json>` from Hermes'
 current working directory, with a 600-second timeout and truncated
 stdout/stderr in error JSON. Passing an explicit project root is a future
 improvement once Hermes exposes a reliable root to plugins.
 Project-local Hermes install without `--profile` writes only project files:
-`.hermes/plugins/tokensave/` and `.hermes/config.yaml`. Launch Hermes with
+`.hermes/plugins/tracedecay/` and `.hermes/config.yaml`. Launch Hermes with
 `HERMES_HOME=<project>/.hermes` so it reads the project-local plugin, memory
 provider config, and LCM session storage. If you pass
-`--profile` together with `--local --agent hermes`, tokensave intentionally
+`--profile` together with `--local --agent hermes`, tracedecay intentionally
 targets the named profile instead of the project plugin directory; use this when
 you want to run the command from a project but update a Hermes profile.
 
-Kiro setup registers tokensave in `~/.kiro/settings/mcp.json`, writes steering to
-`~/.kiro/steering/tokensave.md`, and writes a tokensave-managed agent that loads
+Kiro setup registers tracedecay in `~/.kiro/settings/mcp.json`, writes steering to
+`~/.kiro/steering/tracedecay.md`, and writes a tracedecay-managed agent that loads
 that steering as a resource while keeping Kiro's default prompt. The managed
 agent exposes all configured tools and pre-approves Kiro built-ins plus the
-tokensave MCP server, then adds hooks that block research delegation until
-tokensave MCP tools have been tried and sync the index after Kiro writes files.
+tracedecay MCP server, then adds hooks that block research delegation until
+tracedecay MCP tools have been tried and sync the index after Kiro writes files.
 If you already have a different custom default agent or a user-managed
-`tokensave` agent, tokensave leaves it alone and prints a warning.
+`tracedecay` agent, tracedecay leaves it alone and prints a warning.
 
-The install is idempotent — safe to run again after upgrading tokensave. You'll also be offered the option to set up a global git post-commit hook (more on that below).
+The install is idempotent — safe to run again after upgrading tracedecay. You'll also be offered the option to set up a global git post-commit hook (more on that below).
 
 ### Project-local installs
 
 If you want an integration to apply only to the current repository, run install from the project root with `--local`:
 
 ```bash
-tokensave install --local --agent claude
-tokensave install --local --agent cursor
-tokensave install --local --agent copilot
+tracedecay install --local --agent claude
+tracedecay install --local --agent cursor
+tracedecay install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tokensave/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tracedecay/`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
 
 Cursor install is plugin-based:
 
-- `tokensave install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tokensave`.
-- `tokensave install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
-- The plugin MCP config runs `tokensave serve --path ${workspaceFolder}`, so the server resolves the active workspace/repo-local `.tokensave/` DB instead of the plugin directory.
-- Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tokensave.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
-- The plugin bundles Cursor-specific, fail-open hooks (each acts only when a `.tokensave/` index exists):
-  - `sessionStart` injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when uninitialized).
+- `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
+- `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
+- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace/repo-local `.tracedecay/` DB instead of the plugin directory.
+- Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
+- The plugin bundles Cursor-specific, fail-open hooks (each acts only when a `.tracedecay/` index exists):
+  - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
   - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape; the plugin's own `code-explorer`/`code-health-auditor`/`session-historian` agents are allow-listed.
-  - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tokensave_context`, `tokensave_search`, `tokensave_outline`, or `tokensave_files`; each hint category fires at most once per session.
-  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
+  - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
+  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into `.tracedecay/sessions.db` when `transcript_path` is present.
   - `afterFileEdit` (unmatched, so every Agent edit tool counts) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
-  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tokensave branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
+  - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
   - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
   Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. The Cursor `postToolUse` hint remains nonblocking to avoid noisy denials.
@@ -291,74 +291,74 @@ Manual Cursor plugin install for local development:
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
-ln -s /path/to/tokensave/cursor-plugin ~/.cursor/plugins/local/tokensave
+ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 ```
 
-Reload Cursor after installing or replacing the plugin. The plugin expects the `tokensave` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
+Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
 
-Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tokensave` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
+Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tracedecay` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
 
 #### Codex lifecycle hooks
 
-Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tokensave hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when a `.tokensave/` index exists.
+Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tracedecay hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when a `.tracedecay/` index exists.
 
-- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tokensave MCP tools and reporting index freshness (suggests `tokensave init` when uninitialized).
+- `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tracedecay MCP tools and reporting index freshness (suggests `tracedecay init` when uninitialized).
 - `UserPromptSubmit` — resets the per-project local token counter for the new turn and injects the same steering context.
-- `SubagentStart` — redirects research/explore subagents toward tokensave MCP tools via `additionalContext`. Codex's `SubagentStart` cannot hard-stop a subagent (`continue: false` is ignored for this event), so this steers rather than denies.
+- `SubagentStart` — redirects research/explore subagents toward tracedecay MCP tools via `additionalContext`. Codex's `SubagentStart` cannot hard-stop a subagent (`continue: false` is ignored for this event), so this steers rather than denies.
 - `PostToolUse` (matcher `Bash|apply_patch`) — for `apply_patch` edits, runs a targeted single-file sync of just the patched files (parsed from the patch envelope); for `Bash` git commands, branch switches bootstrap/maintain branch tracking (`branch add`) and other state-changing git commands run a coalesced incremental sync.
 
-**Trust gate:** Codex records trust against each hook's hash and skips new or changed non-managed command hooks until trusted. After install, run `/hooks` inside Codex to review and trust the tokensave hooks (the installer prints this reminder). For one-off non-interactive runs you can pass `--dangerously-bypass-hook-trust`, but trusting via `/hooks` is recommended. `tokensave doctor --agent codex` reports whether the hooks are registered and repeats the trust reminder.
+**Trust gate:** Codex records trust against each hook's hash and skips new or changed non-managed command hooks until trusted. After install, run `/hooks` inside Codex to review and trust the tracedecay hooks (the installer prints this reminder). For one-off non-interactive runs you can pass `--dangerously-bypass-hook-trust`, but trusting via `/hooks` is recommended. `tracedecay doctor --agent codex` reports whether the hooks are registered and repeats the trust reminder.
 
 **Blind spots:** `PostToolUse` only fires for `apply_patch` edits and "simple" Bash commands — file edits made through raw shell, the newer `unified_exec` mechanism, and `WebSearch` are not observed. There is no first-class branch-switch event, so branch switches are derived from Bash `git` commands. `PreToolUse` is intentionally not installed: Codex documents it as a partial guardrail (it can't intercept `unified_exec`/`WebSearch`/raw-shell edits), so installing a redundant-exploration blocker there would be unreliable.
 
-The generated MCP entries use the resolved absolute path to the current `tokensave` executable. A local install does not update `~/.tokensave/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tokensave install --local --agent antigravity` and `tokensave install --local --agent cline` are rejected with unsupported-agent errors.
+The generated MCP entries use the resolved absolute path to the current `tracedecay` executable. A local install does not update `~/.tracedecay/config.toml`, installed-agent tracking, the last installed version, or the global git post-commit hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tracedecay install --local --agent antigravity` and `tracedecay install --local --agent cline` are rejected with unsupported-agent errors.
 
 #### Config backups
 
-Whenever tokensave rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:
+Whenever tracedecay rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:
 
 - `~/.codex/config.toml` → `~/.codex/config.toml.bak`
 - `~/.codex/hooks.json` → `~/.codex/hooks.json.bak`
 - `~/.claude.json` → `~/.claude.json.bak`
 
-If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tokensave never deletes or rotates it, so the most recent backup is the file you want.
+If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore with `cp <path>.bak <path>`. The `.bak` is always the **exact bytes** of whatever was on disk just before the write; tracedecay never deletes or rotates it, so the most recent backup is the file you want.
 
 ### Removing an integration
 
 ```bash
-tokensave uninstall                   # remove Claude Code integration
-tokensave uninstall --agent codex     # remove Codex integration
-tokensave uninstall --agent hermes --profile work
+tracedecay uninstall                   # remove Claude Code integration
+tracedecay uninstall --agent codex     # remove Codex integration
+tracedecay uninstall --agent hermes --profile work
 ```
 
 ---
 
 ## Exploring Your Codebase from the CLI
 
-You don't need an AI agent to use tokensave. The CLI has several commands for direct exploration.
+You don't need an AI agent to use tracedecay. The CLI has several commands for direct exploration.
 
 ### Searching for symbols
 
 ```bash
-tokensave query "authenticate"
+tracedecay query "authenticate"
 ```
 
 This searches the full-text index for symbols matching your query. It returns function names, class names, method names, and their file locations and signatures. Limit results with `-l`:
 
 ```bash
-tokensave query "authenticate" -l 5
+tracedecay query "authenticate" -l 5
 ```
 
 ### Building task context
 
 ```bash
-tokensave context "implement user authentication"
+tracedecay context "implement user authentication"
 ```
 
 This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to Markdown; use `--format json` for structured output.
 
 ```bash
-tokensave context "implement user authentication" --format json -n 30
+tracedecay context "implement user authentication" --format json -n 30
 ```
 
 The `-n` flag controls how many symbols are included (default: 20).
@@ -366,43 +366,43 @@ The `-n` flag controls how many symbols are included (default: 20).
 ### Listing indexed files
 
 ```bash
-tokensave files                           # all files
-tokensave files --filter src/mcp          # only files under src/mcp/
-tokensave files --pattern "**/*.rs"       # only Rust files
-tokensave files --json                    # machine-readable output
+tracedecay files                           # all files
+tracedecay files --filter src/mcp          # only files under src/mcp/
+tracedecay files --pattern "**/*.rs"       # only Rust files
+tracedecay files --json                    # machine-readable output
 ```
 
 ### Running the MCP server directly
 
 ```bash
-tokensave serve
+tracedecay serve
 ```
 
 This starts the MCP server over stdio. You normally don't need to run this yourself — the agent integration handles it. But it's useful for debugging or connecting custom tools.
 
 ### Working from a subdirectory
 
-You can open your AI agent from any subdirectory of an indexed project. Tokensave will walk up the directory tree to find the nearest `.tokensave/` database — similar to how git finds `.git/`.
+You can open your AI agent from any subdirectory of an indexed project. TraceDecay will walk up the directory tree to find the nearest `.tracedecay/` database — similar to how git finds `.git/`.
 
-When the MCP server starts from a subdirectory, listing tools like `tokensave_files`, `tokensave_search`, and `tokensave_context` automatically scope their results to that subdirectory. This is useful in monorepos or large projects where you want to focus on one area.
+When the MCP server starts from a subdirectory, listing tools like `tracedecay_files`, `tracedecay_search`, and `tracedecay_context` automatically scope their results to that subdirectory. This is useful in monorepos or large projects where you want to focus on one area.
 
-Graph traversal tools (`tokensave_callers`, `tokensave_callees`, `tokensave_impact`, etc.) remain unscoped so you can still follow connections across directory boundaries.
+Graph traversal tools (`tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, etc.) remain unscoped so you can still follow connections across directory boundaries.
 
-You can always override the automatic scope by passing an explicit `path` parameter to any tool. `tokensave_status` shows the active scope prefix when one is in effect.
+You can always override the automatic scope by passing an explicit `path` parameter to any tool. `tracedecay_status` shows the active scope prefix when one is in effect.
 
 ---
 
 ## Keeping the Index Fresh
 
-Tokensave gives you three ways to keep the index up to date.
+TraceDecay gives you three ways to keep the index up to date.
 
 ### Manual sync
 
-Run `tokensave sync` whenever you want. It's incremental and fast.
+Run `tracedecay sync` whenever you want. It's incremental and fast.
 
 ### Post-commit hook
 
-During `tokensave install`, you'll be offered a global git `post-commit` hook. If you accept, tokensave will automatically sync in the background after every git commit across all your repos. The hook is a no-op in repos that don't have a `.tokensave/` directory.
+During `tracedecay install`, you'll be offered a global git `post-commit` hook. If you accept, tracedecay will automatically sync in the background after every git commit across all your repos. The hook is a no-op in repos that don't have a `.tracedecay/` directory.
 
 You can also set it up manually:
 
@@ -435,13 +435,14 @@ cp scripts/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
-Or run `tokensave sync` manually when you need a fresh index.
+Or run `tracedecay sync` manually when you need a fresh index.
 
 ### Upgrading from 5.x
 
 The standalone `tokensave daemon` command and its system-service autostart
-were removed in 6.0.0. If you had a daemon autostart installed under 5.x,
-remove it manually.
+were removed in 6.0.0 (when the project was still named TokenSave). If you had
+a daemon autostart installed under 5.x, remove it manually. Note the service
+names below use the old `tokensave` branding because that is what 5.x installed.
 
 If you don't remember the exact service/plist name, list them first:
 
@@ -464,29 +465,29 @@ Once your agent is attached, MCP tool calls keep the index fresh on demand.
 The `doctor` command runs a comprehensive health check:
 
 ```bash
-tokensave doctor
+tracedecay doctor
 ```
 
 It verifies:
 
 - **Binary** — location and version
-- **Current project** — whether a `.tokensave/` index exists and the database is healthy
-- **Global database** — the cross-project database at `~/.tokensave/global.db`
-- **User config** — `~/.tokensave/config.toml` and upload settings
+- **Current project** — whether a `.tracedecay/` index exists and the database is healthy
+- **Global database** — the cross-project database at `~/.tracedecay/global.db`
+- **User config** — `~/.tracedecay/config.toml` and upload settings
 - **Agent integrations** — MCP server registration, hook installation, tool permissions, prompt rules
 - **Network** — connectivity to the worldwide counter and GitHub releases API
 
-If any tool permissions are missing after an upgrade, doctor will tell you to run `tokensave install` again.
+If any tool permissions are missing after an upgrade, doctor will tell you to run `tracedecay install` again.
 
 To check only a specific agent:
 
 ```bash
-tokensave doctor --agent claude
-tokensave doctor --agent codex
-tokensave doctor --agent kiro
+tracedecay doctor --agent claude
+tracedecay doctor --agent codex
+tracedecay doctor --agent kiro
 ```
 
-The accepted agent values are the same values supported by `tokensave install --agent`.
+The accepted agent values are the same values supported by `tracedecay install --agent`.
 
 ---
 
@@ -495,7 +496,7 @@ The accepted agent values are the same values supported by `tokensave install --
 When you change source files, you often want to know which tests might be affected. The `affected` command traces through the file dependency graph to find them.
 
 ```bash
-tokensave affected src/main.rs src/db/connection.rs
+tracedecay affected src/main.rs src/db/connection.rs
 ```
 
 This performs a breadth-first search from the changed files through import/dependency edges to find test files that directly or transitively depend on those files.
@@ -505,68 +506,68 @@ This performs a breadth-first search from the changed files through import/depen
 This is especially useful in CI pipelines:
 
 ```bash
-git diff --name-only HEAD~1 | tokensave affected --stdin
+git diff --name-only HEAD~1 | tracedecay affected --stdin
 ```
 
 ### Options
 
 ```bash
-tokensave affected src/lib.rs --depth 3         # limit traversal depth (default: 5)
-tokensave affected src/lib.rs --filter "*_test.rs"  # custom test file pattern
-tokensave affected src/lib.rs --json             # JSON output
-tokensave affected src/lib.rs --quiet            # just file paths, no decoration
+tracedecay affected src/lib.rs --depth 3         # limit traversal depth (default: 5)
+tracedecay affected src/lib.rs --filter "*_test.rs"  # custom test file pattern
+tracedecay affected src/lib.rs --json             # JSON output
+tracedecay affected src/lib.rs --quiet            # just file paths, no decoration
 ```
 
 ---
 
 ## MCP Tools for AI Agents
 
-When running as an MCP server, tokensave exposes more than 70 tools that AI agents can call. Here's what they do, grouped by purpose.
+When running as an MCP server, tracedecay exposes more than 70 tools that AI agents can call. Here's what they do, grouped by purpose.
 
 ### Core exploration
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_context` | Given a task description, returns relevant symbols, relationships, and code snippets. This is the go-to starting point for any coding task. |
-| `tokensave_search` | Find symbols by name. Supports filtering by kind (function, class, method, etc.). |
-| `tokensave_node` | Get full details for a specific symbol: source code, location, complexity metrics, and relationships. |
-| `tokensave_files` | List indexed files, optionally filtered by directory or glob pattern. |
-| `tokensave_status` | Index statistics: file counts, symbol counts, language distribution, and tokens saved. |
+| `tracedecay_context` | Given a task description, returns relevant symbols, relationships, and code snippets. This is the go-to starting point for any coding task. |
+| `tracedecay_search` | Find symbols by name. Supports filtering by kind (function, class, method, etc.). |
+| `tracedecay_node` | Get full details for a specific symbol: source code, location, complexity metrics, and relationships. |
+| `tracedecay_files` | List indexed files, optionally filtered by directory or glob pattern. |
+| `tracedecay_status` | Index statistics: file counts, symbol counts, language distribution, and tokens saved. |
 
 ### Navigating relationships
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_callers` | Find what calls a given function or method. Configurable traversal depth. |
-| `tokensave_callees` | Find what a function or method calls. |
-| `tokensave_impact` | Trace the full blast radius of changing a symbol — everything that could be affected. |
-| `tokensave_affected` | Find test files affected by source file changes. |
-| `tokensave_similar` | Find symbols with similar names (useful for naming patterns or related code). |
-| `tokensave_rename_preview` | Preview all references to a symbol before renaming it. |
+| `tracedecay_callers` | Find what calls a given function or method. Configurable traversal depth. |
+| `tracedecay_callees` | Find what a function or method calls. |
+| `tracedecay_impact` | Trace the full blast radius of changing a symbol — everything that could be affected. |
+| `tracedecay_affected` | Find test files affected by source file changes. |
+| `tracedecay_similar` | Find symbols with similar names (useful for naming patterns or related code). |
+| `tracedecay_rename_preview` | Preview all references to a symbol before renaming it. |
 
 ### Code quality analysis
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_dead_code` | Find unreachable symbols — functions with no callers. |
-| `tokensave_unused_imports` | Find import statements that are never referenced. |
-| `tokensave_circular` | Detect circular file dependencies. |
-| `tokensave_recursion` | Detect recursive and mutually-recursive call cycles. |
-| `tokensave_complexity` | Rank functions by composite complexity score, including cyclomatic complexity from the AST. |
-| `tokensave_god_class` | Find classes with the most members — candidates for decomposition. |
-| `tokensave_hotspots` | Find the most connected symbols (highest call count). These are high-risk areas. |
-| `tokensave_doc_coverage` | Find public symbols missing documentation. |
-| `tokensave_simplify_scan` | Quality analysis of changed files: duplications, dead code, complexity, coupling. |
+| `tracedecay_dead_code` | Find unreachable symbols — functions with no callers. |
+| `tracedecay_unused_imports` | Find import statements that are never referenced. |
+| `tracedecay_circular` | Detect circular file dependencies. |
+| `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
+| `tracedecay_complexity` | Rank functions by composite complexity score, including cyclomatic complexity from the AST. |
+| `tracedecay_god_class` | Find classes with the most members — candidates for decomposition. |
+| `tracedecay_hotspots` | Find the most connected symbols (highest call count). These are high-risk areas. |
+| `tracedecay_doc_coverage` | Find public symbols missing documentation. |
+| `tracedecay_simplify_scan` | Quality analysis of changed files: duplications, dead code, complexity, coupling. |
 
 ### Health & quality signals
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_health` | Composite quality signal (0–10000) from five structural dimensions (acyclicity, depth, equality, redundancy, modularity) with a low-weight penalty for `/// skip-test-coverage` overuse. The single number to track over time. |
-| `tokensave_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
-| `tokensave_dependency_depth` | Longest file-level dependency chains — the critical paths where upstream changes ripple through the most layers. |
-| `tokensave_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |
-| `tokensave_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" |
+| `tracedecay_health` | Composite quality signal (0–10000) from five structural dimensions (acyclicity, depth, equality, redundancy, modularity) with a low-weight penalty for `/// skip-test-coverage` overuse. The single number to track over time. |
+| `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
+| `tracedecay_dependency_depth` | Longest file-level dependency chains — the critical paths where upstream changes ripple through the most layers. |
+| `tracedecay_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |
+| `tracedecay_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" |
 
 ### Test Coverage Conventions
 
@@ -579,45 +580,45 @@ Mark functions that are genuinely untestable in unit tests (e.g. infrastructure-
 pub async fn produce(&mut self, topic: &str, batch: Bytes) -> io::Result<i64> { ... }
 ```
 
-Marked functions are excluded from `tokensave_test_risk` coverage calculations, giving you an accurate picture of testable-code coverage. The `skipped` count appears in the summary so you can track how many functions use the annotation.
+Marked functions are excluded from `tracedecay_test_risk` coverage calculations, giving you an accurate picture of testable-code coverage. The `skipped` count appears in the summary so you can track how many functions use the annotation.
 
-**Health penalty:** The `coverage_discipline` dimension (visible in `tokensave_health` and `tokensave_session_start`/`session_end`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
+**Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_session_start`/`session_end`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
 
 ### Structural analysis
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_module_api` | Public API surface of a file or directory. |
-| `tokensave_coupling` | Rank files by coupling (fan-in or fan-out). |
-| `tokensave_inheritance_depth` | Find the deepest class inheritance hierarchies. |
-| `tokensave_type_hierarchy` | Recursive type hierarchy tree for traits, interfaces, and classes. |
-| `tokensave_distribution` | Node kind breakdown (classes, methods, fields) per file or directory. |
-| `tokensave_rank` | Rank nodes by relationship count (most-implemented interface, most-extended class, etc.). |
-| `tokensave_largest` | Rank nodes by size — largest classes, longest methods. |
+| `tracedecay_module_api` | Public API surface of a file or directory. |
+| `tracedecay_coupling` | Rank files by coupling (fan-in or fan-out). |
+| `tracedecay_inheritance_depth` | Find the deepest class inheritance hierarchies. |
+| `tracedecay_type_hierarchy` | Recursive type hierarchy tree for traits, interfaces, and classes. |
+| `tracedecay_distribution` | Node kind breakdown (classes, methods, fields) per file or directory. |
+| `tracedecay_rank` | Rank nodes by relationship count (most-implemented interface, most-extended class, etc.). |
+| `tracedecay_largest` | Rank nodes by size — largest classes, longest methods. |
 
 ### Git-aware tools
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_diff_context` | Semantic context for changed files: modified symbols, dependencies, and affected tests. |
-| `tokensave_changelog` | Semantic diff between two git refs — which symbols were added, removed, or modified. |
-| `tokensave_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
-| `tokensave_pr_context` | Semantic diff between git refs for pull request descriptions. |
-| `tokensave_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. |
+| `tracedecay_diff_context` | Semantic context for changed files: modified symbols, dependencies, and affected tests. |
+| `tracedecay_changelog` | Semantic diff between two git refs — which symbols were added, removed, or modified. |
+| `tracedecay_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
+| `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions. |
+| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. |
 
 ### Porting tools
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_port_status` | Compare symbols between source/target directories to track cross-language porting progress. |
-| `tokensave_port_order` | Topological sort of symbols for porting — tells you what to port first based on dependencies. |
+| `tracedecay_port_status` | Compare symbols between source/target directories to track cross-language porting progress. |
+| `tracedecay_port_order` | Topological sort of symbols for porting — tells you what to port first based on dependencies. |
 
 ### Session management
 
 | Tool | What it does |
 |------|-------------|
-| `tokensave_session_start` | Save current health metrics as a baseline before starting work. |
-| `tokensave_session_end` | Compare current health against the baseline to detect structural degradation during the session. |
+| `tracedecay_session_start` | Save current health metrics as a baseline before starting work. |
+| `tracedecay_session_end` | Compare current health against the baseline to detect structural degradation during the session. |
 
 ### Memory and fact recall
 
@@ -625,21 +626,21 @@ The holographic memory tools store durable facts linked to entities:
 
 | Tool | What it does |
 |------|--------------|
-| `tokensave_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
-| `tokensave_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
-| `tokensave_memory_status` | Repair dirty memory banks, then report fact/entity counts, trust-score buckets, feedback counts, and missing-vector count. |
+| `tracedecay_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
+| `tracedecay_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
+| `tracedecay_memory_status` | Repair dirty memory banks, then report fact/entity counts, trust-score buckets, feedback counts, and missing-vector count. |
 
-Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status`.
+Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
-Common `tokensave_fact_store` payloads:
+Common `tracedecay_fact_store` payloads:
 
 ```json
-{"action": "add", "content": "Repository prefers local installs during active development.", "entities": ["install", "tokensave"], "category": "project", "source": "user", "tags": ["preference"], "trust": 0.9}
+{"action": "add", "content": "Repository prefers local installs during active development.", "entities": ["install", "tracedecay"], "category": "project", "source": "user", "tags": ["preference"], "trust": 0.9}
 {"action": "search", "query": "local install preference", "min_trust": 0.5, "limit": 10}
-{"action": "probe", "entity": "tokensave"}
+{"action": "probe", "entity": "tracedecay"}
 ```
 
-Common `tokensave_fact_feedback` payloads:
+Common `tracedecay_fact_feedback` payloads:
 
 ```json
 {"fact_id": 42, "action": "helpful", "source": "agent", "note": "Matched the current code path."}
@@ -648,13 +649,13 @@ Common `tokensave_fact_feedback` payloads:
 
 For exact fields, inspect the live MCP descriptors; the generated schemas are the source of truth.
 
-Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tokensave/session_baseline.json`, memory and feedback/status tools update the project database, and edit tools modify source files.
+Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tracedecay/session_baseline.json`, memory and feedback/status tools update the project database, and edit tools modify source files.
 
 ---
 
 ## Supported Languages
 
-Tokensave supports more than 50 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
+TraceDecay supports more than 50 languages, organized into three tiers. Each tier includes all the languages from the tier below it.
 
 ### Lite (14 languages)
 
@@ -679,12 +680,12 @@ Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, 
 You can also cherry-pick individual languages without taking a full tier:
 
 ```bash
-cargo install tokensave --no-default-features --features lang-nix,lang-bash
+cargo install tracedecay --no-default-features --features lang-nix,lang-bash
 ```
 
 ### What gets extracted
 
-For each supported language, tokensave extracts:
+For each supported language, tracedecay extracts:
 
 - Function and method definitions (with signatures)
 - Class, struct, trait, interface, and enum definitions
@@ -699,47 +700,47 @@ For each supported language, tokensave extracts:
 
 ## Privacy and Network
 
-Tokensave's core functionality is 100% local. Indexing, search, graph queries, and the MCP server all run on your machine against a local database. No API keys are needed.
+TraceDecay's core functionality is 100% local. Indexing, search, graph queries, and the MCP server all run on your machine against a local database. No API keys are needed.
 
 There are two optional network calls.
 
 ### Worldwide token counter
 
-Tokensave tracks how many tokens it has saved you. During `sync` and `status`, it uploads that count (a single number like `4823`) to an anonymous worldwide counter. No code, file names, project names, or identifying information is sent. The Cloudflare Worker also logs the country derived from your IP for aggregate geographic statistics — your actual IP is not stored.
+TraceDecay tracks how many tokens it has saved you. During `sync` and `status`, it uploads that count (a single number like `4823`) to an anonymous worldwide counter. No code, file names, project names, or identifying information is sent. The Cloudflare Worker also logs the country derived from your IP for aggregate geographic statistics — your actual IP is not stored.
 
-This powers the "Worldwide" counter shown in `tokensave status`.
+This powers the "Worldwide" counter shown in `tracedecay status`.
 
 **To opt out:**
 
 ```bash
-tokensave disable-upload-counter
+tracedecay disable-upload-counter
 ```
 
-When disabled, tokensave never uploads your count but still fetches and displays the worldwide total. Re-enable at any time:
+When disabled, tracedecay never uploads your count but still fetches and displays the worldwide total. Re-enable at any time:
 
 ```bash
-tokensave enable-upload-counter
+tracedecay enable-upload-counter
 ```
 
 ### Version check
 
-Tokensave checks GitHub for new releases so it can show you an upgrade notice. This is a single GET request to the GitHub API with no identifying information. It has a 1-second timeout and failures are silently ignored. This check cannot be disabled, but it never blocks your workflow.
+TraceDecay checks GitHub for new releases so it can show you an upgrade notice. This is a single GET request to the GitHub API with no identifying information. It has a 1-second timeout and failures are silently ignored. This check cannot be disabled, but it never blocks your workflow.
 
 ---
 
-## Updating Tokensave
+## Updating TraceDecay
 
-When a new version is available, tokensave tells you during `sync` and `status`:
+When a new version is available, tracedecay tells you during `sync` and `status`:
 
 ```
 Update available: v3.3.3 -> v3.4.0
-  Run: tokensave upgrade
+  Run: tracedecay upgrade
 ```
 
 The `upgrade` command downloads the latest release from GitHub and replaces the binary in place:
 
 ```bash
-tokensave upgrade
+tracedecay upgrade
 ```
 
 Beta and stable are separate update channels — a beta build only sees beta releases and vice versa. Any attached MCP servers will continue running with the previous binary until you restart your agent.
@@ -747,33 +748,35 @@ Beta and stable are separate update channels — a beta build only sees beta rel
 You can also update through your package manager:
 
 ```bash
-brew upgrade tokensave          # Homebrew
-scoop update tokensave          # Scoop
-cargo install tokensave         # Cargo
+brew upgrade tracedecay          # Homebrew
+scoop update tracedecay          # Scoop
+cargo install tracedecay         # Cargo
 ```
 
 After upgrading, it's good practice to re-run install (to pick up any new tool permissions or prompt rules) and force a re-index:
 
 ```bash
-tokensave install
-tokensave sync --force
+tracedecay install
+tracedecay sync --force
 ```
 
 ---
 
 ## Configuration Files
 
-Tokensave stores data in two places.
+TraceDecay stores data in two places.
 
-### Per-project: `.tokensave/`
+### Per-project: `.tracedecay/`
 
 Created inside each project you index. Contains:
 
-- `tokensave.db` — the libSQL database with all symbols, edges, files, and vector embeddings
+- `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
 
-Add `.tokensave` to your `.gitignore`.
+Add `.tracedecay` to your `.gitignore`.
 
-### Per-user: `~/.tokensave/`
+Projects indexed before the TraceDecay rename may still have a `.tokensave/` directory with a `tokensave.db` inside — it is still honored as a fallback, so you don't need to re-index.
+
+### Per-user: `~/.tracedecay/`
 
 Created in your home directory. Contains:
 
@@ -794,36 +797,36 @@ last_worldwide_fetch_at = 1711375200
 
 ## Troubleshooting
 
-### "tokensave not initialized"
+### "tracedecay not initialized"
 
-The `.tokensave/` directory doesn't exist in your current project. Run:
+The `.tracedecay/` directory doesn't exist in your current project. Run:
 
 ```bash
-tokensave init
+tracedecay init
 ```
 
 ### MCP server not connecting
 
-Your AI agent doesn't see tokensave tools.
+Your AI agent doesn't see tracedecay tools.
 
-1. Run `tokensave doctor` to check the integration
-2. Verify `tokensave` is on your PATH: `which tokensave`
-3. Re-run `tokensave install` and restart your agent completely
+1. Run `tracedecay doctor` to check the integration
+2. Verify `tracedecay` is on your PATH: `which tracedecay`
+3. Re-run `tracedecay install` and restart your agent completely
 
 ### Missing symbols in search
 
 Some symbols aren't showing up.
 
-- Run `tokensave sync` to update the index
+- Run `tracedecay sync` to update the index
 - Check that the language is supported (see the tiers above)
-- Verify the file isn't being skipped by `.gitignore` (`tokensave gitignore` to check)
+- Verify the file isn't being skipped by `.gitignore` (`tracedecay gitignore` to check)
 
 ### Indexing is slow on first run
 
-The initial full index of a large project can take a few seconds. This is normal. Use `tokensave sync --verbose` to see which phase is taking the longest.
+The initial full index of a large project can take a few seconds. This is normal. Use `tracedecay sync --verbose` to see which phase is taking the longest.
 
 - Subsequent syncs are incremental and much faster
-- Use `tokensave sync` (not `--force`) for day-to-day updates
+- Use `tracedecay sync` (not `--force`) for day-to-day updates
 - The post-commit hook and the embedded MCP watcher run in the background so they never block you
 
 ### Stale install warning
@@ -831,7 +834,7 @@ The initial full index of a large project can take a few seconds. This is normal
 If you see a warning about your install being stale after an upgrade, run:
 
 ```bash
-tokensave install
+tracedecay install
 ```
 
 This updates tool permissions, hooks, and prompt rules to match the new version.

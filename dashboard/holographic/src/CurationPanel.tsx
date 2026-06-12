@@ -15,6 +15,7 @@ import type {
   MemoryCurateResponse,
   MemoryCuratorActivityEvent,
   MemoryCuratorStatusResponse,
+  MemoryOplogEvent,
 } from "./types";
 
 type CurationTab = "plan" | "history" | "activity";
@@ -283,6 +284,22 @@ function formatHistoryTime(ts?: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Oplog timestamps are unix seconds. */
+function formatOplogTime(ts: number): string {
+  if (!ts) return "";
+  return formatHistoryTime(new Date(ts * 1000).toISOString());
+}
+
+/** Compact one-line summary of an oplog row's detail payload. */
+function oplogDetailSummary(event: MemoryOplogEvent): string {
+  const detail = event.detail ?? {};
+  const parts = Object.entries(detail)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 4)
+    .map(([key, value]) => `${key}=${String(value)}`);
+  return parts.join(" · ");
 }
 
 function ActivityScroller({
@@ -691,6 +708,8 @@ export default function CurationPanel({
   const [status, setStatus] = useState<MemoryCuratorStatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState("");
+  const [oplog, setOplog] = useState<MemoryOplogEvent[]>([]);
+  const [oplogError, setOplogError] = useState("");
   const [activity, setActivity] = useState<MemoryCuratorActivityEvent[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState("");
@@ -818,6 +837,17 @@ export default function CurationPanel({
       .finally(() => setStatusLoading(false));
   }, []);
 
+  const loadOplog = useCallback(() => {
+    setOplogError("");
+    api
+      .getMemoryOplog({ limit: 30 })
+      .then((r) => {
+        setOplog(r.events || []);
+        if (r.error) setOplogError(r.error);
+      })
+      .catch((e) => setOplogError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
   useEffect(() => {
     if (activeTab === "plan" && !loading && !applying) {
       loadSavedPreview(false);
@@ -829,6 +859,12 @@ export default function CurationPanel({
       loadStatus();
     }
   }, [activeTab, loadStatus, status, statusLoading]);
+
+  useEffect(() => {
+    if (activeTab === "history") {
+      loadOplog();
+    }
+  }, [activeTab, loadOplog]);
 
   useEffect(() => {
     if (activeTab === "activity" && activity.length === 0) {
@@ -1179,6 +1215,37 @@ export default function CurationPanel({
                 </div>
               </>
             ) : null}
+            <div className="border border-border bg-background/30 px-3 py-2">
+              <div className="mb-1 text-[11px] uppercase tracking-[0.08em] text-text-tertiary">
+                Recent memory operations
+              </div>
+              {oplogError ? (
+                <div className="text-xs text-destructive">{oplogError}</div>
+              ) : null}
+              {oplog.length ? (
+                <div className="flex flex-col gap-1">
+                  {oplog.map((event) => (
+                    <div
+                      key={event.id}
+                      className="grid grid-cols-[7.5rem_5.5rem_minmax(0,1fr)] gap-2 font-mono-ui text-xs"
+                    >
+                      <span className="text-text-tertiary">{formatOplogTime(event.ts)}</span>
+                      <span className="truncate uppercase tracking-[0.08em] text-text-secondary">
+                        {event.op}
+                      </span>
+                      <span className="min-w-0 break-all text-text-tertiary">
+                        {event.fact_id != null ? `#${event.fact_id} ` : ""}
+                        {oplogDetailSummary(event)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-text-tertiary">
+                  No memory operations recorded yet.
+                </div>
+              )}
+            </div>
             {report ? (
               <>
                 <div className="text-xs font-medium text-foreground">

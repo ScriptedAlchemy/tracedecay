@@ -39,6 +39,7 @@ pub struct ToolDefinition {
 
 /// The result of a tool call, including the JSON response and the file
 /// paths that were touched (used to track saved tokens).
+#[derive(Debug)]
 pub struct ToolResult {
     /// The JSON-RPC result payload.
     pub value: Value,

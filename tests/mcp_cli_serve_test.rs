@@ -5,14 +5,14 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::tokensave::TokenSave;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::tracedecay::TraceDecay;
 
 async fn init_project_with_file(contents: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), contents).unwrap();
-    let cg = TokenSave::init(dir.path()).await.unwrap();
+    let cg = TraceDecay::init(dir.path()).await.unwrap();
     cg.index_all().await.unwrap();
     dir
 }
@@ -21,25 +21,25 @@ async fn init_project_under(parent: &Path, name: &str, contents: &str) -> PathBu
     let path = parent.join(name);
     fs::create_dir_all(path.join("src")).unwrap();
     fs::write(path.join("src/lib.rs"), contents).unwrap();
-    let cg = TokenSave::init(&path).await.unwrap();
+    let cg = TraceDecay::init(&path).await.unwrap();
     cg.index_all().await.unwrap();
     path
 }
 
 async fn register_global_project(home: &Path, project: &Path) {
-    let db_path = home.join(".tokensave/global.db");
+    let db_path = home.join(".tracedecay/global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     db.upsert(project, 0).await;
     db.checkpoint().await;
 }
 
-fn tokensave_command_with_home(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tokensave"));
+fn tracedecay_command_with_home(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TOKENSAVE_GLOBAL_DB", home.join(".tokensave/global.db"));
+        .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"));
     command
 }
 
@@ -91,7 +91,7 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
     let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
 
-    let output = tokensave_command_with_home(home.path())
+    let output = tracedecay_command_with_home(home.path())
         .arg("serve")
         .arg("--path")
         .arg(explicit.path())
@@ -99,7 +99,7 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("tokensave serve should run");
+        .expect("tracedecay serve should run");
 
     assert!(
         !output.status.success(),
@@ -122,14 +122,14 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), stale.path()).await;
 
-    let mut child = tokensave_command_with_home(home.path())
+    let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
         .current_dir(cwd.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("tokensave serve should start");
+        .expect("tracedecay serve should start");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
@@ -157,7 +157,7 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
+                    "name": "tracedecay_runtime",
                     "arguments": {}
                 }
             })
@@ -167,10 +167,10 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
 
     let output = child
         .wait_with_output()
-        .expect("tokensave serve should exit after stdin closes");
+        .expect("tracedecay serve should exit after stdin closes");
     assert!(
         output.status.success(),
-        "tokensave serve failed\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -189,14 +189,14 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let nested_cwd = cwd_project.path().join("src");
     let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
 
-    let mut child = tokensave_command_with_home(home.path())
+    let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
         .current_dir(&nested_cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("tokensave serve should start");
+        .expect("tracedecay serve should start");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
@@ -224,7 +224,7 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
+                    "name": "tracedecay_runtime",
                     "arguments": {}
                 }
             })
@@ -234,10 +234,10 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
 
     let output = child
         .wait_with_output()
-        .expect("tokensave serve should exit after stdin closes");
+        .expect("tracedecay serve should exit after stdin closes");
     assert!(
         output.status.success(),
-        "tokensave serve failed\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -255,7 +255,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     let explicit = init_project_with_file("pub fn explicit_project_marker() {}\n").await;
     let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
 
-    let mut child = tokensave_command_with_home(home.path())
+    let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
         .arg("--path")
         .arg(explicit.path())
@@ -263,7 +263,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("tokensave serve should start");
+        .expect("tracedecay serve should start");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
@@ -291,7 +291,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
+                    "name": "tracedecay_runtime",
                     "arguments": {}
                 }
             })
@@ -301,10 +301,10 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
 
     let output = child
         .wait_with_output()
-        .expect("tokensave serve should exit after stdin closes");
+        .expect("tracedecay serve should exit after stdin closes");
     assert!(
         output.status.success(),
-        "tokensave serve failed\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -323,14 +323,14 @@ async fn no_explicit_path_without_roots_still_uses_global_fallback() {
     let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
 
-    let output = tokensave_command_with_home(home.path())
+    let output = tracedecay_command_with_home(home.path())
         .arg("serve")
         .current_dir(cwd.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("tokensave serve should run");
+        .expect("tracedecay serve should run");
 
     assert!(
         output.status.success(),
@@ -361,14 +361,14 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     register_global_project(home.path(), &stale).await;
     register_global_project(home.path(), &active).await;
 
-    let mut child = tokensave_command_with_home(home.path())
+    let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
         .current_dir(cwd.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("tokensave serve should start");
+        .expect("tracedecay serve should start");
 
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
@@ -396,7 +396,7 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "tokensave_runtime",
+                    "name": "tracedecay_runtime",
                     "arguments": {}
                 }
             })
@@ -406,10 +406,10 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
 
     let output = child
         .wait_with_output()
-        .expect("tokensave serve should exit after stdin closes");
+        .expect("tracedecay serve should exit after stdin closes");
     assert!(
         output.status.success(),
-        "tokensave serve should accept encoded file://localhost MCP roots\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay serve should accept encoded file://localhost MCP roots\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -429,14 +429,14 @@ async fn same_depth_descendant_global_fallback_is_ambiguous() {
     register_global_project(home.path(), &alpha).await;
     register_global_project(home.path(), &beta).await;
 
-    let output = tokensave_command_with_home(home.path())
+    let output = tracedecay_command_with_home(home.path())
         .arg("serve")
         .current_dir(cwd.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("tokensave serve should run");
+        .expect("tracedecay serve should run");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -446,7 +446,7 @@ async fn same_depth_descendant_global_fallback_is_ambiguous() {
         stderr
     );
     assert!(
-        stderr.contains("Multiple tokensave projects found"),
+        stderr.contains("Multiple tracedecay projects found"),
         "stderr should explain the ambiguity:\n{stderr}"
     );
     assert!(

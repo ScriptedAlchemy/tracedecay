@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokensave::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
+use tracedecay::sessions::lcm::{LcmError, LcmStorageKind, LCM_SCHEMA_VERSION};
 
 mod common;
 use common::{
@@ -95,7 +95,7 @@ fn externalized_ref_from_placeholder(text: &str) -> String {
 async fn externalizes_nested_json_media_payload_without_externalizing_scaffold() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -159,7 +159,7 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
 async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchable() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -217,7 +217,7 @@ async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchabl
 async fn long_base64_run_substring_externalizes_span_inline() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -263,7 +263,7 @@ async fn long_base64_run_substring_externalizes_span_inline() {
 #[tokio::test]
 async fn message_that_is_only_a_media_payload_externalizes_whole_message() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -308,7 +308,7 @@ async fn message_that_is_only_a_media_payload_externalizes_whole_message() {
 async fn tiny_data_uri_stays_inline_and_lossless() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -345,7 +345,7 @@ async fn tiny_data_uri_stays_inline_and_lossless() {
 async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -416,7 +416,7 @@ async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets()
 #[tokio::test]
 async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -444,7 +444,7 @@ async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
 async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -508,7 +508,7 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
 async fn quoted_password_assignment_redacts_full_quoted_value() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -554,7 +554,7 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
 async fn api_alias_assignments_redact_apikey_and_apitoken() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -603,7 +603,7 @@ async fn api_alias_assignments_redact_apikey_and_apitoken() {
 async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -662,7 +662,7 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
 async fn private_key_redaction_disabled_preserves_lossless_content() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -702,7 +702,7 @@ async fn private_key_redaction_disabled_preserves_lossless_content() {
 async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -754,7 +754,7 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
 #[tokio::test]
 async fn externalizes_large_tool_payload_with_recoverable_ref() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -777,7 +777,7 @@ async fn externalizes_large_tool_payload_with_recoverable_ref() {
     let payload_ref = raw.payload_ref.as_deref().expect("payload ref");
     assert!(payload_ref.ends_with(".payload"));
     assert_eq!(Path::new(payload_ref).file_name().unwrap(), payload_ref);
-    assert!(tokensave::sessions::lcm::payload::validate_payload_ref(payload_ref).is_ok());
+    assert!(tracedecay::sessions::lcm::payload::validate_payload_ref(payload_ref).is_ok());
 
     let expanded = store
         .lcm_expand_payload(
@@ -796,7 +796,7 @@ async fn externalizes_large_tool_payload_with_recoverable_ref() {
 async fn externalized_payload_indexes_placeholder_without_body_text() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -855,7 +855,7 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
 #[tokio::test]
 async fn lcm_status_reports_missing_and_unreferenced_payloads_without_previewing_content() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -876,7 +876,7 @@ async fn lcm_status_reports_missing_and_unreferenced_payloads_without_previewing
         .payload_ref
         .expect("payload ref");
 
-    let payload_dir = tokensave::sessions::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay::sessions::lcm::payload::payload_dir(&storage_root);
     std::fs::remove_file(payload_dir.join(&payload_ref)).unwrap();
     std::fs::write(payload_dir.join("orphan.payload"), "ORPHAN_PAYLOAD_SECRET").unwrap();
 
@@ -917,7 +917,7 @@ fn rejects_payload_ref_path_traversal() {
         "..",
     ] {
         assert!(
-            tokensave::sessions::lcm::payload::validate_payload_ref(bad).is_err(),
+            tracedecay::sessions::lcm::payload::validate_payload_ref(bad).is_err(),
             "{bad} should be rejected"
         );
     }
@@ -926,7 +926,7 @@ fn rejects_payload_ref_path_traversal() {
 #[tokio::test]
 async fn denies_cross_session_payload_expansion() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-a"))
@@ -960,7 +960,7 @@ async fn denies_cross_session_payload_expansion() {
 #[tokio::test]
 async fn denies_expansion_after_message_updates_to_new_payload_ref() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -1025,7 +1025,7 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
     use std::os::unix::fs::symlink;
 
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -1034,7 +1034,7 @@ async fn external_payload_write_rejects_preexisting_symlink_ref() {
 
     let payload = format!("tool output\n{}", "C".repeat(900_000));
     let payload_ref = expected_payload_ref("cursor", "session-1", "tool-symlink", &payload);
-    let payload_dir = tokensave::sessions::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay::sessions::lcm::payload::payload_dir(&storage_root);
     std::fs::create_dir_all(&payload_dir).unwrap();
     let outside_target = tmp.path().join("outside-target.txt");
     std::fs::write(&outside_target, "do not overwrite").unwrap();
@@ -1061,11 +1061,11 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
     use std::os::unix::fs::symlink;
 
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     std::fs::create_dir_all(&storage_root).unwrap();
     let outside_dir = tmp.path().join("outside-payloads");
     std::fs::create_dir_all(&outside_dir).unwrap();
-    let payload_dir = tokensave::sessions::lcm::payload::payload_dir(&storage_root);
+    let payload_dir = tracedecay::sessions::lcm::payload::payload_dir(&storage_root);
     symlink(&outside_dir, &payload_dir).unwrap();
 
     let db = open_lcm_db(&tmp).await;
@@ -1096,7 +1096,7 @@ async fn external_payload_write_rejects_symlinked_payload_directory() {
 async fn unicode_scaffold_survives_data_uri_substring_externalization() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -1159,7 +1159,7 @@ async fn unicode_scaffold_survives_data_uri_substring_externalization() {
 async fn redaction_applies_before_whole_message_externalization() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -1209,7 +1209,7 @@ async fn redaction_applies_before_whole_message_externalization() {
 
     // The durable payload body was redacted before it ever hit disk.
     let payload_path =
-        tokensave::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+        tracedecay::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     let payload_body = std::fs::read_to_string(&payload_path).expect("payload file should exist");
     assert!(!payload_body.contains(secret));
     assert!(payload_body.contains("[LCM sensitive redaction: name=api_key"));
@@ -1227,7 +1227,7 @@ async fn redaction_applies_before_whole_message_externalization() {
 #[tokio::test]
 async fn existing_ingest_placeholder_is_not_double_externalized() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))
@@ -1330,7 +1330,7 @@ async fn existing_ingest_placeholder_is_not_double_externalized() {
 #[tokio::test]
 async fn json_key_media_payload_externalizes_key_span_without_whole_message_externalization() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     assert!(
         db.upsert_session(&sample_session("cursor", "session-1"))

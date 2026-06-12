@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 use crate::types::{NodeKind, Visibility};
 
 use super::super::ToolResult;
@@ -149,9 +149,9 @@ fn identifier_from_segment(seg: &str) -> String {
         .to_string()
 }
 
-/// Handles `tokensave_dead_code` tool calls.
+/// Handles `tracedecay_dead_code` tool calls.
 pub(super) async fn handle_dead_code(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -201,13 +201,13 @@ pub(super) async fn handle_dead_code(
     })
 }
 
-/// Handles `tokensave_module_api` tool calls.
+/// Handles `tracedecay_module_api` tool calls.
 pub(super) async fn handle_module_api(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let path = effective_path(&args, scope_prefix).ok_or_else(|| TokenSaveError::Config {
+    let path = effective_path(&args, scope_prefix).ok_or_else(|| TraceDecayError::Config {
         message: "missing required parameter: path".to_string(),
     })?;
 
@@ -265,8 +265,8 @@ pub(super) async fn handle_module_api(
     })
 }
 
-/// Handles `tokensave_circular` tool calls.
-pub(super) async fn handle_circular(cg: &TokenSave, _args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_circular` tool calls.
+pub(super) async fn handle_circular(cg: &TraceDecay, _args: Value) -> Result<ToolResult> {
     let cycles = cg.find_circular_dependencies().await?;
 
     let items: Vec<Value> = cycles.iter().map(|cycle| json!(cycle)).collect();
@@ -285,9 +285,9 @@ pub(super) async fn handle_circular(cg: &TokenSave, _args: Value) -> Result<Tool
     })
 }
 
-/// Handles `tokensave_hotspots` tool calls.
+/// Handles `tracedecay_hotspots` tool calls.
 pub(super) async fn handle_hotspots(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -363,9 +363,9 @@ pub(super) async fn handle_hotspots(
     })
 }
 
-/// Handles `tokensave_unused_imports` tool calls.
+/// Handles `tracedecay_unused_imports` tool calls.
 pub(super) async fn handle_unused_imports(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -477,9 +477,9 @@ pub(super) async fn handle_unused_imports(
     })
 }
 
-/// Handles `tokensave_rank` tool calls.
+/// Handles `tracedecay_rank` tool calls.
 pub(super) async fn handle_rank(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -489,11 +489,11 @@ pub(super) async fn handle_rank(
     let edge_kind_str = args
         .get("edge_kind")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: edge_kind".to_string(),
         })?;
 
-    let edge_kind = EdgeKind::from_str(edge_kind_str).ok_or_else(|| TokenSaveError::Config {
+    let edge_kind = EdgeKind::from_str(edge_kind_str).ok_or_else(|| TraceDecayError::Config {
         message: format!(
             "invalid edge_kind '{edge_kind_str}'. Valid values: implements, extends, calls, uses, contains, annotates, derives_macro"
         ),
@@ -508,7 +508,7 @@ pub(super) async fn handle_rank(
         "incoming" => true,
         "outgoing" => false,
         _ => {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
                     "invalid direction '{direction}'. Valid values: incoming, outgoing"
                 ),
@@ -565,9 +565,9 @@ pub(super) async fn handle_rank(
     })
 }
 
-/// Handles `tokensave_largest` tool calls.
+/// Handles `tracedecay_largest` tool calls.
 pub(super) async fn handle_largest(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -619,9 +619,9 @@ pub(super) async fn handle_largest(
     })
 }
 
-/// Handles `tokensave_coupling` tool calls.
+/// Handles `tracedecay_coupling` tool calls.
 pub(super) async fn handle_coupling(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -634,7 +634,7 @@ pub(super) async fn handle_coupling(
         "fan_in" => true,
         "fan_out" => false,
         _ => {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!("invalid direction '{direction}'. Valid values: fan_in, fan_out"),
             });
         }
@@ -674,9 +674,9 @@ pub(super) async fn handle_coupling(
     })
 }
 
-/// Handles `tokensave_inheritance_depth` tool calls.
+/// Handles `tracedecay_inheritance_depth` tool calls.
 pub(super) async fn handle_inheritance_depth(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -719,9 +719,9 @@ pub(super) async fn handle_inheritance_depth(
     })
 }
 
-/// Handles `tokensave_distribution` tool calls.
+/// Handles `tracedecay_distribution` tool calls.
 pub(super) async fn handle_distribution(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -793,12 +793,12 @@ pub(super) async fn handle_distribution(
     })
 }
 
-/// Handles `tokensave_recursion` tool calls.
+/// Handles `tracedecay_recursion` tool calls.
 ///
 /// Detects cycles in the call graph using iterative DFS on the calls-only
 /// edge subgraph. Each cycle is a vec of node IDs forming the loop.
 pub(super) async fn handle_recursion(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -893,7 +893,7 @@ pub(super) async fn handle_recursion(
 }
 
 async fn cached_node(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     cache: &mut HashMap<String, Option<crate::types::Node>>,
     id: &str,
 ) -> Result<Option<crate::types::Node>> {
@@ -906,7 +906,7 @@ async fn cached_node(
 }
 
 fn cached_lines<'a>(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     cache: &'a mut HashMap<String, Option<Vec<String>>>,
     file_path: &str,
 ) -> Option<&'a Vec<String>> {
@@ -921,7 +921,7 @@ fn cached_lines<'a>(
 }
 
 fn is_direct_self_call(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     lines_cache: &mut HashMap<String, Option<Vec<String>>>,
     node: &crate::types::Node,
     edge_line: Option<u32>,
@@ -1103,9 +1103,9 @@ fn dfs_cycle_path<'a>(
     false
 }
 
-/// Handles `tokensave_complexity` tool calls.
+/// Handles `tracedecay_complexity` tool calls.
 pub(super) async fn handle_complexity(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1169,9 +1169,9 @@ pub(super) async fn handle_complexity(
     })
 }
 
-/// Handles `tokensave_doc_coverage` tool calls.
+/// Handles `tracedecay_doc_coverage` tool calls.
 pub(super) async fn handle_doc_coverage(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1231,9 +1231,9 @@ pub(super) async fn handle_doc_coverage(
     })
 }
 
-/// Handles `tokensave_god_class` tool calls.
+/// Handles `tracedecay_god_class` tool calls.
 pub(super) async fn handle_god_class(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1279,7 +1279,7 @@ pub(super) async fn handle_god_class(
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_unsafe_patterns
+// tracedecay_unsafe_patterns
 // ---------------------------------------------------------------------------
 
 const UNSAFE_KINDS: &[&str] = &[
@@ -1370,7 +1370,7 @@ fn path_looks_like_test(path: &str) -> bool {
 }
 
 pub(super) async fn handle_unsafe_patterns(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1467,10 +1467,10 @@ pub(super) async fn handle_unsafe_patterns(
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_diagnostics
+// tracedecay_diagnostics
 // ---------------------------------------------------------------------------
 
-pub(super) async fn handle_diagnostics(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_diagnostics(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     use crate::diagnostics::{run_all, Scope};
 
     let scope_str = args
@@ -1484,7 +1484,7 @@ pub(super) async fn handle_diagnostics(cg: &TokenSave, args: Value) -> Result<To
             let name = args
                 .get("name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| TokenSaveError::Config {
+                .ok_or_else(|| TraceDecayError::Config {
                     message: "scope='package' requires a 'name' argument".to_string(),
                 })?
                 .to_string();
@@ -1494,14 +1494,14 @@ pub(super) async fn handle_diagnostics(cg: &TokenSave, args: Value) -> Result<To
             let path = args
                 .get("path")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| TokenSaveError::Config {
+                .ok_or_else(|| TraceDecayError::Config {
                     message: "scope='file' requires a 'path' argument".to_string(),
                 })?
                 .to_string();
             Scope::File { path }
         }
         other => {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!("unknown scope '{other}'; expected workspace, package, or file"),
             });
         }
@@ -1569,19 +1569,19 @@ pub(super) async fn handle_diagnostics(cg: &TokenSave, args: Value) -> Result<To
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_constructors
+// tracedecay_constructors
 // ---------------------------------------------------------------------------
 
 pub(super) async fn handle_constructors(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let struct_name =
         args.get("struct")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
-                message: "tokensave_constructors requires a 'struct' argument".to_string(),
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "tracedecay_constructors requires a 'struct' argument".to_string(),
             })?;
     let limit = args
         .get("limit")
@@ -1954,20 +1954,20 @@ fn field_name_from_chunk(chunk: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_field_sites
+// tracedecay_field_sites
 // ---------------------------------------------------------------------------
 
 pub(super) async fn handle_field_sites(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let raw = args
-        .get("field")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "tokensave_field_sites requires a 'field' argument".to_string(),
-        })?;
+    let raw =
+        args.get("field")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "tracedecay_field_sites requires a 'field' argument".to_string(),
+            })?;
     let writes_only = args
         .get("writes_only")
         .and_then(serde_json::Value::as_bool)

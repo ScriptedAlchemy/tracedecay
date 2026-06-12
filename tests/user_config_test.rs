@@ -1,4 +1,4 @@
-use tokensave::user_config::UserConfig;
+use tracedecay::user_config::UserConfig;
 
 #[test]
 fn defaults_when_no_file() {
@@ -58,13 +58,13 @@ fn unknown_fields_ignored() {
 #[test]
 fn old_daemon_debounce_field_still_deserializes() {
     let toml = r#"daemon_debounce = "30s""#;
-    let cfg: tokensave::user_config::UserConfig = toml::from_str(toml).unwrap();
+    let cfg: tracedecay::user_config::UserConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.watcher_debounce, "30s");
 }
 
 #[test]
 fn new_watcher_debounce_field_works() {
     let toml = r#"watcher_debounce = "45s""#;
-    let cfg: tokensave::user_config::UserConfig = toml::from_str(toml).unwrap();
+    let cfg: tracedecay::user_config::UserConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.watcher_debounce, "45s");
 }

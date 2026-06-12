@@ -306,7 +306,7 @@ export function summarizeCosts(rows: ApiTokenRow[], table: PriceTable): CostSumm
 /**
  * Reference rate used to express saved tokens in dollars: saved tokens are
  * context the model never had to read, so they are valued at a flagship
- * *input* rate (same convention as `tokensave gain`, which uses the Claude
+ * *input* rate (same convention as `tracedecay gain`, which uses the Claude
  * Sonnet input price).
  */
 export const SAVINGS_REFERENCE_MODEL = "claude-sonnet-4";

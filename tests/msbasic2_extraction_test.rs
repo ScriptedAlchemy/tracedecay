@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::MsBasic2Extractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::MsBasic2Extractor;
+use tracedecay::types::*;
 
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("tests/fixtures/sample.bas").unwrap();

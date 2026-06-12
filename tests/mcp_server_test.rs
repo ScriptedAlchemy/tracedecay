@@ -13,10 +13,10 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokensave::branch_meta::{save_branch_meta, BranchMeta};
-use tokensave::mcp::transport::{ChannelTransport, McpTransport};
-use tokensave::mcp::McpServer;
-use tokensave::tokensave::TokenSave;
+use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
+use tracedecay::mcp::McpServer;
+use tracedecay::tracedecay::TraceDecay;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -32,7 +32,7 @@ async fn setup_server() -> (Arc<McpServer>, TempDir) {
         "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
     (server, dir)
@@ -133,7 +133,7 @@ async fn test_initialize() {
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["protocolVersion"].is_string());
     assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(resp["result"]["serverInfo"]["name"], "tokensave");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "tracedecay");
     assert!(resp["result"]["serverInfo"]["version"].is_string());
 }
 
@@ -222,7 +222,7 @@ async fn test_tools_call_explicit_null_id_is_still_a_request() {
             json!(null),
             "tools/call",
             json!({
-                "name": "tokensave_status",
+                "name": "tracedecay_status",
                 "arguments": {}
             }),
         )],
@@ -314,16 +314,16 @@ async fn test_tools_list() {
     // Verify at least some well-known tools are present.
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
-        tool_names.contains(&"tokensave_search"),
-        "should have tokensave_search"
+        tool_names.contains(&"tracedecay_search"),
+        "should have tracedecay_search"
     );
     assert!(
-        tool_names.contains(&"tokensave_status"),
-        "should have tokensave_status"
+        tool_names.contains(&"tracedecay_status"),
+        "should have tracedecay_status"
     );
     assert!(
-        tool_names.contains(&"tokensave_context"),
-        "should have tokensave_context"
+        tool_names.contains(&"tracedecay_context"),
+        "should have tracedecay_context"
     );
 }
 
@@ -340,7 +340,7 @@ async fn test_tools_call_search() {
             json!(30),
             "tools/call",
             json!({
-                "name": "tokensave_search",
+                "name": "tracedecay_search",
                 "arguments": { "query": "helper" }
             }),
         )],
@@ -377,7 +377,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
             json!(33),
             "tools/call",
             json!({
-                "name": "tokensave_str_replace",
+                "name": "tracedecay_str_replace",
                 "arguments": {
                     "path": "src/main.rs",
                     "old_str": "fn missing() {}",
@@ -413,7 +413,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
             json!(34),
             "tools/call",
             json!({
-                "name": "tokensave_changelog",
+                "name": "tracedecay_changelog",
                 "arguments": {
                     "from_ref": "HEAD~1",
                     "to_ref": "HEAD"
@@ -453,7 +453,7 @@ async fn test_tools_call_timings_flag_off_by_default() {
         vec![jsonrpc_request(
             json!(31),
             "tools/call",
-            json!({"name": "tokensave_search", "arguments": {"query": "helper"}}),
+            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
         )],
     )
     .await;
@@ -479,7 +479,7 @@ async fn test_tools_call_timings_flag_on_emits_duration_us() {
         vec![jsonrpc_request(
             json!(32),
             "tools/call",
-            json!({"name": "tokensave_search", "arguments": {"query": "helper"}}),
+            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
         )],
     )
     .await;
@@ -513,7 +513,7 @@ async fn test_tools_call_status() {
             json!(40),
             "tools/call",
             json!({
-                "name": "tokensave_status",
+                "name": "tracedecay_status",
                 "arguments": {}
             }),
         )],
@@ -745,7 +745,7 @@ async fn test_multiple_tool_calls() {
                 json!(103),
                 "tools/call",
                 json!({
-                    "name": "tokensave_search",
+                    "name": "tracedecay_search",
                     "arguments": { "query": "main" }
                 }),
             ),
@@ -798,13 +798,13 @@ async fn test_server_stats_initial() {
 }
 
 // ---------------------------------------------------------------------------
-// 15. test_server_stats_after_run (indirect via tokensave_status response)
+// 15. test_server_stats_after_run (indirect via tracedecay_status response)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_server_stats_after_run() {
     let (server, _dir) = setup_server().await;
-    // Send several requests then a tokensave_status to check stats are embedded.
+    // Send several requests then a tracedecay_status to check stats are embedded.
     let responses = run_server_with_messages(
         server,
         vec![
@@ -814,7 +814,7 @@ async fn test_server_stats_after_run() {
                 json!(202),
                 "tools/call",
                 json!({
-                    "name": "tokensave_status",
+                    "name": "tracedecay_status",
                     "arguments": {}
                 }),
             ),
@@ -862,7 +862,7 @@ async fn test_error_tracking() {
                 json!(301),
                 "tools/call",
                 json!({
-                    "name": "tokensave_status",
+                    "name": "tracedecay_status",
                     "arguments": {}
                 }),
             ),
@@ -956,8 +956,8 @@ async fn test_initialize_has_instructions() {
         .as_str()
         .expect("initialize should have instructions string");
     assert!(
-        instructions.contains("tokensave_context"),
-        "instructions should mention tokensave_context"
+        instructions.contains("tracedecay_context"),
+        "instructions should mention tracedecay_context"
     );
 }
 
@@ -984,23 +984,23 @@ async fn test_resources_list() {
 
     let uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
     assert!(
-        uris.contains(&"tokensave://status"),
+        uris.contains(&"tracedecay://status"),
         "should have status resource"
     );
     assert!(
-        uris.contains(&"tokensave://files"),
+        uris.contains(&"tracedecay://files"),
         "should have files resource"
     );
     assert!(
-        uris.contains(&"tokensave://overview"),
+        uris.contains(&"tracedecay://overview"),
         "should have overview resource"
     );
     assert!(
-        uris.contains(&"tokensave://branches"),
+        uris.contains(&"tracedecay://branches"),
         "should have branches resource"
     );
     assert!(
-        uris.contains(&"tokensave://schema"),
+        uris.contains(&"tracedecay://schema"),
         "should have schema resource"
     );
 
@@ -1031,7 +1031,7 @@ async fn test_resources_read_status() {
             json!(410),
             "resources/read",
             json!({
-                "uri": "tokensave://status"
+                "uri": "tracedecay://status"
             }),
         )],
     )
@@ -1051,7 +1051,7 @@ async fn test_resources_read_status() {
         .as_array()
         .expect("should have contents array");
     assert_eq!(contents.len(), 1);
-    assert_eq!(contents[0]["uri"], "tokensave://status");
+    assert_eq!(contents[0]["uri"], "tracedecay://status");
     assert_eq!(contents[0]["mimeType"], "application/json");
 
     let text = contents[0]["text"].as_str().unwrap();
@@ -1078,7 +1078,7 @@ async fn test_resources_read_files() {
             json!(420),
             "resources/read",
             json!({
-                "uri": "tokensave://files"
+                "uri": "tracedecay://files"
             }),
         )],
     )
@@ -1098,7 +1098,7 @@ async fn test_resources_read_files() {
         .as_array()
         .expect("should have contents array");
     assert_eq!(contents.len(), 1);
-    assert_eq!(contents[0]["uri"], "tokensave://files");
+    assert_eq!(contents[0]["uri"], "tracedecay://files");
     assert_eq!(contents[0]["mimeType"], "text/plain");
 
     let text = contents[0]["text"].as_str().unwrap();
@@ -1125,7 +1125,7 @@ async fn test_resources_read_overview() {
             json!(430),
             "resources/read",
             json!({
-                "uri": "tokensave://overview"
+                "uri": "tracedecay://overview"
             }),
         )],
     )
@@ -1145,7 +1145,7 @@ async fn test_resources_read_overview() {
         .as_array()
         .expect("should have contents array");
     assert_eq!(contents.len(), 1);
-    assert_eq!(contents[0]["uri"], "tokensave://overview");
+    assert_eq!(contents[0]["uri"], "tracedecay://overview");
     assert_eq!(contents[0]["mimeType"], "text/plain");
 
     let text = contents[0]["text"].as_str().unwrap();
@@ -1173,7 +1173,7 @@ async fn test_resources_read_unknown_uri() {
             json!(440),
             "resources/read",
             json!({
-                "uri": "tokensave://nonexistent"
+                "uri": "tracedecay://nonexistent"
             }),
         )],
     )
@@ -1385,7 +1385,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
         jsonrpc_request(
             json!(id),
             "tools/call",
-            json!({ "name": "tokensave_lcm_status", "arguments": {} }),
+            json!({ "name": "tracedecay_lcm_status", "arguments": {} }),
         )
     };
     // Write-path call: opens the session DB in write mode, creating it and
@@ -1397,7 +1397,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             json!(id),
             "tools/call",
             json!({
-                "name": "tokensave_lcm_session_boundary",
+                "name": "tracedecay_lcm_session_boundary",
                 "arguments": { "session_id": "migration-rerun-probe" }
             }),
         )
@@ -1442,7 +1442,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // Stamp a sentinel applied_at; only a re-run of the migrations would
     // rewrite it (the version-gate fast path and the per-process ensured
     // flag both leave the row untouched).
-    let db_path = tokensave::sessions::cursor::project_session_db_path(dir.path());
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(dir.path());
     let applied_at = |db_path: std::path::PathBuf| async move {
         let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
         let conn = db.connect().unwrap();
@@ -1471,7 +1471,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // The write-path boundary call is the one that would re-run migrations
     // if the per-process ensured cache failed; the status reads must also
     // keep working.
-    let cg = TokenSave::open(dir.path()).await.unwrap();
+    let cg = TraceDecay::open(dir.path()).await.unwrap();
     let server = McpServer::new(cg, None).await;
     let responses = run_server_with_messages(
         server,
@@ -1499,23 +1499,23 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
 }
 
 /// Serializes the savings-accounting tests below: they all mutate
-/// process-wide env vars (`HOME`, `TOKENSAVE_GLOBAL_DB`,
-/// `TOKENSAVE_ENABLE_GLOBAL_DB`). `#[tokio::test]` defaults to a
+/// process-wide env vars (`HOME`, `TRACEDECAY_GLOBAL_DB`,
+/// `TRACEDECAY_ENABLE_GLOBAL_DB`). `#[tokio::test]` defaults to a
 /// current-thread runtime, so holding the guard across `.await` is fine.
 static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Redirects HOME at an isolated temp dir (so `~/.tokensave/global.db`
+/// Redirects HOME at an isolated temp dir (so `~/.tracedecay/global.db`
 /// lands there) and enables the global DB. Deliberately does NOT set
-/// `TOKENSAVE_GLOBAL_DB`: that override also wins over project-local
+/// `TRACEDECAY_GLOBAL_DB`: that override also wins over project-local
 /// LCM store discovery and would leak into concurrently running tests.
 fn isolated_savings_env(tmp: &TempDir) -> Vec<EnvVarGuard> {
     let mut guards = vec![EnvVarGuard::set("HOME", tmp.path().as_os_str())];
     #[cfg(target_os = "windows")]
     guards.push(EnvVarGuard::set("USERPROFILE", tmp.path().as_os_str()));
-    // `.cargo/config.toml` sets TOKENSAVE_DISABLE_GLOBAL_DB=1 to keep
+    // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 to keep
     // cargo-launched processes hermetic; the explicit enable wins.
     guards.push(EnvVarGuard::set(
-        "TOKENSAVE_ENABLE_GLOBAL_DB",
+        "TRACEDECAY_ENABLE_GLOBAL_DB",
         std::ffi::OsStr::new("1"),
     ));
     guards
@@ -1538,9 +1538,9 @@ async fn settled_ledger_total(
     global_db_path: &std::path::Path,
     project: &std::path::Path,
     expected_calls: u64,
-) -> tokensave::global_db::SavingsTotal {
+) -> tracedecay::global_db::SavingsTotal {
     server.ledger_writes_settled().await;
-    let db = tokensave::global_db::GlobalDb::open_at(global_db_path)
+    let db = tracedecay::global_db::GlobalDb::open_at(global_db_path)
         .await
         .expect("global db opens at isolated path");
     let total = db.sum_savings(Some(&project.to_string_lossy()), 0).await;
@@ -1556,7 +1556,7 @@ async fn settled_ledger_total(
 /// `SAVINGS_ENV_LOCK`, so this is the same path the server under test
 /// resolves at construction).
 fn locked_global_db_path() -> std::path::PathBuf {
-    tokensave::global_db::global_db_path().expect("global db path resolves under isolated HOME")
+    tracedecay::global_db::global_db_path().expect("global db path resolves under isolated HOME")
 }
 
 /// Creates a temp project whose `src/main.rs` is large enough that the
@@ -1572,20 +1572,20 @@ async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
         ));
     }
     fs::write(project.join("src/main.rs"), source).unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
     (server, dir)
 }
 
-/// Extracts `(before, after)` from the `tokensave_metrics:` line appended
+/// Extracts `(before, after)` from the `tracedecay_metrics:` line appended
 /// to a tool response's content array.
 fn parse_metrics_line(resp: &Value) -> Option<(u64, u64)> {
     let content = resp["result"]["content"].as_array()?;
     let line = content
         .iter()
         .filter_map(|item| item["text"].as_str())
-        .find(|t| t.contains("tokensave_metrics: before="))?;
+        .find(|t| t.contains("tracedecay_metrics: before="))?;
     let tail = line.split("before=").nth(1)?;
     let (before, rest) = tail.split_once(' ')?;
     let after = rest.strip_prefix("after=")?;
@@ -1613,7 +1613,7 @@ async fn search_call_writes_savings_ledger_row() {
             json!(9001),
             "tools/call",
             json!({
-                "name": "tokensave_search",
+                "name": "tracedecay_search",
                 "arguments": { "query": "hello" }
             }),
         )],
@@ -1633,7 +1633,7 @@ async fn search_call_writes_savings_ledger_row() {
 
 /// Regression test for the empty-ledger bug: the savings ledger must record
 /// **by default**, with no env opt-in. The holographic-fact-store commit
-/// made the global DB opt-in via `TOKENSAVE_ENABLE_GLOBAL_DB`, which
+/// made the global DB opt-in via `TRACEDECAY_ENABLE_GLOBAL_DB`, which
 /// silently disabled ledger writes for every default MCP-server install
 /// (dashboards showed "no events yet" while lifetime counters kept growing
 /// through the ungated CLI paths).
@@ -1651,9 +1651,13 @@ async fn ledger_records_by_default_without_env_opt_in() {
     env.push(EnvVarGuard::set("USERPROFILE", tmp_home.path().as_os_str()));
     // Simulate a real (non-cargo) launch: neither the legacy opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
+    // Legacy `TOKENSAVE_*` spellings are still honored at runtime (and
+    // `.cargo/config.toml` injects the legacy opt-out), so clear both.
+    env.push(EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB"));
+    env.push(EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB"));
     env.push(EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB"));
     env.push(EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB"));
-    assert!(tokensave::global_db::global_accounting_enabled());
+    assert!(tracedecay::global_db::global_accounting_enabled());
 
     let (server, proj_tmp) = setup_server().await;
     let server_handle = server.clone();
@@ -1665,7 +1669,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
             json!(9103),
             "tools/call",
             json!({
-                "name": "tokensave_search",
+                "name": "tracedecay_search",
                 "arguments": { "query": "hello" }
             }),
         )],
@@ -1683,29 +1687,33 @@ async fn ledger_records_by_default_without_env_opt_in() {
 }
 
 /// The explicit opt-outs must still work: a falsy
-/// `TOKENSAVE_ENABLE_GLOBAL_DB` or a truthy `TOKENSAVE_DISABLE_GLOBAL_DB`
+/// `TRACEDECAY_ENABLE_GLOBAL_DB` or a truthy `TRACEDECAY_DISABLE_GLOBAL_DB`
 /// disables global accounting.
 #[test]
 fn global_accounting_env_overrides() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    use tokensave::global_db::{global_accounting_mode, AccountingMode};
+    use tracedecay::global_db::{global_accounting_mode, AccountingMode};
 
-    let _clear_enable = EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB");
-    let _clear_disable = EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB");
+    // Clear the legacy `TOKENSAVE_*` spellings too: they remain honored as a
+    // runtime fallback, and `.cargo/config.toml` injects the legacy opt-out.
+    let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
+    let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
+    let _clear_legacy_enable = EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB");
+    let _clear_legacy_disable = EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB");
     assert_eq!(global_accounting_mode(), AccountingMode::Default);
     assert!(global_accounting_mode().enabled());
 
     {
-        let _disable = EnvVarGuard::set("TOKENSAVE_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+        let _disable = EnvVarGuard::set("TRACEDECAY_DISABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
         assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
         // An explicit enable wins over the opt-out (the cargo-test default).
-        let _enable = EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
+        let _enable = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("1"));
         assert_eq!(global_accounting_mode(), AccountingMode::EnabledByEnv);
     }
 
-    let _enable_falsy = EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
+    let _enable_falsy = EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", std::ffi::OsStr::new("0"));
     assert_eq!(global_accounting_mode(), AccountingMode::DisabledByEnv);
     assert!(!global_accounting_mode().enabled());
 }
@@ -1736,7 +1744,7 @@ async fn full_file_read_credits_zero_net_savings() {
             json!(9101),
             "tools/call",
             json!({
-                "name": "tokensave_read",
+                "name": "tracedecay_read",
                 "arguments": { "file": "src/main.rs", "mode": "full" }
             }),
         )],
@@ -1764,7 +1772,7 @@ async fn full_file_read_credits_zero_net_savings() {
         total.saved_tokens, 0,
         "ledger must not count a full-file read as savings"
     );
-    let db = tokensave::global_db::GlobalDb::open_at(&db_path)
+    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
         .await
         .expect("global db opens at isolated path");
     assert_eq!(
@@ -1799,7 +1807,7 @@ async fn lifetime_counter_matches_ledger_net_savings() {
             json!(9102),
             "tools/call",
             json!({
-                "name": "tokensave_search",
+                "name": "tracedecay_search",
                 "arguments": { "query": "helper" }
             }),
         )],
@@ -1825,7 +1833,7 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         before - after,
         "ledger net saving must match the metrics line"
     );
-    let db = tokensave::global_db::GlobalDb::open_at(&db_path)
+    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
         .await
         .expect("global db opens at isolated path");
     assert_eq!(
@@ -1853,7 +1861,7 @@ fn git(project: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// Drives one `tools/call` of `tokensave_search` through the JSON-RPC
+/// Drives one `tools/call` of `tracedecay_search` through the JSON-RPC
 /// transport and returns the full response text for the given id.
 async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
     let responses = run_server_with_messages(
@@ -1861,7 +1869,7 @@ async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> V
         vec![jsonrpc_request(
             json!(id),
             "tools/call",
-            json!({ "name": "tokensave_search", "arguments": { "query": query } }),
+            json!({ "name": "tracedecay_search", "arguments": { "query": query } }),
         )],
     )
     .await;
@@ -1884,7 +1892,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
         "pub fn main_only() -> u32 { 1 }\n",
     )
     .unwrap();
-    fs::write(project.join(".gitignore"), ".tokensave/\n").unwrap();
+    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
     git(project, &["init"]);
     git(project, &["config", "user.email", "test@test.com"]);
     git(project, &["config", "user.name", "Test"]);
@@ -1893,20 +1901,20 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     git(project, &["branch", "-M", "main"]);
 
     {
-        let cg = TokenSave::init(project).await.unwrap();
+        let cg = TraceDecay::init(project).await.unwrap();
         cg.index_all().await.unwrap();
         cg.checkpoint().await.unwrap();
     }
 
     // Track main + feature, seeding feature's DB from main's.
-    let tokensave_dir = project.join(".tokensave");
+    let tracedecay_dir = project.join(".tracedecay");
     let mut meta = BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
-    save_branch_meta(&tokensave_dir, &meta).unwrap();
-    fs::create_dir_all(tokensave_dir.join("branches")).unwrap();
+    save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    fs::create_dir_all(tracedecay_dir.join("branches")).unwrap();
     fs::copy(
-        tokensave_dir.join("tokensave.db"),
-        tokensave_dir.join("branches/feature.db"),
+        tracedecay_dir.join("tracedecay.db"),
+        tracedecay_dir.join("branches/feature.db"),
     )
     .unwrap();
 
@@ -1920,7 +1928,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "feature work"]);
     {
-        let cg = TokenSave::open(project).await.unwrap();
+        let cg = TraceDecay::open(project).await.unwrap();
         assert_eq!(cg.serving_branch(), Some("feature"));
         cg.sync().await.unwrap();
         cg.checkpoint().await.unwrap();
@@ -1928,7 +1936,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
     // Back on main: start the server pinned to main's DB.
     git(project, &["checkout", "main"]);
-    let cg = TokenSave::open(project).await.unwrap();
+    let cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(cg.serving_branch(), Some("main"));
     let server = McpServer::new(cg, None).await;
     assert!(

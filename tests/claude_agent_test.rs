@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use tokensave::agents::{
+use tracedecay::agents::{
     expected_tool_perms, AgentIntegration, ClaudeIntegration, DoctorCounters, HealthcheckContext,
     InstallContext,
 };
@@ -13,7 +13,7 @@ use tokensave::agents::{
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
@@ -21,12 +21,12 @@ fn make_install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-/// Creates a fake tokensave binary in a temp dir so healthcheck binary-exists
+/// Creates a fake tracedecay binary in a temp dir so healthcheck binary-exists
 /// checks pass.
 fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
     let bin_dir = home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
-    let bin_path = bin_dir.join("tokensave");
+    let bin_path = bin_dir.join("tracedecay");
     std::fs::write(&bin_path, "#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     {
@@ -35,7 +35,7 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
     }
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: bin_path.to_string_lossy().to_string(),
+        tracedecay_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
@@ -60,11 +60,11 @@ fn test_install_creates_claude_json_with_mcp_server() {
     ClaudeIntegration.install(&ctx).unwrap();
 
     let claude_json = read_json(&home.join(".claude.json"));
-    let ts = &claude_json["mcpServers"]["tokensave"];
-    assert!(ts.is_object(), "mcpServers.tokensave should be an object");
+    let ts = &claude_json["mcpServers"]["tracedecay"];
+    assert!(ts.is_object(), "mcpServers.tracedecay should be an object");
     assert_eq!(
         ts["command"].as_str().unwrap(),
-        "/usr/local/bin/tokensave",
+        "/usr/local/bin/tracedecay",
         "command should match the bin path"
     );
     let args: Vec<&str> = ts["args"]
@@ -88,7 +88,7 @@ fn test_install_creates_settings_with_hook() {
         .as_array()
         .expect("PreToolUse should be an array");
 
-    let tokensave_hook = hooks.iter().find(|h| {
+    let tracedecay_hook = hooks.iter().find(|h| {
         h.get("matcher").and_then(|m| m.as_str()) == Some("Agent")
             && h.get("hooks")
                 .and_then(|a| a.as_array())
@@ -97,23 +97,23 @@ fn test_install_creates_settings_with_hook() {
                         entry
                             .get("command")
                             .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.contains("tokensave"))
+                            .is_some_and(|c| c.contains("tracedecay"))
                     })
                 })
                 .unwrap_or(false)
     });
     assert!(
-        tokensave_hook.is_some(),
-        "PreToolUse should contain a hook with matcher=Agent and command containing tokensave"
+        tracedecay_hook.is_some(),
+        "PreToolUse should contain a hook with matcher=Agent and command containing tracedecay"
     );
 
     // Verify the hook command format (issue #81: modern args[] shape).
-    let hook = tokensave_hook.unwrap();
+    let hook = tracedecay_hook.unwrap();
     let inner = &hook["hooks"][0];
     let cmd = inner["command"].as_str().unwrap();
     assert!(
-        cmd.contains("tokensave"),
-        "hook command should be the tokensave exe path, got: {cmd}"
+        cmd.contains("tracedecay"),
+        "hook command should be the tracedecay exe path, got: {cmd}"
     );
     let args: Vec<&str> = inner["args"]
         .as_array()
@@ -158,12 +158,12 @@ fn test_install_creates_claude_md_with_rules() {
 
     let claude_md = std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
     assert!(
-        claude_md.contains("## MANDATORY: No Explore Agents When Tokensave Is Available"),
+        claude_md.contains("## MANDATORY: No Explore Agents When Tracedecay Is Available"),
         "CLAUDE.md should contain the mandatory rules marker"
     );
     assert!(
-        claude_md.contains("tokensave_context"),
-        "CLAUDE.md should mention tokensave tools"
+        claude_md.contains("tracedecay_context"),
+        "CLAUDE.md should mention tracedecay tools"
     );
     assert!(
         claude_md.contains("NEVER use Agent(subagent_type=Explore)"),
@@ -198,8 +198,8 @@ fn test_claude_md_contains_explore_agent_paragraph() {
         "should contain explore agent paragraph"
     );
     assert!(
-        content.contains("tokensave_context"),
-        "should reference tokensave_context as the tool"
+        content.contains("tracedecay_context"),
+        "should reference tracedecay_context as the tool"
     );
     assert!(
         content.contains("exclude_node_ids"),
@@ -252,7 +252,7 @@ fn test_install_idempotent_claude_md() {
     ClaudeIntegration.install(&ctx).unwrap();
 
     let claude_md = std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
-    let marker = "## MANDATORY: No Explore Agents When Tokensave Is Available";
+    let marker = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
     let count = claude_md.matches(marker).count();
     assert_eq!(
         count, 1,
@@ -278,8 +278,8 @@ fn test_install_preserves_existing_claude_json() {
         "existing key 'foo' should be preserved"
     );
     assert!(
-        claude_json["mcpServers"]["tokensave"].is_object(),
-        "mcpServers.tokensave should be added alongside existing keys"
+        claude_json["mcpServers"]["tracedecay"].is_object(),
+        "mcpServers.tracedecay should be added alongside existing keys"
     );
 }
 
@@ -335,8 +335,8 @@ fn test_install_migrates_old_mcp_from_settings() {
         claude_dir.join("settings.json"),
         r#"{
   "mcpServers": {
-    "tokensave": {
-      "command": "/old/path/tokensave",
+    "tracedecay": {
+      "command": "/old/path/tracedecay",
       "args": ["serve"]
     }
   }
@@ -347,28 +347,28 @@ fn test_install_migrates_old_mcp_from_settings() {
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // settings.json should NOT have mcpServers.tokensave anymore
+    // settings.json should NOT have mcpServers.tracedecay anymore
     let settings = read_json(&claude_dir.join("settings.json"));
     let has_stale = settings
         .get("mcpServers")
-        .and_then(|v| v.get("tokensave"))
+        .and_then(|v| v.get("tracedecay"))
         .is_some();
     assert!(
         !has_stale,
-        "tokensave MCP server should be removed from settings.json (old location)"
+        "tracedecay MCP server should be removed from settings.json (old location)"
     );
 
     // .claude.json should have it in the new location
     let claude_json = read_json(&home.join(".claude.json"));
     assert!(
-        claude_json["mcpServers"]["tokensave"].is_object(),
-        "tokensave MCP server should exist in .claude.json (new location)"
+        claude_json["mcpServers"]["tracedecay"].is_object(),
+        "tracedecay MCP server should exist in .claude.json (new location)"
     );
     assert_eq!(
-        claude_json["mcpServers"]["tokensave"]["command"]
+        claude_json["mcpServers"]["tracedecay"]["command"]
             .as_str()
             .unwrap(),
-        "/usr/local/bin/tokensave",
+        "/usr/local/bin/tracedecay",
         "MCP command should use the new bin path, not the old one"
     );
 }
@@ -385,17 +385,17 @@ fn test_uninstall_removes_mcp_from_claude_json() {
     ClaudeIntegration.install(&ctx).unwrap();
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // File may be deleted (empty) or exist without tokensave
+    // File may be deleted (empty) or exist without tracedecay
     let path = home.join(".claude.json");
     if path.exists() {
         let claude_json = read_json(&path);
-        let has_tokensave = claude_json
+        let has_tracedecay = claude_json
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
+            .and_then(|v| v.get("tracedecay"))
             .is_some();
         assert!(
-            !has_tokensave,
-            "mcpServers.tokensave should be gone after uninstall"
+            !has_tracedecay,
+            "mcpServers.tracedecay should be gone after uninstall"
         );
     }
 }
@@ -406,13 +406,13 @@ fn test_uninstall_removes_empty_claude_json() {
     let home = dir.path();
     let ctx = make_install_ctx(home);
 
-    // Install (creates .claude.json with only mcpServers.tokensave)
+    // Install (creates .claude.json with only mcpServers.tracedecay)
     ClaudeIntegration.install(&ctx).unwrap();
     assert!(home.join(".claude.json").exists());
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // Since the only content was tokensave, file should be deleted
+    // Since the only content was tracedecay, file should be deleted
     assert!(
         !home.join(".claude.json").exists(),
         ".claude.json should be deleted when it becomes empty after uninstall"
@@ -441,7 +441,7 @@ fn test_uninstall_removes_hook_from_settings() {
                                 entry
                                     .get("command")
                                     .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.contains("tokensave"))
+                                    .is_some_and(|c| c.contains("tracedecay"))
                             })
                         })
                         .unwrap_or(false)
@@ -450,7 +450,7 @@ fn test_uninstall_removes_hook_from_settings() {
             .unwrap_or(false);
         assert!(
             !has_hook,
-            "PreToolUse should not contain tokensave hook after uninstall"
+            "PreToolUse should not contain tracedecay hook after uninstall"
         );
     }
 }
@@ -471,13 +471,13 @@ fn test_uninstall_removes_permissions_from_settings() {
             .map(|arr| {
                 arr.iter().any(|v| {
                     v.as_str()
-                        .is_some_and(|s| s.starts_with("mcp__tokensave__"))
+                        .is_some_and(|s| s.starts_with("mcp__tracedecay__"))
                 })
             })
             .unwrap_or(false);
         assert!(
             !has_ts_perm,
-            "permissions.allow should not contain mcp__tokensave__* after uninstall"
+            "permissions.allow should not contain mcp__tracedecay__* after uninstall"
         );
     }
 }
@@ -491,7 +491,7 @@ fn test_uninstall_preserves_other_permissions() {
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // Now add a non-tokensave permission to settings.json
+    // Now add a non-tracedecay permission to settings.json
     let settings_path = home.join(".claude/settings.json");
     let mut settings = read_json(&settings_path);
     let allow = settings["permissions"]["allow"].as_array_mut().unwrap();
@@ -508,11 +508,11 @@ fn test_uninstall_preserves_other_permissions() {
     let strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         strs.contains(&"Bash(*)"),
-        "non-tokensave permission 'Bash(*)' should be preserved, got: {strs:?}"
+        "non-tracedecay permission 'Bash(*)' should be preserved, got: {strs:?}"
     );
     assert!(
-        !strs.iter().any(|s| s.starts_with("mcp__tokensave__")),
-        "tokensave permissions should be removed"
+        !strs.iter().any(|s| s.starts_with("mcp__tracedecay__")),
+        "tracedecay permissions should be removed"
     );
 }
 
@@ -528,12 +528,12 @@ fn test_uninstall_removes_claude_md_rules() {
 
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // CLAUDE.md had only tokensave rules, should be removed
+    // CLAUDE.md had only tracedecay rules, should be removed
     if claude_md_path.exists() {
         let content = std::fs::read_to_string(&claude_md_path).unwrap();
         assert!(
-            !content.contains("MANDATORY: No Explore Agents When Tokensave Is Available"),
-            "CLAUDE.md should not contain tokensave marker after uninstall"
+            !content.contains("MANDATORY: No Explore Agents When Tracedecay Is Available"),
+            "CLAUDE.md should not contain tracedecay marker after uninstall"
         );
     }
 }
@@ -574,7 +574,7 @@ fn test_uninstall_preserves_other_claude_md_content() {
     );
     assert!(
         !md_content.contains("MANDATORY: No Explore Agents"),
-        "tokensave marker should be removed after uninstall"
+        "tracedecay marker should be removed after uninstall"
     );
 }
 
@@ -607,7 +607,7 @@ fn test_healthcheck_detects_missing_settings() {
     // Create .claude.json with MCP server but no settings.json
     std::fs::write(
         home.join(".claude.json"),
-        r#"{"mcpServers":{"tokensave":{"command":"/usr/local/bin/tokensave","args":["serve"]}}}"#,
+        r#"{"mcpServers":{"tracedecay":{"command":"/usr/local/bin/tracedecay","args":["serve"]}}}"#,
     )
     .unwrap();
 
@@ -633,7 +633,7 @@ fn test_healthcheck_detects_missing_permissions() {
     // Create .claude.json with MCP server
     std::fs::write(
         home.join(".claude.json"),
-        r#"{"mcpServers":{"tokensave":{"command":"/usr/local/bin/tokensave","args":["serve"]}}}"#,
+        r#"{"mcpServers":{"tracedecay":{"command":"/usr/local/bin/tracedecay","args":["serve"]}}}"#,
     )
     .unwrap();
 
@@ -647,7 +647,7 @@ fn test_healthcheck_detects_missing_permissions() {
     "PreToolUse": [
       {
         "matcher": "Agent",
-        "hooks": [{"type": "command", "command": "/usr/local/bin/tokensave hook-pre-tool-use"}]
+        "hooks": [{"type": "command", "command": "/usr/local/bin/tracedecay hook-pre-tool-use"}]
       }
     ]
   }
@@ -678,7 +678,7 @@ fn test_healthcheck_detects_stale_permissions() {
     let settings_path = home.join(".claude/settings.json");
     let mut settings = read_json(&settings_path);
     let allow = settings["permissions"]["allow"].as_array_mut().unwrap();
-    allow.push(serde_json::json!("mcp__tokensave__fake_tool"));
+    allow.push(serde_json::json!("mcp__tracedecay__fake_tool"));
     let pretty = serde_json::to_string_pretty(&settings).unwrap();
     std::fs::write(&settings_path, format!("{pretty}\n")).unwrap();
 
@@ -723,10 +723,10 @@ fn test_healthcheck_clean_local_config() {
     let project = dir.path().join("myproject");
     std::fs::create_dir_all(&project).unwrap();
 
-    // Create a local .mcp.json with tokensave
+    // Create a local .mcp.json with tracedecay
     std::fs::write(
         project.join(".mcp.json"),
-        r#"{"mcpServers":{"tokensave":{"command":"/usr/local/bin/tokensave","args":["serve"]}}}"#,
+        r#"{"mcpServers":{"tracedecay":{"command":"/usr/local/bin/tracedecay","args":["serve"]}}}"#,
     )
     .unwrap();
 
@@ -741,7 +741,7 @@ fn test_healthcheck_clean_local_config() {
     };
     ClaudeIntegration.healthcheck(&mut dc, &hctx);
 
-    // The local .mcp.json should be cleaned up (removed entirely since tokensave
+    // The local .mcp.json should be cleaned up (removed entirely since tracedecay
     // was the only entry)
     assert!(
         !project.join(".mcp.json").exists(),
@@ -757,15 +757,15 @@ fn test_healthcheck_local_settings_cleanup() {
     let local_claude = project.join(".claude");
     std::fs::create_dir_all(&local_claude).unwrap();
 
-    // Create local settings.local.json with tokensave entries
+    // Create local settings.local.json with tracedecay entries
     std::fs::write(
         local_claude.join("settings.local.json"),
         r#"{
   "enableAllProjectMcpServers": false,
-  "enabledMcpjsonServers": ["tokensave"],
+  "enabledMcpjsonServers": ["tracedecay"],
   "mcpServers": {
-    "tokensave": {
-      "command": "/usr/local/bin/tokensave",
+    "tracedecay": {
+      "command": "/usr/local/bin/tracedecay",
       "args": ["serve"]
     }
   }
@@ -785,7 +785,7 @@ fn test_healthcheck_local_settings_cleanup() {
     ClaudeIntegration.healthcheck(&mut dc, &hctx);
 
     // The local settings.local.json should be cleaned up
-    // (removed entirely since tokensave was the only content that mattered)
+    // (removed entirely since tracedecay was the only content that mattered)
     assert!(
         !local_claude.join("settings.local.json").exists(),
         "settings.local.json should be removed after healthcheck cleanup"
@@ -793,29 +793,29 @@ fn test_healthcheck_local_settings_cleanup() {
 }
 
 // ===========================================================================
-// is_detected / has_tokensave
+// is_detected / has_tracedecay
 // ===========================================================================
 
 #[test]
-fn test_has_tokensave_after_install() {
+fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
     assert!(
-        ClaudeIntegration.has_tokensave(home),
-        "has_tokensave should return true after install"
+        ClaudeIntegration.has_tracedecay(home),
+        "has_tracedecay should return true after install"
     );
 }
 
 #[test]
-fn test_has_tokensave_without_install() {
+fn test_has_tracedecay_without_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
     assert!(
-        !ClaudeIntegration.has_tokensave(home),
-        "has_tokensave should return false without install"
+        !ClaudeIntegration.has_tracedecay(home),
+        "has_tracedecay should return false without install"
     );
 }

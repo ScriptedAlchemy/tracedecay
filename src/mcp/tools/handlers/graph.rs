@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 use serde_json::{json, Value};
 
 use crate::context::format_context_as_markdown;
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, EdgeKind, NodeKind, Visibility};
 
 use super::super::ToolResult;
@@ -17,16 +17,16 @@ use super::{
     effective_path, filter_by_scope, require_node_id, truncate_response, unique_file_paths,
 };
 
-/// Handles `tokensave_search` tool calls.
+/// Handles `tracedecay_search` tool calls.
 pub(super) async fn handle_search(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let query =
         args.get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: query".to_string(),
             })?;
 
@@ -64,18 +64,18 @@ pub(super) async fn handle_search(
     })
 }
 
-/// Handles `tokensave_context` tool calls.
+/// Handles `tracedecay_context` tool calls.
 pub(super) async fn handle_context(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let task = args
-        .get("task")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: task".to_string(),
-        })?;
+    let task =
+        args.get("task")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: task".to_string(),
+            })?;
 
     let max_nodes = args
         .get("max_nodes")
@@ -207,7 +207,7 @@ pub(super) async fn handle_context(
                         callers.iter().map(|(n, _)| n.id.clone()).collect();
                     let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
                     for (caller, _) in &callers {
-                        if crate::tokensave::is_test_file(&caller.file_path)
+                        if crate::tracedecay::is_test_file(&caller.file_path)
                             || test_annotated.contains(&caller.id)
                         {
                             test_files.insert(caller.file_path.clone());
@@ -243,8 +243,8 @@ pub(super) async fn handle_context(
     })
 }
 
-/// Handles `tokensave_callers` tool calls.
-pub(super) async fn handle_callers(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_callers` tool calls.
+pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     let max_depth = args
@@ -279,7 +279,7 @@ pub(super) async fn handle_callers(cg: &TokenSave, args: Value) -> Result<ToolRe
     })
 }
 
-/// Handles `tokensave_callees` tool calls.
+/// Handles `tracedecay_callees` tool calls.
 ///
 /// Beyond the direct `Calls` edges, this handler also surfaces *trait
 /// dispatch targets*: when a callee is a method whose enclosing scope is a
@@ -289,7 +289,7 @@ pub(super) async fn handle_callers(cg: &TokenSave, args: Value) -> Result<ToolRe
 /// they statically called.
 ///
 /// Dispatch resolution skipped when `resolve_dispatch=false` is passed.
-pub(super) async fn handle_callees(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     let max_depth = args
@@ -356,22 +356,22 @@ pub(super) async fn handle_callees(cg: &TokenSave, args: Value) -> Result<ToolRe
     })
 }
 
-/// Handles `tokensave_find_exact_symbol` tool calls. Bare-name lookup against
+/// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
 /// `idx_nodes_name` — no BM25 scoring, no fuzzy match, no qualified-name
 /// suffix walk. Returns every node whose `name` column equals the query
 /// exactly. Useful when you already know the symbol and want the apples-to-
-/// apples cost of an index hit instead of `tokensave_search`'s ranked query.
+/// apples cost of an index hit instead of `tracedecay_search`'s ranked query.
 pub(super) async fn handle_find_exact_symbol(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let name = args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: name".to_string(),
-        })?;
+    let name =
+        args.get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: name".to_string(),
+            })?;
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
@@ -414,19 +414,19 @@ pub(super) async fn handle_find_exact_symbol(
     })
 }
 
-/// Handles `tokensave_call_chain` tool calls. Finds the shortest directed
+/// Handles `tracedecay_call_chain` tool calls. Finds the shortest directed
 /// call path from `from_id` to `to_id` along outgoing `Calls` edges.
-pub(super) async fn handle_call_chain(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_call_chain(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let from_id = args
         .get("from_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: from_id".to_string(),
         })?;
     let to_id =
         args.get("to_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: to_id".to_string(),
             })?;
     let max_depth = args
@@ -479,14 +479,14 @@ pub(super) async fn handle_call_chain(cg: &TokenSave, args: Value) -> Result<Too
     })
 }
 
-/// Handles `tokensave_file_dependents` tool calls.
-pub(super) async fn handle_file_dependents(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let file = args
-        .get("file")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: file".to_string(),
-        })?;
+/// Handles `tracedecay_file_dependents` tool calls.
+pub(super) async fn handle_file_dependents(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let file =
+        args.get("file")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: file".to_string(),
+            })?;
 
     let dependents = cg.get_file_dependents(file).await?;
     let touched_files = dependents.clone();
@@ -504,8 +504,8 @@ pub(super) async fn handle_file_dependents(cg: &TokenSave, args: Value) -> Resul
     })
 }
 
-/// Handles `tokensave_impact` tool calls.
-pub(super) async fn handle_impact(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_impact` tool calls.
+pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     let max_depth = args
@@ -546,8 +546,8 @@ pub(super) async fn handle_impact(cg: &TokenSave, args: Value) -> Result<ToolRes
     })
 }
 
-/// Handles `tokensave_node` tool calls.
-pub(super) async fn handle_node(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_node` tool calls.
+pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     let node = cg.get_node(node_id).await?;
@@ -625,8 +625,8 @@ pub(super) async fn handle_node(cg: &TokenSave, args: Value) -> Result<ToolResul
     }
 }
 
-/// Handles `tokensave_similar` tool calls.
-pub(super) async fn handle_similar(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_similar` tool calls.
+pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     debug_assert!(
         args.is_object(),
         "handle_similar expects an object argument"
@@ -634,7 +634,7 @@ pub(super) async fn handle_similar(cg: &TokenSave, args: Value) -> Result<ToolRe
     let symbol =
         args.get("symbol")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: symbol".to_string(),
             })?;
 
@@ -697,8 +697,8 @@ pub(super) async fn handle_similar(cg: &TokenSave, args: Value) -> Result<ToolRe
     })
 }
 
-/// Handles `tokensave_rename_preview` tool calls.
-pub(super) async fn handle_rename_preview(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_rename_preview` tool calls.
+pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
 
     // Get the node itself
@@ -783,8 +783,8 @@ pub(super) async fn handle_rename_preview(cg: &TokenSave, args: Value) -> Result
     })
 }
 
-/// Handles `tokensave_callers_for` tool calls — bulk caller lookup over many IDs.
-pub(super) async fn handle_callers_for(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
+pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_ids: Vec<String> = args
         .get("node_ids")
         .and_then(|v| v.as_array())
@@ -796,7 +796,7 @@ pub(super) async fn handle_callers_for(cg: &TokenSave, args: Value) -> Result<To
         .unwrap_or_default();
 
     if node_ids.is_empty() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "callers_for requires non-empty node_ids".to_string(),
         });
     }
@@ -809,7 +809,7 @@ pub(super) async fn handle_callers_for(cg: &TokenSave, args: Value) -> Result<To
         match EdgeKind::from_str(kind_arg) {
             Some(k) => vec![k],
             None => {
-                return Err(TokenSaveError::Config {
+                return Err(TraceDecayError::Config {
                     message: format!("unknown edge kind: {kind_arg}"),
                 });
             }
@@ -855,12 +855,12 @@ pub(super) async fn handle_callers_for(cg: &TokenSave, args: Value) -> Result<To
     })
 }
 
-/// Handles `tokensave_by_qualified_name` — cross-run node lookup by name.
-pub(super) async fn handle_by_qualified_name(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
+pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let qname = args
         .get("qualified_name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: qualified_name".to_string(),
         })?;
 
@@ -892,10 +892,10 @@ pub(super) async fn handle_by_qualified_name(cg: &TokenSave, args: Value) -> Res
     })
 }
 
-/// Handles `tokensave_signature` — signature-only lookup (no body) by
+/// Handles `tracedecay_signature` — signature-only lookup (no body) by
 /// qualified name or node ID. Returns the public-API surface of a symbol so
 /// callers can avoid reading the source file just to inspect the signature.
-pub(super) async fn handle_signature(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let qname = args.get("qualified_name").and_then(|v| v.as_str());
     let node_id = args
         .get("node_id")
@@ -903,7 +903,7 @@ pub(super) async fn handle_signature(cg: &TokenSave, args: Value) -> Result<Tool
         .and_then(|v| v.as_str());
 
     if qname.is_none() && node_id.is_none() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "missing required parameter: qualified_name or node_id".to_string(),
         });
     }
@@ -950,12 +950,12 @@ pub(super) async fn handle_signature(cg: &TokenSave, args: Value) -> Result<Tool
     })
 }
 
-/// Handles `tokensave_impls` — index of `impl Trait for Type` blocks.
+/// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
 ///
 /// Both `trait` and `type` arguments are optional. With neither, every impl
 /// in the graph is returned (capped by `limit`). Surfaces trait-dispatch
 /// information that is otherwise hidden behind raw `Implements` edges.
-pub(super) async fn handle_impls(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let trait_filter = args.get("trait").and_then(|v| v.as_str());
     let type_filter = args.get("type").and_then(|v| v.as_str());
     let limit = args
@@ -1005,17 +1005,17 @@ pub(super) async fn handle_impls(cg: &TokenSave, args: Value) -> Result<ToolResu
     })
 }
 
-/// Handles `tokensave_derives` — lists `#[derive(...)]` macros on a type
+/// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
 /// and the trait + method names each one synthesizes (per the static
 /// `derive_table`). Accepts either `node_id` or `qualified_name`.
-pub(super) async fn handle_derives(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let qname = args.get("qualified_name").and_then(|v| v.as_str());
     let node_id = args
         .get("node_id")
         .or_else(|| args.get("id"))
         .and_then(|v| v.as_str());
     if qname.is_none() && node_id.is_none() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "missing required parameter: qualified_name or node_id".to_string(),
         });
     }
@@ -1090,9 +1090,9 @@ pub(super) fn cost_to_expand(node: &crate::types::Node, file_size_bytes: u64) ->
     })
 }
 
-/// Handles `tokensave_implementations` — trait / method implementor lookup.
+/// Handles `tracedecay_implementations` — trait / method implementor lookup.
 pub(super) async fn handle_implementations(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1100,13 +1100,13 @@ pub(super) async fn handle_implementations(
     let method_name = args.get("method").and_then(|v| v.as_str());
 
     if trait_name.is_none() && method_name.is_none() {
-        return Err(TokenSaveError::Config {
-            message: "tokensave_implementations requires either 'trait' or 'method'".to_string(),
+        return Err(TraceDecayError::Config {
+            message: "tracedecay_implementations requires either 'trait' or 'method'".to_string(),
         });
     }
     if trait_name.is_some() && method_name.is_some() {
-        return Err(TokenSaveError::Config {
-            message: "tokensave_implementations: 'trait' and 'method' are mutually exclusive"
+        return Err(TraceDecayError::Config {
+            message: "tracedecay_implementations: 'trait' and 'method' are mutually exclusive"
                 .to_string(),
         });
     }
@@ -1232,7 +1232,7 @@ pub(super) async fn handle_implementations(
 }
 
 async fn collect_method_bodies(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     impl_node: &crate::types::Node,
     project_root: &std::path::Path,
 ) -> Result<Vec<Value>> {

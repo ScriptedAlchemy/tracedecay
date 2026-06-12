@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libsql::{params, Connection, Value as SqlValue};
 use serde_json::{json, Value};
 
-use crate::tokensave::current_timestamp;
+use crate::tracedecay::current_timestamp;
 
 use super::{payload, schema, security, util, LcmCleanConfig, LcmError, LCM_SCHEMA_VERSION};
 

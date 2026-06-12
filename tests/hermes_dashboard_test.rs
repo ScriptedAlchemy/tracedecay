@@ -1,6 +1,6 @@
 //! Hermes dashboard plugin-page deployment tests.
 //!
-//! `tokensave install --agent hermes` deploys the dashboard wrapper
+//! `tracedecay install --agent hermes` deploys the dashboard wrapper
 //! (manifest.json + plugin_api.py + dist bundles) into the generated
 //! plugin's `dashboard/` subdirectory, where Hermes' dashboard-plugin
 //! discovery (`plugins/*/dashboard/manifest.json`) picks it up. These tests
@@ -11,12 +11,12 @@
 
 use std::path::{Path, PathBuf};
 
-use tokensave::agents::{AgentIntegration, HermesIntegration, InstallContext};
+use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
 
 fn make_ctx(home: &Path, dashboard: bool) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
         project_root: None,
@@ -25,7 +25,7 @@ fn make_ctx(home: &Path, dashboard: bool) -> InstallContext {
 }
 
 fn dashboard_dir(home: &Path) -> PathBuf {
-    home.join(".hermes/plugins/tokensave/dashboard")
+    home.join(".hermes/plugins/tracedecay/dashboard")
 }
 
 fn read(path: &Path) -> String {
@@ -60,8 +60,8 @@ fn install_deploys_dashboard_plugin_page() {
     // Manifest is discoverable and stamped with the generating version.
     let manifest: serde_json::Value =
         serde_json::from_str(&read(&dash.join("manifest.json"))).unwrap();
-    assert_eq!(manifest["name"], "tokensave");
-    assert_eq!(manifest["label"], "TokenSave");
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(manifest["label"], "TraceDecay");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["entry"], "dist/index.js");
     assert_eq!(manifest["css"], "dist/style.css");
@@ -71,8 +71,8 @@ fn install_deploys_dashboard_plugin_page() {
 
     // The proxy backend bakes in the installing binary (env still wins).
     let api = read(&dash.join("plugin_api.py"));
-    assert!(api.contains(r#"DEPLOYED_TOKENSAVE_BIN = "/usr/local/bin/tokensave""#));
-    // Unpinned installs serve the profile home's `.tokensave/` stores (the
+    assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
+    // Unpinned installs serve the profile home's `.tracedecay/` stores (the
     // hermes_profile storage scope), not whatever cwd Hermes spawns from.
     let encoded_home =
         serde_json::to_string(home.path().join(".hermes").to_string_lossy().as_ref()).unwrap();
@@ -129,7 +129,7 @@ fn no_dashboard_skips_deploy() {
     // The agent plugin itself still installs.
     assert!(home
         .path()
-        .join(".hermes/plugins/tokensave/plugin.yaml")
+        .join(".hermes/plugins/tracedecay/plugin.yaml")
         .is_file());
 }
 
@@ -163,7 +163,7 @@ fn uninstall_removes_dashboard_deploy() {
 
     assert!(!dashboard_dir(home.path()).exists());
     assert!(
-        !home.path().join(".hermes/plugins/tokensave").exists(),
+        !home.path().join(".hermes/plugins/tracedecay").exists(),
         "plugin dir should be fully removed once the dashboard is cleaned up"
     );
 }
@@ -202,8 +202,8 @@ fn deployed_bundles_match_embedded_standalone_assets() {
     let entry = read(&dist.join("index.js"));
     let css = read(&dist.join("style.css"));
 
-    assert!(holographic.contains("tokensave holographic-memory dashboard plugin"));
-    assert!(entry.contains("\"tokensave\""));
+    assert!(holographic.contains("tracedecay holographic-memory dashboard plugin"));
+    assert!(entry.contains("\"tracedecay\""));
     // Wrapper chrome first, then the child stylesheets concatenated.
     assert!(css.starts_with("/* Wrapper chrome"));
     assert!(css.contains(".tsiw-tab"));

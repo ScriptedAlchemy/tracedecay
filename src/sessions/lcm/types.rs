@@ -1,6 +1,6 @@
 pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
-pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tokensave]";
+pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tracedecay]";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmRawMessage {
@@ -231,7 +231,7 @@ pub struct LcmExpandRequest {
 
 /// Pagination metadata for a summary node's immediate source list, mirroring
 /// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
-/// `tools.py`). `TokenSave` slices each returned source by characters via
+/// `tools.py`). `TraceDecay` slices each returned source by characters via
 /// `content_slice` instead of sharing a token budget across sources, so the
 /// resume cursor is `next_source_offset` alone.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

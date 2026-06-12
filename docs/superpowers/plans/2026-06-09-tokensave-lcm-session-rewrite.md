@@ -1,5 +1,7 @@
 # TokenSave LCM Session Rewrite Implementation Plan
 
+> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated planning artifact keeps the TokenSave-era names it was written with; read `tokensave` / `tokensave_*` as `tracedecay` / `tracedecay_*` when applying it to the current codebase.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rewrite TokenSave's existing session internals into a lossless, LCM-grade session store inside the existing `sessions.db`, while preserving compatible `tokensave_message_search` behavior and adding deterministic LCM load/expand/status/compression APIs.

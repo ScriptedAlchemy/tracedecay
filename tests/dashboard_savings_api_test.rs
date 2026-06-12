@@ -1,8 +1,8 @@
 //! Integration tests for the Savings & Cost dashboard API
 //! (`/api/plugins/savings/*`), against a seeded temp global DB serving both
-//! the savings ledger and the session store (`TOKENSAVE_GLOBAL_DB` override).
+//! the savings ledger and the session store (`TRACEDECAY_GLOBAL_DB` override).
 //!
-//! Pricing runs offline (`TOKENSAVE_OFFLINE=1`) with the cache pointed at a
+//! Pricing runs offline (`TRACEDECAY_OFFLINE=1`) with the cache pointed at a
 //! nonexistent temp path, so the bundled fallback snapshot is exercised.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -18,11 +18,11 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::dashboard;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
-use tokensave::tokensave::TokenSave;
-use tokensave::types::CostTurn;
+use tracedecay::dashboard;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::CostTurn;
 
 /// Serializes tests in this binary: they mutate process-wide env vars.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -109,19 +109,19 @@ const TEXT_MIXED: &str = "Second message of the mixed session, no usage record h
 async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
     let gdb = GlobalDb::open_at(db_path).await.expect("open global db");
 
-    // Lifetime counter (legacy `projects.tokens_saved`, what `tokensave
+    // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
     // gain` reports as the lifetime number).
     gdb.upsert(project, 47_000).await;
 
     // Savings ledger: two events today, one yesterday (same shape as
     // tests/gain_test.rs so totals line up with the CLI behavior).
-    gdb.record_savings("/proj/a", "tokensave_context", 10_000, 500, day_start + 10)
+    gdb.record_savings("/proj/a", "tracedecay_context", 10_000, 500, day_start + 10)
         .await;
-    gdb.record_savings("/proj/b", "tokensave_context", 5_000, 250, day_start + 20)
+    gdb.record_savings("/proj/b", "tracedecay_context", 5_000, 250, day_start + 20)
         .await;
     gdb.record_savings(
         "/proj/a",
-        "tokensave_search",
+        "tracedecay_search",
         2_000,
         100,
         day_start - 86_390,
@@ -312,15 +312,15 @@ async fn start_fixture() -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guards = vec![
-        EnvVarGuard::set("TOKENSAVE_GLOBAL_DB", &global_db_path),
+        EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path),
         // `.cargo/config.toml` disables global accounting for cargo-launched
         // processes; opt back in so the recording state reads "enabled".
-        EnvVarGuard::set("TOKENSAVE_ENABLE_GLOBAL_DB", "1"),
-        EnvVarGuard::set("TOKENSAVE_OFFLINE", "1"),
+        EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1"),
+        EnvVarGuard::set("TRACEDECAY_OFFLINE", "1"),
         // Point the pricing cache at a path that never exists → the bundled
         // fallback snapshot must serve.
         EnvVarGuard::set(
-            "TOKENSAVE_MODEL_PRICES_PATH",
+            "TRACEDECAY_MODEL_PRICES_PATH",
             tmp.path().join("no-such-prices.json"),
         ),
     ];
@@ -329,9 +329,9 @@ async fn start_fixture() -> Fixture {
     let day_start = now - (now % 86_400);
     seed_global_db(&global_db_path, &project_root, day_start).await;
 
-    let cg = TokenSave::init(&project_root)
+    let cg = TraceDecay::init(&project_root)
         .await
-        .expect("tokensave init");
+        .expect("tracedecay init");
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -429,13 +429,13 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         let by_tool = ledger["by_tool"].as_array().expect("by_tool");
         let context = by_tool
             .iter()
-            .find(|row| row["tool"] == "tokensave_context")
+            .find(|row| row["tool"] == "tracedecay_context")
             .expect("context tool row");
         assert_eq!(context["saved_tokens"], 14_250);
         assert_eq!(context["calls"], 2);
         let search = by_tool
             .iter()
-            .find(|row| row["tool"] == "tokensave_search")
+            .find(|row| row["tool"] == "tracedecay_search")
             .expect("search tool row");
         assert_eq!(search["saved_tokens"], 1_900);
         let by_project = ledger["by_project"].as_array().expect("by_project");

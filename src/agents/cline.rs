@@ -1,13 +1,13 @@
 //! Cline agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Cline's
-//! `cline_mcp_settings.json` under the `mcpServers.tokensave` key.
+//! Handles registration of the tracedecay MCP server in Cline's
+//! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
@@ -33,12 +33,12 @@ impl AgentIntegration for ClineIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let settings_path = cline_ext_dir(&ctx.home).join("settings/cline_mcp_settings.json");
-        install_mcp_server(&settings_path, &ctx.tokensave_bin)?;
+        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Restart VS Code — tokensave tools are now available in Cline");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Restart VS Code — tracedecay tools are now available in Cline");
         Ok(())
     }
 
@@ -47,10 +47,10 @@ impl AgentIntegration for ClineIntegration {
     }
 
     fn install_local(&self, _ctx: &InstallContext, _project_path: &Path) -> Result<()> {
-        Err(TokenSaveError::Config {
+        Err(TraceDecayError::Config {
             message: "Cline does not currently document or ship a project-local MCP config path. \
-                      `tokensave install --local --agent cline` is unsupported. \
-                      Run `tokensave install --agent cline` for a global install."
+                      `tracedecay install --local --agent cline` is unsupported. \
+                      Run `tracedecay install --agent cline` for a global install."
                 .to_string(),
         })
     }
@@ -60,7 +60,7 @@ impl AgentIntegration for ClineIntegration {
         uninstall_mcp_server(&settings_path);
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Cline.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Cline.");
         eprintln!("Restart VS Code for changes to take effect.");
         Ok(())
     }
@@ -78,15 +78,15 @@ impl AgentIntegration for ClineIntegration {
         Some(cline_ext_dir(home).join("settings/cline_mcp_settings.json"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let settings_path = cline_ext_dir(home).join("settings/cline_mcp_settings.json");
         if !settings_path.exists() {
             return false;
         }
         let json = load_json_file(&settings_path);
-        json.get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some()
+        let servers = json.get("mcpServers");
+        servers.and_then(|v| v.get("tracedecay")).is_some()
+            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -94,7 +94,7 @@ impl AgentIntegration for ClineIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -109,15 +109,15 @@ fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
             return Err(e);
         }
     };
-    settings["mcpServers"]["tokensave"] = json!({
-        "command": tokensave_bin,
+    settings["mcpServers"]["tracedecay"] = json!({
+        "command": tracedecay_bin,
         "args": ["serve"],
         "disabled": false
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
@@ -142,15 +142,17 @@ fn uninstall_mcp_server(settings_path: &Path) {
         .and_then(|v| v.as_object_mut())
     else {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
     };
 
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -169,7 +171,7 @@ fn uninstall_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             settings_path.display()
         );
     }
@@ -179,20 +181,20 @@ fn uninstall_mcp_server(settings_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Cline's `cline_mcp_settings.json` has tokensave MCP server registered.
+/// Check Cline's `cline_mcp_settings.json` has tracedecay MCP server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = cline_ext_dir(home).join("settings/cline_mcp_settings.json");
 
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent cline` if you use Cline",
+            "{} not found — run `tracedecay install --agent cline` if you use Cline",
             settings_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     if server.and_then(|v| v.as_object()).is_some() {
         dc.pass(&format!(
@@ -201,7 +203,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent cline`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent cline`",
             settings_path.display()
         ));
     }

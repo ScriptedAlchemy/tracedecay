@@ -47,8 +47,8 @@ export default function SavingsOverviewPanel({
       <div className="tss-empty">
         <h3>Global accounting database unavailable</h3>
         <p>
-          The savings ledger lives in <code>~/.tokensave/global.db</code>{" "}
-          (override: <code>TOKENSAVE_GLOBAL_DB</code>), which could not be
+          The savings ledger lives in <code>~/.tracedecay/global.db</code>{" "}
+          (override: <code>TRACEDECAY_GLOBAL_DB</code>), which could not be
           opened.
         </p>
       </div>
@@ -108,9 +108,9 @@ export default function SavingsOverviewPanel({
         <div className="tss-note tss-note-warn" role="note">
           <strong>Ledger recording is disabled by environment.</strong>{" "}
           {recording.mode === "disabled_by_env" &&
-            "TOKENSAVE_DISABLE_GLOBAL_DB (or a falsy TOKENSAVE_ENABLE_GLOBAL_DB) is set, so MCP servers do not append savings_ledger rows. "}
-          Unset it (or set <code>TOKENSAVE_ENABLE_GLOBAL_DB=1</code>) and
-          restart your agent&apos;s tokensave MCP server to start recording.
+            "TRACEDECAY_DISABLE_GLOBAL_DB (or a falsy TRACEDECAY_ENABLE_GLOBAL_DB) is set, so MCP servers do not append savings_ledger rows. "}
+          Unset it (or set <code>TRACEDECAY_ENABLE_GLOBAL_DB=1</code>) and
+          restart your agent&apos;s tracedecay MCP server to start recording.
         </div>
       )}
 
@@ -118,15 +118,15 @@ export default function SavingsOverviewPanel({
         <div className="tss-note" role="note">
           The savings ledger has no events
           {ledger?.range && ledger.range !== "all" ? ` in range "${ledger.range}"` : ""} yet —
-          rows are appended when tokensave MCP tools return trimmed context
+          rows are appended when tracedecay MCP tools return trimmed context
           (each row records before/after token counts per tool call).
           Recording is enabled in this environment, so an empty all-time
           ledger usually means the running MCP server was started from an
           older build (or with recording disabled) —{" "}
-          <strong>restart/reload your agent&apos;s tokensave MCP server</strong>{" "}
+          <strong>restart/reload your agent&apos;s tracedecay MCP server</strong>{" "}
           to pick up ledger recording. The lifetime counters below come from
           the older <code>projects.tokens_saved</code> tally that{" "}
-          <code>tokensave gain</code> also reports.
+          <code>tracedecay gain</code> also reports.
         </div>
       )}
 
@@ -190,7 +190,7 @@ export default function SavingsOverviewPanel({
             />
             <p className="tss-chart-hint">
               Running totals kept since each project was initialized (the
-              number <code>tokensave gain</code> reports as lifetime savings).
+              number <code>tracedecay gain</code> reports as lifetime savings).
             </p>
           </CardContent>
         </Card>

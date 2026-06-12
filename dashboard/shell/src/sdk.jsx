@@ -168,7 +168,7 @@ export function useI18n() {
 export function buildSDK() {
   return {
     sdkVersion: "1.2.0",
-    host: "tokensave-standalone",
+    host: "tracedecay-standalone",
     React,
     hooks: { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext },
     api: {},

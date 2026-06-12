@@ -39,7 +39,7 @@ pub trait LanguageExtractor: Send + Sync {
 
 ## Proposed languages by tier
 
-Languages are tiered by a combination of: popularity (TIOBE, Stack Overflow, GitHub usage), relevance to tokensave's target users (professional developers using AI coding tools), and implementation complexity.
+Languages are tiered by a combination of: popularity (TIOBE, Stack Overflow, GitHub usage), relevance to tracedecay's target users (professional developers using AI coding tools), and implementation complexity.
 
 ### High Priority — Web Frameworks
 

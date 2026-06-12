@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Verify the generated tokensave plugin against STOCK (upstream) Hermes.
+"""Verify the generated tracedecay plugin against STOCK (upstream) Hermes.
 
 Run from the upstream hermes-agent repo root with its own interpreter
-(`.venv/bin/python` after `uv sync`), after `tokensave install --agent hermes`
+(`.venv/bin/python` after `uv sync`), after `tracedecay install --agent hermes`
 wrote the plugin into a throwaway profile:
 
     HERMES_HOME=<throwaway>/.hermes \
-    TOKENSAVE_PROJECT_ROOT=<throwaway-project> \
+    TRACEDECAY_PROJECT_ROOT=<throwaway-project> \
     .venv/bin/python scripts/hermes_stock_check.py
 
 Asserts the surfaces stock Hermes actually exposes:
@@ -14,7 +14,7 @@ Asserts the surfaces stock Hermes actually exposes:
   2. the context engine registers and is selected via `context.engine`,
   3. the memory provider is discovered via `memory.provider` config
      (stock routes providers through plugins/memory, not PluginContext),
-  4. real tool dispatch round-trips through the tokensave binary
+  4. real tool dispatch round-trips through the tracedecay binary
      (memory facts, LCM status/preflight/compress, graph status).
 
 Everything runs offline: no model calls (compress stays below threshold).
@@ -48,7 +48,7 @@ def unwrap_tool_json(raw):
 
 def main():
     hermes_home = os.environ["HERMES_HOME"]
-    project_root = os.environ["TOKENSAVE_PROJECT_ROOT"]
+    project_root = os.environ["TRACEDECAY_PROJECT_ROOT"]
     sys.path.insert(0, os.getcwd())
 
     # 1. Stock general plugin manager: discovery, enablement, registrations.
@@ -56,30 +56,30 @@ def main():
 
     manager = get_plugin_manager()
     manager.discover_and_load()
-    loaded = manager._plugins.get("tokensave")
-    assert loaded is not None, f"tokensave missing from {sorted(manager._plugins)}"
-    assert loaded.enabled, f"tokensave plugin not enabled: {loaded.error}"
-    assert loaded.error is None, f"tokensave plugin load error: {loaded.error}"
+    loaded = manager._plugins.get("tracedecay")
+    assert loaded is not None, f"tracedecay missing from {sorted(manager._plugins)}"
+    assert loaded.enabled, f"tracedecay plugin not enabled: {loaded.error}"
+    assert loaded.error is None, f"tracedecay plugin load error: {loaded.error}"
     ok("plugin loads via stock PluginManager")
     assert "pre_llm_call" in loaded.hooks_registered, loaded.hooks_registered
     ok("pre_llm_call hook registered")
-    assert "tokensave_status" in loaded.commands_registered, loaded.commands_registered
-    ok("/tokensave_status command registered")
+    assert "tracedecay_status" in loaded.commands_registered, loaded.commands_registered
+    ok("/tracedecay_status command registered")
     # Code-graph / memory / transcript tools register unconditionally; only
     # the live-ingest LCM verbs (whose schemas take the in-memory messages
     # list) depend on the context_engine_tool_handlers_receive_messages
     # capability, which stock does not advertise.
     registered = set(loaded.tools_registered)
-    assert "tokensave_search" in registered, sorted(registered)
-    assert "tokensave_context" in registered, sorted(registered)
-    assert "tokensave_message_search" in registered, sorted(registered)
-    assert "tokensave_lcm_compress" not in registered, sorted(registered)
-    assert "tokensave_lcm_preflight" not in registered, sorted(registered)
-    # memory.provider is tokensave here, so the provider-owned fact trio
+    assert "tracedecay_search" in registered, sorted(registered)
+    assert "tracedecay_context" in registered, sorted(registered)
+    assert "tracedecay_message_search" in registered, sorted(registered)
+    assert "tracedecay_lcm_compress" not in registered, sorted(registered)
+    assert "tracedecay_lcm_preflight" not in registered, sorted(registered)
+    # memory.provider is tracedecay here, so the provider-owned fact trio
     # must not register as direct duplicates.
-    assert "tokensave_fact_store" not in registered, sorted(registered)
-    assert "tokensave_fact_feedback" not in registered, sorted(registered)
-    assert "tokensave_memory_status" not in registered, sorted(registered)
+    assert "tracedecay_fact_store" not in registered, sorted(registered)
+    assert "tracedecay_fact_feedback" not in registered, sorted(registered)
+    assert "tracedecay_memory_status" not in registered, sorted(registered)
     ok(
         "code-graph tools register on stock; LCM + provider-owned tools stay gated",
         f"{len(registered)} tools",
@@ -91,8 +91,8 @@ def main():
 
     config = load_config()
     engine_name = (config.get("context") or {}).get("engine")
-    assert engine_name == "tokensave", f"context.engine = {engine_name!r}"
-    ok("config.yaml selects context.engine: tokensave")
+    assert engine_name == "tracedecay", f"context.engine = {engine_name!r}"
+    ok("config.yaml selects context.engine: tracedecay")
 
     from plugins.context_engine import load_context_engine
 
@@ -125,7 +125,7 @@ def main():
     ]
     compressed = engine.compress(messages, current_tokens=50)
     # Host ABC contract: compress() returns a MESSAGE LIST the host adopts
-    # as the live transcript; the raw tokensave result stays on the engine.
+    # as the live transcript; the raw tracedecay result stays on the engine.
     assert isinstance(compressed, list), type(compressed)
     assert all(isinstance(m, dict) and m.get("role") for m in compressed), compressed
     result = engine.last_compress_result
@@ -137,15 +137,15 @@ def main():
     #    register_memory_provider, so this is the only stock activation path).
     from plugins.memory import _get_active_memory_provider, load_memory_provider
 
-    assert _get_active_memory_provider() == "tokensave"
-    ok("config.yaml selects memory.provider: tokensave")
+    assert _get_active_memory_provider() == "tracedecay"
+    ok("config.yaml selects memory.provider: tracedecay")
 
-    provider = load_memory_provider("tokensave")
-    assert provider is not None, "stock plugins/memory failed to load tokensave"
+    provider = load_memory_provider("tracedecay")
+    assert provider is not None, "stock plugins/memory failed to load tracedecay"
     from agent.memory_provider import MemoryProvider
 
     assert isinstance(provider, MemoryProvider)
-    assert provider.name == "tokensave"
+    assert provider.name == "tracedecay"
     assert provider.is_available() is True
     ok("memory provider discovered and available on stock")
 
@@ -206,7 +206,7 @@ def main():
     # 4. Graph tool dispatch through the generated tools.py against the
     #    pinned throwaway project.
     plugin = loaded.module
-    graph_status = unwrap_tool_json(plugin.tools.call_tokensave_tool("tokensave_status", {}))
+    graph_status = unwrap_tool_json(plugin.tools.call_tracedecay_tool("tracedecay_status", {}))
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status
     ok(
@@ -214,7 +214,7 @@ def main():
         f"files={graph_status.get('file_count')} nodes={graph_status.get('node_count')}",
     )
     assert plugin.tools.config_pinned_project_root() == project_root
-    ok("plugins.tokensave.project_root pin resolves", project_root)
+    ok("plugins.tracedecay.project_root pin resolves", project_root)
 
     print(f"1..{PASS}")
     print(f"stock hermes integration: all {PASS} checks passed")

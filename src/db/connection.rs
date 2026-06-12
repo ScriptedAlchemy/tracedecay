@@ -3,7 +3,7 @@ use std::path::Path;
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 use super::migrations;
 
@@ -43,7 +43,7 @@ impl Database {
     /// migrations were applied during initialization.
     pub async fn initialize(db_path: &Path) -> Result<(Self, bool)> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| TokenSaveError::Database {
+            std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to create database directory: {e}"),
                 operation: "initialize".to_string(),
             })?;
@@ -53,12 +53,12 @@ impl Database {
             Builder::new_local(db_path)
                 .build()
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to open database: {e}"),
                     operation: "initialize".to_string(),
                 })?;
 
-        let conn = db.connect().map_err(|e| TokenSaveError::Database {
+        let conn = db.connect().map_err(|e| TraceDecayError::Database {
             message: format!("failed to connect to database: {e}"),
             operation: "initialize".to_string(),
         })?;
@@ -78,12 +78,12 @@ impl Database {
             Builder::new_local(db_path)
                 .build()
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to open database: {e}"),
                     operation: "open".to_string(),
                 })?;
 
-        let conn = db.connect().map_err(|e| TokenSaveError::Database {
+        let conn = db.connect().map_err(|e| TraceDecayError::Database {
             message: format!("failed to connect to database: {e}"),
             operation: "open".to_string(),
         })?;
@@ -113,7 +113,7 @@ impl Database {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to checkpoint WAL: {e}"),
                 operation: "checkpoint".to_string(),
             })?;
@@ -125,7 +125,7 @@ impl Database {
         self.conn
             .execute_batch("VACUUM; ANALYZE;")
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to optimize database: {e}"),
                 operation: "optimize".to_string(),
             })?;
@@ -141,7 +141,7 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to get database size: {e}"),
                 operation: "size".to_string(),
             })?;
@@ -149,16 +149,16 @@ impl Database {
         let row = rows
             .next()
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read database size row: {e}"),
                 operation: "size".to_string(),
             })?
-            .ok_or_else(|| TokenSaveError::Database {
+            .ok_or_else(|| TraceDecayError::Database {
                 message: "no result from page size query".to_string(),
                 operation: "size".to_string(),
             })?;
 
-        let size = row.get::<i64>(0).map_err(|e| TokenSaveError::Database {
+        let size = row.get::<i64>(0).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read size value: {e}"),
             operation: "size".to_string(),
         })?;
@@ -175,12 +175,12 @@ impl Database {
             .conn
             .query("PRAGMA quick_check", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to run quick_check: {e}"),
                 operation: "quick_check".to_string(),
             })?;
 
-        if let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        if let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read quick_check result: {e}"),
             operation: "quick_check".to_string(),
         })? {
@@ -199,7 +199,7 @@ impl Database {
         self.conn
             .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to rebuild FTS index: {e}"),
                 operation: "rebuild_fts".to_string(),
             })?;
@@ -223,7 +223,7 @@ impl Database {
              PRAGMA mmap_size = {mmap};",
         ))
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to apply pragmas: {e}"),
             operation: "apply_pragmas".to_string(),
         })?;
@@ -258,7 +258,7 @@ impl Database {
              DELETE FROM nodes_fts;",
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to begin bulk load: {e}"),
                 operation: "begin_bulk_load".to_string(),
             })?;
@@ -298,7 +298,7 @@ impl Database {
              INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
                  SELECT rowid, name, qualified_name, docstring, signature FROM nodes;
              PRAGMA foreign_keys = ON;",
-        ).await.map_err(|e| TokenSaveError::Database {
+        ).await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to end bulk load: {e}"),
             operation: "end_bulk_load".to_string(),
         })?;

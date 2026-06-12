@@ -1,4 +1,4 @@
-//! Holographic-memory dashboard API, backed by tokensave's memory store.
+//! Holographic-memory dashboard API, backed by tracedecay's memory store.
 //!
 //! Port of `plugins/memory/holographic_plus/dashboard/plugin_api.py` (Hermes)
 //! onto the project database tables `memory_facts`, `memory_entities`,
@@ -13,7 +13,7 @@
 //!   `merge`) that external planners (e.g. an LLM-backed Hermes wrapper)
 //!   can call with their own proposed operations.
 //! - There is no fact archive: deletion is permanent (the original
-//!   `holographic_plus` soft-archived facts; tokensave does not).
+//!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
 
 use std::collections::HashMap;
@@ -27,17 +27,17 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::memory_analysis::{
-    build_similarity_computation, pca_scores, propose_dedup_actions, score_distribution,
-    score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_FACT_CAP,
-    SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
+    build_similarity_computation, pca_scores, propose_dedup_actions, propose_hygiene_candidates,
+    score_distribution, score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
+    SIMILARITY_FACT_CAP, SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX,
+    SIMILARITY_SCORE_MIN,
 };
 use super::util::{
     coerce_limit, http_detail, like_pattern, query_i64, query_rows, JsonPath, JsonQuery,
 };
-use super::{CuratePreviewEntry, DashboardState};
+use super::{CuratePreviewEntry, CuratePreviewFingerprint, DashboardState};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::store::MemoryStore;
-use crate::memory::types::UpdateFactRequest;
 
 #[derive(Deserialize)]
 pub(crate) struct OverviewParams {
@@ -69,14 +69,14 @@ const PROJECTION_POINT_CAP: i64 = 2000;
 
 fn providers_stub() -> Value {
     json!({
-        "memory_provider": "tokensave",
+        "memory_provider": "tracedecay",
         "memory_options": [
             {
-                "name": "tokensave",
-                "description": "TokenSave holographic memory store (project-local memory_facts)."
+                "name": "tracedecay",
+                "description": "TraceDecay holographic memory store (project-local memory_facts)."
             }
         ],
-        "context_engine": "tokensave",
+        "context_engine": "tracedecay",
         "context_options": [],
         "plugin_context_engine": null,
         "curator_tools": { "enabled": false, "count": 0, "available": 0, "tools": [] },
@@ -100,7 +100,8 @@ async fn fetch_facts(
         query_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
-                    retrieval_count, helpful_count, created_at, updated_at,
+                    retrieval_count, access_count, last_recalled_at,
+                    helpful_count, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              ORDER BY trust_score DESC, updated_at DESC
@@ -113,7 +114,8 @@ async fn fetch_facts(
         query_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
-                    retrieval_count, helpful_count, created_at, updated_at,
+                    retrieval_count, access_count, last_recalled_at,
+                    helpful_count, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              WHERE content LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'
@@ -220,7 +222,7 @@ async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
         })
         .collect();
 
-    // Per-category HRR coverage: tokensave names category banks after the
+    // Per-category HRR coverage: tracedecay names category banks after the
     // category itself (the Hermes store used a `cat:` prefix).
     let mut hrr_coverage = Vec::new();
     for row in &category_rows {
@@ -554,7 +556,8 @@ pub(crate) async fn fact_detail(
     let rows = query_rows(
         &state.mem_conn,
         "SELECT fact_id, content, category, tags, trust_score,
-                retrieval_count, helpful_count, created_at, updated_at,
+                retrieval_count, access_count, last_recalled_at,
+                helpful_count, created_at, updated_at,
                 hrr_vector IS NOT NULL AS has_hrr
          FROM memory_facts
          WHERE fact_id = ?1
@@ -598,7 +601,8 @@ async fn vector_facts(
     let (sql, params): (String, Vec<libsql::Value>) = if q.is_empty() {
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
-                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count
+                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
+                    f.access_count, f.last_recalled_at, f.created_at
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -612,7 +616,8 @@ async fn vector_facts(
     } else {
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
-                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count
+                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
+                    f.access_count, f.last_recalled_at, f.created_at
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -661,6 +666,9 @@ async fn vector_facts(
             _ => Value::Null,
         };
         let entity_count: i64 = row.get(8).unwrap_or(0);
+        let access_count: i64 = row.get(9).unwrap_or(0);
+        let last_recalled_at: Option<i64> = row.get(10).unwrap_or(None);
+        let created_at: i64 = row.get(11).unwrap_or(0);
         out.push((
             json!({
                 "fact_id": fact_id,
@@ -668,6 +676,9 @@ async fn vector_facts(
                 "category": category,
                 "trust_score": trust_score,
                 "retrieval_count": retrieval_count,
+                "access_count": access_count,
+                "last_recalled_at": last_recalled_at,
+                "created_at": created_at,
                 "bank_id": bank_id,
                 "bank_name": bank_name,
                 "entity_count": entity_count,
@@ -843,16 +854,17 @@ type VectorStateFingerprint = (i64, i64, i64, u64);
 /// hashed (at the 2000-fact cap that was ~32 MB pulled out of `SQLite` per
 /// request, paying most of what the cache exists to avoid). Inserts and
 /// deletes change `count`/`sum_fact_id`, content edits re-encode through the
-/// store paths that bump `updated_at` (hashed per row), the startup NULL-
-/// vector repair changes `count`, and algebra/dimension migrations hash
-/// differently.
+/// store paths that bump `updated_at` (hashed per row), recall access updates
+/// refresh curation delete-reluctance metadata, the startup NULL-vector repair
+/// changes `count`, and algebra/dimension migrations hash differently.
 async fn vector_state_fingerprint(
     state: &DashboardState,
 ) -> Result<VectorStateFingerprint, String> {
     let mut rows = state
         .mem_conn
         .query(
-            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim
+            "SELECT fact_id, COALESCE(updated_at, 0), hrr_algebra, hrr_dim,
+                    COALESCE(access_count, 0), COALESCE(last_recalled_at, 0)
              FROM memory_facts
              WHERE hrr_vector IS NOT NULL
              ORDER BY fact_id ASC",
@@ -869,6 +881,8 @@ async fn vector_state_fingerprint(
         let updated_at: i64 = row.get(1).unwrap_or(0);
         let hrr_algebra: String = row.get(2).unwrap_or_default();
         let hrr_dim: i64 = row.get(3).unwrap_or(0);
+        let access_count: i64 = row.get(4).unwrap_or(0);
+        let last_recalled_at: i64 = row.get(5).unwrap_or(0);
         count += 1;
         max_updated_at = max_updated_at.max(updated_at);
         sum_fact_id += fact_id;
@@ -876,6 +890,8 @@ async fn vector_state_fingerprint(
         updated_at.hash(&mut hasher);
         hrr_algebra.hash(&mut hasher);
         hrr_dim.hash(&mut hasher);
+        access_count.hash(&mut hasher);
+        last_recalled_at.hash(&mut hasher);
     }
     Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
 }
@@ -1020,7 +1036,7 @@ pub(crate) async fn curation_status(State(state): State<DashboardState>) -> Json
         None => (Value::Null, Value::Null),
     };
     Json(json!({
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "state": {
             "paused": false,
             "last_run_at": null,
@@ -1048,6 +1064,32 @@ pub(crate) async fn curation_activity(JsonQuery(params): JsonQuery<LimitParams>)
     Json(json!({ "events": [], "count": 0, "limit": limit, "error": "" }))
 }
 
+async fn curation_preview_fingerprint(
+    state: &DashboardState,
+) -> Result<CuratePreviewFingerprint, String> {
+    let mut rows = state
+        .mem_conn
+        .query(
+            "SELECT COUNT(*),
+                    COALESCE(MAX(updated_at), 0),
+                    COALESCE(SUM(fact_id), 0),
+                    COALESCE(SUM(updated_at), 0)
+             FROM memory_facts",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
+        return Ok((0, 0, 0, 0));
+    };
+    Ok((
+        row.get::<i64>(0).unwrap_or(0),
+        row.get::<i64>(1).unwrap_or(0),
+        row.get::<i64>(2).unwrap_or(0),
+        row.get::<i64>(3).unwrap_or(0),
+    ))
+}
+
 /// `GET /api/plugins/holographic/curation/preview` — returns the last saved
 /// dry-run preview, or null if none has been run this server session.
 pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Json<Value> {
@@ -1063,11 +1105,12 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
         Some(entry) => {
             let report = entry.report.clone();
             let saved_at = entry.saved_at.clone();
-            let active_facts_at_save = entry.active_facts_at_save;
+            let memory_fingerprint_at_save = entry.memory_fingerprint_at_save;
             drop(preview);
-            let current_active =
-                query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
-            let stale = current_active != active_facts_at_save;
+            let current_fingerprint = curation_preview_fingerprint(&state)
+                .await
+                .unwrap_or((-1, -1, -1, -1));
+            let stale = current_fingerprint != memory_fingerprint_at_save;
             let stale_reason = if stale {
                 "Memory store changed since this preview was generated."
             } else {
@@ -1090,31 +1133,50 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
 
 /// Build a deduplication plan from the cached similarity computation.
 ///
-/// Returns (actions, counts, total) where actions is the list of proposed
-/// `delete` operations for `likely_duplicate` pairs.
+/// Returns (`actions`, `hygiene_candidates`, `counts`, `total`): `actions` is
+/// the list of auto-appliable `delete` operations for `likely_duplicate` pairs;
+/// `hygiene_candidates` is the deterministic rule-based proposal set
+/// (`secret_like` / `transient` / `supersession` — see
+/// `propose_hygiene_candidates`). Hygiene candidates are review evidence only:
+/// the `/curate` apply path never executes them; a reviewer
+/// (human, or the external-LLM flows in `memory_curate` / the Hermes wrapper)
+/// confirms them through the existing ops contract.
 pub(crate) async fn build_delete_plan(
     state: &DashboardState,
-) -> Result<(Vec<Value>, Map<String, Value>, i64), String> {
+) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {
     let total = query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
     let computation = similarity_computation(state).await?;
-    if computation.facts.len() < 2 || computation.dim == 0 {
-        return Ok((Vec::new(), Map::new(), total));
-    }
 
     // The retained pair set always covers every pair at or above the
     // planner threshold (see `build_similarity_computation`).
-    let planner_len = computation
-        .pairs
+    let actions = if computation.facts.len() < 2 || computation.dim == 0 {
+        Vec::new()
+    } else {
+        let planner_len = computation
+            .pairs
+            .iter()
+            .take_while(|pair| pair.similarity >= SIMILARITY_DEFAULT_THRESHOLD)
+            .count();
+        propose_dedup_actions(&computation.facts, &computation.pairs[..planner_len])
+    };
+
+    let dedup_loser_ids: std::collections::HashSet<i64> = actions
         .iter()
-        .take_while(|pair| pair.similarity >= SIMILARITY_DEFAULT_THRESHOLD)
-        .count();
-    let actions = propose_dedup_actions(&computation.facts, &computation.pairs[..planner_len]);
+        .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
+        .collect();
+    let hygiene_facts = fetch_facts(state, "", total).await?;
+    let hygiene_candidates = propose_hygiene_candidates(
+        &hygiene_facts,
+        &computation.facts,
+        &computation.supersession_pairs,
+        &dedup_loser_ids,
+    );
 
     let mut counts = Map::new();
     if !actions.is_empty() {
         counts.insert("delete".to_string(), json!(actions.len()));
     }
-    Ok((actions, counts, total))
+    Ok((actions, hygiene_candidates, counts, total))
 }
 
 /// Hard-deletes one fact through the canonical store path (transactional
@@ -1144,7 +1206,7 @@ pub(crate) async fn curate(
 ) -> (StatusCode, Json<Value>) {
     let dry_run = body.is_none_or(|b| b.dry_run);
 
-    let (actions, counts, total) = match build_delete_plan(&state).await {
+    let (actions, hygiene_candidates, counts, total) = match build_delete_plan(&state).await {
         Ok(result) => result,
         Err(e) => {
             return (
@@ -1154,10 +1216,14 @@ pub(crate) async fn curate(
         }
     };
 
+    // `hygiene_candidates` is additive review evidence: the apply branch below
+    // only executes `actions` (dedup deletes); candidates wait for explicit
+    // confirmation through `/curate/apply`.
     let report = json!({
         "ran": true,
         "dry_run": dry_run,
         "actions": actions,
+        "hygiene_candidates": hygiene_candidates,
         "counts": counts,
         "applied_counts": if dry_run { Value::Null } else { json!(counts.clone()) },
         "llm_calls": 0,
@@ -1166,16 +1232,20 @@ pub(crate) async fn curate(
             "active_total": total,
             "due_remaining": 0,
         },
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "mode": "similarity_dedup",
     });
 
     if dry_run {
         let saved_at = crate::timeutil::now_iso_utc();
+        let memory_fingerprint_at_save = curation_preview_fingerprint(&state)
+            .await
+            .unwrap_or((total, 0, 0, 0));
         let entry = CuratePreviewEntry {
             report: report.clone(),
             saved_at,
             active_facts_at_save: total,
+            memory_fingerprint_at_save,
         };
         super::curate_preview_store::save(&state.project_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
@@ -1202,6 +1272,16 @@ pub(crate) async fn curate(
     *state.curate_preview.write().await = None;
     super::curate_preview_store::clear(&state.project_root).await;
 
+    // Oplog summary for the apply run (per-fact "remove" rows are written by
+    // the store path itself). Fire-and-forget: never fails the response.
+    let _ = MemoryStore::new(&state.mem_conn)
+        .record_oplog(
+            "curate_apply",
+            None,
+            &json!({ "mode": "similarity_dedup", "deleted": applied, "skipped": skipped }),
+        )
+        .await;
+
     let mut applied_counts = Map::new();
     if applied > 0 {
         applied_counts.insert("delete".to_string(), json!(applied));
@@ -1210,12 +1290,13 @@ pub(crate) async fn curate(
         "ran": true,
         "dry_run": false,
         "actions": report["actions"],
+        "hygiene_candidates": report["hygiene_candidates"],
         "counts": report["counts"],
         "applied_counts": applied_counts,
         "skipped_actions": skipped,
         "llm_calls": 0,
         "coverage": report["coverage"],
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "mode": "similarity_dedup",
     });
 
@@ -1286,100 +1367,57 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
             false,
         );
     };
-    let loser_ids: Vec<i64> = loser_ids.iter().filter_map(Value::as_i64).collect();
-
-    let store = MemoryStore::new(&state.mem_conn);
-
-    // Validate the winner exists before touching anything.
-    match store.get_fact(winner_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    let mut parsed_loser_ids = Vec::with_capacity(loser_ids.len());
+    for (index, value) in loser_ids.iter().enumerate() {
+        let Some(loser_id) = value.as_i64() else {
             return (
                 json!({
                     "op": "merge",
                     "winner_id": winner_id,
                     "status": "error",
-                    "error": format!("winner fact {winner_id} not found"),
+                    "error": format!("loser_ids[{index}] must be an integer"),
                 }),
                 false,
             );
-        }
-        Err(e) => {
-            return (
-                json!({
-                    "op": "merge",
-                    "winner_id": winner_id,
-                    "status": "error",
-                    "error": e.to_string(),
-                }),
-                false,
-            );
-        }
+        };
+        parsed_loser_ids.push(loser_id);
     }
 
-    // Optionally rewrite the winner's content (re-encodes HRR + entities).
+    let store = MemoryStore::new(&state.mem_conn);
     let merged_content = op
         .get("merged_content")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let mut content_updated = false;
-    if let Some(content) = merged_content {
-        let request = UpdateFactRequest {
-            fact_id: winner_id,
-            content: Some(content.to_string()),
-            category: None,
-            tags: None,
-            entities: None,
-            trust: None,
-            source: None,
-            metadata: None,
-        };
-        if let Err(e) = store.update_fact(request).await {
-            return (
-                json!({
-                    "op": "merge",
-                    "winner_id": winner_id,
-                    "status": "error",
-                    "error": format!("failed to update winner content: {e}"),
-                }),
-                false,
-            );
-        }
-        content_updated = true;
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    match store
+        .merge_facts(winner_id, parsed_loser_ids, merged_content)
+        .await
+    {
+        Ok((content_updated, deleted)) => (
+            json!({
+                "op": "merge",
+                "winner_id": winner_id,
+                "content_updated": content_updated,
+                "deleted_loser_ids": deleted,
+                "failed_losers": [],
+                "status": "merged",
+            }),
+            true,
+        ),
+        Err(e) => (
+            json!({
+                "op": "merge",
+                "winner_id": winner_id,
+                "content_updated": false,
+                "deleted_loser_ids": [],
+                "failed_losers": [],
+                "status": "error",
+                "error": e.to_string(),
+            }),
+            false,
+        ),
     }
-
-    // Hard-delete each loser (the winner itself is never deletable here).
-    let mut deleted: Vec<i64> = Vec::new();
-    let mut failed: Vec<Value> = Vec::new();
-    for loser_id in loser_ids {
-        if loser_id == winner_id {
-            failed.push(json!({ "fact_id": loser_id, "error": "loser equals winner" }));
-            continue;
-        }
-        match delete_fact(state, loser_id).await {
-            Ok(true) => deleted.push(loser_id),
-            Ok(false) => {
-                failed.push(json!({ "fact_id": loser_id, "error": "not found" }));
-            }
-            Err(e) => {
-                failed.push(json!({ "fact_id": loser_id, "error": e }));
-            }
-        }
-    }
-
-    let ok = failed.is_empty();
-    (
-        json!({
-            "op": "merge",
-            "winner_id": winner_id,
-            "content_updated": content_updated,
-            "deleted_loser_ids": deleted,
-            "failed_losers": failed,
-            "status": if ok { "merged" } else { "error" },
-        }),
-        ok,
-    )
 }
 
 /// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply
@@ -1440,6 +1478,15 @@ pub(crate) async fn curate_apply(
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
         super::curate_preview_store::clear(&state.project_root).await;
+        // Oplog summary for the explicit-ops apply (per-fact rows come from
+        // the store paths). Fire-and-forget: never fails the response.
+        let _ = MemoryStore::new(&state.mem_conn)
+            .record_oplog(
+                "curate_apply",
+                None,
+                &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
+            )
+            .await;
     }
 
     (
@@ -1449,4 +1496,53 @@ pub(crate) async fn curate_apply(
             "counts": { "deleted": deleted, "merged": merged, "errors": errors },
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Memory operation log
+// ---------------------------------------------------------------------------
+
+/// `GET /api/plugins/holographic/oplog` — recent memory operations, newest
+/// first. Rows come from `memory_oplog`, the append-only audit written by the
+/// store mutation paths (add/update/remove/feedback) and curation applies.
+/// `detail_json` never carries fact content beyond what the op needs
+/// (deletes record a content hash, not the content).
+pub(crate) async fn oplog(
+    State(state): State<DashboardState>,
+    JsonQuery(params): JsonQuery<LimitParams>,
+) -> Json<Value> {
+    let limit = coerce_limit(params.limit, 50, 300);
+    match query_rows(
+        &state.mem_conn,
+        "SELECT id, ts, op, fact_id, detail_json
+         FROM memory_oplog
+         ORDER BY id DESC
+         LIMIT ?1",
+        libsql::params![limit],
+    )
+    .await
+    {
+        Ok(rows) => {
+            let events: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let detail = row
+                        .get("detail_json")
+                        .and_then(Value::as_str)
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        .unwrap_or_else(|| json!({}));
+                    json!({
+                        "id": row.get("id").cloned().unwrap_or(Value::Null),
+                        "ts": row.get("ts").cloned().unwrap_or(Value::Null),
+                        "op": row.get("op").cloned().unwrap_or(Value::Null),
+                        "fact_id": row.get("fact_id").cloned().unwrap_or(Value::Null),
+                        "detail": detail,
+                    })
+                })
+                .collect();
+            let count = events.len();
+            Json(json!({ "events": events, "count": count, "limit": limit, "error": "" }))
+        }
+        Err(e) => Json(json!({ "events": [], "count": 0, "limit": limit, "error": e })),
+    }
 }

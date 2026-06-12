@@ -34,7 +34,7 @@ The key property is **graceful degradation**: every language works without LSP i
 
 ### Pipeline Changes
 
-The current sync pipeline in `tokensave.rs` is:
+The current sync pipeline in `tracedecay.rs` is:
 
 1. Scan files
 2. Parallel tree-sitter extraction (rayon)
@@ -178,7 +178,7 @@ On `stop()`:
 
 ### LspResolver
 
-Bridges between tokensave's `UnresolvedRef` and LSP protocol:
+Bridges between tracedecay's `UnresolvedRef` and LSP protocol:
 
 ```rust
 pub struct LspResolver<'a> {
@@ -209,7 +209,7 @@ LSP servers process requests sequentially (the protocol allows interleaving but 
 
 ### Phase 1: Standalone Binaries (No Runtime)
 
-These servers are single binaries with no runtime dependency. They cover 7 tokensave languages and are the initial implementation targets.
+These servers are single binaries with no runtime dependency. They cover 7 tracedecay languages and are the initial implementation targets.
 
 | Language | Server | Binary | Manifest | Grace Period | Notes |
 |---|---|---|---|---|---|
@@ -253,7 +253,7 @@ These are better suited to a long-running model (e.g. embedded in the MCP server
 
 ### No LSP Available
 
-These tokensave languages have no usable LSP server. They continue to use heuristic resolution only.
+These tracedecay languages have no usable LSP server. They continue to use heuristic resolution only.
 
 Batch, GWBasic, MSBasic2, QBasic, QuickBasic.
 
@@ -285,7 +285,7 @@ This enables future queries like "show me all call edges that were only heuristi
 
 ## Configuration
 
-### Per-Project (`tokensave.toml`)
+### Per-Project (`tracedecay.toml`)
 
 ```toml
 [lsp]
@@ -305,18 +305,21 @@ python = false
 ### CLI Flags
 
 ```
-tokensave sync              # LSP pass runs if servers are available
-tokensave sync --no-lsp     # skip LSP pass entirely
-tokensave sync --lsp-only   # skip heuristic resolution, only use LSP
-tokensave index --no-lsp    # full reindex without LSP
+tracedecay sync              # LSP pass runs if servers are available
+tracedecay sync --no-lsp     # skip LSP pass entirely
+tracedecay sync --lsp-only   # skip heuristic resolution, only use LSP
+tracedecay index --no-lsp    # full reindex without LSP
 ```
 
 ### Environment Variables
 
 ```
-TOKENSAVE_LSP=0             # disable LSP globally (equivalent to --no-lsp)
-TOKENSAVE_LSP_TIMEOUT=30    # override timeout
+TRACEDECAY_LSP=0             # disable LSP globally (equivalent to --no-lsp)
+TRACEDECAY_LSP_TIMEOUT=30    # override timeout
 ```
+
+The legacy `TOKENSAVE_*` variable names are still honored as a fallback when the
+`TRACEDECAY_*` equivalents are unset.
 
 ## Performance Considerations
 
@@ -334,7 +337,7 @@ The dominant cost is server initialization, not per-request latency. Once initia
 
 ### Mitigation Strategies
 
-**MCP-kept servers.** When the tokensave MCP server is running, LSP servers can be kept alive between incremental syncs driven by the embedded watcher. The initialization cost is paid once; subsequent syncs only pay per-request costs. This changes the delta from +10-30s to +1-5s for incremental syncs.
+**MCP-kept servers.** When the tracedecay MCP server is running, LSP servers can be kept alive between incremental syncs driven by the embedded watcher. The initialization cost is paid once; subsequent syncs only pay per-request costs. This changes the delta from +10-30s to +1-5s for incremental syncs.
 
 **Parallel server startup.** Phase 1 servers (all standalone binaries) can be spawned concurrently. A project using Rust + Go + C++ pays the init cost of the slowest server (rust-analyzer, ~10s), not the sum.
 
@@ -356,7 +359,7 @@ The dominant cost is server initialization, not per-request latency. Once initia
 
 - Spawn a real `rust-analyzer` against `tests/fixtures/` Rust project. Verify that cross-file call edges are resolved correctly.
 - Same for `gopls` and a Go fixture project.
-- Test graceful degradation: run sync with `TOKENSAVE_LSP=0` and verify output matches current behavior exactly.
+- Test graceful degradation: run sync with `TRACEDECAY_LSP=0` and verify output matches current behavior exactly.
 
 ### CI Considerations
 
@@ -377,9 +380,9 @@ Work breakdown:
 3. `src/lsp/mod.rs` -- LspManager lifecycle (~300 lines)
 4. `src/lsp/resolver.rs` -- UnresolvedRef -> Edge via LSP (~250 lines)
 5. Adapter trait + 5 adapters (rust, go, clangd, zig, lua) (~500 lines)
-6. Pipeline integration in `tokensave.rs` (~100 lines)
+6. Pipeline integration in `tracedecay.rs` (~100 lines)
 7. Edge provenance: `ResolutionSource` + DB migration (~50 lines)
-8. Config: `--no-lsp`, `tokensave.toml` section (~80 lines)
+8. Config: `--no-lsp`, `tracedecay.toml` section (~80 lines)
 9. Tests (~600 lines)
 10. Documentation updates
 
@@ -413,7 +416,7 @@ Target: Java, Kotlin, Scala, C#, Dart, Swift. Deferred until Phase 3 (MCP integr
 
 ## Appendix: Broken-Code Tolerance Ranking
 
-How well each LSP server resolves definitions when the project has errors, missing dependencies, or incomplete builds. This determines how useful the LSP pass is in practice, since users often run `tokensave sync` on code that doesn't compile.
+How well each LSP server resolves definitions when the project has errors, missing dependencies, or incomplete builds. This determines how useful the LSP pass is in practice, since users often run `tracedecay sync` on code that doesn't compile.
 
 | Rank | Server | Tolerance | Notes |
 |---|---|---|---|

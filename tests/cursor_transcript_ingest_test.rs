@@ -1,19 +1,19 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::cursor::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::cursor::{
     cursor_project_slug, ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped,
     open_project_session_db, project_session_db_path, CursorSweepSource,
 };
-use tokensave::sessions::source::ingest_source;
-use tokensave::sessions::SessionSearchScope;
+use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::SessionSearchScope;
 
 fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     project
 }
 
@@ -55,14 +55,14 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
 
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
         &transcript,
         r#"{"role":"user","message":{"content":[{"type":"text","text":"Please check billing ingestion from Cursor transcripts."}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"The billing ingestion plan is ready."},{"type":"tool_use","name":"tokensave_context","input":{"task":"billing ingestion"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"The billing ingestion plan is ready."},{"type":"tool_use","name":"tracedecay_context","input":{"task":"billing ingestion"}}]}}
 "#,
     )
     .unwrap();
@@ -97,7 +97,7 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     );
     assert!(results
         .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("tokensave_context")));
+        .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
 }
 
 #[tokio::test]
@@ -286,10 +286,10 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
     let tmp = TempDir::new().unwrap();
     let root_a = tmp.path().join("root-a");
     let root_b = tmp.path().join("root-b");
-    std::fs::create_dir_all(root_a.join(".tokensave")).unwrap();
-    std::fs::create_dir_all(root_b.join(".tokensave")).unwrap();
-    std::fs::write(root_a.join(".tokensave/tokensave.db"), "").unwrap();
-    std::fs::write(root_b.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(root_a.join(".tracedecay")).unwrap();
+    std::fs::create_dir_all(root_b.join(".tracedecay")).unwrap();
+    std::fs::write(root_a.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::write(root_b.join(".tracedecay/tracedecay.db"), "").unwrap();
     let cwd_b = root_b.join("workspace");
     std::fs::create_dir_all(&cwd_b).unwrap();
     let transcript = root_b.join("cursor-session.jsonl");
@@ -845,8 +845,8 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let project = tmp.path().join("work").join("foo-bar");
-    std::fs::create_dir_all(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     // A second *existing* directory that encodes to the same slug as the
     // project ("…-work-foo-bar"): the sweep must skip rather than guess
     // which workspace the slug's transcripts belong to.
@@ -862,7 +862,7 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 }
 
 #[tokio::test]
-async fn cursor_sweep_skips_projects_without_tokensave() {
+async fn cursor_sweep_skips_projects_without_tracedecay() {
     let tmp = TempDir::new().unwrap();
     let scratch = init_project(&tmp);
     let home = tmp.path().join("home");
@@ -877,8 +877,8 @@ async fn cursor_sweep_skips_projects_without_tokensave() {
     assert_eq!(skipped.messages_upserted, 0);
 
     // Once the project is indexed, the same sweep picks its transcripts up.
-    std::fs::create_dir_all(unindexed.join(".tokensave")).unwrap();
-    std::fs::write(unindexed.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(unindexed.join(".tracedecay")).unwrap();
+    std::fs::write(unindexed.join(".tracedecay/tracedecay.db"), "").unwrap();
     let indexed = ingest_source(&db, &sweep, &unindexed, None).await;
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);

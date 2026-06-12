@@ -1,6 +1,6 @@
 use serde_json::json;
-use tokensave::mcp::tools::*;
-use tokensave::mcp::transport::*;
+use tracedecay::mcp::tools::*;
+use tracedecay::mcp::transport::*;
 
 #[test]
 fn test_parse_jsonrpc_request() {
@@ -22,13 +22,13 @@ fn test_tool_definitions() {
     assert!(!tools.is_empty());
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert!(tool_names.contains(&"tokensave_search"));
-    assert!(tool_names.contains(&"tokensave_context"));
-    assert!(tool_names.contains(&"tokensave_callers"));
-    assert!(tool_names.contains(&"tokensave_callees"));
-    assert!(tool_names.contains(&"tokensave_impact"));
-    assert!(tool_names.contains(&"tokensave_node"));
-    assert!(tool_names.contains(&"tokensave_status"));
+    assert!(tool_names.contains(&"tracedecay_search"));
+    assert!(tool_names.contains(&"tracedecay_context"));
+    assert!(tool_names.contains(&"tracedecay_callers"));
+    assert!(tool_names.contains(&"tracedecay_callees"));
+    assert!(tool_names.contains(&"tracedecay_impact"));
+    assert!(tool_names.contains(&"tracedecay_node"));
+    assert!(tool_names.contains(&"tracedecay_status"));
 }
 
 #[test]
@@ -93,14 +93,14 @@ fn test_all_error_codes() {
 #[test]
 fn test_tool_definitions_count() {
     let tools = get_tool_definitions();
-    // `tokensave_ast_grep_rewrite` is registered conditionally on whether
+    // `tracedecay_ast_grep_rewrite` is registered conditionally on whether
     // the external `ast-grep` binary is on PATH — hide-when-missing so
     // agents never receive a tool that will instantly fail.
     // LCM comparison support registers ten additional MCP tools.
-    let expected = if tokensave::mcp::tools::ast_grep_available() {
-        88
+    let expected = if tracedecay::mcp::tools::ast_grep_available() {
+        89
     } else {
-        87
+        88
     };
     assert_eq!(tools.len(), expected);
 }
@@ -111,14 +111,14 @@ fn test_write_and_exec_tools_are_not_read_only() {
     // `readOnlyHint: false`, otherwise harnesses that auto-approve read-only
     // tools will edit files / run `cargo test` without prompting. See #94.
     let write_or_exec = [
-        "tokensave_str_replace",
-        "tokensave_multi_str_replace",
-        "tokensave_insert_at",
-        "tokensave_replace_symbol",
-        "tokensave_insert_at_symbol",
-        "tokensave_run_affected_tests",
-        "tokensave_ast_grep_rewrite",
-        "tokensave_lcm_doctor",
+        "tracedecay_str_replace",
+        "tracedecay_multi_str_replace",
+        "tracedecay_insert_at",
+        "tracedecay_replace_symbol",
+        "tracedecay_insert_at_symbol",
+        "tracedecay_run_affected_tests",
+        "tracedecay_ast_grep_rewrite",
+        "tracedecay_lcm_doctor",
     ];
     let tools = get_tool_definitions();
     for name in write_or_exec {

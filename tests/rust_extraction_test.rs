@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::RustExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::RustExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_rust_file_node_is_root() {

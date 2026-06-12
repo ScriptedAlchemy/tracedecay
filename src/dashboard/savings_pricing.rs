@@ -3,14 +3,14 @@
 //! Price source order (cheapest sufficient wins, never blocks a request on
 //! the network):
 //!
-//! 1. **Cached `OpenRouter` fetch** at `~/.tokensave/model-prices.json`
-//!    (override with `TOKENSAVE_MODEL_PRICES_PATH`). Served immediately even
+//! 1. **Cached `OpenRouter` fetch** at `~/.tracedecay/model-prices.json`
+//!    (override with `TRACEDECAY_MODEL_PRICES_PATH`). Served immediately even
 //!    when stale; a background refresh re-fetches at most once per process
 //!    when the file is older than 24h.
 //! 2. **Bundled static snapshot** (`model_prices_fallback.json`, a curated
 //!    subset of the live response) so the tab works offline / on first run.
 //!
-//! `TOKENSAVE_OFFLINE=1` skips the network entirely (cache/fallback only).
+//! `TRACEDECAY_OFFLINE=1` skips the network entirely (cache/fallback only).
 //!
 //! The table is served raw to the UI (`GET /api/plugins/savings/pricing`);
 //! fuzzy model-id → `OpenRouter`-slug resolution lives in the frontend
@@ -20,11 +20,11 @@
 //! # Two pricing tables exist on purpose — know which one you are reading
 //!
 //! This table prices **client-side estimates in the Savings & Cost tab**
-//! only. Server-side cost accounting (`tokensave cost` / `tokensave gain` /
+//! only. Server-side cost accounting (`tracedecay cost` / `tracedecay gain` /
 //! the `turns` table the dashboard reports as `cost_basis: "actual"`) is
 //! priced by `accounting/pricing.rs` — a separate Claude-only `LiteLLM`
 //! table with its own cache. The two sources can quote different USD for
-//! the same model, so dashboard estimates and `tokensave gain` output are
+//! the same model, so dashboard estimates and `tracedecay gain` output are
 //! not guaranteed to match to the cent.
 
 use std::collections::BTreeMap;
@@ -44,10 +44,12 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const CACHE_TTL_SECS: i64 = 86_400;
 
 /// Set to `1` to disable all network access for pricing.
-const OFFLINE_ENV: &str = "TOKENSAVE_OFFLINE";
+const OFFLINE_ENV: &str = "TRACEDECAY_OFFLINE";
+const OFFLINE_ENV_LEGACY: &str = "TOKENSAVE_OFFLINE";
 
 /// Overrides the on-disk cache path (tests use a temp file).
-const CACHE_PATH_ENV: &str = "TOKENSAVE_MODEL_PRICES_PATH";
+const CACHE_PATH_ENV: &str = "TRACEDECAY_MODEL_PRICES_PATH";
+const CACHE_PATH_ENV_LEGACY: &str = "TOKENSAVE_MODEL_PRICES_PATH";
 
 /// Curated static snapshot of the `OpenRouter` response (same JSON shape).
 const FALLBACK_JSON: &str = include_str!("model_prices_fallback.json");
@@ -74,17 +76,32 @@ pub(crate) struct PriceTable {
     pub(crate) fetched_at: Option<i64>,
 }
 
+fn env_with_legacy(primary: &str, legacy: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .or_else(|| std::env::var(legacy).ok())
+}
+
 fn cache_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(CACHE_PATH_ENV) {
+    if let Some(path) = env_with_legacy(CACHE_PATH_ENV, CACHE_PATH_ENV_LEGACY) {
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }
     }
-    dirs::home_dir().map(|h| h.join(".tokensave").join("model-prices.json"))
+    let home = dirs::home_dir()?;
+    let preferred = home.join(".tracedecay").join("model-prices.json");
+    let legacy = home.join(".tokensave").join("model-prices.json");
+    // Prefer the new data dir; fall back to the legacy cache location until
+    // users naturally migrate.
+    if preferred.exists() || !legacy.exists() {
+        Some(preferred)
+    } else {
+        Some(legacy)
+    }
 }
 
 fn offline() -> bool {
-    std::env::var(OFFLINE_ENV).is_ok_and(|v| !v.is_empty() && v != "0")
+    env_with_legacy(OFFLINE_ENV, OFFLINE_ENV_LEGACY).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Reads a price field that `OpenRouter` serves as a per-token decimal string

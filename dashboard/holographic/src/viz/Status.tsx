@@ -22,7 +22,7 @@ export function PanelLoading({ label = "Loading…" }: { label?: string }) {
 
 function humanize(error: string): string {
   if (/failed to fetch|networkerror|load failed/i.test(error)) {
-    return "Can't reach the tokensave server. It may be restarting — retry in a moment.";
+    return "Can't reach the tracedecay server. It may be restarting — retry in a moment.";
   }
   return error;
 }

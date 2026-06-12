@@ -5,8 +5,8 @@
 //! are left untouched, and the marker makes the pass run once per store.
 
 use tempfile::TempDir;
-use tokensave::sessions::cursor::{open_project_session_db, project_session_db_path};
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
 const MARKER_SQL: &str =
     "SELECT version FROM session_schema_migrations WHERE name = 'transcript_facts_backfill'";
@@ -18,8 +18,8 @@ const DAY_TWO: i64 = 1_781_157_600;
 fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     project
 }
 

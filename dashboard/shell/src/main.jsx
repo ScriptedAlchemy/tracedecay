@@ -1,5 +1,5 @@
 /**
- * Standalone dashboard shell for `tokensave dashboard`.
+ * Standalone dashboard shell for `tracedecay dashboard`.
  *
  * Mirrors what the Hermes dashboard SPA does for plugin tabs:
  *   1. expose a plugin SDK + registry on window (BEFORE loading bundles),
@@ -59,7 +59,8 @@ function useRegistryVersion() {
 
 function getInitialTheme() {
   try {
-    const stored = localStorage.getItem("ts-theme");
+    const stored =
+      localStorage.getItem("td-theme") ?? localStorage.getItem("ts-theme");
     if (stored === "light" || stored === "dark") return stored;
   } catch {
     /* storage unavailable */
@@ -227,7 +228,7 @@ function App() {
   useEffect(() => {
     applyTheme(theme);
     try {
-      localStorage.setItem("ts-theme", theme);
+      localStorage.setItem("td-theme", theme);
     } catch {
       /* storage unavailable */
     }
@@ -355,7 +356,7 @@ function App() {
   useEffect(() => {
     const manifest = plugins.find((p) => p.name === active);
     const label = manifest?.label || active;
-    document.title = label ? `${label} — tokensave` : "tokensave dashboard";
+    document.title = label ? `${label} — tracedecay` : "tracedecay dashboard";
   }, [active, plugins]);
 
   const activeManifest = plugins.find((p) => p.name === active);
@@ -375,7 +376,7 @@ function App() {
       <header className="ts-shell-header">
         <div className="ts-shell-brand">
           <span className="ts-shell-logo" aria-hidden="true">◳</span>
-          <h1 className="ts-shell-title">tokensave</h1>
+          <h1 className="ts-shell-title">tracedecay</h1>
           {projectName && (
             <span className="ts-shell-project" title={capabilities?.project_root}>
               {projectName}

@@ -1,4 +1,4 @@
-//! Code graph dashboard API, backed by tokensave's indexed graph tables.
+//! Code graph dashboard API, backed by tracedecay's indexed graph tables.
 //!
 //! The explorer reads the project-local `nodes`, `edges`, and `files` tables
 //! directly and returns compact payloads suitable for search, inspection,

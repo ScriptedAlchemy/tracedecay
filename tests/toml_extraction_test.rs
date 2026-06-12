@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::TomlExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::TomlExtractor;
+use tracedecay::types::*;
 
 fn extract(source: &str) -> ExtractionResult {
     TomlExtractor.extract("Cargo.toml", source)

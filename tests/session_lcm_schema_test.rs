@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
+use tracedecay::global_db::GlobalDb;
 
 async fn create_legacy_sessions_db(db_path: &Path) {
     create_legacy_sessions_db_with_text(db_path, "legacy text").await;
@@ -156,7 +156,7 @@ async fn set_migration_version(db_path: &Path, version: i64) {
 
 /// Rewrites the raw-message FTS objects into the pre-v3 shape (role +
 /// metadata_json indexed alongside index_text) and stamps the requested
-/// schema version, simulating a database written by an older tokensave.
+/// schema version, simulating a database written by an older tracedecay.
 async fn downgrade_raw_fts_to_v2(db_path: &Path) {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -243,7 +243,7 @@ async fn raw_fts_object_sql(db_path: &Path) -> Vec<String> {
 #[tokio::test]
 async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
     let db = GlobalDb::open_at(&db_path).await.expect("global db open");
@@ -253,7 +253,7 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     assert!(table_exists(&db_path, "lcm_raw_messages_fts").await);
     assert_eq!(
         db.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
 
     let legacy = db
@@ -268,7 +268,7 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     assert_eq!(legacy.content, "legacy text");
     assert_eq!(
         legacy.storage_kind,
-        tokensave::sessions::lcm::LcmStorageKind::Inline
+        tracedecay::sessions::lcm::LcmStorageKind::Inline
     );
     assert!(legacy.legacy_source);
     assert!(!legacy.legacy_truncated);
@@ -281,8 +281,8 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
 #[tokio::test]
 async fn lcm_schema_marks_legacy_truncated_messages() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
-    let legacy_text = "legacy text\n[truncated by tokensave]";
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let legacy_text = "legacy text\n[truncated by tracedecay]";
     create_legacy_sessions_db_with_text(&db_path, legacy_text).await;
 
     let db = GlobalDb::open_at(&db_path).await.expect("global db open");
@@ -299,24 +299,24 @@ async fn lcm_schema_marks_legacy_truncated_messages() {
 #[tokio::test]
 async fn lcm_schema_migration_is_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
     let db = GlobalDb::open_at(&db_path).await.expect("global db open");
     assert_eq!(
         db.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
     assert_eq!(
         reopened.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(
         schema_version(&db_path).await,
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 1);
     assert_eq!(
@@ -333,7 +333,7 @@ async fn lcm_schema_migration_is_idempotent() {
 #[tokio::test]
 async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
     // Establish the schema, then rewrite the FTS objects into the pre-v3
@@ -351,7 +351,7 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
     let migrated = GlobalDb::open_at(&db_path).await.expect("global db reopen");
     assert_eq!(
         migrated.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(migrated);
 
@@ -384,7 +384,7 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
         .expect("idempotent reopen");
     assert_eq!(
         reopened.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(
@@ -404,20 +404,20 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
 #[tokio::test]
 async fn lcm_schema_future_version_is_preserved_without_remigration() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
     let db = GlobalDb::open_at(&db_path).await.expect("global db open");
     assert_eq!(
         db.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
-    // Simulate a database last touched by a newer tokensave: bump the version
+    // Simulate a database last touched by a newer tracedecay: bump the version
     // marker past this binary and have the newer schema relocate carried rows
     // out of lcm_raw_messages.
-    let future_version = tokensave::sessions::lcm::LCM_SCHEMA_VERSION + 97;
+    let future_version = tracedecay::sessions::lcm::LCM_SCHEMA_VERSION + 97;
     set_migration_version(&db_path, future_version).await;
     set_migration_applied_at(&db_path, 456).await;
     {
@@ -448,13 +448,13 @@ async fn lcm_schema_future_version_is_preserved_without_remigration() {
 #[tokio::test]
 async fn lcm_schema_current_version_reopen_skips_migration_update() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("sessions.db");
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     create_legacy_sessions_db(&db_path).await;
 
     let db = GlobalDb::open_at(&db_path).await.expect("global db open");
     assert_eq!(
         db.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
@@ -464,7 +464,7 @@ async fn lcm_schema_current_version_reopen_skips_migration_update() {
     let reopened = GlobalDb::open_at(&db_path).await.expect("global db reopen");
     assert_eq!(
         reopened.lcm_schema_version().await.unwrap(),
-        tokensave::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(migration_applied_at(&db_path).await, 123);
 }

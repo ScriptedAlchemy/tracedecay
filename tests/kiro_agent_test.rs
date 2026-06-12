@@ -2,14 +2,14 @@ use std::io::Write;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tokensave::agents::{
+use tracedecay::agents::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, KiroIntegration,
 };
 
 fn make_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
         project_root: None,
@@ -84,9 +84,12 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
     let mcp_path = home.join(".kiro/settings/mcp.json");
     assert!(mcp_path.exists(), "global Kiro MCP config should exist");
     let mcp = read_json(&mcp_path);
-    let server = &mcp["mcpServers"]["tokensave"];
-    assert!(server.is_object(), "mcpServers.tokensave should exist");
-    assert_eq!(server["command"].as_str(), Some("/usr/local/bin/tokensave"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert!(server.is_object(), "mcpServers.tracedecay should exist");
+    assert_eq!(
+        server["command"].as_str(),
+        Some("/usr/local/bin/tracedecay")
+    );
     assert_eq!(
         server["args"].as_array().unwrap(),
         &[serde_json::json!("serve")]
@@ -97,19 +100,19 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
         "global MCP config should leave approval policy to the managed Kiro agent"
     );
 
-    let steering_path = home.join(".kiro/steering/tokensave.md");
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
     assert!(
         steering_path.exists(),
-        "global Kiro tokensave.md should exist"
+        "global Kiro tracedecay.md should exist"
     );
     let steering = std::fs::read_to_string(&steering_path).unwrap();
-    assert!(steering.contains("## Prefer tokensave MCP tools"));
+    assert!(steering.contains("## Prefer tracedecay MCP tools"));
     assert!(steering.contains("delegate"));
 
-    let agent_path = home.join(".kiro/agents/tokensave.json");
+    let agent_path = home.join(".kiro/agents/tracedecay.json");
     assert!(agent_path.exists(), "managed Kiro agent should exist");
     let agent = read_json(&agent_path);
-    assert_eq!(agent["name"].as_str(), Some("tokensave"));
+    assert_eq!(agent["name"].as_str(), Some("tracedecay"));
     assert_eq!(agent["includeMcpJson"].as_bool(), Some(true));
     assert!(
         agent.get("prompt").is_none(),
@@ -122,7 +125,7 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
             .unwrap()
             .iter()
             .any(|v| v.as_str() == Some(steering_resource.as_str())),
-        "managed agent should load global tokensave steering as an absolute resource"
+        "managed agent should load global tracedecay steering as an absolute resource"
     );
     assert_eq!(
         agent["tools"].as_array().unwrap(),
@@ -132,7 +135,7 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
         agent["allowedTools"].as_array().unwrap(),
         &[
             serde_json::json!("@builtin"),
-            serde_json::json!("@tokensave")
+            serde_json::json!("@tracedecay")
         ]
     );
     assert_hook(
@@ -167,7 +170,7 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
     let cli_path = home.join(".kiro/settings/cli.json");
     assert!(cli_path.exists(), "Kiro CLI settings should exist");
     let cli = read_json(&cli_path);
-    assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("tokensave"));
+    assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("tracedecay"));
 }
 
 #[test]
@@ -186,7 +189,7 @@ fn test_install_preserves_existing_mcp_config_and_writes_backup() {
     KiroIntegration.install(&ctx).unwrap();
 
     let mcp = read_json(&mcp_path);
-    assert!(mcp["mcpServers"]["tokensave"].is_object());
+    assert!(mcp["mcpServers"]["tracedecay"].is_object());
     assert!(mcp["mcpServers"]["other"].is_object());
     assert_eq!(mcp["theme"].as_str(), Some("dark"));
     assert!(
@@ -214,30 +217,30 @@ fn test_install_and_uninstall_preserve_existing_steering_content() {
     let user_steering = std::fs::read_to_string(&user_steering_path).unwrap();
     assert!(user_steering.contains("## Existing Kiro guidance"));
     assert!(user_steering.contains("Keep this user-authored guidance."));
-    assert!(!user_steering.contains("## Prefer tokensave MCP tools"));
+    assert!(!user_steering.contains("## Prefer tracedecay MCP tools"));
 
-    let tokensave_steering_path = home.join(".kiro/steering/tokensave.md");
-    let installed = std::fs::read_to_string(&tokensave_steering_path).unwrap();
-    assert!(installed.contains("## Prefer tokensave MCP tools"));
+    let tracedecay_steering_path = home.join(".kiro/steering/tracedecay.md");
+    let installed = std::fs::read_to_string(&tracedecay_steering_path).unwrap();
+    assert!(installed.contains("## Prefer tracedecay MCP tools"));
 
     KiroIntegration.uninstall(&ctx).unwrap();
 
     let uninstalled = std::fs::read_to_string(&user_steering_path).unwrap();
     assert!(uninstalled.contains("## Existing Kiro guidance"));
     assert!(uninstalled.contains("Keep this user-authored guidance."));
-    assert!(!uninstalled.contains("## Prefer tokensave MCP tools"));
-    assert!(!tokensave_steering_path.exists());
+    assert!(!uninstalled.contains("## Prefer tracedecay MCP tools"));
+    assert!(!tracedecay_steering_path.exists());
 }
 
 #[test]
-fn test_uninstall_preserves_user_steering_after_tokensave_block() {
+fn test_uninstall_preserves_user_steering_after_tracedecay_block() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
 
     KiroIntegration.install(&ctx).unwrap();
 
-    let steering_path = home.join(".kiro/steering/tokensave.md");
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
     std::fs::OpenOptions::new()
         .append(true)
         .open(&steering_path)
@@ -249,11 +252,11 @@ fn test_uninstall_preserves_user_steering_after_tokensave_block() {
 
     let uninstalled = std::fs::read_to_string(&steering_path).unwrap();
     assert!(uninstalled.contains("User guidance appended after setup without a new heading."));
-    assert!(!uninstalled.contains("## Prefer tokensave MCP tools"));
+    assert!(!uninstalled.contains("## Prefer tracedecay MCP tools"));
 }
 
 #[test]
-fn test_uninstall_removes_tokensave_and_preserves_other_mcp_servers() {
+fn test_uninstall_removes_tracedecay_and_preserves_other_mcp_servers() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
@@ -271,18 +274,18 @@ fn test_uninstall_removes_tokensave_and_preserves_other_mcp_servers() {
 
     let mcp = read_json(&mcp_path);
     assert!(mcp["mcpServers"]["other"].is_object());
-    assert!(mcp["mcpServers"].get("tokensave").is_none());
+    assert!(mcp["mcpServers"].get("tracedecay").is_none());
     assert_eq!(mcp["theme"].as_str(), Some("dark"));
 
-    assert!(!home.join(".kiro/agents/tokensave.json").exists());
+    assert!(!home.join(".kiro/agents/tracedecay.json").exists());
     let cli = std::fs::read_to_string(home.join(".kiro/settings/cli.json")).unwrap_or_default();
     assert!(
         !cli.contains("defaultAgent"),
-        "uninstall should remove tokensave default agent"
+        "uninstall should remove tracedecay default agent"
     );
     let steering =
-        std::fs::read_to_string(home.join(".kiro/steering/tokensave.md")).unwrap_or_default();
-    assert!(!steering.contains("## Prefer tokensave MCP tools"));
+        std::fs::read_to_string(home.join(".kiro/steering/tracedecay.md")).unwrap_or_default();
+    assert!(!steering.contains("## Prefer tracedecay MCP tools"));
 }
 
 #[test]
@@ -291,10 +294,10 @@ fn test_install_and_uninstall_preserve_user_managed_custom_agent() {
     let home = dir.path();
     let ctx = make_ctx(home);
 
-    let agent_path = home.join(".kiro/agents/tokensave.json");
+    let agent_path = home.join(".kiro/agents/tracedecay.json");
     std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
     let custom_agent = serde_json::json!({
-        "name": "tokensave",
+        "name": "tracedecay",
         "description": "User-managed custom agent",
         "includeMcpJson": true,
         "hooks": {
@@ -316,7 +319,7 @@ fn test_install_and_uninstall_preserve_user_managed_custom_agent() {
     assert_eq!(read_json(&agent_path), custom_agent);
     assert!(
         !home.join(".kiro/settings/cli.json").exists(),
-        "install should not point defaultAgent at a user-managed tokensave agent"
+        "install should not point defaultAgent at a user-managed tracedecay agent"
     );
 
     KiroIntegration.uninstall(&ctx).unwrap();
@@ -342,7 +345,7 @@ fn test_install_preserves_existing_custom_default_agent_choice() {
     let cli = read_json(&cli_path);
     assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("my-team-agent"));
     assert_eq!(cli["telemetry"]["enabled"].as_bool(), Some(false));
-    assert!(home.join(".kiro/agents/tokensave.json").exists());
+    assert!(home.join(".kiro/agents/tracedecay.json").exists());
 }
 
 #[test]
@@ -358,22 +361,22 @@ fn test_install_replaces_builtin_default_agent_choice() {
     KiroIntegration.install(&ctx).unwrap();
 
     let cli = read_json(&cli_path);
-    assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("tokensave"));
+    assert_eq!(cli["chat"]["defaultAgent"].as_str(), Some("tracedecay"));
 }
 
 #[test]
-fn test_has_tokensave_tracks_global_mcp_entry() {
+fn test_has_tracedecay_tracks_global_mcp_entry() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
 
-    assert!(!KiroIntegration.has_tokensave(home));
+    assert!(!KiroIntegration.has_tracedecay(home));
 
     KiroIntegration.install(&ctx).unwrap();
-    assert!(KiroIntegration.has_tokensave(home));
+    assert!(KiroIntegration.has_tracedecay(home));
 
     KiroIntegration.uninstall(&ctx).unwrap();
-    assert!(!KiroIntegration.has_tokensave(home));
+    assert!(!KiroIntegration.has_tracedecay(home));
 }
 
 #[test]
@@ -403,10 +406,10 @@ fn test_healthcheck_fails_when_steering_lacks_owned_end_marker() {
 
     KiroIntegration.install(&ctx).unwrap();
 
-    let steering_path = home.join(".kiro/steering/tokensave.md");
+    let steering_path = home.join(".kiro/steering/tracedecay.md");
     std::fs::write(
         &steering_path,
-        "## Prefer tokensave MCP tools\n\nEdited tokensave guidance without ownership marker.\n",
+        "## Prefer tracedecay MCP tools\n\nEdited tracedecay guidance without ownership marker.\n",
     )
     .unwrap();
 
@@ -419,7 +422,7 @@ fn test_healthcheck_fails_when_steering_lacks_owned_end_marker() {
 
     assert!(
         dc.issues > 0,
-        "Kiro doctor should fail when tokensave.md has tokensave rules that install/uninstall cannot own"
+        "Kiro doctor should fail when tracedecay.md has tracedecay rules that install/uninstall cannot own"
     );
 }
 
@@ -431,9 +434,9 @@ fn test_healthcheck_warns_when_agent_tool_policy_is_not_permissive() {
 
     KiroIntegration.install(&ctx).unwrap();
 
-    let agent_path = home.join(".kiro/agents/tokensave.json");
+    let agent_path = home.join(".kiro/agents/tracedecay.json");
     let mut agent = read_json(&agent_path);
-    agent["tools"] = serde_json::json!(["@tokensave"]);
+    agent["tools"] = serde_json::json!(["@tracedecay"]);
     agent["allowedTools"] = serde_json::json!(["@builtin"]);
     std::fs::write(&agent_path, serde_json::to_string_pretty(&agent).unwrap()).unwrap();
 
@@ -455,7 +458,7 @@ fn test_healthcheck_warns_when_agent_tool_policy_is_not_permissive() {
 }
 
 #[test]
-fn test_healthcheck_fails_when_workspace_mcp_disables_tokensave() {
+fn test_healthcheck_fails_when_workspace_mcp_disables_tracedecay() {
     let home_dir = TempDir::new().unwrap();
     let project_dir = TempDir::new().unwrap();
     let home = home_dir.path();
@@ -468,7 +471,7 @@ fn test_healthcheck_fails_when_workspace_mcp_disables_tokensave() {
     std::fs::create_dir_all(workspace_mcp_path.parent().unwrap()).unwrap();
     std::fs::write(
         &workspace_mcp_path,
-        r#"{"mcpServers":{"tokensave":{"command":"/usr/local/bin/tokensave","args":["serve"],"disabled":true}}}"#,
+        r#"{"mcpServers":{"tracedecay":{"command":"/usr/local/bin/tracedecay","args":["serve"],"disabled":true}}}"#,
     )
     .unwrap();
 
@@ -481,7 +484,7 @@ fn test_healthcheck_fails_when_workspace_mcp_disables_tokensave() {
 
     assert!(
         dc.issues > 0,
-        "workspace Kiro MCP override that disables tokensave should be unhealthy"
+        "workspace Kiro MCP override that disables tracedecay should be unhealthy"
     );
 }
 
@@ -499,7 +502,7 @@ fn test_healthcheck_fails_when_workspace_mcp_shadows_global_command() {
     std::fs::create_dir_all(workspace_mcp_path.parent().unwrap()).unwrap();
     std::fs::write(
         &workspace_mcp_path,
-        r#"{"mcpServers":{"tokensave":{"command":"other-tokensave","args":["serve"],"disabled":false}}}"#,
+        r#"{"mcpServers":{"tracedecay":{"command":"other-tracedecay","args":["serve"],"disabled":false}}}"#,
     )
     .unwrap();
 

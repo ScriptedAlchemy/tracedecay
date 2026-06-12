@@ -10,13 +10,13 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::branch;
-use tokensave::dashboard;
-use tokensave::global_db::GlobalDb;
-use tokensave::memory::encoding::HolographicEncoder;
-use tokensave::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
-use tokensave::tokensave::TokenSave;
+use tracedecay::branch;
+use tracedecay::dashboard;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::memory::encoding::HolographicEncoder;
+use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate
 /// `content` at 200, so this fact proves the `/fact/{id}` detail endpoint
@@ -51,14 +51,14 @@ fn write_file(path: &Path, content: &str) {
     }
 }
 
-async fn setup_project(project_root: &Path) -> TokenSave {
+async fn setup_project(project_root: &Path) -> TraceDecay {
     write_file(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    match TokenSave::init(project_root).await {
+    match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tokensave fixture project: {err}"),
+        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
     }
 }
 
@@ -66,7 +66,7 @@ fn blob_param(bytes: Vec<u8>) -> libsql::Value {
     libsql::Value::Blob(bytes)
 }
 
-async fn seed_memory_fixture(cg: &TokenSave) {
+async fn seed_memory_fixture(cg: &TraceDecay) {
     let conn = cg.db().conn();
     let vec_a = match HolographicEncoder::serialize(&[0.20, 0.35, 0.50]) {
         Ok(value) => value,
@@ -233,7 +233,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
-        project_key: "tokensave-fixture".to_string(),
+        project_key: "tracedecay-fixture".to_string(),
         project_path: project_path.display().to_string(),
         title: Some("Dashboard fixture session".to_string()),
         started_at: Some(1_700_001_000),
@@ -275,7 +275,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
             text: "Similarity pair detected for cache policy facts.".to_string(),
             kind: Some("chat".to_string()),
             model: Some("gpt".to_string()),
-            tool_names: Some("tokensave_search".to_string()),
+            tool_names: Some("tracedecay_search".to_string()),
             source_path: None,
             source_offset: None,
             metadata_json: None,
@@ -290,7 +290,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
             text: "LCM tab should render non-empty overview cards.".to_string(),
             kind: Some("chat".to_string()),
             model: Some("gpt".to_string()),
-            tool_names: Some("tokensave_lcm_status".to_string()),
+            tool_names: Some("tracedecay_lcm_status".to_string()),
             source_path: None,
             source_offset: None,
             metadata_json: None,
@@ -379,7 +379,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let project_db_path = project_root.join(".tokensave").join("tokensave.db");
+    let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
     let server = tokio::spawn(async move {
         let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
     });
@@ -399,7 +399,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 /// Counts rows in the fixture's project DB matching `sql` (a SELECT COUNT query
 /// with one `?1` bind), via a fresh read connection. Used to prove hard deletes
 /// actually removed rows (and their entity links) from the store that
-/// `tokensave_fact_store` recall reads.
+/// `tracedecay_fact_store` recall reads.
 async fn count_in_project_db(fixture: &DashboardFixture, sql: &str, fact_id: i64) -> i64 {
     let db = match libsql::Builder::new_local(&fixture.project_db_path)
         .build()
@@ -419,6 +419,23 @@ async fn count_in_project_db(fixture: &DashboardFixture, sql: &str, fact_id: i64
     match rows.next().await {
         Ok(Some(row)) => row.get::<i64>(0).unwrap_or(-1),
         Ok(None) => -1,
+        Err(err) => panic!("verification row read failed: {err}"),
+    }
+}
+
+async fn string_in_project_db(
+    fixture: &DashboardFixture,
+    sql: &str,
+    fact_id: i64,
+) -> Option<String> {
+    let conn = project_db_conn(fixture).await;
+    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
+        Ok(rows) => rows,
+        Err(err) => panic!("verification query failed: {err}"),
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).ok(),
+        Ok(None) => None,
         Err(err) => panic!("verification row read failed: {err}"),
     }
 }
@@ -487,6 +504,26 @@ async fn clear_fact_vector_without_touching_updated_at(fixture: &DashboardFixtur
     }
 }
 
+async fn set_fact_access_without_touching_updated_at(
+    fixture: &DashboardFixture,
+    fact_id: i64,
+    access_count: i64,
+    last_recalled_at: i64,
+) {
+    let conn = project_db_conn(fixture).await;
+    if let Err(err) = conn
+        .execute(
+            "UPDATE memory_facts
+             SET access_count = ?1, last_recalled_at = ?2
+             WHERE fact_id = ?3",
+            libsql::params![access_count, last_recalled_at, fact_id],
+        )
+        .await
+    {
+        panic!("failed to update fact access fixture: {err}");
+    }
+}
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -507,9 +544,9 @@ fn commit_all(project: &Path, message: &str) {
         project,
         &[
             "-c",
-            "user.name=TokenSave Test",
+            "user.name=TraceDecay Test",
             "-c",
-            "user.email=tokensave-test@example.com",
+            "user.email=tracedecay-test@example.com",
             "commit",
             "-m",
             message,
@@ -541,6 +578,28 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             "fixture starts with one near-duplicate pair"
         );
 
+        set_fact_access_without_touching_updated_at(&fixture, 102, 7, 1_700_000_500).await;
+        let (status, curate_after_access) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        let access_action = curate_after_access["actions"]
+            .as_array()
+            .and_then(|actions| {
+                actions
+                    .iter()
+                    .find(|action| action["fact_id"].as_i64() == Some(102))
+            })
+            .unwrap_or_else(|| {
+                panic!("expected dry-run delete action for fact 102: {curate_after_access}")
+            });
+        assert_eq!(
+            access_action["access_count"], 7,
+            "access-only updates must invalidate cached curation metadata"
+        );
+
         set_fact_vector_and_bump_updated_at(&fixture, 103, &[0.20, 0.35, 0.50]).await;
         let (status, repaired_cache) = get_json(
             &agent,
@@ -562,9 +621,9 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             .project_db_path
             .parent()
             .and_then(Path::parent)
-            .unwrap_or_else(|| panic!("fixture DB path should be under .tokensave"))
+            .unwrap_or_else(|| panic!("fixture DB path should be under .tracedecay"))
             .to_path_buf();
-        let cg = match TokenSave::open(&project_root).await {
+        let cg = match TraceDecay::open(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to reopen fixture project: {err}"),
         };
@@ -610,7 +669,7 @@ fn dashboard_reports_resolved_branch_db_path() {
         .unwrap_or_else(|err| panic!("failed to write fixture lib.rs: {err}"));
         commit_all(&project_root, "initial commit");
 
-        let main = match TokenSave::init(&project_root).await {
+        let main = match TraceDecay::init(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to initialize fixture project: {err}"),
         };
@@ -629,13 +688,15 @@ fn dashboard_reports_resolved_branch_db_path() {
         {
             panic!("failed to track feature branch: {err}");
         }
-        let cg = match TokenSave::open(&project_root).await {
+        let cg = match TraceDecay::open(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to open feature branch fixture: {err}"),
         };
         let expected = cg.db_path().display().to_string();
         assert!(
-            expected.replace('\\', "/").contains(".tokensave/branches/"),
+            expected
+                .replace('\\', "/")
+                .contains(".tracedecay/branches/"),
             "fixture should serve a branch DB path, got {expected}"
         );
 
@@ -716,7 +777,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["providers"]["memory_provider"], "tokensave");
+        assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 2);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
@@ -742,6 +803,15 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array in overview payload"));
         assert_eq!(facts.len(), 2, "query should filter to cache facts only");
+        // Access tracking is part of every fact payload (seeded rows carry
+        // the column defaults).
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact["access_count"].is_number()
+                    && fact.get("last_recalled_at").is_some()),
+            "fact list rows must surface access_count and last_recalled_at"
+        );
         let graph_nodes = overview["holographic"]["graph"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected graph nodes array"));
@@ -922,6 +992,13 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             curate["actions"].as_array().is_some(),
             "curate dry-run should return an actions array"
         );
+        // The deterministic hygiene candidate section is always present.
+        for key in ["secret_like", "transient", "supersession"] {
+            assert!(
+                curate["hygiene_candidates"][key].as_array().is_some(),
+                "curate dry-run should include hygiene_candidates.{key} proposals"
+            );
+        }
     });
 }
 
@@ -979,6 +1056,14 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
         assert_eq!(detail["fact"]["has_hrr"], 1);
         assert_eq!(detail["fact"]["trust_score"], 0.76);
+        assert!(
+            detail["fact"]["access_count"].is_number(),
+            "fact detail must surface access_count"
+        );
+        assert!(
+            detail["fact"].get("last_recalled_at").is_some(),
+            "fact detail must surface last_recalled_at"
+        );
         let entities = detail["fact"]["entities"]
             .as_array()
             .unwrap_or_else(|| panic!("expected entities array in fact detail"));
@@ -1004,6 +1089,79 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
                 .unwrap_or_default()
                 .contains("99999"),
             "404 body should carry the requested fact id"
+        );
+    });
+}
+
+#[test]
+fn curate_hygiene_scans_unvectored_facts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let conn = project_db_conn(&fixture).await;
+        conn.execute(
+            "INSERT INTO memory_facts
+                (fact_id, content, category, tags, trust_score, created_at, updated_at, source, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            libsql::params![
+                901_i64,
+                "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH",
+                "project",
+                "[]",
+                0.5_f64,
+                1_700_000_200_i64,
+                1_700_000_200_i64,
+                "test",
+                "{}"
+            ],
+        )
+        .await
+        .unwrap_or_else(|err| panic!("failed to insert unvectored hygiene fact: {err}"));
+
+        let agent = http_agent();
+        let (status, curate) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+
+        assert_eq!(status, 200);
+        let secret_like = curate["hygiene_candidates"]["secret_like"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected hygiene_candidates.secret_like array"));
+        let secret_candidate = secret_like
+            .iter()
+            .find(|action| action["fact_id"].as_i64() == Some(901))
+            .unwrap_or_else(|| {
+                panic!("hygiene scan must include secret-like facts without HRR vectors: {curate}")
+            });
+        assert_eq!(secret_candidate["status"], "candidate");
+        assert_eq!(secret_candidate["review_required"], true);
+        assert_eq!(secret_candidate["recommended_op"], "delete");
+
+        let (status, applied) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": false }),
+        );
+        assert_eq!(status, 200);
+        assert!(applied["hygiene_candidates"]["secret_like"]
+            .as_array()
+            .is_some_and(|candidates| candidates
+                .iter()
+                .any(|candidate| candidate["fact_id"].as_i64() == Some(901))));
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+                901,
+            )
+            .await,
+            1,
+            "deterministic curate apply must not delete hygiene candidates without explicit review"
         );
     });
 }
@@ -1118,7 +1276,7 @@ fn curation_delete_lifecycle() {
         );
 
         // --- The row and its entity links must be gone from the store that
-        //     tokensave_fact_store recall reads (hard delete, not soft). ---
+        //     tracedecay_fact_store recall reads (hard delete, not soft). ---
         let remaining = count_in_project_db(
             &fixture,
             "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
@@ -1150,6 +1308,125 @@ fn curation_delete_lifecycle() {
         );
         assert_eq!(status, 200);
         assert!(preview_after["report"].is_null());
+    });
+}
+
+#[test]
+fn curation_preview_marks_same_count_updates_stale() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, dry) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(dry["dry_run"], true);
+
+        let conn = project_db_conn(&fixture).await;
+        conn.execute(
+            "UPDATE memory_facts
+             SET content = content || ' after preview', updated_at = updated_at + 1
+             WHERE fact_id = 101",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (status, preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/preview",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            preview["stale"], true,
+            "same-count edits must stale previews"
+        );
+        assert!(
+            preview["stale_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("changed"),
+            "stale response should explain the memory store changed: {preview}"
+        );
+    });
+}
+
+#[test]
+fn memory_oplog_endpoint_lists_recent_operations() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        // Fresh fixture: no operations recorded yet.
+        let (status, empty) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/oplog?limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(empty["count"], 0);
+        assert_eq!(empty["error"], "");
+
+        // An explicit-ops delete writes a per-fact "remove" row plus a
+        // "curate_apply" summary row.
+        let (status, applied) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate/apply", fixture.base_url),
+            &serde_json::json!({
+                "ops": [{ "op": "delete", "fact_id": 103, "reason": "oplog fixture" }]
+            }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(applied["counts"]["deleted"], 1);
+
+        let (status, oplog) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/oplog?limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(oplog["error"], "");
+        let events = oplog["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected oplog events array"));
+        assert_eq!(events.len(), 2, "expected remove + curate_apply rows");
+
+        // Newest first: the curate_apply summary follows the per-fact remove.
+        assert_eq!(events[0]["op"], "curate_apply");
+        assert_eq!(events[0]["detail"]["deleted"], 1);
+        assert_eq!(events[1]["op"], "remove");
+        assert_eq!(events[1]["fact_id"], 103);
+        let remove_detail = events[1]["detail"].to_string();
+        assert!(
+            remove_detail.contains("content_hash"),
+            "remove rows must carry a content hash: {remove_detail}"
+        );
+        assert!(
+            !remove_detail.contains("empty states"),
+            "remove rows must not leak deleted fact content: {remove_detail}"
+        );
+        assert!(
+            events.iter().all(|event| event["ts"].is_number()),
+            "every oplog row carries a timestamp"
+        );
     });
 }
 
@@ -1296,6 +1573,120 @@ fn curate_apply_ops_contract() {
 }
 
 #[test]
+fn curate_apply_merge_with_missing_loser_is_atomic() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+        let apply_url = format!("{}/api/plugins/holographic/curate/apply", fixture.base_url);
+
+        let (status, dry) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(dry["dry_run"], true);
+
+        let original_winner = string_in_project_db(
+            &fixture,
+            "SELECT content FROM memory_facts WHERE fact_id = ?1",
+            101,
+        )
+        .await
+        .expect("winner content");
+
+        let (status, response) = post_json_body(
+            &agent,
+            &apply_url,
+            &serde_json::json!({
+                "ops": [{
+                    "op": "merge",
+                    "winner_id": 101,
+                    "loser_ids": [102, 99999],
+                    "merged_content": "Cache invalidation policy should not partially merge"
+                }]
+            }),
+        );
+        assert_eq!(status, 200, "per-op failures stay in-band");
+        assert_eq!(response["counts"]["deleted"], 0);
+        assert_eq!(response["counts"]["merged"], 0);
+        assert_eq!(response["counts"]["errors"], 1);
+        assert_eq!(response["results"][0]["op"], "merge");
+        assert_eq!(response["results"][0]["status"], "error");
+        assert!(
+            response["results"][0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("loser fact 99999 not found"),
+            "missing loser should be reported before mutation: {response}"
+        );
+
+        let winner_after = string_in_project_db(
+            &fixture,
+            "SELECT content FROM memory_facts WHERE fact_id = ?1",
+            101,
+        )
+        .await
+        .expect("winner content after failed merge");
+        assert_eq!(
+            winner_after, original_winner,
+            "failed merge must not update winner content"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+                102,
+            )
+            .await,
+            1,
+            "failed merge must not delete valid losers"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
+                101,
+            )
+            .await,
+            0,
+            "failed merge must not write a winner update oplog"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
+                102,
+            )
+            .await,
+            0,
+            "failed merge must not write loser delete oplogs"
+        );
+
+        let (status, preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/preview",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            !preview["report"].is_null(),
+            "failed merge must not clear saved preview"
+        );
+        assert_eq!(
+            preview["stale"], false,
+            "unchanged store should leave preview fresh"
+        );
+    });
+}
+
+#[test]
 fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -1316,7 +1707,7 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         assert_eq!(overview["exists"], true);
         assert_eq!(
             overview["storage_scope"], "global",
-            "TOKENSAVE_GLOBAL_DB override fixtures serve the global scope"
+            "TRACEDECAY_GLOBAL_DB override fixtures serve the global scope"
         );
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
@@ -1429,9 +1820,9 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
 }
 
 /// Opens (creating if needed) the project-local session store at
-/// `<project>/.tokensave/sessions.db` — the DB transcript ingest writes to.
+/// `<project>/.tracedecay/sessions.db` — the DB transcript ingest writes to.
 async fn open_project_session_store(project_root: &Path) -> GlobalDb {
-    let db_path = tokensave::sessions::cursor::project_session_db_path(project_root);
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
     match GlobalDb::open_at(&db_path).await {
         Some(db) => db,
         None => panic!(
@@ -1441,8 +1832,8 @@ async fn open_project_session_store(project_root: &Path) -> GlobalDb {
     }
 }
 
-/// Without a `TOKENSAVE_GLOBAL_DB` override the dashboard must serve the
-/// project-local `.tokensave/sessions.db` (where Cursor hooks and the
+/// Without a `TRACEDECAY_GLOBAL_DB` override the dashboard must serve the
+/// project-local `.tracedecay/sessions.db` (where Cursor hooks and the
 /// catch-up sweep ingest transcripts), and report it via the additive
 /// `storage_scope` payload field.
 #[test]
@@ -1480,7 +1871,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         assert!(
             lcm_db
                 .replace('\\', "/")
-                .ends_with(".tokensave/sessions.db"),
+                .ends_with(".tracedecay/sessions.db"),
             "capabilities.lcm_db should be the project session store, got {lcm_db}"
         );
 
@@ -1498,7 +1889,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            path.replace('\\', "/").ends_with(".tokensave/sessions.db"),
+            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
             "overview.path should be the project session store, got {path}"
         );
 
@@ -1520,7 +1911,7 @@ fn lcm_serves_project_session_store_without_global_override() {
     });
 }
 
-/// An explicit `TOKENSAVE_GLOBAL_DB` override pins the dashboard to that
+/// An explicit `TRACEDECAY_GLOBAL_DB` override pins the dashboard to that
 /// store even when the project-local session store exists and has rows —
 /// the contract the smoke harness and the Hermes wrapper rely on.
 #[test]
@@ -1575,7 +1966,7 @@ fn lcm_global_override_wins_over_project_store() {
 }
 
 /// The dry-run curation preview must survive a dashboard restart: it is
-/// mirrored to `.tokensave/dashboard/curation_preview.json` and re-hydrated
+/// mirrored to `.tracedecay/dashboard/curation_preview.json` and re-hydrated
 /// by `build_state`, and applying curation clears both the memory copy and
 /// the sidecar.
 #[test]
@@ -1594,11 +1985,11 @@ fn curation_preview_persists_across_dashboard_restarts() {
         seed_memory_fixture(&cg).await;
         let agent = http_agent();
         let sidecar = project_root
-            .join(".tokensave")
+            .join(".tracedecay")
             .join("dashboard")
             .join("curation_preview.json");
 
-        async fn start_server(cg: TokenSave) -> (String, tokio::task::JoinHandle<()>) {
+        async fn start_server(cg: TraceDecay) -> (String, tokio::task::JoinHandle<()>) {
             let port = pick_free_port();
             let base_url = format!("http://127.0.0.1:{port}");
             let server = tokio::spawn(async move {
@@ -1612,8 +2003,8 @@ fn curation_preview_persists_across_dashboard_restarts() {
             let _ = server.await;
         }
 
-        async fn reopen_project(project_root: &Path) -> TokenSave {
-            match TokenSave::open(project_root).await {
+        async fn reopen_project(project_root: &Path) -> TraceDecay {
+            match TraceDecay::open(project_root).await {
                 Ok(cg) => cg,
                 Err(err) => panic!("failed to reopen fixture project: {err}"),
             }

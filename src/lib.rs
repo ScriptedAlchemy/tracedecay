@@ -46,7 +46,7 @@ pub mod sessions;
 pub mod sync;
 pub mod text;
 pub mod timeutil;
-pub mod tokensave;
+pub mod tracedecay;
 pub mod types;
 pub mod upgrade;
 pub mod user_config;

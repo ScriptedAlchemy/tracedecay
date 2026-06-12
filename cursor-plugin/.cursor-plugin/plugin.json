@@ -1,7 +1,7 @@
 {
-  "name": "tokensave",
+  "name": "tracedecay",
   "version": "6.1.3",
-  "description": "Cursor integration for the tokensave semantic code intelligence MCP server.",
+  "description": "Cursor integration for the TraceDecay semantic code intelligence MCP server.",
   "author": {
     "name": "ScriptedAlchemy",
     "url": "https://github.com/ScriptedAlchemy"
@@ -20,7 +20,7 @@
   "mcpServers": "mcp.json",
   "hooks": "hooks/hooks.json",
   "rules": [
-    "rules/tokensave.mdc"
+    "rules/tracedecay.mdc"
   ],
   "skills": "skills/",
   "agents": "agents/"

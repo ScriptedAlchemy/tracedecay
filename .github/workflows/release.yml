@@ -76,7 +76,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../tokensave-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tokensave
+          tar czf ../../../tracedecay-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
 
       - name: Upload binary archive (unix)
@@ -84,7 +84,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tokensave-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Windows: Authenticode signing via SignPath ---
       # The unsigned .exe is uploaded as a workflow artifact (upload-artifact wraps the
@@ -96,8 +96,8 @@ jobs:
         id: upload-unsigned
         uses: actions/upload-artifact@v4
         with:
-          name: tokensave-windows-unsigned
-          path: target/${{ matrix.target }}/release/tokensave.exe
+          name: tracedecay-windows-unsigned
+          path: target/${{ matrix.target }}/release/tracedecay.exe
           if-no-files-found: error
 
       - name: Submit signing request to SignPath
@@ -106,7 +106,10 @@ jobs:
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: tokensave
+          # NOTE: SignPath is an external service — the project must also be
+          # renamed tokensave -> tracedecay in the SignPath dashboard, or
+          # signing will fail with an unknown project-slug error.
+          project-slug: tracedecay
           # Test certificate while bootstrapping; switch to release-signing for production.
           signing-policy-slug: test-signing
           github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
@@ -117,14 +120,14 @@ jobs:
         if: matrix.archive == 'zip' && github.event_name == 'release'
         shell: pwsh
         run: |
-          Compress-Archive -Path signed/tokensave.exe -DestinationPath tokensave-${{ github.ref_name }}-${{ matrix.name }}.zip -Force
+          Compress-Archive -Path signed/tracedecay.exe -DestinationPath tracedecay-${{ github.ref_name }}-${{ matrix.name }}.zip -Force
 
       - name: Upload signed binary archive
         if: matrix.archive == 'zip' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tokensave-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
@@ -133,17 +136,17 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BOTTLE_TAG="${{ matrix.bottle_tag }}"
-          mkdir -p tokensave/${VERSION}/bin
-          cp target/${{ matrix.target }}/release/tokensave tokensave/${VERSION}/bin/tokensave
-          chmod +x tokensave/${VERSION}/bin/tokensave
-          tar czf "tokensave-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tokensave/
+          mkdir -p tracedecay/${VERSION}/bin
+          cp target/${{ matrix.target }}/release/tracedecay tracedecay/${VERSION}/bin/tracedecay
+          chmod +x tracedecay/${VERSION}/bin/tracedecay
+          tar czf "tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay/
 
       - name: Upload bottle artifact
         if: matrix.bottle_tag && github.event_name == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: bottle-${{ matrix.bottle_tag }}
-          path: "tokensave-*.bottle.tar.gz"
+          path: "tracedecay-*.bottle.tar.gz"
 
   update-homebrew:
     name: Update Homebrew tap
@@ -169,7 +172,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for f in bottles/tokensave-*.bottle.tar.gz; do
+          for f in bottles/tracedecay-*.bottle.tar.gz; do
             gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
           done
 
@@ -185,12 +188,15 @@ jobs:
           SOURCE_SHA=$(sha256sum source.tar.gz | awk '{print $1}')
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
 
-          for f in bottles/tokensave-*.bottle.tar.gz; do
-            tag=$(basename "$f" | sed "s/tokensave-${VERSION}\.\(.*\)\.bottle\.tar\.gz/\1/")
+          for f in bottles/tracedecay-*.bottle.tar.gz; do
+            tag=$(basename "$f" | sed "s/tracedecay-${VERSION}\.\(.*\)\.bottle\.tar\.gz/\1/")
             sha=$(sha256sum "$f" | awk '{print $1}')
             echo "${tag}_sha=${sha}" >> "$GITHUB_OUTPUT"
           done
 
+      # NOTE: the Homebrew tap (ScriptedAlchemy/homebrew-tap) is an external
+      # repo — the old Formula/tokensave.rb there must be removed/renamed
+      # separately; this step only writes the new Formula/tracedecay.rb.
       - name: Update formula
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -202,8 +208,8 @@ jobs:
 
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
 
-          cat > tap/Formula/tokensave.rb << EOF
-          class Tokensave < Formula
+          cat > tap/Formula/tracedecay.rb << EOF
+          class Tracedecay < Formula
             desc "Code intelligence tool that builds semantic knowledge graphs from source code"
             homepage "https://github.com/ScriptedAlchemy/tokensave"
             url "https://github.com/ScriptedAlchemy/tokensave/archive/refs/tags/v${VERSION}.tar.gz"
@@ -223,16 +229,18 @@ jobs:
             end
 
             test do
-              system "#{bin}/tokensave", "--help"
+              system "#{bin}/tracedecay", "--help"
             end
           end
           EOF
 
           cd tap
+          # Clean up the legacy pre-rebrand formula if it still exists.
+          git rm -f --ignore-unmatch Formula/tokensave.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tokensave.rb
-          git diff --cached --quiet || git commit -m "tokensave ${VERSION}"
+          git add Formula/tracedecay.rb
+          git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push
 
   publish-crate:
@@ -259,6 +267,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # NOTE: publishes the renamed `tracedecay` crate — a new crate name on
+      # crates.io; the legacy `tokensave` crate is not updated by this job.
       - name: Publish
         run: cargo publish
         env:
@@ -281,11 +291,14 @@ jobs:
 
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
-            --pattern "tokensave-${GITHUB_REF_NAME}-x86_64-windows.zip" \
+            --pattern "tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" \
             --dir .
-          SHA256=$(sha256sum "tokensave-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
+          SHA256=$(sha256sum "tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
+      # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
+      # repo — the old bucket/tokensave.json there must be removed separately;
+      # this step only writes the new bucket/tracedecay.json.
       - name: Update Scoop manifest
         env:
           SCOOP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -294,7 +307,7 @@ jobs:
           TAG="${{ steps.release.outputs.tag }}"
           SHA256="${{ steps.release.outputs.sha256_win64 }}"
 
-          cat > tokensave.json << EOF
+          cat > tracedecay.json << EOF
           {
             "version": "${VERSION}",
             "description": "Code intelligence tool that builds semantic knowledge graphs from source code",
@@ -302,18 +315,18 @@ jobs:
             "license": "MIT",
             "architecture": {
               "64bit": {
-                "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/${TAG}/tokensave-${TAG}-x86_64-windows.zip",
+                "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/${TAG}/tracedecay-${TAG}-x86_64-windows.zip",
                 "hash": "${SHA256}"
               }
             },
-            "bin": "tokensave.exe",
+            "bin": "tracedecay.exe",
             "checkver": {
               "github": "https://github.com/ScriptedAlchemy/tokensave"
             },
             "autoupdate": {
               "architecture": {
                 "64bit": {
-                  "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/v\$version/tokensave-v\$version-x86_64-windows.zip"
+                  "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/v\$version/tracedecay-v\$version-x86_64-windows.zip"
                 }
               }
             }
@@ -323,10 +336,11 @@ jobs:
           git clone "https://x-access-token:${SCOOP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/scoop-bucket.git" scoop-repo
           cd scoop-repo
           mkdir -p bucket
-          cp ../tokensave.json bucket/tokensave.json
-          git rm -f --ignore-unmatch tokensave.json
+          cp ../tracedecay.json bucket/tracedecay.json
+          # Clean up legacy pre-rebrand manifests (root-level and bucket/).
+          git rm -f --ignore-unmatch tokensave.json bucket/tokensave.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bucket/tokensave.json
-          git diff --cached --quiet || git commit -m "tokensave ${VERSION}"
+          git add bucket/tracedecay.json
+          git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push

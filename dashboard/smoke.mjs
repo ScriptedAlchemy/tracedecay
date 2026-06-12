@@ -21,14 +21,14 @@ function withTrailingSlash(url) {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-// The dashboard refuses to start without a TokenSave index, and CI checkouts
-// (unlike dev workspaces) have no `.tokensave/`. Build a tiny throwaway
+// The dashboard refuses to start without a TraceDecay index, and CI checkouts
+// (unlike dev workspaces) have no `.tracedecay/`. Build a tiny throwaway
 // project and index it so the smoke run is hermetic everywhere.
 function createSmokeWorkspace() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokensave-dashboard-smoke-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tracedecay-dashboard-smoke-"));
   fs.writeFileSync(
     path.join(dir, "sample.rs"),
-    "/// Fixture indexed by `tokensave init` for the dashboard smoke test.\npub fn smoke_sample() -> u32 {\n    42\n}\n",
+    "/// Fixture indexed by `tracedecay init` for the dashboard smoke test.\npub fn smoke_sample() -> u32 {\n    42\n}\n",
   );
   // stdin is closed so init's interactive `.gitignore` prompt reads EOF and
   // proceeds with the default instead of blocking.
@@ -39,7 +39,7 @@ function createSmokeWorkspace() {
   });
   if (result.status !== 0) {
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new Error(`tokensave init failed for smoke workspace (code ${result.status})`);
+    throw new Error(`tracedecay init failed for smoke workspace (code ${result.status})`);
   }
   return dir;
 }
@@ -214,9 +214,9 @@ async function main() {
       server = { baseUrl: explicitUrl, stop: async () => {} };
       console.log(`Using existing dashboard URL: ${explicitUrl}`);
     } else {
-      console.log("Creating hermetic smoke workspace (tokensave init)...");
+      console.log("Creating hermetic smoke workspace (tracedecay init)...");
       workspace = createSmokeWorkspace();
-      console.log(`Starting \`tokensave dashboard --port 0 --path ${workspace}\` for smoke test...`);
+      console.log(`Starting \`tracedecay dashboard --port 0 --path ${workspace}\` for smoke test...`);
       server = await startDashboardServer(workspace);
       console.log(`Dashboard URL: ${server.baseUrl}`);
     }

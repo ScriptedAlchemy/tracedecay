@@ -76,11 +76,19 @@ pub struct FactRecord {
     pub trust_score: f64,
     pub source: Option<String>,
     pub retrieval_count: i64,
+    /// Times this fact was RETURNED from a recall search (`FactRetriever::
+    /// search`), as opposed to `retrieval_count`, which also counts probe,
+    /// list, related, and reason scans.
+    #[serde(default)]
+    pub access_count: i64,
     pub helpful_count: i64,
     pub unhelpful_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_retrieved_at: Option<i64>,
+    /// Timestamp of the most recent recall-search return (see `access_count`).
+    #[serde(default)]
+    pub last_recalled_at: Option<i64>,
     pub last_feedback_at: Option<i64>,
     pub metadata: Value,
 }
@@ -178,6 +186,64 @@ pub struct AddFactRequest {
     pub entities: Vec<String>,
     pub trust: Option<f64>,
     pub metadata: Value,
+}
+
+/// How a newly added fact relates to the existing store. Returned as part of
+/// [`AddFactOutcome`]; purely a report — `add_fact` never auto-merges or
+/// auto-deletes based on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddFactDiffKind {
+    /// New information; no strong overlap with stored facts.
+    Add,
+    /// Strong overlap (similarity > 0.9) with an existing fact.
+    NearDuplicate,
+    /// Similar (≥ 0.7) to an existing fact AND one side carries a
+    /// negation/state-change cue — likely supersession or contradiction.
+    PossibleConflict,
+    /// The content matched a conservative secret-likeness rule and was NOT
+    /// stored.
+    RejectedSecretLike,
+}
+
+impl AddFactDiffKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::NearDuplicate => "near_duplicate",
+            Self::PossibleConflict => "possible_conflict",
+            Self::RejectedSecretLike => "rejected_secret_like",
+        }
+    }
+}
+
+/// Write-time diff report attached to every `add_fact` result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AddFactDiff {
+    pub diff: AddFactDiffKind,
+    /// The strongest existing match, when one scored above the report floor.
+    pub closest_fact_id: Option<i64>,
+    pub similarity: Option<f64>,
+    pub reason: Option<String>,
+}
+
+impl AddFactDiff {
+    pub const fn plain_add() -> Self {
+        Self {
+            diff: AddFactDiffKind::Add,
+            closest_fact_id: None,
+            similarity: None,
+            reason: None,
+        }
+    }
+}
+
+/// Result of an `add_fact` call: the stored (or pre-existing) fact plus the
+/// write-time diff report. `fact` is `None` only for `rejected_secret_like`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AddFactOutcome {
+    pub fact: Option<FactRecord>,
+    pub diff: AddFactDiff,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

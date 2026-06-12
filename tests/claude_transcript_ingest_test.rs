@@ -1,17 +1,17 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tokensave::sessions::claude::ClaudeSource;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::source::ingest_source;
+use tracedecay::sessions::claude::ClaudeSource;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::source::ingest_source;
 
 /// Builds an initialized project dir and returns (home, project_root).
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 
@@ -55,7 +55,7 @@ fn write_claude_transcript(
                 },
                 "content": [
                     {"type": "text", "text": "The billing pipeline regression is fixed."},
-                    {"type": "tool_use", "name": "tokensave_context", "input": {}}
+                    {"type": "tool_use", "name": "tracedecay_context", "input": {}}
                 ]
             }
         }),
@@ -121,7 +121,7 @@ async fn claude_transcript_populates_searchable_messages() {
     assert_eq!(results.len(), 2);
     assert!(results
         .iter()
-        .any(|hit| hit.message.tool_names.as_deref() == Some("tokensave_context")));
+        .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
     assert!(results
         .iter()
         .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8")));
@@ -156,7 +156,7 @@ async fn claude_transcript_populates_searchable_messages() {
 
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
-        {"type": "tool_use", "name": "tokensave_context", "input": {}}
+        {"type": "tool_use", "name": "tracedecay_context", "input": {}}
     ]);
     let raw = db
         .lcm_load_raw_message("claude", "msg_claude_1")

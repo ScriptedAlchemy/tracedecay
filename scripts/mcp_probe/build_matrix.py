@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read /tmp/tokensave_matrix.log (TSV from probe.py) and render a markdown
+"""Read /tmp/tracedecay_matrix.log (TSV from probe.py) and render a markdown
 status matrix on stdout. Optionally merge an isolated-probe log so
 post-cascade rows get replaced with their fresh-server results.
 
@@ -13,8 +13,8 @@ Status legend:
 
 Usage:
   python3 build_matrix.py
-  python3 build_matrix.py --log /tmp/tokensave_matrix.log \
-                          --isolated /tmp/tokensave_isolated.log
+  python3 build_matrix.py --log /tmp/tracedecay_matrix.log \
+                          --isolated /tmp/tracedecay_isolated.log
 """
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-DEFAULT_LOG = os.environ.get("TOKENSAVE_PROBE_LOG", "/tmp/tokensave_matrix.log")
-DEFAULT_ISO = os.environ.get("TOKENSAVE_PROBE_LOG_ISO", "/tmp/tokensave_isolated.log")
+DEFAULT_LOG = os.environ.get("TRACEDECAY_PROBE_LOG", "/tmp/tracedecay_matrix.log")
+DEFAULT_ISO = os.environ.get("TRACEDECAY_PROBE_LOG_ISO", "/tmp/tracedecay_isolated.log")
 
 
 def load(path: Path):

@@ -87,20 +87,20 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../tokensave-beta-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tokensave
+          tar czf ../../../tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
 
       - name: Package binary (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/tokensave.exe -DestinationPath tokensave-beta-${{ github.ref_name }}-${{ matrix.name }}.zip
+          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.zip
 
       - name: Upload binary archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tokensave-beta-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
@@ -109,17 +109,17 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BOTTLE_TAG="${{ matrix.bottle_tag }}"
-          mkdir -p tokensave-beta/${VERSION}/bin
-          cp target/${{ matrix.target }}/release/tokensave tokensave-beta/${VERSION}/bin/tokensave
-          chmod +x tokensave-beta/${VERSION}/bin/tokensave
-          tar czf "tokensave-beta-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tokensave-beta/
+          mkdir -p tracedecay-beta/${VERSION}/bin
+          cp target/${{ matrix.target }}/release/tracedecay tracedecay-beta/${VERSION}/bin/tracedecay
+          chmod +x tracedecay-beta/${VERSION}/bin/tracedecay
+          tar czf "tracedecay-beta-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay-beta/
 
       - name: Upload bottle artifact
         if: matrix.bottle_tag
         uses: actions/upload-artifact@v4
         with:
           name: bottle-beta-${{ matrix.bottle_tag }}
-          path: "tokensave-beta-*.bottle.tar.gz"
+          path: "tracedecay-beta-*.bottle.tar.gz"
 
   update-homebrew:
     name: Update Homebrew tap (beta)
@@ -145,7 +145,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for f in bottles/tokensave-beta-*.bottle.tar.gz; do
+          for f in bottles/tracedecay-beta-*.bottle.tar.gz; do
             gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
           done
 
@@ -161,12 +161,15 @@ jobs:
           SOURCE_SHA=$(sha256sum source.tar.gz | awk '{print $1}')
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
 
-          for f in bottles/tokensave-beta-*.bottle.tar.gz; do
-            tag=$(basename "$f" | sed "s/tokensave-beta-${VERSION}\.\(.*\)\.bottle\.tar\.gz/\1/")
+          for f in bottles/tracedecay-beta-*.bottle.tar.gz; do
+            tag=$(basename "$f" | sed "s/tracedecay-beta-${VERSION}\.\(.*\)\.bottle\.tar\.gz/\1/")
             sha=$(sha256sum "$f" | awk '{print $1}')
             echo "${tag}_sha=${sha}" >> "$GITHUB_OUTPUT"
           done
 
+      # NOTE: the Homebrew tap (ScriptedAlchemy/homebrew-tap) is an external
+      # repo — any legacy Formula/tokensave-beta.rb there must be removed
+      # separately; this step only writes Formula/tracedecay-beta.rb.
       - name: Update formula
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -178,8 +181,8 @@ jobs:
 
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
 
-          cat > tap/Formula/tokensave-beta.rb << EOF
-          class TokensaveBeta < Formula
+          cat > tap/Formula/tracedecay-beta.rb << EOF
+          class TracedecayBeta < Formula
             desc "Code intelligence tool (beta channel)"
             homepage "https://github.com/ScriptedAlchemy/tokensave"
             url "https://github.com/ScriptedAlchemy/tokensave/archive/refs/tags/v${VERSION}.tar.gz"
@@ -194,14 +197,14 @@ jobs:
 
             depends_on "rust" => :build
 
-            conflicts_with "tokensave", because: "both install a `tokensave` binary"
+            conflicts_with "tracedecay", because: "both install a `tracedecay` binary"
 
             def install
               system "cargo", "install", *std_cargo_args
             end
 
             test do
-              system "#{bin}/tokensave", "--help"
+              system "#{bin}/tracedecay", "--help"
             end
           end
           EOF
@@ -209,8 +212,8 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tokensave-beta.rb
-          git diff --cached --quiet || git commit -m "tokensave-beta ${VERSION}"
+          git add Formula/tracedecay-beta.rb
+          git diff --cached --quiet || git commit -m "tracedecay-beta ${VERSION}"
           git push
 
   update-scoop:
@@ -230,11 +233,14 @@ jobs:
 
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
-            --pattern "tokensave-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" \
+            --pattern "tracedecay-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" \
             --dir .
-          SHA256=$(sha256sum "tokensave-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
+          SHA256=$(sha256sum "tracedecay-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
+      # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
+      # repo — any legacy bucket/tokensave-beta.json there must be removed
+      # separately; this step only writes bucket/tracedecay-beta.json.
       - name: Update Scoop manifest
         env:
           SCOOP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -243,7 +249,7 @@ jobs:
           TAG="${{ steps.release.outputs.tag }}"
           SHA256="${{ steps.release.outputs.sha256_win64 }}"
 
-          cat > tokensave-beta.json << EOF
+          cat > tracedecay-beta.json << EOF
           {
             "version": "${VERSION}",
             "description": "Code intelligence tool (beta channel)",
@@ -251,11 +257,11 @@ jobs:
             "license": "MIT",
             "architecture": {
               "64bit": {
-                "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/${TAG}/tokensave-beta-${TAG}-x86_64-windows.zip",
+                "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/${TAG}/tracedecay-beta-${TAG}-x86_64-windows.zip",
                 "hash": "${SHA256}"
               }
             },
-            "bin": "tokensave.exe",
+            "bin": "tracedecay.exe",
             "checkver": {
               "github": "https://github.com/ScriptedAlchemy/tokensave",
               "regex": "v([\\d.]+-beta[\\d.]*)"
@@ -263,7 +269,7 @@ jobs:
             "autoupdate": {
               "architecture": {
                 "64bit": {
-                  "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/v\$version/tokensave-beta-v\$version-x86_64-windows.zip"
+                  "url": "https://github.com/ScriptedAlchemy/tokensave/releases/download/v\$version/tracedecay-beta-v\$version-x86_64-windows.zip"
                 }
               }
             }
@@ -273,9 +279,9 @@ jobs:
           git clone "https://x-access-token:${SCOOP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/scoop-bucket.git" scoop-repo
           cd scoop-repo
           mkdir -p bucket
-          cp ../tokensave-beta.json bucket/tokensave-beta.json
+          cp ../tracedecay-beta.json bucket/tracedecay-beta.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bucket/tokensave-beta.json
-          git diff --cached --quiet || git commit -m "tokensave-beta ${VERSION}"
+          git add bucket/tracedecay-beta.json
+          git diff --cached --quiet || git commit -m "tracedecay-beta ${VERSION}"
           git push

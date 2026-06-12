@@ -1,4 +1,4 @@
-//! `tokensave memory curate` — dashboard-free curation core.
+//! `tracedecay memory curate` — dashboard-free curation core.
 //!
 //! Footprint-Ladder rung 2 for Hermes: the similarity-dedup curate (and the
 //! LLM-review tier's plan/apply halves) run directly against the project
@@ -24,8 +24,8 @@ use super::memory_api::{
 };
 use super::util::{qmarks, query_rows};
 use super::{token_count, DashboardState};
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
@@ -65,10 +65,25 @@ Per-op required fields:\n\
 \"merged_content\" (string) when the winner's text should be replaced \
 by a consolidated fact.\n\
   delete: {\"fact_id\": <id>}\n\
-Only reference fact ids that appear in the input clusters. \
-Return ONLY the JSON object.";
+Only reference fact ids that appear in the input clusters or in \
+hygiene_candidates. Return ONLY the JSON object.\n\n\
+Hygiene categories: the input may also carry \"hygiene_candidates\" — \
+deterministic rule-flagged evidence with status=\"candidate\", \
+review_required=true, and recommended_op hints. Review these candidates with \
+the same conservatism; do not treat them as already-approved operations. \
+secret_like: flagged as credential-like content; delete unless it is clearly \
+a false positive (e.g. prose ABOUT secret handling with no actual \
+credential). transient: looks like ephemeral run output (ports, PIDs, temp \
+paths, run logs); delete unless it encodes a durable decision. supersession: \
+a negation/state-change cue pairs an older fact with a newer one; confirm \
+from the texts which fact is current, delete the stale one, or emit a \
+time-aware merge when both matter. Usage signals: members may carry \
+access_count / last_recalled_at (recall-search returns). Treat high access \
+as evidence a fact is actively used — avoid deleting the more-accessed fact \
+of a pair unless the duplication is near-exact. Low trust alone is never a \
+delete reason; use it only to temper confidence.";
 
-/// Options for one `tokensave memory curate` run.
+/// Options for one `tracedecay memory curate` run.
 pub struct MemoryCurateOptions {
     /// Apply the similarity-dedup plan (and any provided `--llm-ops`)
     /// instead of reporting a dry-run preview.
@@ -97,7 +112,7 @@ impl Default for MemoryCurateOptions {
 
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
-async fn cli_state(cg: &TokenSave) -> DashboardState {
+async fn cli_state(cg: &TraceDecay) -> DashboardState {
     // Same vector/bank repair the dashboard runs before serving similarity.
     if let Err(err) = cg.memory_status().await {
         eprintln!("Warning: memory repair failed: {err}");
@@ -117,7 +132,7 @@ async fn cli_state(cg: &TokenSave) -> DashboardState {
 }
 
 /// Runs the curate verb and returns the JSON report printed by the CLI.
-pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) -> Result<Value> {
+pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -> Result<Value> {
     let state = cli_state(cg).await;
     let mut report = Map::new();
     report.insert("mode".to_string(), json!("similarity_dedup"));
@@ -129,12 +144,22 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     // reference (their fact ids would already be gone).
     if let Some(provided) = options.llm_ops.as_ref() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
-        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        // Evidence guard: cluster members plus the deterministic hygiene
+        // candidates (recomputed against the same pre-apply state the ops
+        // were planned on) are the only legal delete targets.
+        let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        let (_, pre_apply_hygiene_candidates, _, _) =
+            build_delete_plan(&state)
+                .await
+                .map_err(|message| TraceDecayError::Config {
+                    message: format!("curation analysis failed: {message}"),
+                })?;
+        allowed_ids.extend(hygiene_candidate_fact_ids(&pre_apply_hygiene_candidates));
         let raw_ops = provided
             .get("ops")
             .and_then(Value::as_array)
             .cloned()
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "--llm-ops payload must be a JSON object with an `ops` array".to_string(),
             })?;
         let (valid, rejected) = validate_llm_ops(&raw_ops, &allowed_ids, options.min_confidence);
@@ -168,15 +193,19 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
         report.insert("llm_apply".to_string(), Value::Object(llm_report));
     }
 
-    // Similarity-dedup tier (the dashboard's `/curate` semantics), planned
-    // on the post-LLM-ops store state.
-    let (actions, counts, total) =
+    // Similarity-dedup tier (the dashboard's `/curate` semantics), planned on
+    // the post-LLM-ops store state. `hygiene_candidates` carries deterministic
+    // rule-based evidence (secret_like / transient / supersession); candidates
+    // are never auto-applied here — the external LLM (or a human) confirms
+    // them and feeds delete/merge ops back through `--llm-ops`.
+    let (actions, hygiene_candidates, counts, total) =
         build_delete_plan(&state)
             .await
-            .map_err(|message| TokenSaveError::Config {
+            .map_err(|message| TraceDecayError::Config {
                 message: format!("curation analysis failed: {message}"),
             })?;
     report.insert("counts".to_string(), Value::Object(counts));
+    report.insert("hygiene_candidates".to_string(), hygiene_candidates.clone());
     report.insert(
         "coverage".to_string(),
         json!({ "scanned": total, "active_total": total }),
@@ -204,36 +233,52 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
 
     if options.llm && options.llm_ops.is_none() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
-        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        allowed_ids.extend(hygiene_candidate_fact_ids(&hygiene_candidates));
+        let has_hygiene = !hygiene_candidate_fact_ids(&hygiene_candidates).is_empty();
         {
             // Plan half of the two-phase contract: hand the caller the exact
             // chat messages the Hermes wrapper sends to its auxiliary LLM.
+            // Hygiene candidates ride along so the external LLM reviews them
+            // through the same ops contract.
             let user_message = format!(
                 "Review these candidate clusters and return ops as strict JSON.\n\n{}",
-                Value::Object(Map::from_iter([(
-                    "clusters".to_string(),
-                    Value::Array(clusters.clone()),
-                )]))
+                Value::Object(Map::from_iter([
+                    ("clusters".to_string(), Value::Array(clusters.clone())),
+                    ("hygiene_candidates".to_string(), hygiene_candidates.clone()),
+                ]))
             );
             report.insert(
                 "llm_review".to_string(),
                 json!({
-                    "status": if clusters.is_empty() { "nothing_to_review" } else { "needs_llm_review" },
+                    "status": if clusters.is_empty() && !has_hygiene { "nothing_to_review" } else { "needs_llm_review" },
                     "clusters_reviewed": clusters.len(),
                     "clusters": clusters,
+                    "hygiene_candidates": hygiene_candidates,
                     "allowed_fact_ids": allowed_ids,
                     "min_confidence": options.min_confidence,
                     "messages": [
                         { "role": "system", "content": CURATION_SYSTEM_PROMPT },
                         { "role": "user", "content": user_message },
                     ],
-                    "next_step": "run the messages through an LLM and pass its {\"ops\": [...]} JSON back via: tokensave memory curate --llm-ops <file> [--apply]",
+                    "next_step": "run the messages through an LLM and pass its {\"ops\": [...]} JSON back via: tracedecay memory curate --llm-ops <file> [--apply]",
                 }),
             );
         }
     }
 
     Ok(Value::Object(report))
+}
+
+/// Fact ids referenced by the deterministic hygiene candidate set — these are
+/// legal op targets for the evidence guard alongside cluster members.
+fn hygiene_candidate_fact_ids(hygiene_candidates: &Value) -> BTreeSet<i64> {
+    ["secret_like", "transient", "supersession"]
+        .iter()
+        .filter_map(|key| hygiene_candidates.get(*key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(|entry| entry.get("fact_id").and_then(Value::as_i64))
+        .collect()
 }
 
 /// All member fact ids across the reviewable clusters (the evidence guard).
@@ -263,7 +308,7 @@ async fn build_clusters(state: &DashboardState, max_clusters: usize) -> Result<V
     let computation =
         similarity_computation(state)
             .await
-            .map_err(|message| TokenSaveError::Config {
+            .map_err(|message| TraceDecayError::Config {
                 message: format!("similarity computation failed: {message}"),
             })?;
 
@@ -361,14 +406,15 @@ async fn fact_details(
     }
     let ids: Vec<i64> = fact_ids.iter().copied().collect();
     let sql = format!(
-        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at
+        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at,
+                access_count, last_recalled_at
          FROM memory_facts WHERE fact_id IN ({})",
         qmarks(ids.len())
     );
     let params: Vec<libsql::Value> = ids.into_iter().map(libsql::Value::Integer).collect();
     let rows = query_rows(&state.mem_conn, &sql, params)
         .await
-        .map_err(|message| TokenSaveError::Config {
+        .map_err(|message| TraceDecayError::Config {
             message: format!("fact detail query failed: {message}"),
         })?;
     for row in rows {
@@ -503,5 +549,31 @@ mod tests {
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0]["winner_id"], json!(1));
         assert_eq!(rejected.len(), 3);
+    }
+
+    #[test]
+    fn validate_llm_ops_allows_delete_and_merge_with_candidate_evidence() {
+        let ops = vec![
+            json!({
+                "op": "delete",
+                "fact_id": 3,
+                "confidence": 0.8,
+                "reason": "secret-like hygiene candidate confirmed"
+            }),
+            json!({
+                "op": "merge",
+                "winner_id": 1,
+                "loser_ids": [2],
+                "confidence": 0.9,
+                "reason": "same durable claim"
+            }),
+        ];
+
+        let (valid, rejected) = validate_llm_ops(&ops, &allowed(&[1, 2, 3]), 0.5);
+
+        assert!(rejected.is_empty());
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0]["op"], "delete");
+        assert_eq!(valid[1]["op"], "merge");
     }
 }

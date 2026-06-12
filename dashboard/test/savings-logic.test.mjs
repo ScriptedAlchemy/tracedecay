@@ -73,7 +73,7 @@ test("fillDailySeries refuses to explode on absurd ranges", () => {
 });
 
 test("projectLabel shortens paths", () => {
-  assert.equal(logic.projectLabel("/home/zack/projects/tokensave"), "tokensave");
+  assert.equal(logic.projectLabel("/home/zack/projects/tracedecay"), "tracedecay");
   assert.equal(logic.projectLabel(""), "(unknown)");
 });
 

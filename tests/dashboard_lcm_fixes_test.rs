@@ -13,11 +13,11 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::dashboard;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
-use tokensave::tokensave::TokenSave;
+use tracedecay::dashboard;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 const PROVIDER: &str = "cursor";
 const SESSION_ID: &str = "sess-lcm-fixes";
@@ -39,7 +39,7 @@ impl Drop for DashboardFixture {
     }
 }
 
-async fn setup_project(project_root: &Path) -> TokenSave {
+async fn setup_project(project_root: &Path) -> TraceDecay {
     if let Err(err) = std::fs::create_dir_all(project_root.join("src")) {
         panic!("failed to create project src dir: {err}");
     }
@@ -49,9 +49,9 @@ async fn setup_project(project_root: &Path) -> TokenSave {
     ) {
         panic!("failed to write fixture lib.rs: {err}");
     }
-    match TokenSave::init(project_root).await {
+    match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tokensave fixture project: {err}"),
+        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
     }
 }
 
@@ -121,7 +121,7 @@ async fn seed_lcm_fixture(
     let session = SessionRecord {
         provider: PROVIDER.to_string(),
         session_id: SESSION_ID.to_string(),
-        project_key: "tokensave-lcm-fixes".to_string(),
+        project_key: "tracedecay-lcm-fixes".to_string(),
         project_path: project_path.display().to_string(),
         title: Some("LCM fixes session".to_string()),
         started_at: Some(1_700_002_000),
@@ -161,7 +161,7 @@ async fn seed_lcm_fixture(
         1_700_002_100,
         "gamma vector message shared",
     );
-    msg_c.tool_names = Some("tokensave_search".to_string());
+    msg_c.tool_names = Some("tracedecay_search".to_string());
     msg_c.metadata_json = Some("{\"fixture_marker\":\"msg-c-meta\"}".to_string());
     for msg in [&msg_b, &msg_a, &msg_c] {
         if !global_db.upsert_session_message(msg).await {
@@ -584,7 +584,7 @@ fn session_endpoint_orders_by_ordinal_paginates_nodes_and_enriches_messages() {
         let enriched = message_by_id(messages, "msg-c");
         assert_eq!(enriched["ordinal"], 3);
         assert_eq!(enriched["pinned"], 0);
-        assert_eq!(enriched["tool_name"], "tokensave_search");
+        assert_eq!(enriched["tool_name"], "tracedecay_search");
         assert!(
             enriched["metadata_json"]
                 .as_str()

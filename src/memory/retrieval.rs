@@ -12,8 +12,8 @@ use super::trust::DEFAULT_MIN_TRUST;
 use super::types::{
     ContradictionResult, EntityRecord, FactRecord, FactSearchResult, MemoryCategory,
 };
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::current_timestamp;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::current_timestamp;
 
 const DEFAULT_LIMIT: usize = 10;
 const FTS_SCORE_WEIGHT: f64 = 0.40;
@@ -134,6 +134,15 @@ impl<'a> FactRetriever<'a> {
                 .then_with(|| right.fact.updated_at.cmp(&left.fact.updated_at))
         });
         results.truncate(limit);
+
+        // Access tracking for the facts actually RETURNED to the caller —
+        // candidates scanned and dropped above never count, and the other
+        // retrieval modes (probe/list/related/reason) deliberately do not
+        // bump access_count. Batched single UPDATE, fire-and-forget: a
+        // tracking failure must never fail the search itself.
+        let returned_ids: Vec<i64> = results.iter().map(|result| result.fact.fact_id).collect();
+        let _ = self.store.record_fact_recalls(&returned_ids).await;
+
         Ok(results)
     }
 
@@ -678,6 +687,14 @@ fn jaccard(left: &[String], right: &[String]) -> f64 {
     }
 }
 
+/// Recall ranking: relevance (FTS + Jaccard + holographic) weighted by trust
+/// and temporal decay.
+///
+/// `access_count` is deliberately NOT an input. Folding access frequency into
+/// the ranking would create a rich-get-richer feedback loop: frequently
+/// recalled facts rank higher, get recalled even more, and crowd out newer or
+/// niche-but-correct facts. Access stats exist for *curation* signals
+/// (delete-reluctance for actively used facts), never for retrieval order.
 fn combined_score(
     fts: f64,
     jaccard: f64,
@@ -733,8 +750,8 @@ fn normalized_limit(limit: usize) -> usize {
     }
 }
 
-fn db_error(operation: &str, error: impl fmt::Display) -> TokenSaveError {
-    TokenSaveError::Database {
+fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
         message: error.to_string(),
         operation: operation.to_string(),
     }

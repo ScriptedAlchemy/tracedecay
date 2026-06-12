@@ -1,69 +1,32 @@
 ---
 name: memorizing-subject
-description: Research a user-specified subject with parallel read-only agents, dedupe the findings, and persist durable facts via tokensave_fact_store. Use only when the user explicitly asks to memorize or remember a subject.
+description: Use when the user explicitly asks to memorize or remember a subject, code area, PR, branch, or decision set by researching it and storing only durable cited facts.
 disable-model-invocation: true
 ---
 
 # Memorizing a subject
 
-An explicit, user-triggered workflow (via the `/memorize-subject` command) that researches a subject with parallel read-only agents and stores only durable, cited facts in tokensave memory. This is an expensive, memory-writing workflow: run it only when the user explicitly asks to memorize/remember a subject. The parent agent is the sole writer.
+Expensive memory-writing workflow for `/memorize-subject`. Run only on an explicit memorize/remember request. For curation, updates, deletes, or stale-fact cleanup, use `tracedecay:curating-project-memory`.
 
 ## Inputs
 
-- **subject = `$ARGUMENTS`** — the topic, code area, branch, PR, or scope to memorize. The subject is the scope boundary for all research and every stored fact.
-- If the subject is missing or ambiguous, ask the user to name it **before** doing any research.
+- **subject = `$ARGUMENTS`** — topic, code area, branch, PR, or scope boundary. If missing or ambiguous, ask before research.
 
-## Safety rules
+## Workflow
 
-- Research subagents are **READ-ONLY**. They MUST NOT call `tokensave_fact_store` with `action: "add"`, `"update"`, or `"remove"`, and MUST NOT call `tokensave_fact_feedback`. Only the parent agent writes to memory.
-- Never store secrets, credentials, tokens, API keys, or PII.
-- Never store large code blobs. Prefer citations (file/symbol, branch, PR, doc, or transcript) over copying code.
-- Store a `code_area` fact only when it is durable — not transient branch state.
-- Keep every fact scoped to the subject.
+1. **Research read-only.** Gather candidates from code graph (`tracedecay_context`, `tracedecay_search`, `tracedecay_body`, `tracedecay_outline`, callers/callees/impact), docs, `tracedecay_message_search`, existing `tracedecay_fact_store` search results, and relevant branch/PR context. Research agents, if used, never write memory.
+2. **Filter.** Keep only durable, scoped, cited facts. Reject secrets, credentials, PII, large code blobs, transient branch state, uncited speculation, and unsupported claims.
+3. **Calibrate trust.** Use ~0.85+ for independently verified decisions/observations, ~0.7 for ordinary well-sourced facts, and ~0.5 for plausible but uncertain facts. Store low-trust facts normally at the requested trust; hygiene, trust scoring, holographic similarity, and curator/audit workflows prune or repair them over time. Do not ask for approval solely because trust is low.
+4. **Dedupe before writing.** Search `tracedecay_fact_store` with the subject + candidate, matching category, `limit: 10`, and `min_trust: 0.5`; skip near-duplicates and ask before replacing contradictory facts.
+5. **Store accepted facts.** Call `tracedecay_fact_store` `action: "add"` with content, category, source `"memorize-subject"`, tags (`"memorize-subject"`, subject slug), entities, trust, and metadata containing subject/confidence/citations.
+6. **Read add diffs.** Act on `near_duplicate`, `possible_conflict`, and `rejected_secret_like`; never rephrase a rejected secret to bypass the filter.
 
-## Research fan-out (parallel read-only subagents)
+## Guardrails
 
-Dispatch these angles in parallel; each one only gathers and returns candidate facts, never writes:
-
-1. **Code graph** — start with `tokensave_context` (semantic), then `tokensave_search`, `tokensave_body`, `tokensave_outline`, `tokensave_callers`, `tokensave_callees`, and `tokensave_impact`.
-2. **Docs / README** — READMEs, design docs, and module-level documentation for the subject.
-3. **History / session** — `tokensave_message_search` over ingested transcripts, plus `tokensave_fact_store` with `action: "search"` to see what memory already holds.
-4. **Branch / PR** — the branch or PR context relevant to the subject.
-5. **Architecture / risk** — structure, dependencies, and risks tied to the subject.
-
-Each candidate fact reports: `content`, a `category` (one of `project`, `general`, `code_area`, `decision`, `tool`, `user_pref`), `entities`, `tags`, a confidence level, citations, and a short rationale.
-
-## Parent synthesis
-
-- Merge and dedupe the candidates; reject anything transient, uncited, low-confidence, secret, oversized, or out-of-scope.
-- Map confidence to a `trust` score: **high = 0.85**, **medium = 0.7**, **low = do not store without user approval**.
-
-## Dedupe before writing
-
-- For each surviving fact, search first: `tokensave_fact_store` with `action: "search"`, `query` (subject + the fact), the candidate's `category`, `limit: 10`, and `min_trust: 0.5`.
-- Skip near-duplicates that already exist.
-- If a stored fact is close-but-stale or contradictory, report it for user approval — do not overwrite it.
-
-## Store accepted facts
-
-For each accepted, non-duplicate fact, call `tokensave_fact_store` with `action: "add"` and:
-
-- `content` — the fact.
-- `category` — one of `project`, `general`, `code_area`, `decision`, `tool`, `user_pref`.
-- `source` — `"memorize-subject"`.
-- `tags` — `["memorize-subject", "<subject-slug>"]`.
-- `entities` — the relevant entity names.
-- `trust` — from the confidence mapping above.
-- `metadata` — `{ "subject": ..., "confidence": ..., "research_angle": ..., "citations": ... }`.
-
-## Feedback
-
-- Do **not** call `tokensave_fact_feedback` during storage. It records `helpful` / `unhelpful` on a fact that was actually used later (adjusting its trust), not at write time.
+- Parent agent is the only writer. Do not call `tracedecay_fact_feedback` during storage; feedback is for later helpful/unhelpful ratings on facts that were actually used.
+- Prefer citations over copied code. Store `code_area` facts only when they describe durable behavior or ownership, not in-progress branch state.
 
 ## Output
 
-- **Stored** facts (id, category, content).
-- **Skipped** duplicates.
-- **Rejected** candidates, with the reason.
-- **Uncertain** candidates that need user approval before storing.
-- If any tool result includes a `tokensave_metrics:` line, report the savings to the user.
+- Stored facts (id/category/content/trust), skipped duplicates, rejected candidates with reasons, and any low-trust facts stored for later curation.
+- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

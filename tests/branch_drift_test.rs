@@ -7,8 +7,8 @@
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
-use tokensave::branch_meta::{save_branch_meta, BranchMeta};
-use tokensave::tokensave::TokenSave;
+use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
@@ -42,15 +42,15 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     let project = dir.path();
     init_repo_on_main(project);
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Track `main` so the project is in branch-aware mode (serving_branch=Some).
     let meta = BranchMeta::new("main");
-    save_branch_meta(&project.join(".tokensave"), &meta).unwrap();
+    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
 
     // Reopen so the instance resolves and pins `main`.
-    let cg = TokenSave::open(project).await.unwrap();
+    let cg = TraceDecay::open(project).await.unwrap();
     assert!(
         !cg.branch_drifted(),
         "no drift expected while still on the branch we opened"
@@ -86,9 +86,9 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
     let project = dir.path();
     init_repo_on_main(project);
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let cg = TokenSave::open(project).await.unwrap();
+    let cg = TraceDecay::open(project).await.unwrap();
 
     // Still on the branch we opened: no drift, writes proceed normally.
     assert!(!cg.branch_drifted());
@@ -107,9 +107,9 @@ async fn sync_allowed_in_single_db_mode_without_git() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let cg = TokenSave::open(project).await.unwrap();
+    let cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(cg.serving_branch(), None);
     assert!(!cg.branch_drifted());
 

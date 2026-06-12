@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::LuaExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::LuaExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_lua_extract_functions() {

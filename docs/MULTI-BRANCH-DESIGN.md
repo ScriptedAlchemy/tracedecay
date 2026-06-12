@@ -8,7 +8,7 @@ Created: 2026-04-02 | Implemented: 2026-04-06
 
 ## The Problem
 
-The tokensave database lives at `<project>/.tokensave/tokensave.db`. Since `.tokensave/` is (and should be) gitignored, there is **one single DB shared across all branches**. When a user switches branches:
+The tracedecay database lives at `<project>/.tracedecay/tracedecay.db`. Since `.tracedecay/` is (and should be) gitignored, there is **one single DB shared across all branches**. When a user switches branches:
 
 1. Files that exist on branch A but not branch B leave **ghost nodes/edges** in the DB.
 2. Files that differ between branches have **stale data** until the next sync.
@@ -71,8 +71,8 @@ Detect branch changes (store current branch in `metadata`), wipe and re-index.
 ## Recommended: Branch-Scoped DBs with Copy-on-Switch
 
 ```
-.tokensave/
-  tokensave.db          → main/master (always exists, the canonical baseline)
+.tracedecay/
+  tracedecay.db          → main/master (always exists, the canonical baseline)
   branches/
     feature-foo.db      → snapshot from last sync on feature-foo
     bugfix-bar.db       → snapshot from last sync on bugfix-bar
@@ -80,7 +80,7 @@ Detect branch changes (store current branch in `metadata`), wipe and re-index.
 
 ### How it works
 
-**main/master** always lives at `tokensave.db` (the canonical graph). Non-default branches get their own DB under `branches/`.
+**main/master** always lives at `tracedecay.db` (the canonical graph). Non-default branches get their own DB under `branches/`.
 
 ### Sync flow
 
@@ -91,8 +91,8 @@ sync():
 
   if current_branch != stored_branch:
     // Branch switch detected
-    active_db = resolve_db_path(stored_branch)   // .tokensave/tokensave.db
-    target_db = resolve_db_path(current_branch)  // .tokensave/branches/feature-x.db
+    active_db = resolve_db_path(stored_branch)   // .tracedecay/tracedecay.db
+    target_db = resolve_db_path(current_branch)  // .tracedecay/branches/feature-x.db
 
     if !target_db.exists():
       cp(active_db, target_db)   // seed from previous branch's DB
@@ -109,13 +109,13 @@ sync():
 
 ```
 resolve_db_path(branch):
-  "main" | "master" → .tokensave/tokensave.db
-  other             → .tokensave/branches/<branch>.db
+  "main" | "master" → .tracedecay/tracedecay.db
+  other             → .tracedecay/branches/<branch>.db
 ```
 
 ### The copy-on-switch seed
 
-When tokensave first encounters a new branch, it copies the **currently active** DB as a seed. This is almost always a good starting point:
+When tracedecay first encounters a new branch, it copies the **currently active** DB as a seed. This is almost always a good starting point:
 
 - Branch created from main → main.db is copied, incremental sync re-indexes the delta.
 - Branch created from feature-a → feature-a.db is copied, minimal work needed.
@@ -124,23 +124,23 @@ The key insight: **the copy doesn't need to be from the parent branch** — git 
 
 ### Detecting branch changes
 
-Tokensave doesn't control `git checkout`. It only runs at two moments:
+TraceDecay doesn't control `git checkout`. It only runs at two moments:
 
-1. **Sync time** (post-commit hook or explicit `tokensave sync`)
+1. **Sync time** (post-commit hook or explicit `tracedecay sync`)
 2. **MCP tool call** (when any tool is invoked via the MCP server)
 
-So there's no "branch create" event. Tokensave discovers the branch changed **after the fact** at next sync. The stored `current_branch` in `metadata` is compared to `git rev-parse --abbrev-ref HEAD`.
+So there's no "branch create" event. TraceDecay discovers the branch changed **after the fact** at next sync. The stored `current_branch` in `metadata` is compared to `git rev-parse --abbrev-ref HEAD`.
 
 ### Branch from non-main
 
 ```
 git checkout main
-git checkout -b feature-a    ← tokensave copies main.db → feature-a.db, syncs
+git checkout -b feature-a    ← tracedecay copies main.db → feature-a.db, syncs
 # ... work, several syncs on feature-a ...
 git checkout -b feature-b    ← branched from feature-a, not main
 ```
 
-At next sync, tokensave sees "feature-b" for the first time. It copies from whatever was active before the switch (feature-a.db). Since feature-b was just created from feature-a, the seed is nearly identical — incremental sync only re-indexes actual changes.
+At next sync, tracedecay sees "feature-b" for the first time. It copies from whatever was active before the switch (feature-a.db). Since feature-b was just created from feature-a, the seed is nearly identical — incremental sync only re-indexes actual changes.
 
 ### Cross-branch blast radius
 
@@ -148,28 +148,28 @@ With branch-scoped DBs, comparing branches is straightforward:
 
 ```rust
 // Open both databases
-let main_db = Database::open(".tokensave/tokensave.db")?;
-let branch_db = Database::open(".tokensave/branches/feature-x.db")?;
+let main_db = Database::open(".tracedecay/tracedecay.db")?;
+let branch_db = Database::open(".tracedecay/branches/feature-x.db")?;
 
 // Diff node sets, run impact analysis on the delta
 let changed_nodes = diff_graphs(&main_db, &branch_db);
 let blast_radius = compute_impact(&main_db, &changed_nodes);
 ```
 
-A new `tokensave_branch_impact` MCP tool would take `base` (defaults to main) and `head` (defaults to current branch), open both DBs, diff their graphs, and run impact analysis on the delta.
+A new `tracedecay_branch_impact` MCP tool would take `base` (defaults to main) and `head` (defaults to current branch), open both DBs, diff their graphs, and run impact analysis on the delta.
 
 ### Git worktree support
 
-Git worktrees already have separate working trees, and each gets its own `.tokensave/` directory. This means worktree scenarios "just work" — each worktree is an independent tokensave project with its own DB. No special handling needed.
+Git worktrees already have separate working trees, and each gets its own `.tracedecay/` directory. This means worktree scenarios "just work" — each worktree is an independent tracedecay project with its own DB. No special handling needed.
 
 ### Size management
 
 Each branch DB is a full copy (~37MB in a typical project). Mitigation strategies:
 
-- **Prune on branch deletion**: `git fetch --prune` hook or periodic cleanup in `tokensave doctor`.
+- **Prune on branch deletion**: `git fetch --prune` hook or periodic cleanup in `tracedecay doctor`.
 - **TTL-based expiry**: Only keep branch DBs synced within the last N days.
-- **`tokensave doctor` reporting**: List stale branch DBs with sizes, offer cleanup.
-- **Manual cleanup**: `tokensave branch --prune` or similar.
+- **`tracedecay doctor` reporting**: List stale branch DBs with sizes, offer cleanup.
+- **Manual cleanup**: `tracedecay branch --prune` or similar.
 
 ### Advantages
 
@@ -190,8 +190,8 @@ Each branch DB is a full copy (~37MB in a typical project). Mitigation strategie
 1. **Store current branch in metadata** — add `current_branch` key, write it on every sync.
 2. **Branch-aware DB path resolution** — `resolve_db_path()` function, create `branches/` directory.
 3. **Copy-on-switch** — detect branch change, copy active DB to new branch path, reopen.
-4. **Prune stale branch DBs** — integrate into `tokensave doctor`, add TTL config.
-5. **Cross-branch impact tool** — `tokensave_branch_impact` MCP tool, open two DBs, diff graphs.
+4. **Prune stale branch DBs** — integrate into `tracedecay doctor`, add TTL config.
+5. **Cross-branch impact tool** — `tracedecay_branch_impact` MCP tool, open two DBs, diff graphs.
 6. **Watcher awareness** — the embedded MCP file watcher needs to detect branch switches (via HEAD change) and handle DB swapping.
 
 ## Implementation Decisions
@@ -199,9 +199,9 @@ Each branch DB is a full copy (~37MB in a typical project). Mitigation strategie
 The following questions from the original design were resolved during implementation:
 
 - **MCP server DB selection**: reads `.git/HEAD` at startup, opens the corresponding branch DB. No mid-session switching.
-- **`tokensave status` branch info**: yes, `tokensave_status` now includes `active_branch`, `branch_fallback`, and `branch_warning` fields.
-- **`tokensave sync --force`**: re-indexes the current branch's DB only.
-- **Cleanup strategy**: manual only via `tokensave branch remove` and `tokensave branch gc`. No automatic pruning.
-- **Opt-in model**: multi-branch activates when the user runs `tokensave branch add`. Without it, single-DB mode is unchanged.
+- **`tracedecay status` branch info**: yes, `tracedecay_status` now includes `active_branch`, `branch_fallback`, and `branch_warning` fields.
+- **`tracedecay sync --force`**: re-indexes the current branch's DB only.
+- **Cleanup strategy**: manual only via `tracedecay branch remove` and `tracedecay branch gc`. No automatic pruning.
+- **Opt-in model**: multi-branch activates when the user runs `tracedecay branch add`. Without it, single-DB mode is unchanged.
 - **Parent DB selection**: uses `git merge-base` to find the nearest tracked ancestor, not always the default branch.
-- **Cross-branch queries**: two MCP tools added: `tokensave_branch_search` (search in another branch's graph) and `tokensave_branch_diff` (compare symbols between branches).
+- **Cross-branch queries**: two MCP tools added: `tracedecay_branch_search` (search in another branch's graph) and `tracedecay_branch_diff` (compare symbols between branches).

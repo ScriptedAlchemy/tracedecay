@@ -4,8 +4,8 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
-use super::truncated_json_envelope;
-use crate::errors::{Result, TokenSaveError};
+use super::truncated_json_envelope_with_handle;
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
@@ -16,7 +16,7 @@ use crate::sessions::lcm::{
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::SessionSearchScope;
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
@@ -29,12 +29,12 @@ const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
-fn tool_json(value: &Value) -> ToolResult {
+fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
-        truncated_json_envelope(&formatted)
+        truncated_json_envelope_with_handle(project_root, &formatted)
     };
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
@@ -42,7 +42,7 @@ fn tool_json(value: &Value) -> ToolResult {
     }
 }
 
-fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
+fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     let needs_synthesis = value
         .get("needs_synthesis")
@@ -67,12 +67,12 @@ fn lcm_expand_query_tool_json(value: &Value) -> ToolResult {
             serde_json::to_string_pretty(&fallback).unwrap_or_default()
         }
     } else {
-        truncated_json_envelope(&formatted)
+        truncated_json_envelope_with_handle(project_root, &formatted)
     };
     let text = if text.len() <= MAX_RESPONSE_CHARS || needs_synthesis {
         text
     } else {
-        truncated_json_envelope(&text)
+        truncated_json_envelope_with_handle(project_root, &text)
     };
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
@@ -461,13 +461,13 @@ fn string_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
 }
 
 fn required_string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
-    string_arg(args, name).ok_or_else(|| TokenSaveError::Config {
+    string_arg(args, name).ok_or_else(|| TraceDecayError::Config {
         message: format!("missing required parameter: {name}"),
     })
 }
 
-fn argument_error(message: impl Into<String>) -> TokenSaveError {
-    TokenSaveError::Config {
+fn argument_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
         message: message.into(),
     }
 }
@@ -575,7 +575,7 @@ fn parse_timestamp_string(value: &str, name: &str) -> Result<i64> {
     crate::timeutil::parse_rfc3339_timestamp(text).ok_or_else(|| timestamp_argument_error(name))
 }
 
-fn timestamp_argument_error(name: &str) -> TokenSaveError {
+fn timestamp_argument_error(name: &str) -> TraceDecayError {
     argument_error(format!(
         "{name} must be a non-negative Unix timestamp or timezone-aware ISO/RFC3339 string"
     ))
@@ -628,7 +628,7 @@ fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
     let Some(summarizer) = args.get("summarizer") else {
         return Ok(LcmSummarizerMode::Noop);
     };
-    serde_json::from_value(summarizer.clone()).map_err(|err| TokenSaveError::Config {
+    serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
         message: format!("invalid summarizer: {err}"),
     })
 }
@@ -693,17 +693,20 @@ fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
 
 // By-value so it can be used point-free as a `map_err` adapter.
 #[allow(clippy::needless_pass_by_value)]
-fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
-    TokenSaveError::Config {
+fn lcm_error(err: crate::sessions::lcm::LcmError) -> TraceDecayError {
+    TraceDecayError::Config {
         message: err.to_string(),
     }
 }
 
 fn lcm_unavailable() -> ToolResult {
-    tool_json(&json!({
-        "status": "unavailable",
-        "message": "could not open project-local tokensave session database",
-    }))
+    tool_json(
+        None,
+        &json!({
+            "status": "unavailable",
+            "message": "could not open project-local tracedecay session database",
+        }),
+    )
 }
 
 /// Returned by pure-read tools when the sessions.db file has not been
@@ -712,20 +715,26 @@ fn lcm_unavailable() -> ToolResult {
 /// The `store_exists: false` field is the machine-readable discriminator;
 /// other fields are backward-compatible additions.
 fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
-    tool_json(&json!({
-        "status": "not_ingested",
-        "store_exists": false,
-        "storage_scope": storage_scope,
-        "message": "session store does not exist yet — nothing has been ingested",
-    }))
+    tool_json(
+        None,
+        &json!({
+            "status": "not_ingested",
+            "store_exists": false,
+            "storage_scope": storage_scope,
+            "message": "session store does not exist yet — nothing has been ingested",
+        }),
+    )
 }
 
 fn lcm_scoped_unavailable(storage_scope: &str, message: impl Into<String>) -> ToolResult {
-    tool_json(&json!({
-        "status": "unavailable",
-        "storage_scope": storage_scope,
-        "message": message.into(),
-    }))
+    tool_json(
+        None,
+        &json!({
+            "status": "unavailable",
+            "storage_scope": storage_scope,
+            "message": message.into(),
+        }),
+    )
 }
 
 fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
@@ -740,7 +749,7 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
 fn project_local_storage_without_project() -> ToolResult {
     lcm_scoped_unavailable(
         "project_local",
-        "project_local LCM storage requires an initialized TokenSave project root",
+        "project_local LCM storage requires an initialized TraceDecay project root",
     )
 }
 
@@ -750,7 +759,7 @@ struct LcmStorage {
 }
 
 /// Database paths whose schema (sessions DDL + LCM migrations) has already
-/// been ensured by this process. In `tokensave serve`, every LCM tool call
+/// been ensured by this process. In `tracedecay serve`, every LCM tool call
 /// re-opens the project session DB; once `GlobalDb::open_at` has ensured the
 /// schema for a path, later opens skip the DDL batch and the LCM version
 /// gate entirely via `open_at_assuming_schema`. The schema only ever grows
@@ -955,7 +964,7 @@ async fn open_lcm_storage(
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                    "could not open hermes_profile tokensave session database",
+                    "could not open hermes_profile tracedecay session database",
                 ));
             };
             LcmStorageResolution::Available(Box::new(LcmStorage {
@@ -997,7 +1006,7 @@ fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
 fn parse_lcm_summary_node_id(target: &Value) -> Result<String> {
     required_string_arg(target, "node_id")
         .map(str::to_string)
-        .map_err(|_| TokenSaveError::Config {
+        .map_err(|_| TraceDecayError::Config {
             message: "target.node_id is required when target.kind is summary_node".to_string(),
         })
 }
@@ -1005,7 +1014,7 @@ fn parse_lcm_summary_node_id(target: &Value) -> Result<String> {
 fn parse_lcm_external_payload_ref(target: &Value) -> Result<String> {
     required_string_arg(target, "payload_ref")
         .map(str::to_string)
-        .map_err(|_| TokenSaveError::Config {
+        .map_err(|_| TraceDecayError::Config {
             message: "target.payload_ref is required when target.kind is external_payload"
                 .to_string(),
         })
@@ -1023,7 +1032,7 @@ fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
             payload_ref: parse_lcm_external_payload_ref(target)?,
         }),
         "session" => Ok(LcmDescribeTarget::Session),
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: "target.kind must be one of session, summary_node, external_payload"
                 .to_string(),
         }),
@@ -1031,13 +1040,13 @@ fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
 }
 
 fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
-    let target = args.get("target").ok_or_else(|| TokenSaveError::Config {
+    let target = args.get("target").ok_or_else(|| TraceDecayError::Config {
         message: "missing required parameter: target".to_string(),
     })?;
     match string_arg(target, "kind").unwrap_or_default() {
         "raw_message" => {
             let store_id = non_negative_i64_arg(target, "store_id")?.ok_or_else(|| {
-                TokenSaveError::Config {
+                TraceDecayError::Config {
                     message: "target.store_id is required when target.kind is raw_message"
                         .to_string(),
                 }
@@ -1050,14 +1059,14 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
         "external_payload" => Ok(LcmExpandTarget::ExternalPayload {
             payload_ref: parse_lcm_external_payload_ref(target)?,
         }),
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: "target.kind must be one of raw_message, summary_node, external_payload"
                 .to_string(),
         }),
     }
 }
 
-/// Parses the `scope` argument for `tokensave_message_search`. Like
+/// Parses the `scope` argument for `tracedecay_message_search`. Like
 /// [`parse_lcm_scope`], invalid values are a hard error naming the valid set —
 /// never silently broadened to `all`.
 fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
@@ -1074,13 +1083,13 @@ fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
     }
 }
 
-pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|query| !query.is_empty())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
     let provider = args
@@ -1115,17 +1124,20 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
 
     let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
-        return Ok(tool_json(&json!({
-            "status": "unavailable",
-            "message": "could not open project-local tokensave session database",
-            "results": [],
-            "count": 0
-        })));
+        return Ok(tool_json(
+            Some(cg.project_root()),
+            &json!({
+                "status": "unavailable",
+                "message": "could not open project-local tracedecay session database",
+                "results": [],
+                "count": 0
+            }),
+        ));
     };
     if provider == "hermes" {
         // Hermes history lives in per-profile state.db stores normally swept
         // by the serve/dashboard startup catch-ups; an incremental
-        // search-time catch-up makes the `tokensave tool` / generated-plugin
+        // search-time catch-up makes the `tracedecay tool` / generated-plugin
         // path self-sufficient (cursor-based, so it is cheap when fresh).
         let _ = crate::sessions::hermes::ingest_for_project(&db, cg.project_root()).await;
     }
@@ -1140,21 +1152,24 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         )
         .await;
 
-    Ok(tool_json(&json!({
-        "status": "ok",
-        "provider": provider,
-        "project_key": project_key,
-        "parent_session_id": parent_session_id,
-        "include_subagents": include_subagents,
-        "scope": match scope {
-            SessionSearchScope::All => "all",
-            SessionSearchScope::ParentsOnly => "parents_only",
-            SessionSearchScope::SubagentsOnly => "subagents_only",
-        },
-        "query": query,
-        "count": results.len(),
-        "results": results,
-    })))
+    Ok(tool_json(
+        Some(cg.project_root()),
+        &json!({
+            "status": "ok",
+            "provider": provider,
+            "project_key": project_key,
+            "parent_session_id": parent_session_id,
+            "include_subagents": include_subagents,
+            "scope": match scope {
+                SessionSearchScope::All => "all",
+                SessionSearchScope::ParentsOnly => "parents_only",
+                SessionSearchScope::SubagentsOnly => "subagents_only",
+            },
+            "query": query,
+            "count": results.len(),
+            "results": results,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_status(
@@ -1170,12 +1185,15 @@ pub(super) async fn handle_lcm_status(
         .await
         .map_err(lcm_error)?;
     status.storage_scope = Some(storage.scope.to_string());
-    Ok(tool_json(&json!({
-        "status": "ok",
-        "provider": provider,
-        "session_id": session_id,
-        "lcm": status,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": "ok",
+            "provider": provider,
+            "session_id": session_id,
+            "lcm": status,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_doctor(
@@ -1188,28 +1206,31 @@ pub(super) async fn handle_lcm_doctor(
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
     let clean_apply_enabled = lcm_doctor_clean_apply_enabled(&args)?;
     if mode == "clean" && apply && !clean_apply_enabled {
-        return Ok(tool_json(&json!({
-            "status": "denied",
-            "provider": provider,
-            "session_id": session_id,
-            "mode": mode,
-            "dry_run": false,
-            "apply": true,
-            "error": "destructive cleanup is disabled by default",
-            "note": "set LCM_DOCTOR_CLEAN_APPLY_ENABLED=true only in trusted operator environments",
-            "repairs": {
-                "planned_actions": [],
-                "applied_actions": [],
-                "backup": Value::Null,
-                "unsafe_actions_skipped": [
-                    {
-                        "kind": "clean_lcm_noise",
-                        "safe": false,
-                        "reason": "doctor_clean_apply_disabled"
-                    }
-                ]
-            }
-        })));
+        return Ok(tool_json(
+            project_root,
+            &json!({
+                "status": "denied",
+                "provider": provider,
+                "session_id": session_id,
+                "mode": mode,
+                "dry_run": false,
+                "apply": true,
+                "error": "destructive cleanup is disabled by default",
+                "note": "set LCM_DOCTOR_CLEAN_APPLY_ENABLED=true only in trusted operator environments",
+                "repairs": {
+                    "planned_actions": [],
+                    "applied_actions": [],
+                    "backup": Value::Null,
+                    "unsafe_actions_skipped": [
+                        {
+                            "kind": "clean_lcm_noise",
+                            "safe": false,
+                            "reason": "doctor_clean_apply_disabled"
+                        }
+                    ]
+                }
+            }),
+        ));
     }
     let clean_config = lcm_clean_config(&args)?;
     let open_mode = if matches!(mode, "repair" | "clean") && apply {
@@ -1229,7 +1250,7 @@ pub(super) async fn handle_lcm_doctor(
     if let Some(object) = payload.as_object_mut() {
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(tool_json(&payload))
+    Ok(tool_json(project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_load_session(
@@ -1278,7 +1299,7 @@ pub(super) async fn handle_lcm_load_session(
             );
         }
     }
-    Ok(tool_json(&payload))
+    Ok(tool_json(project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_grep(
@@ -1311,14 +1332,17 @@ pub(super) async fn handle_lcm_grep(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": "ok",
-        "provider": provider,
-        "query": query,
-        "count": hits.len(),
-        "hits": hits,
-        "sort": string_arg(&args, "sort").unwrap_or("recency"),
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": "ok",
+            "provider": provider,
+            "query": query,
+            "count": hits.len(),
+            "hits": hits,
+            "sort": string_arg(&args, "sort").unwrap_or("recency"),
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_describe(
@@ -1340,12 +1364,15 @@ pub(super) async fn handle_lcm_describe(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": "ok",
-        "provider": provider,
-        "session_id": session_id,
-        "description": description,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": "ok",
+            "provider": provider,
+            "session_id": session_id,
+            "description": description,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_expand(
@@ -1368,12 +1395,15 @@ pub(super) async fn handle_lcm_expand(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": "ok",
-        "provider": provider,
-        "session_id": session_id,
-        "expansion": expansion,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": "ok",
+            "provider": provider,
+            "session_id": session_id,
+            "expansion": expansion,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_expand_query(
@@ -1417,7 +1447,7 @@ pub(super) async fn handle_lcm_expand_query(
         })
         .await
         .map_err(lcm_error)?;
-    let mut payload = serde_json::to_value(response).map_err(|err| TokenSaveError::Config {
+    let mut payload = serde_json::to_value(response).map_err(|err| TraceDecayError::Config {
         message: format!("failed to serialize expand-query response: {err}"),
     })?;
     if let Some(object) = payload.as_object_mut() {
@@ -1426,7 +1456,7 @@ pub(super) async fn handle_lcm_expand_query(
         object.insert("session_id".to_string(), json!(session_id));
         object.insert("storage_scope".to_string(), json!(storage.scope));
     }
-    Ok(lcm_expand_query_tool_json(&payload))
+    Ok(lcm_expand_query_tool_json(project_root, &payload))
 }
 
 pub(super) async fn handle_lcm_session_boundary(
@@ -1448,13 +1478,16 @@ pub(super) async fn handle_lcm_session_boundary(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": response.status,
-        "provider": provider,
-        "session_id": session_id,
-        "recorded": response.recorded,
-        "reason": response.reason,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": response.status,
+            "provider": provider,
+            "session_id": session_id,
+            "recorded": response.recorded,
+            "reason": response.reason,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_preflight(
@@ -1488,14 +1521,17 @@ pub(super) async fn handle_lcm_preflight(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": response.status,
-        "provider": provider,
-        "session_id": session_id,
-        "should_compress": response.should_compress,
-        "reason": response.reason,
-        "replay_messages": response.replay_messages,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": response.status,
+            "provider": provider,
+            "session_id": session_id,
+            "should_compress": response.should_compress,
+            "reason": response.reason,
+            "replay_messages": response.replay_messages,
+        }),
+    ))
 }
 
 pub(super) async fn handle_lcm_compress(
@@ -1535,20 +1571,23 @@ pub(super) async fn handle_lcm_compress(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(&json!({
-        "status": response.status,
-        "provider": provider,
-        "session_id": session_id,
-        "reason": response.reason,
-        "summary_nodes_created": response.summary_nodes_created,
-        "summary_nodes": response.summary_nodes,
-        "replay_messages": response.replay_messages,
-        "replay_token_estimate": response.replay_token_estimate,
-        "replay_over_budget": response.replay_over_budget,
-        "compression_attempts": response.compression_attempts,
-        "fallback_used": response.fallback_used,
-        "retry_status": response.retry_status,
-        "frontier": response.frontier,
-        "summary_request": response.summary_request,
-    })))
+    Ok(tool_json(
+        project_root,
+        &json!({
+            "status": response.status,
+            "provider": provider,
+            "session_id": session_id,
+            "reason": response.reason,
+            "summary_nodes_created": response.summary_nodes_created,
+            "summary_nodes": response.summary_nodes,
+            "replay_messages": response.replay_messages,
+            "replay_token_estimate": response.replay_token_estimate,
+            "replay_over_budget": response.replay_over_budget,
+            "compression_attempts": response.compression_attempts,
+            "fallback_used": response.fallback_used,
+            "retry_status": response.retry_status,
+            "frontier": response.frontier,
+            "summary_request": response.summary_request,
+        }),
+    ))
 }

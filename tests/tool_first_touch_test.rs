@@ -1,9 +1,9 @@
-//! First-touch creation of the profile store via `tokensave tool`.
+//! First-touch creation of the profile store via `tracedecay tool`.
 //!
 //! The generated Hermes plugin anchors fact/memory/transcript tools at the
-//! Hermes home with `--project <home>`. A fresh profile has no `.tokensave`
+//! Hermes home with `--project <home>`. A fresh profile has no `.tracedecay`
 //! there yet, so those tools must create the store on first touch instead of
-//! failing with "run tokensave init". Code-graph tools keep the strict
+//! failing with "run tracedecay init". Code-graph tools keep the strict
 //! behaviour, as does any store tool invoked without an explicit `--project`.
 
 use std::path::Path;
@@ -12,12 +12,12 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn run_tool(cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(cwd)
         .arg("tool")
         .args(args)
         .output()
-        .expect("failed to spawn tokensave")
+        .expect("failed to spawn tracedecay")
 }
 
 #[test]
@@ -46,8 +46,8 @@ fn fact_store_creates_profile_store_on_first_touch() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        profile.join(".tokensave").join("tokensave.db").is_file(),
-        "first touch should have created .tokensave/tokensave.db under the profile home"
+        profile.join(".tracedecay").join("tracedecay.db").is_file(),
+        "first touch should have created .tracedecay/tracedecay.db under the profile home"
     );
 
     // The store persists: a follow-up search finds the fact.
@@ -82,7 +82,7 @@ fn store_tools_without_explicit_project_still_require_init() {
         "without --project an uninitialised cwd must keep the init guidance"
     );
     assert!(
-        !cwd.path().join(".tokensave").exists(),
+        !cwd.path().join(".tracedecay").exists(),
         "no store may be silently created in the working directory"
     );
 }
@@ -99,8 +99,8 @@ fn code_graph_tools_keep_strict_init_requirement() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no TokenSave index found"),
+        stderr.contains("no TraceDecay index found"),
         "expected init guidance, got:\n{stderr}"
     );
-    assert!(!target.path().join(".tokensave").exists());
+    assert!(!target.path().join(".tracedecay").exists());
 }

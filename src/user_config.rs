@@ -1,4 +1,4 @@
-//! User-level configuration stored at `~/.tokensave/config.toml`.
+//! User-level configuration stored in the TraceDecay user data directory.
 //!
 //! All fields have defaults so a missing file or missing fields are handled
 //! gracefully. Unknown fields are silently ignored for forward compatibility.
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// User-level tokensave configuration.
+/// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
     /// Whether to upload pending tokens to the worldwide counter.
@@ -71,8 +71,8 @@ pub struct UserConfig {
     #[serde(default)]
     pub last_installed_version: String,
 
-    /// Version of the *previously running* tokensave binary, recorded by
-    /// `tokensave upgrade` / `channel switch` just before the binary is
+    /// Version of the *previously running* tracedecay binary, recorded by
+    /// `tracedecay upgrade` / `channel switch` just before the binary is
     /// replaced. The *new* binary reads this on startup and decides whether
     /// reinstall is required for the transition (patch-only bumps are
     /// no-ops; minor/major bumps re-register agents). Always updated to the
@@ -124,13 +124,13 @@ impl Default for UserConfig {
     }
 }
 
-/// Returns the path to the config file: `~/.tokensave/config.toml`.
+/// Returns the path to the user-level config file.
 pub fn config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".tokensave").join("config.toml"))
+    crate::config::user_data_dir().map(|dir| dir.join("config.toml"))
 }
 
 impl UserConfig {
-    /// Loads the config from `~/.tokensave/config.toml`.
+    /// Loads the user-level config file.
     /// Returns defaults if the file is missing or unreadable.
     pub fn load() -> Self {
         let Some(path) = config_path() else {
@@ -142,7 +142,7 @@ impl UserConfig {
         toml::from_str(&contents).unwrap_or_default()
     }
 
-    /// Saves the config to `~/.tokensave/config.toml`. Best-effort.
+    /// Saves the user-level config file. Best-effort.
     /// Returns true if the file was saved, false on any error.
     pub fn save(&self) -> bool {
         let Some(path) = config_path() else {
@@ -159,7 +159,7 @@ impl UserConfig {
         std::fs::write(&path, contents).is_ok()
     }
 
-    /// Saves only when `~/.tokensave/config.toml` already exists.
+    /// Saves only when the user-level config file already exists.
     ///
     /// This lets repo-local commands update an existing user profile without
     /// creating one as an incidental side effect.
