@@ -146,3 +146,21 @@ async fn vibe_messages_are_incremental() {
         1
     );
 }
+
+#[tokio::test]
+async fn vibe_session_for_other_project_is_skipped() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let other = tmp.path().join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    write_vibe_session(&home, &other, "other-vibe");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = VibeSource::with_home(&home);
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        0
+    );
+}

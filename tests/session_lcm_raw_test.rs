@@ -65,6 +65,7 @@ impl TranscriptSource for FakeTranscriptSource {
             new_cursor: StoredCursor {
                 position: self.content.len() as u64,
                 mtime: 1,
+                file_id: 0,
             },
         })
     }

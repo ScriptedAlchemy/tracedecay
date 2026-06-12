@@ -50,9 +50,10 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     // production path in `maybe_sync_if_stale`, which always refreshes
     // after passing the cooldown gate so quiet peers don't drift.
     for server in [&server1, &server2] {
-        let stale = server.cg().find_stale_files().await;
+        let cg = server.cg().await;
+        let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
-            server.cg().sync_if_stale_silent(&stale).await.unwrap();
+            cg.sync_if_stale_silent(&stale).await.unwrap();
         }
         server.refresh_file_token_map().await;
     }

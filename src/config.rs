@@ -233,6 +233,27 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
 /// Returns the first ancestor directory (inclusive) that contains an
 /// initialised `TokenSave` project, or `None` if the filesystem root is
 /// reached without finding one.
+///
+/// # Canonical project-root resolution order
+///
+/// This walk-up is the heart of project-root resolution. Every entry point
+/// that needs a project root should resolve it in this order — new code must
+/// converge on this chain instead of inventing its own:
+///
+/// 1. **Explicit path** (`--path`/`-p`, tool `path` argument): used verbatim,
+///    no discovery, and failure to open is fatal — never silently fall back.
+/// 2. **CWD walk-up** (this function via [`resolve_path_with_discovery`]):
+///    nearest ancestor of the working directory containing
+///    `.tokensave/tokensave.db`.
+/// 3. **MCP `initialize` roots** (`serve` only,
+///    `serve::resolve_serve_from_mcp_roots`): each workspace root the editor
+///    advertises is tried verbatim against registered projects, then walked
+///    up via this function.
+/// 4. **Global DB registry** (`serve` only,
+///    `serve::resolve_serve_from_global_db`): a single registered project
+///    wins outright; among several, the deepest registered ancestor of cwd
+///    wins, then the shallowest registered descendant; ties are reported as
+///    ambiguous and require an explicit path.
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {

@@ -1,6 +1,9 @@
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
+use common::pyyaml_shim_pythonpath;
 use tempfile::TempDir;
 use tokensave::agents::*;
 use tokensave::branch_meta;
@@ -127,6 +130,8 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     }
 }
 
@@ -197,11 +202,31 @@ fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tokensave");
-    assert_eq!(manifest["displayName"], "TokenSave");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
+    // Documented manifest metadata (displayName is not a documented field and
+    // must not reappear; author/homepage/keywords are the documented ones).
+    assert!(
+        manifest.get("displayName").is_none(),
+        "displayName is not a documented plugin.json field"
+    );
+    assert!(
+        manifest["author"]["name"].is_string(),
+        "plugin manifest should carry a documented author object"
+    );
+    assert!(manifest["homepage"].is_string());
+    assert!(
+        manifest["keywords"]
+            .as_array()
+            .is_some_and(|keywords| !keywords.is_empty()),
+        "plugin manifest should carry keywords"
+    );
+    assert!(
+        manifest.get("commands").is_none(),
+        "the deprecated commands surface must not be referenced by the manifest"
+    );
     assert!(
         manifest["rules"]
             .as_array()
@@ -219,29 +244,23 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     );
 
     let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    // The hint hook lives on postToolUse (the only generic tool event whose
+    // documented output supports `additional_context`) and runs unmatched so
+    // it also sees Read and Cursor's semantic search, whose matcher names are
+    // not documented. afterFileEdit runs unmatched so every Agent edit tool
+    // (not just Write) triggers the targeted sync.
     let expected_hooks = [
-        ("sessionStart", "hook-cursor-session-start", None),
-        ("subagentStart", "hook-cursor-subagent-start", None),
-        (
-            "preToolUse",
-            "hook-cursor-pre-tool-use",
-            Some("Shell|Bash|Grep|Glob|Search"),
-        ),
-        (
-            "beforeSubmitPrompt",
-            "hook-cursor-before-submit-prompt",
-            None,
-        ),
-        (
-            "afterFileEdit",
-            "hook-cursor-after-file-edit",
-            Some("Write"),
-        ),
-        ("afterShellExecution", "hook-cursor-after-shell", None),
-        ("workspaceOpen", "hook-cursor-workspace-open", None),
-        ("stop", "hook-cursor-stop", None),
+        ("sessionStart", "hook-cursor-session-start"),
+        ("sessionEnd", "hook-cursor-session-end"),
+        ("subagentStart", "hook-cursor-subagent-start"),
+        ("postToolUse", "hook-cursor-post-tool-use"),
+        ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
+        ("afterFileEdit", "hook-cursor-after-file-edit"),
+        ("afterShellExecution", "hook-cursor-after-shell"),
+        ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
     ];
-    for (event, subcommand, matcher) in expected_hooks {
+    for (event, subcommand) in expected_hooks {
         let entries = hooks["hooks"][event]
             .as_array()
             .unwrap_or_else(|| panic!("plugin hook {event} should be an array"));
@@ -259,15 +278,22 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
                 .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
             "plugin hook commands should use the installed tokensave binary"
         );
-        if let Some(matcher) = matcher {
-            assert_eq!(hook["matcher"], matcher);
-        }
+        assert!(
+            hook.get("matcher").is_none(),
+            "plugin hook {event} should run unmatched (matchers either miss \
+             undocumented tool names or restrict edits to Write only)"
+        );
     }
+    assert!(
+        hooks["hooks"].get("preToolUse").is_none(),
+        "the hint hook must not register on preToolUse: its documented output \
+         schema has no context-injection field"
+    );
 
     let rule = std::fs::read_to_string(plugin_dir.join("rules/tokensave.mdc")).unwrap();
     assert!(rule.contains("alwaysApply: true"));
     assert!(rule.contains("tokensave MCP tools"));
-    assert!(rule.contains("fall back"));
+    assert!(rule.to_lowercase().contains("fall back"));
     assert!(plugin_dir.join("README.md").exists());
 }
 
@@ -307,6 +333,14 @@ fn assert_hermes_config_enables_tokensave_memory(config_path: &Path) -> String {
     assert!(
         config.contains("- tokensave"),
         "missing tokensave plugin enablement:\n{config}"
+    );
+    assert!(
+        config.contains("context:"),
+        "missing context block (context.engine selects the plugin engine):\n{config}"
+    );
+    assert!(
+        config.contains("  engine: tokensave"),
+        "missing tokensave context engine activation:\n{config}"
     );
     config
 }
@@ -494,6 +528,13 @@ fn test_hermes_local_install_writes_profile_plugin() {
     let manifest = std::fs::read_to_string(plugin_dir.join("plugin.yaml")).unwrap();
     assert!(manifest.contains("name: tokensave"));
     assert!(manifest.contains("kind: standalone"));
+    // `hermes plugins list` shows the manifest version; it must track the
+    // generating binary so stale plugins are detectable after upgrades.
+    assert!(
+        manifest.contains(&format!("version: {}\n", env!("CARGO_PKG_VERSION"))),
+        "manifest version must match the generating binary:\n{manifest}"
+    );
+    assert!(manifest.contains("author: "));
     assert!(manifest.contains("provides_tools:"));
     assert!(manifest.contains("tokensave_context"));
     assert!(manifest.contains("tokensave_lcm_status"));
@@ -511,7 +552,7 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
-    assert!(init_py.contains("register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("register_skill(\"tokensave\""));
     assert!(init_py.contains("class TokenSaveContextEngine"));
     assert!(init_py.contains("storage_scope"));
     assert!(init_py.contains("tokensave_lcm_compress"));
@@ -528,15 +569,31 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains(&expected_tokensave_bin()));
     assert!(tools_py.contains("subprocess.run"));
     assert!(tools_py.contains("tokensave tool"));
-    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 120"));
+    assert!(tools_py.contains("TOKENSAVE_LONG_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("ARGS_FILE_THRESHOLD_BYTES"));
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
-    assert!(tools_py.contains(
-        "project_root = kwargs.get(\"project_root\") or tool_args.get(\"project_root\")"
-    ));
+    assert!(tools_py.contains("kwargs.get(\"project_root\")"));
+    assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
+    assert!(
+        tools_py.contains("config_pinned_project_root()"),
+        "tool dispatch must fall back to the config-block project pin"
+    );
+    assert!(
+        tools_py.contains("PROFILE_STORE_TOOLS"),
+        "profile-global state tools must anchor at the Hermes home when unpinned"
+    );
+    assert!(
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "the install-time pin lives only in plugins.tokensave.project_root"
+    );
     assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
-    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\", payload])"));
+    // Large payloads spill to a tempfile passed as `--args @<path>` so argv
+    // never exceeds the kernel's per-string cap.
+    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\"])"));
+    assert!(tools_py.contains("argv.append(\"@\" + args_file)"));
     assert!(!tools_py.contains("shell=True"));
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
@@ -654,6 +711,8 @@ fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
         tokensave_bin: tokensave_bin.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -671,11 +730,15 @@ fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
         r#"
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
 tools_path = pathlib.Path(sys.argv[1])
 expected_bin = sys.argv[2]
+# Hermetic profile home so plugins.tokensave from the developer's real
+# ~/.hermes config can never leak a --project argument into the argv checks.
+os.environ["HERMES_HOME"] = str(tools_path.parent.parent.parent)
 spec = importlib.util.spec_from_file_location("tokensave_hermes_tools", tools_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -691,7 +754,7 @@ def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
     assert argv[1:] == ["tool", "tokensave_context", "--json", "--args", "{\"query\": \"x\"}"]
     assert "cwd" not in kwargs
-    assert kwargs["timeout"] == 600
+    assert kwargs["timeout"] == 120
     assert kwargs["shell"] is False
     return Result()
 
@@ -743,11 +806,13 @@ import importlib.machinery
 import importlib.util
 import abc
 import json
+import os
 import pathlib
 import sys
 import types
 
 plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
 
 class MemoryProvider(abc.ABC):
     @property
@@ -798,6 +863,7 @@ class FullCtx:
         self.commands = []
         self.skills = []
         self.memory_providers = []
+        self.config_defaults = []
 
     def register_tool(self, **kwargs):
         self.tools.append(kwargs)
@@ -814,13 +880,22 @@ class FullCtx:
     def register_memory_provider(self, provider):
         self.memory_providers.append(provider)
 
+    def register_config_defaults(self, defaults):
+        self.config_defaults.append(defaults)
+
 ctx = FullCtx()
 plugin.register(ctx)
 assert any(tool["name"] == "tokensave_context" for tool in ctx.tools)
 assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
 assert ctx.commands and ctx.commands[0][0] == "/tokensave_status"
-assert ctx.skills and ctx.skills[0][0] == "tokensave:tokensave"
+assert ctx.skills and ctx.skills[0][0] == "tokensave"
 assert len(ctx.memory_providers) == 1
+
+# Conventional config defaults registered under the plugins.tokensave block.
+assert len(ctx.config_defaults) == 1
+defaults = ctx.config_defaults[0]
+assert set(defaults) == {"plugins"}
+assert "project_root" in defaults["plugins"]["tokensave"]
 
 provider = ctx.memory_providers[0]
 assert isinstance(provider, MemoryProvider)
@@ -834,32 +909,22 @@ plugin.tools.TOKENSAVE_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
 assert provider.session_id == "session-123"
+# Without an explicit hermes_home the provider resolves the active profile
+# home itself (sync_turn/prefetch need a storage anchor).
 provider.initialize("session-only")
-assert provider.hermes_home is None
+assert provider.hermes_home == os.environ["HERMES_HOME"]
 assert provider.session_id == "session-only"
 
+# Collapsed schema surface: fact_store(action=...) covers the nine legacy
+# fixed-action aliases, which stay dispatchable but cost no schema footprint.
 schemas = provider.get_tool_schemas()
 schema_names = [schema.get("name") for schema in schemas]
-assert schema_names == [
-    "fact_store",
-    "fact_add",
-    "fact_search",
-    "fact_probe",
-    "fact_related",
-    "fact_reason",
-    "fact_contradict",
-    "fact_update",
-    "fact_remove",
-    "fact_list",
-    "fact_feedback",
-    "memory_status",
-]
+assert schema_names == ["fact_store", "fact_feedback", "memory_status"]
 assert all("function" not in schema for schema in schemas)
 schema_by_name = {schema["name"]: schema for schema in schemas}
 fact_store_schema = schema_by_name["fact_store"]
 fact_feedback_schema = schema_by_name["fact_feedback"]
 assert fact_store_schema["parameters"]["required"] == ["action"]
-assert "action" not in schema_by_name["fact_search"]["parameters"].get("required", [])
 assert fact_feedback_schema["parameters"]["required"] == ["fact_id"]
 
 calls = []
@@ -964,11 +1029,13 @@ fn test_hermes_generated_memory_provider_is_discovered_from_active_home() {
 import abc
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
 import sys
 import types
 
 hermes_home = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(hermes_home)
 
 class MemoryProvider(abc.ABC):
     @property
@@ -1049,6 +1116,8 @@ def load_provider(provider_dir):
 config = (hermes_home / "config.yaml").read_text()
 assert "memory:" in config
 assert "provider: tokensave" in config
+assert "context:" in config
+assert "engine: tokensave" in config
 
 providers = dict(iter_user_provider_dirs())
 assert "tokensave" in providers
@@ -1057,23 +1126,270 @@ assert provider is not None
 assert isinstance(provider, MemoryProvider)
 assert provider.name == "tokensave"
 assert provider.is_available() is True
-assert provider.get_config_schema() == []
+
+# `hermes memory setup` walks get_config_schema(); the pin is the only field.
+schema = provider.get_config_schema()
+assert [field["key"] for field in schema] == ["project_root"]
+assert "description" in schema[0]
+assert not any(field.get("secret") for field in schema)
+
+# Hermes layers get_config_defaults() under DEFAULT_CONFIG.
+defaults = provider.get_config_defaults()
+assert "project_root" in defaults["plugins"]["tokensave"]
+
+# Dashboard hints use full config dot-paths.
+field_meta = provider.get_config_field_meta()
+assert "plugins.tokensave.project_root" in field_meta
+assert "description" in field_meta["plugins.tokensave.project_root"]
+
+# `hermes memory setup` persists non-secret values via save_config(); the
+# conventional home is the plugins.tokensave block.
+import yaml
+provider.save_config({"project_root": "/pinned/by/setup"}, str(hermes_home))
+saved = yaml.safe_load((hermes_home / "config.yaml").read_text())
+assert saved["plugins"]["tokensave"]["project_root"] == "/pinned/by/setup"
+assert saved["memory"]["provider"] == "tokensave"
+
 provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
 assert provider.hermes_home == str(hermes_home)
-assert "fact_search" in [schema["name"] for schema in provider.get_tool_schemas()]
+assert "fact_store" in [schema["name"] for schema in provider.get_tool_schemas()]
 assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
+"#,
+    )
+    .unwrap();
+
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(hermes_home);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
+        .output()
+        .expect("python3 should run Hermes memory provider discovery check");
+    assert!(
+        output.status.success(),
+        "Hermes-style memory provider discovery should find the generated tokensave provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Stock-ABC variant harness: upstream (NousResearch/hermes-agent) Hermes
+/// differs from forks in two load-bearing ways — the ABCs enforce a fixed
+/// abstract-method set (instantiation raises `TypeError` on any miss), and
+/// the general `PluginContext` has **no** `register_memory_provider` or
+/// `register_config_defaults` (memory providers load through the
+/// `plugins/memory` `_ProviderCollector` instead). The generated plugin must
+/// keep memory + context + tools functional on that surface and skip
+/// fork-only registrations without raising.
+#[test]
+fn test_hermes_generated_python_degrades_gracefully_on_stock_hermes_api() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let script = plugin_dir.join("check_stock_abi.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+
+# Stock agent/memory_provider.py abstract surface (upstream pins these four).
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+# Stock agent/context_engine.py abstract surface. Instantiating the generated
+# engine under this ABC proves every stock-abstract method is implemented
+# (update_from_response is the one newer stock releases added).
+class ContextEngine(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def update_from_response(self, usage):
+        pass
+
+    @abc.abstractmethod
+    def should_compress(self, prompt_tokens=None):
+        pass
+
+    @abc.abstractmethod
+    def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+context_engine_module = types.ModuleType("agent.context_engine")
+context_engine_module.ContextEngine = ContextEngine
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+sys.modules["agent.context_engine"] = context_engine_module
+
+parent_name = "_hermes_stock_plugins"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# Stock general PluginContext: hooks/commands/skills/context engine/tools
+# exist; register_memory_provider, register_config_defaults, and the
+# context_engine_tool_handlers_receive_messages capability do not.
+class StockPluginContext:
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+        self.commands = []
+        self.cli_commands = []
+        self.middleware = []
+        self.skills = []
+        self.context_engine = None
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_cli_command(self, *args, **kwargs):
+        self.cli_commands.append((args, kwargs))
+
+    def register_command(self, name, handler, description="", args_hint=""):
+        self.commands.append((name, handler, description))
+
+    def register_context_engine(self, engine):
+        assert self.context_engine is None, "only one context engine is allowed"
+        self.context_engine = engine
+
+    def register_hook(self, hook_name, callback):
+        self.hooks.append((hook_name, callback))
+
+    def register_middleware(self, kind, callback):
+        self.middleware.append((kind, callback))
+
+    def register_skill(self, name, path, description=""):
+        self.skills.append((name, path))
+
+ctx = StockPluginContext()
+plugin.register(ctx)
+
+# Core registrations stay functional on the stock surface.
+assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
+assert ctx.commands and ctx.commands[0][0] == "/tokensave_status"
+assert ctx.skills and ctx.skills[0][0] == "tokensave"
+assert ctx.context_engine is not None
+assert isinstance(ctx.context_engine, ContextEngine)
+assert ctx.context_engine.name == "tokensave"
+# Code-graph / memory / transcript tools register unconditionally; only the
+# messages-dependent LCM live-ingest verbs (and the context-engine tool
+# mirrors) stay gated on the message-forwarding capability, which stock
+# never advertises — the LCM surface stays reachable through the context
+# engine schemas instead.
+registered = [tool["name"] for tool in ctx.tools]
+assert "tokensave_search" in registered
+assert "tokensave_context" in registered
+assert "tokensave_lcm_compress" not in registered
+assert "tokensave_lcm_preflight" not in registered
+assert "lcm_grep" not in registered
+lcm_names = [schema["name"] for schema in ctx.context_engine.get_tool_schemas()]
+assert "lcm_status" in lcm_names and "lcm_grep" in lcm_names
+
+# The stock-abstract ContextEngine methods round-trip.
+engine = ctx.context_engine
+engine.update_from_response({"prompt_tokens": 11, "completion_tokens": 4})
+assert engine.last_total_tokens == 15
+
+calls = []
+
+def fake_call(name, args, **kwargs):
+    calls.append((name, args))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({"should_compress": False})}]})
+
+original_call = plugin.tools.call_tokensave_tool
+plugin.tools.call_tokensave_tool = fake_call
+assert engine.should_compress(123) is False
+assert calls and calls[0][0] == "tokensave_lcm_preflight"
+plugin.tools.call_tokensave_tool = original_call
+
+# Stock memory activation: plugins/memory drives register() through its
+# _ProviderCollector (exactly these four methods — notably no
+# register_command, register_context_engine, or register_skill).
+class StockProviderCollector:
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+collector = StockProviderCollector()
+plugin.register(collector)
+assert collector.provider is not None
+assert isinstance(collector.provider, MemoryProvider)
+assert collector.provider.name == "tokensave"
+assert collector.provider.is_available() is True
+assert collector.provider.get_tool_schemas()
+
+# Stock fallback branch: when register() yields no provider, the loader
+# instantiates any module-level MemoryProvider subclass directly.
+fallback = plugin.TokensaveMemoryProvider()
+assert isinstance(fallback, MemoryProvider)
+assert fallback.name == "tokensave"
 "#,
     )
     .unwrap();
 
     let output = Command::new("python3")
         .arg(&script)
-        .arg(hermes_home)
+        .arg(plugin_dir)
         .output()
-        .expect("python3 should run Hermes memory provider discovery check");
+        .expect("python3 should run stock Hermes API degradation check");
     assert!(
         output.status.success(),
-        "Hermes-style memory provider discovery should find the generated tokensave provider\nstdout:\n{}\nstderr:\n{}",
+        "generated plugin should degrade gracefully on the stock Hermes plugin API\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1106,6 +1422,10 @@ fn test_hermes_global_install_and_uninstall_plugin() {
         !config.contains("memory:\n"),
         "uninstall should remove the empty tokensave-created memory block"
     );
+    assert!(
+        !config.contains("engine: tokensave") && !config.contains("context:\n"),
+        "uninstall should remove the tokensave context engine activation:\n{config}"
+    );
 }
 
 #[test]
@@ -1116,6 +1436,8 @@ fn test_hermes_profile_install_targets_named_profile() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("Work_Profile".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
@@ -1297,6 +1619,8 @@ fn test_hermes_install_rejects_invalid_profile_names() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("_bad".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
@@ -1399,6 +1723,151 @@ fn test_hermes_install_removes_tokensave_from_disabled_list() {
 }
 
 #[test]
+fn test_hermes_install_matches_two_space_list_item_indent() {
+    // Hermes itself writes sequence items at the same indent as the key
+    // (`enabled:` + `  - item`); inserting a 4-space item into such a list
+    // produces unparseable YAML, so the installer must match the style.
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  enabled:\n  - other\n  - second\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n  - tokensave\n  - other\n  - second\n"),
+        "tokensave must be inserted with the existing 2-space item indent:\n{config}"
+    );
+    assert!(
+        !config.contains("    - tokensave"),
+        "no 4-space item may be mixed into a 2-space list:\n{config}"
+    );
+
+    // Idempotency: a second install must detect the 2-space item.
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert_eq!(
+        config.matches("- tokensave").count(),
+        1,
+        "re-install must not duplicate the 2-space list item:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_removes_two_space_indent_disabled_entry() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  disabled:\n  - tokensave\n  - other\n  enabled:\n  - kept\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled:\n  - other\n"),
+        "tokensave must be removed from the 2-space disabled list:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n  - tokensave\n  - kept\n"),
+        "tokensave must be enabled with matching indent:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_accepts_flow_style_empty_disabled_list() {
+    // Hermes writes `disabled: []` for the empty list; the installer used to
+    // reject it as "unsupported Hermes plugins config".
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  disabled: []\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled: []"),
+        "the empty flow-style disabled list must be preserved:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n    - tokensave\n    - other\n"),
+        "tokensave must be added to the enabled list:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  enabled: []\n  disabled: []\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n    - tokensave\n"),
+        "`enabled: []` must be rewritten into a block list with tokensave:\n{config}"
+    );
+    assert!(
+        !config.contains("enabled: []"),
+        "the empty flow-style enabled list must be replaced:\n{config}"
+    );
+    assert!(
+        config.contains("  disabled: []"),
+        "the untouched disabled flow list must survive:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_still_rejects_non_empty_flow_lists() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "plugins:\n  enabled: [other]\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("unsupported Hermes plugins config"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "non-empty flow lists must not be rewritten"
+    );
+}
+
+#[test]
 fn test_hermes_install_backs_up_existing_config() {
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
@@ -1445,6 +1914,174 @@ fn test_hermes_install_rejects_existing_memory_provider_without_rewrite() {
 }
 
 #[test]
+fn test_hermes_install_rejects_existing_context_engine_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "theme: dark\ncontext:\n  engine: other-engine\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("Hermes context engine already configured"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "install must not overwrite a foreign Hermes context engine"
+    );
+}
+
+#[test]
+fn test_hermes_install_replaces_default_compressor_context_engine() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    // `compressor` is the built-in default the host falls back to anyway, so
+    // replacing it is the activation step, not an overwrite.
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\ncontext:\n  engine: compressor\n  other_key: 1\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  engine: tokensave"),
+        "install must replace the default compressor engine:\n{config}"
+    );
+    assert!(
+        config.contains("  other_key: 1"),
+        "install must keep unrelated context keys:\n{config}"
+    );
+
+    // Uninstall removes only the engine selection, not the user's block.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        !config.contains("engine: tokensave"),
+        "uninstall must deactivate the tokensave context engine:\n{config}"
+    );
+    assert!(
+        config.contains("context:") && config.contains("  other_key: 1"),
+        "uninstall must keep the user's remaining context block:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_preserves_user_keys_in_tokensave_config_block() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  tokensave:\n    summary_model: glm-4.7\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "install must add the pin to the existing plugins.tokensave block:\n{config}"
+    );
+    assert!(
+        config.contains("    summary_model: glm-4.7"),
+        "install must keep user keys in the plugins.tokensave block:\n{config}"
+    );
+
+    // Uninstall drops only the generated pin and keeps the user's keys.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        !config.contains("project_root:"),
+        "uninstall must remove the generated pin:\n{config}"
+    );
+    assert!(
+        config.contains("  tokensave:") && config.contains("    summary_model: glm-4.7"),
+        "uninstall must keep user keys in the plugins.tokensave block:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+
+    // Fresh install: version matches the binary, no pin — no warnings.
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.warnings, 0, "fresh install should be healthy");
+
+    // Stale manifest version (an old generator wrote it) must warn.
+    let manifest_path = plugin_dir.join("plugin.yaml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(
+            &format!("version: {}", env!("CARGO_PKG_VERSION")),
+            "version: 1.0.0",
+        ),
+    )
+    .unwrap();
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.warnings, 1,
+        "stale generated plugin version should warn once"
+    );
+
+    // A pinned project root that no longer exists must warn too.
+    HermesIntegration
+        .install(&InstallContext {
+            home: home.path().to_path_buf(),
+            tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+            tool_permissions: expected_tool_perms(),
+            profile: None,
+            project_root: Some(std::path::PathBuf::from("/missing/pinned/project")),
+            dashboard: true,
+        })
+        .unwrap();
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.warnings, 1,
+        "a dangling pinned project root should warn once"
+    );
+}
+
+#[test]
 fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
@@ -1486,6 +2123,8 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
         tokensave_bin: String::new(),
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -1560,25 +2199,116 @@ fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
     );
 }
 
+/// Global `tokensave install --agent cursor` runs with the project as cwd and
+/// must sweep legacy project-local tokensave artifacts there (old installs
+/// predate the plugin), while preserving user-authored entries alongside them.
+#[test]
+fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"tokensave":{"type":"stdio","command":"/old/tokensave","args":["serve","--path","."]},"other":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tokensave.mdc"),
+        "# Prefer tokensave MCP tools\n",
+    )
+    .unwrap();
+
+    let output = tokensave_command(project.path(), home.path())
+        .arg("install")
+        .arg("--agent")
+        .arg("cursor")
+        .output()
+        .expect("run global cursor install");
+    assert!(
+        output.status.success(),
+        "global cursor install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        home.path()
+            .join(".cursor/plugins/local/tokensave/.cursor-plugin/plugin.json")
+            .exists(),
+        "the user-level plugin should be installed"
+    );
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cursor_dir.join("mcp.json")).unwrap())
+            .unwrap();
+    assert!(
+        mcp["mcpServers"].get("tokensave").is_none(),
+        "legacy project tokensave MCP entry should be swept"
+    );
+    assert!(
+        mcp["mcpServers"].get("other").is_some(),
+        "user-authored project MCP servers must be preserved"
+    );
+    assert!(
+        !cursor_dir.join("rules/tokensave.mdc").exists(),
+        "legacy project tokensave rule should be swept"
+    );
+}
+
+/// The legacy sweep must never modify files *through* a symlinked `.cursor`
+/// that escapes the project. A symlinked `.cursor` with no legacy tokensave
+/// artifacts is left alone (the plugin owns all surfaces, so there is nothing
+/// to write project-locally), but once legacy artifacts are detected behind
+/// the symlink the install refuses rather than reaching outside the project.
 #[cfg(unix)]
 #[test]
-fn test_local_install_cursor_rejects_symlinked_cursor_dir() {
+fn test_local_install_cursor_rejects_symlinked_cursor_dir_with_legacy_artifacts() {
     use std::os::unix::fs::symlink;
 
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
+    let legacy_mcp = r#"{"mcpServers":{"tokensave":{"type":"stdio","command":"/old/tokensave","args":["serve","--path","."]}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), legacy_mcp).unwrap();
     symlink(outside.path(), project.path().join(".cursor")).unwrap();
 
     let output = run_local_install("cursor", project.path(), home.path());
     assert!(
         !output.status.success(),
-        "local Cursor install should reject symlinked .cursor directories"
+        "local Cursor install should reject sweeping through a symlinked .cursor directory"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("symlink"),
         "error should explain the symlink refusal, got:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        legacy_mcp,
+        "files behind the symlink must be untouched"
+    );
+}
+
+/// A symlinked `.cursor` containing only user config is harmless now that
+/// the plugin owns MCP/hooks/rules and local install writes nothing
+/// project-local — the install succeeds and the linked tree is untouched.
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_allows_legacy_free_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let user_mcp = r#"{"mcpServers":{"other":{"url":"https://example.com/mcp"}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), user_mcp).unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        user_mcp,
+        "user config behind the symlink must be untouched"
     );
 }
 
@@ -2736,6 +3466,8 @@ fn test_antigravity_install_writes_cli_plugin() {
         tokensave_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).expect("install ok");
@@ -2786,6 +3518,8 @@ fn test_antigravity_uninstall_removes_both_locations() {
         tokensave_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).unwrap();
@@ -2952,6 +3686,8 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         tokensave_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     }
 }
 
@@ -3091,6 +3827,8 @@ fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
+        project_root: None,
+        dashboard: true,
     };
     HermesIntegration.install(&ctx).unwrap();
 
@@ -4131,4 +4869,192 @@ fn test_backup_and_safe_write_round_trip() {
     let restored: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(restored["version"], 1);
+}
+
+#[test]
+fn test_hermes_install_writes_and_preserves_project_root_pin() {
+    let home = TempDir::new().unwrap();
+    let pinned = InstallContext {
+        home: home.path().to_path_buf(),
+        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
+    };
+    HermesIntegration.install(&pinned).unwrap();
+
+    let tools_path = home.path().join(".hermes/plugins/tokensave/tools.py");
+    let config_path = home.path().join(".hermes/config.yaml");
+    // The config block is the single pin home; the generated tools.py
+    // carries no install-time pin constant.
+    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
+    assert!(
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "tools.py must not carry a pin constant (the config block owns the pin):\n{tools_py}"
+    );
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("  tokensave:") && config.contains("    project_root: \"/pinned/project\""),
+        "install --project-root must write the pin into the conventional plugins.tokensave config block:\n{config}"
+    );
+
+    // A reinstall without the flag must keep the pin (no silent unpinning).
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "reinstall must preserve the plugins.tokensave config pin:\n{config}"
+    );
+
+    // A reinstall after the generated tools.py was deleted still keeps the
+    // config pin (the pin never lived in the generated Python).
+    std::fs::remove_file(&tools_path).unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    assert!(tools_path.is_file(), "reinstall must regenerate tools.py");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "reinstall must keep the plugins.tokensave.project_root pin:\n{config}"
+    );
+
+    // Uninstall removes the generated pin from the config block.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !config.contains("project_root:") && !config.contains("  tokensave:"),
+        "uninstall must remove the generated plugins.tokensave pin block:\n{config}"
+    );
+
+    // A fresh install without a pin stays unpinned.
+    let fresh_home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(fresh_home.path()))
+        .unwrap();
+    let fresh_config =
+        std::fs::read_to_string(fresh_home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(
+        !fresh_config.contains("project_root:"),
+        "fresh install without --project-root must not write a config pin:\n{fresh_config}"
+    );
+}
+
+#[test]
+fn test_hermes_generated_python_reads_plugins_tokensave_config_block() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let hermes_home = home.path().join(".hermes");
+    let plugin_dir = hermes_home.join("plugins/tokensave");
+    let script = plugin_dir.join("check_config_block.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+hermes_home = plugin_dir.parent.parent
+os.environ["HERMES_HOME"] = str(hermes_home)
+
+# Simulate a user (or the installer) putting settings in the conventional
+# plugins.tokensave config block.
+import yaml
+config_path = hermes_home / "config.yaml"
+config = yaml.safe_load(config_path.read_text()) or {}
+plugins_cfg = config.setdefault("plugins", {})
+plugins_cfg["tokensave"] = {
+    "project_root": "/config/block/project",
+    "summary_model": "glm-4.7",
+}
+config_path.write_text(yaml.dump(config, default_flow_style=False))
+
+parent_name = "_hermes_user_config_block"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+module_name = f"{parent_name}.tokensave"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# The subprocess dispatch path resolves the pin from the config block; the
+# generated tools.py carries no pin constant at all.
+assert not hasattr(plugin.tools, "PINNED_PROJECT_ROOT")
+assert plugin.tools.config_pinned_project_root() == "/config/block/project"
+
+captured = {}
+
+class Result:
+    returncode = 0
+    stdout = "{}"
+    stderr = ""
+
+def fake_run(argv, **kwargs):
+    captured["argv"] = argv
+    return Result()
+
+plugin.tools.subprocess.run = fake_run
+plugin.tools.call_tokensave_tool("tokensave_status", {})
+argv = captured["argv"]
+assert "--project" in argv, argv
+assert argv[argv.index("--project") + 1] == "/config/block/project", argv
+
+# The context engine layers the block under the host config: block values
+# fill gaps, host-provided values always win.
+engine = plugin.TokenSaveContextEngine()
+assert engine.project_root == "/config/block/project", engine.project_root
+assert plugin._lcm_str_setting(engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"
+
+host_engine = plugin.TokenSaveContextEngine(config={"project_root": "/host/wins", "summary_model": "host-model"})
+assert host_engine.project_root == "/host/wins"
+assert plugin._lcm_str_setting(host_engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "host-model"
+
+# Attribute-style host configs chain through to the block too.
+class HostConfig:
+    summary_model = None
+    fresh_tail_count = 16
+
+attr_engine = plugin.TokenSaveContextEngine(config=HostConfig())
+assert plugin._lcm_str_setting(attr_engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"
+assert plugin._configured_int(attr_engine.config, "fresh_tail_count") == 16
+
+# Engines bound to a different profile home do not inherit this block.
+other_engine = plugin.TokenSaveContextEngine(hermes_home="/tmp/definitely-missing-hermes-home")
+assert other_engine.project_root is None
+"#,
+    )
+    .unwrap();
+
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(&plugin_dir);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
+        .output()
+        .expect("python3 should run generated Hermes config block check");
+    assert!(
+        output.status.success(),
+        "generated plugin should read the plugins.tokensave config block\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

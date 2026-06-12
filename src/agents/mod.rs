@@ -14,6 +14,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod hermes;
+mod hermes_dashboard;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
@@ -94,6 +95,20 @@ pub trait AgentIntegration {
         Box::pin(std::future::ready(()))
     }
 
+    /// Refresh tokensave-generated artifacts (plugin code, baked binary
+    /// paths, embedded assets) for every *detected* existing installation,
+    /// without writing to any agent config file. Pins, MCP registrations,
+    /// settings, and prompt rules are left byte-for-byte intact.
+    ///
+    /// The default reports [`UpdatePluginOutcome::ConfigOnly`]: most agents
+    /// keep their entire tokensave integration inside shared config files
+    /// (MCP entries, hook blocks, prompt rules), so there is nothing to
+    /// refresh that would not be a config write — `tokensave reinstall`
+    /// remains the path that reconciles those.
+    fn update_plugin(&self, _ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        Ok(UpdatePluginOutcome::ConfigOnly)
+    }
+
     /// Remove everything installed by [`AgentIntegration::install`].
     fn uninstall(&self, ctx: &InstallContext) -> Result<()>;
 
@@ -125,12 +140,34 @@ pub trait AgentIntegration {
     }
 }
 
+/// Outcome of [`AgentIntegration::update_plugin`].
+pub enum UpdatePluginOutcome {
+    /// Generated artifacts were refreshed at these locations.
+    Refreshed(Vec<PathBuf>),
+    /// The integration ships generated artifacts, but none were detected on
+    /// this machine — nothing was written.
+    NotInstalled,
+    /// The integration only writes shared config files; there are no
+    /// tokensave-generated artifacts to refresh without touching config.
+    ConfigOnly,
+}
+
 /// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].
 pub struct InstallContext {
     pub home: PathBuf,
     pub tokensave_bin: String,
     pub tool_permissions: Vec<String>,
     pub profile: Option<String>,
+    /// Hermes only: pin the generated plugin's project root so every tool
+    /// call resolves this project's `.tokensave/` stores regardless of the
+    /// host's working directory (`tokensave install --agent hermes
+    /// --project-root <path>`). `None` preserves any existing pin.
+    pub project_root: Option<PathBuf>,
+    /// Hermes only: deploy the dashboard wrapper plugin page alongside the
+    /// agent plugin (default; `tokensave install --agent hermes
+    /// --no-dashboard` opts out and removes a previous deploy). Other agents
+    /// ignore this field.
+    pub dashboard: bool,
 }
 
 /// Context passed to [`AgentIntegration::healthcheck`].
@@ -927,6 +964,32 @@ pub fn vscode_insiders_data_dir(home: &Path) -> PathBuf {
 /// Returns the GitHub Copilot CLI config directory.
 pub fn copilot_cli_dir(home: &Path) -> PathBuf {
     home.join(".copilot")
+}
+
+/// Returns the Kiro IDE user data directory (VS Code-style layout).
+pub fn kiro_data_dir(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library/Application Support/Kiro")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        home.join(".config/Kiro")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_path = PathBuf::from(&appdata);
+            if appdata_path.starts_with(home) {
+                return appdata_path.join("Kiro");
+            }
+        }
+        home.join("AppData/Roaming/Kiro")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        home.join(".config/Kiro")
+    }
 }
 
 /// Returns agent IDs that have tokensave configured under `home` but are

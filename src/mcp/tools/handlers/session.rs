@@ -4,9 +4,11 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::{json, Map, Value};
 
+use super::truncated_json_envelope;
 use crate::errors::{Result, TokenSaveError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
+use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort,
@@ -37,27 +39,6 @@ fn tool_json(value: &Value) -> ToolResult {
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
-    }
-}
-
-fn truncated_json_envelope(formatted: &str) -> String {
-    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
-    loop {
-        while end > 0 && !formatted.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &formatted[..end];
-        let envelope = json!({
-            "truncated": true,
-            "original_chars": formatted.len(),
-            "preview_chars": preview.len(),
-            "preview": preview,
-        });
-        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
-        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
-            return text;
-        }
-        end = end.saturating_sub(1024);
     }
 }
 
@@ -693,21 +674,12 @@ fn lcm_doctor_mode(args: &Value) -> Result<&str> {
     }
 }
 
-fn parse_bool_flag_from_env(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
 fn lcm_doctor_clean_apply_enabled(args: &Value) -> Result<bool> {
     match args.get("doctor_clean_apply_enabled") {
         Some(value) => value
             .as_bool()
             .ok_or_else(|| argument_error("doctor_clean_apply_enabled must be a boolean")),
-        None => Ok(parse_bool_flag_from_env("LCM_DOCTOR_CLEAN_APPLY_ENABLED")),
+        None => Ok(crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED")),
     }
 }
 
@@ -731,6 +703,20 @@ fn lcm_unavailable() -> ToolResult {
     tool_json(&json!({
         "status": "unavailable",
         "message": "could not open project-local tokensave session database",
+    }))
+}
+
+/// Returned by pure-read tools when the sessions.db file has not been
+/// created yet (nothing has been ingested). Distinct from "unavailable"
+/// so callers can tell "no data yet" apart from "open failed".
+/// The `store_exists: false` field is the machine-readable discriminator;
+/// other fields are backward-compatible additions.
+fn lcm_not_yet_ingested(storage_scope: &str) -> ToolResult {
+    tool_json(&json!({
+        "status": "not_ingested",
+        "store_exists": false,
+        "storage_scope": storage_scope,
+        "message": "session store does not exist yet — nothing has been ingested",
     }))
 }
 
@@ -853,23 +839,44 @@ fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult>
     Ok(canonical)
 }
 
-async fn open_lcm_storage(project_root: Option<&Path>, args: &Value) -> LcmStorageResolution {
-    open_lcm_storage_with_mode(project_root, args, false).await
+/// How an LCM storage open treats the backing sessions.db.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LcmOpenMode {
+    /// Writable open: creates the store and ensures schema as needed.
+    Writable,
+    /// Read-only: a missing store is a hard error.
+    ReadOnlyExisting,
+    /// Read-only: a missing store is a distinguishable `not_ingested`
+    /// result, without creating the file. Use this for every `readOnlyHint`
+    /// LCM handler so "nothing ingested yet" never looks like "ok, 0 rows"
+    /// (and the tool never ghost-creates an empty sessions.db).
+    ReadOnlyOrMissing,
 }
 
 macro_rules! lcm_open_storage {
     ($project_root:expr, $args:expr) => {
-        match open_lcm_storage($project_root, $args).await {
+        match open_lcm_storage($project_root, $args, LcmOpenMode::Writable).await {
             LcmStorageResolution::Available(storage) => storage,
             LcmStorageResolution::Unavailable(result) => return Ok(result),
         }
     };
 }
 
-async fn open_lcm_storage_with_mode(
+/// Like `lcm_open_storage!` but with [`LcmOpenMode::ReadOnlyOrMissing`]
+/// semantics for `readOnlyHint` handlers.
+macro_rules! lcm_open_storage_ro {
+    ($project_root:expr, $args:expr) => {
+        match open_lcm_storage($project_root, $args, LcmOpenMode::ReadOnlyOrMissing).await {
+            LcmStorageResolution::Available(storage) => storage,
+            LcmStorageResolution::Unavailable(result) => return Ok(result),
+        }
+    };
+}
+
+async fn open_lcm_storage(
     project_root: Option<&Path>,
     args: &Value,
-    read_only_existing: bool,
+    mode: LcmOpenMode,
 ) -> LcmStorageResolution {
     let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
     match storage_scope {
@@ -878,10 +885,17 @@ async fn open_lcm_storage_with_mode(
                 return LcmStorageResolution::Unavailable(project_local_storage_without_project());
             };
             let db_path = crate::sessions::cursor::project_session_db_path(project_root);
-            let db = if read_only_existing {
-                GlobalDb::open_read_only_at(&db_path).await
-            } else {
-                open_session_db_with_cached_ensure(&db_path).await
+            let db = match mode {
+                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
+                LcmOpenMode::ReadOnlyExisting => GlobalDb::open_read_only_at(&db_path).await,
+                LcmOpenMode::ReadOnlyOrMissing => {
+                    if !db_path.is_file() {
+                        return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
+                            "project_local",
+                        ));
+                    }
+                    GlobalDb::open_read_only_at(&db_path).await
+                }
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(lcm_unavailable());
@@ -896,32 +910,48 @@ async fn open_lcm_storage_with_mode(
                 Ok(hermes_home) => hermes_home,
                 Err(result) => return LcmStorageResolution::Unavailable(result),
             };
-            let db_path = if read_only_existing {
-                match crate::sessions::cursor::resolve_existing_hermes_profile_session_db_path(
-                    &hermes_home,
-                ) {
-                    Ok(db_path) => db_path,
-                    Err(message) => {
-                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                            message,
-                        ))
+            let db_path = match mode {
+                LcmOpenMode::Writable => {
+                    match crate::sessions::cursor::resolve_hermes_profile_session_db_path(
+                        &hermes_home,
+                    ) {
+                        Ok(db_path) => db_path,
+                        Err(message) => {
+                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                                message,
+                            ))
+                        }
                     }
                 }
-            } else {
-                match crate::sessions::cursor::resolve_hermes_profile_session_db_path(&hermes_home)
-                {
-                    Ok(db_path) => db_path,
-                    Err(message) => {
-                        return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                            message,
-                        ))
+                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
+                    match crate::sessions::cursor::resolve_hermes_profile_session_db_readonly(
+                        &hermes_home,
+                    ) {
+                        HermesProfileDbReadOnly::Exists(db_path) => db_path,
+                        HermesProfileDbReadOnly::NotIngested(db_path) => {
+                            return LcmStorageResolution::Unavailable(match mode {
+                                LcmOpenMode::ReadOnlyOrMissing => {
+                                    lcm_not_yet_ingested("hermes_profile")
+                                }
+                                _ => invalid_hermes_profile_home(format!(
+                                    "hermes_profile LCM storage requires an existing session database: {}",
+                                    db_path.display()
+                                )),
+                            })
+                        }
+                        HermesProfileDbReadOnly::ConfigError(msg) => {
+                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
+                                msg,
+                            ))
+                        }
                     }
                 }
             };
-            let db = if read_only_existing {
-                GlobalDb::open_read_only_at(&db_path).await
-            } else {
-                open_session_db_with_cached_ensure(&db_path).await
+            let db = match mode {
+                LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
+                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
+                    GlobalDb::open_read_only_at(&db_path).await
+                }
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
@@ -1027,6 +1057,23 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
     }
 }
 
+/// Parses the `scope` argument for `tokensave_message_search`. Like
+/// [`parse_lcm_scope`], invalid values are a hard error naming the valid set —
+/// never silently broadened to `all`.
+fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
+    let Some(value) = args.get("scope") else {
+        return Ok(SessionSearchScope::All);
+    };
+    match value.as_str().map(str::trim) {
+        Some("all") => Ok(SessionSearchScope::All),
+        Some("parents_only") => Ok(SessionSearchScope::ParentsOnly),
+        Some("subagents_only") => Ok(SessionSearchScope::SubagentsOnly),
+        _ => Err(argument_error(
+            "scope must be one of all, parents_only, subagents_only",
+        )),
+    }
+}
+
 pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let query = args
         .get("query")
@@ -1056,15 +1103,7 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
         .get("include_subagents")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let mut scope = match args
-        .get("scope")
-        .and_then(Value::as_str)
-        .map_or("all", str::trim)
-    {
-        "parents_only" => SessionSearchScope::ParentsOnly,
-        "subagents_only" => SessionSearchScope::SubagentsOnly,
-        _ => SessionSearchScope::All,
-    };
+    let mut scope = parse_message_search_scope(&args)?;
     if !include_subagents && matches!(scope, SessionSearchScope::All) {
         scope = SessionSearchScope::ParentsOnly;
     }
@@ -1083,6 +1122,13 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
             "count": 0
         })));
     };
+    if provider == "hermes" {
+        // Hermes history lives in per-profile state.db stores normally swept
+        // by the serve/dashboard startup catch-ups; an incremental
+        // search-time catch-up makes the `tokensave tool` / generated-plugin
+        // path self-sufficient (cursor-based, so it is cheap when fresh).
+        let _ = crate::sessions::hermes::ingest_for_project(&db, cg.project_root()).await;
+    }
     let results = db
         .search_session_messages_filtered(
             provider,
@@ -1117,7 +1163,7 @@ pub(super) async fn handle_lcm_status(
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
-    let storage = lcm_open_storage!(project_root, &args);
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let mut status = storage
         .db
         .lcm_status(provider, session_id)
@@ -1166,8 +1212,12 @@ pub(super) async fn handle_lcm_doctor(
         })));
     }
     let clean_config = lcm_clean_config(&args)?;
-    let read_only_existing = !(matches!(mode, "repair" | "clean") && apply);
-    let storage = match open_lcm_storage_with_mode(project_root, &args, read_only_existing).await {
+    let open_mode = if matches!(mode, "repair" | "clean") && apply {
+        LcmOpenMode::Writable
+    } else {
+        LcmOpenMode::ReadOnlyExisting
+    };
+    let storage = match open_lcm_storage(project_root, &args, open_mode).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
@@ -1189,7 +1239,7 @@ pub(super) async fn handle_lcm_load_session(
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let (content_slice, content_limit_clamped_from) = lcm_load_content_slice(&args)?;
-    let storage = lcm_open_storage!(project_root, &args);
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let page = storage
         .db
         .lcm_load_session(LcmLoadSessionRequest {
@@ -1237,13 +1287,16 @@ pub(super) async fn handle_lcm_grep(
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let query = required_string_arg(&args, "query")?;
-    let storage = lcm_open_storage!(project_root, &args);
+    // Validate scope before opening storage so argument errors are reported
+    // even when the sessions DB does not exist yet.
+    let scope = parse_lcm_scope(&args)?;
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let hits = storage
         .db
         .lcm_grep(LcmGrepRequest {
             provider: provider.to_string(),
             query: query.to_string(),
-            scope: parse_lcm_scope(&args)?,
+            scope,
             session_id: string_arg(&args, "session_id").map(str::to_string),
             include_summaries: args
                 .get("include_summaries")
@@ -1274,13 +1327,16 @@ pub(super) async fn handle_lcm_describe(
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
-    let storage = lcm_open_storage!(project_root, &args);
+    // Validate target before opening storage so argument errors are reported
+    // even when the sessions DB does not exist yet.
+    let target = parse_lcm_describe_target(&args)?;
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let description = storage
         .db
         .lcm_describe(LcmDescribeRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
-            target: parse_lcm_describe_target(&args)?,
+            target,
         })
         .await
         .map_err(lcm_error)?;
@@ -1299,7 +1355,7 @@ pub(super) async fn handle_lcm_expand(
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    let storage = lcm_open_storage!(project_root, &args);
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let expansion = storage
         .db
         .lcm_expand(LcmExpandRequest {
@@ -1331,18 +1387,22 @@ pub(super) async fn handle_lcm_expand_query(
         bounded_usize_arg(&args, "max_results", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(5);
     let max_tokens =
         bounded_usize_arg(&args, "max_tokens", 1, MAX_LCM_CONTENT_LIMIT)?.unwrap_or(2000);
-    let default_context_limit = max_tokens.clamp(
-        DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
-        MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
-    );
+    // `context_max_tokens` is the retrieval context budget (how much LCM
+    // material is assembled before host synthesis). It is orthogonal to
+    // `max_tokens` (the synthesis *output* budget): max_tokens ≤ 8 192
+    // while context_max_tokens lives in [32 000, 65 536], so a clamp of
+    // the form `max_tokens.clamp(32_000, 65_536)` always evaluates to
+    // 32_000 — making max_tokens dead. The default is therefore a fixed
+    // constant; pass `context_max_tokens` explicitly when a larger budget
+    // is wanted.
     let context_max_tokens = bounded_usize_arg(
         &args,
         "context_max_tokens",
         1,
         MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
     )?
-    .unwrap_or(default_context_limit);
-    let storage = lcm_open_storage!(project_root, &args);
+    .unwrap_or(DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT);
+    let storage = lcm_open_storage_ro!(project_root, &args);
     let response = storage
         .db
         .lcm_expand_query(LcmExpandQueryRequest {

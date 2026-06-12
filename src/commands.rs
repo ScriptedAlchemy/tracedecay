@@ -1,10 +1,65 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 
-use crate::cli::BranchAction;
+use crate::cli::{BranchAction, MemoryAction};
 use crate::global;
 use crate::Spinner;
 use tokensave::tokensave::TokenSave;
+
+pub(crate) async fn handle_memory_action(action: MemoryAction) -> tokensave::errors::Result<()> {
+    use tokensave::dashboard::memory_curate::{run_memory_curate, MemoryCurateOptions};
+
+    match action {
+        MemoryAction::Curate {
+            apply,
+            llm,
+            llm_ops,
+            max_clusters,
+            min_confidence,
+            path,
+        } => {
+            let project_path = tokensave::config::resolve_path_with_discovery(path);
+            let cg = crate::serve::ensure_initialized(&project_path).await?;
+            let llm_ops_value = match llm_ops {
+                Some(source) => Some(read_llm_ops_payload(&source)?),
+                None => None,
+            };
+            let options = MemoryCurateOptions {
+                apply,
+                llm,
+                llm_ops: llm_ops_value,
+                max_clusters: max_clusters.clamp(1, 50),
+                min_confidence: min_confidence.clamp(0.0, 1.0),
+            };
+            let report = run_memory_curate(&cg, &options).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reads the `--llm-ops` payload from a file path or stdin (`-`).
+fn read_llm_ops_payload(source: &str) -> tokensave::errors::Result<serde_json::Value> {
+    let text = if source == "-" {
+        let mut buf = String::new();
+        io::stdin().lock().read_to_string(&mut buf).map_err(|e| {
+            tokensave::errors::TokenSaveError::Config {
+                message: format!("failed to read --llm-ops from stdin: {e}"),
+            }
+        })?;
+        buf
+    } else {
+        std::fs::read_to_string(source).map_err(|e| tokensave::errors::TokenSaveError::Config {
+            message: format!("failed to read --llm-ops file {source}: {e}"),
+        })?
+    };
+    serde_json::from_str(&text).map_err(|e| tokensave::errors::TokenSaveError::Config {
+        message: format!("--llm-ops payload is not valid JSON: {e}"),
+    })
+}
 
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::errors::Result<()> {
     use tokensave::branch;
@@ -455,6 +510,13 @@ pub(crate) async fn handle_no_command() -> tokensave::errors::Result<()> {
         );
         eprintln!();
     }
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "No TokenSave index found at '{}'. Non-interactive: skipping index creation (run `tokensave init`).",
+            project_path.display()
+        );
+        return Ok(());
+    }
     eprint!(
         "No TokenSave index found at '{}'. Create one now? [Y/n] ",
         project_path.display()
@@ -494,15 +556,21 @@ pub(crate) async fn init_and_index(
         eprintln!("Initialized TokenSave at {}", project_path.display());
         // Offer to add .tokensave to .gitignore if not already there
         if !tokensave::config::is_in_gitignore(project_path) {
-            eprint!("Add .tokensave to .gitignore? [Y/n] ");
-            io::stderr().flush().ok();
-            let mut answer = String::new();
-            if io::stdin().lock().read_line(&mut answer).is_ok() {
-                let answer = answer.trim();
-                if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    tokensave::config::add_to_gitignore(project_path);
-                    eprintln!("Added .tokensave to .gitignore");
+            if io::stdin().is_terminal() {
+                eprint!("Add .tokensave to .gitignore? [Y/n] ");
+                io::stderr().flush().ok();
+                let mut answer = String::new();
+                if io::stdin().lock().read_line(&mut answer).is_ok() {
+                    let answer = answer.trim();
+                    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+                        tokensave::config::add_to_gitignore(project_path);
+                        eprintln!("Added .tokensave to .gitignore");
+                    }
                 }
+            } else {
+                eprintln!(
+                    "Non-interactive: skipped adding .tokensave to .gitignore (run interactively to opt in)."
+                );
             }
         }
         cg

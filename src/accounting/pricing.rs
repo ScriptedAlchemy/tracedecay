@@ -7,6 +7,23 @@
 //!    once every 24 hours, stored to the cache file.
 //!
 //! All prices are per million tokens (`MTok`).
+//!
+//! # Two pricing tables exist on purpose — know which one you are reading
+//!
+//! This module is the **authoritative USD source for server-side cost
+//! accounting**: `cost_of_turn` prices Claude transcript turns at ingest
+//! (`tokensave cost` / `tokensave gain` / the `turns` table). It is
+//! Claude-only, keyed by bare model ids with prefix matching, sourced from
+//! `LiteLLM`, and cached at `~/.tokensave/pricing.json`.
+//!
+//! `dashboard/savings_pricing.rs` is a **separate** table for the Savings &
+//! Cost tab: all-vendor, keyed by `OpenRouter` slugs, served raw to the UI
+//! (which does its own fuzzy model-id resolution and prices client-side),
+//! cached at `~/.tokensave/model-prices.json`. The two sources can quote
+//! different USD for the same model; dollar figures from the dashboard and
+//! from `tokensave gain` are therefore not guaranteed to match to the cent.
+//! Turn costs stored in the `turns` table always come from *this* table —
+//! the dashboard reports them as `cost_basis: "actual"` without re-pricing.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -28,6 +28,60 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
+/// One freshly computed token count headed for the dashboard sidecar cache
+/// (see [`GlobalDb::save_token_counts`]).
+#[derive(Debug, Clone)]
+pub struct TokenCountUpsert {
+    pub provider: String,
+    pub message_id: String,
+    pub text_len: i64,
+    pub encoder: &'static str,
+    pub token_count: i64,
+}
+
+/// Transcript-ingest backlog snapshot for a session store. See
+/// [`GlobalDb::session_ingest_health`].
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct SessionIngestHealth {
+    /// Transcripts referenced by sessions that still exist on disk.
+    pub tracked_transcripts: u64,
+    /// Transcripts with un-ingested appended bytes.
+    pub pending_transcripts: u64,
+    /// Total un-ingested bytes across pending transcripts.
+    pub pending_bytes: u64,
+    /// Largest single-transcript backlog. The hook ingest caps are
+    /// per-transcript, so this (not the total) decides whether the hooks can
+    /// still drain the backlog on their own.
+    pub max_transcript_pending_bytes: u64,
+    /// Newest transcript mtime recorded at ingest time (Unix seconds).
+    pub last_ingest_unix: Option<i64>,
+}
+
+/// Persisted parse cursor for a transcript path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOffset {
+    pub byte_offset: u64,
+    pub mtime: u64,
+    pub file_id: u64,
+}
+
+/// One transcript session plus its parsed messages, for multi-session batch
+/// upserts from SQLite-backed stores where a single store file holds every
+/// session (e.g. Hermes `state.db`).
+#[derive(Debug, Clone)]
+pub struct TranscriptBatch {
+    pub session: SessionRecord,
+    pub messages: Vec<SessionMessageRecord>,
+}
+
+/// Whether a transcript batch writes the full dual store (LCM raw + searchable
+/// projection) or only the `session_messages` projection.
+#[derive(Debug, Clone, Copy)]
+enum TranscriptWriteMode {
+    Full,
+    ProjectionOnly,
+}
+
 /// User-level database tracking all `TokenSave` projects.
 pub struct GlobalDb {
     conn: Connection,
@@ -44,6 +98,88 @@ pub fn global_db_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
+}
+
+/// True when `TOKENSAVE_GLOBAL_DB` pins the global DB to an explicit path.
+/// Consumers (the dashboard LCM store selection) treat the override as an
+/// operator decision that wins over project-local store discovery.
+pub fn global_db_path_is_overridden() -> bool {
+    std::env::var_os(GLOBAL_DB_PATH_ENV).is_some_and(|path| !path.is_empty())
+}
+
+/// How [`global_accounting_enabled`] reached its decision; the dashboard
+/// surfaces this so an empty ledger can be explained honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountingMode {
+    /// No env override — global accounting is on by default.
+    Default,
+    /// `TOKENSAVE_ENABLE_GLOBAL_DB` explicitly enabled it.
+    EnabledByEnv,
+    /// `TOKENSAVE_ENABLE_GLOBAL_DB` (falsy value) or
+    /// `TOKENSAVE_DISABLE_GLOBAL_DB` explicitly disabled it.
+    DisabledByEnv,
+}
+
+impl AccountingMode {
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::DisabledByEnv)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::EnabledByEnv => "enabled_by_env",
+            Self::DisabledByEnv => "disabled_by_env",
+        }
+    }
+}
+
+/// Canonical truthy-env-value test shared by every boolean env flag: trims,
+/// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
+/// coexist with diverging semantics — e.g. `TOKENSAVE_DISABLE_GLOBAL_DB=on`
+/// was silently ignored while the LCM doctor flag honored it.)
+pub fn env_value_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// True when the named env var is set to a truthy value.
+pub fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
+}
+
+/// Whether user-level global accounting (the cross-project `savings_ledger`
+/// plus worldwide-counter flushes in the MCP server) is enabled.
+///
+/// Enabled **by default**: every other writer of `~/.tokensave/global.db`
+/// (CLI sync, hooks, `tokensave cost`, the dashboard) is ungated, and the
+/// Savings dashboard reads the ledger — an opt-in gate here silently left
+/// the ledger empty while lifetime counters kept growing. Precedence:
+///
+/// 1. `TOKENSAVE_ENABLE_GLOBAL_DB` set → its truthiness decides (the
+///    spelling existing agent installers already write).
+/// 2. `TOKENSAVE_DISABLE_GLOBAL_DB` truthy → disabled (opt-out; set by
+///    `.cargo/config.toml` so `cargo test` runs stay hermetic).
+/// 3. Otherwise → enabled.
+pub fn global_accounting_mode() -> AccountingMode {
+    if let Ok(value) = std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB") {
+        return if env_value_truthy(&value) {
+            AccountingMode::EnabledByEnv
+        } else {
+            AccountingMode::DisabledByEnv
+        };
+    }
+    if env_flag("TOKENSAVE_DISABLE_GLOBAL_DB") {
+        return AccountingMode::DisabledByEnv;
+    }
+    AccountingMode::Default
+}
+
+/// Convenience wrapper over [`global_accounting_mode`].
+pub fn global_accounting_enabled() -> bool {
+    global_accounting_mode().enabled()
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -147,6 +283,42 @@ async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
     Some(())
 }
 
+async fn parse_offsets_column_exists(conn: &Connection, column: &str) -> bool {
+    let Ok(mut rows) = conn.query("PRAGMA table_info(parse_offsets)", ()).await else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).ok().as_deref() == Some(column) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn add_parse_offset_column_after_missing_check(
+    conn: &Connection,
+    column: &str,
+    ddl: &str,
+) -> Option<()> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Some(()),
+        Err(_) if parse_offsets_column_exists(conn, column).await => Some(()),
+        Err(_) => None,
+    }
+}
+
+async fn ensure_parse_offset_columns(conn: &Connection) -> Option<()> {
+    if !parse_offsets_column_exists(conn, "file_id").await {
+        add_parse_offset_column_after_missing_check(
+            conn,
+            "file_id",
+            "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+    }
+    Some(())
+}
+
 async fn add_session_parent_column_after_missing_check(
     conn: &Connection,
     column: &str,
@@ -194,7 +366,29 @@ impl GlobalDb {
 
     /// Opens (or creates) the global database at an explicit path. Returns
     /// `None` if the directory cannot be created or the DB fails to open.
+    ///
+    /// Concurrent first opens of the same fresh store used to race each
+    /// other's `PRAGMA journal_mode = WAL`, DDL batch, and migration
+    /// transactions: all but one connection silently got `None`, which
+    /// disabled global accounting (ledger recording) for the unlucky
+    /// callers' entire session. Opens are rare, so they are serialized
+    /// in-process and retried briefly to also cover a racing *external*
+    /// process (e.g. two MCP servers starting simultaneously).
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
+        static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = OPEN_ENSURE_LOCK.lock().await;
+        for attempt in 0..3_u64 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            if let Some(db) = Self::open_at_unsynchronized(db_path).await {
+                return Some(db);
+            }
+        }
+        None
+    }
+
+    async fn open_at_unsynchronized(db_path: &std::path::Path) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
@@ -232,7 +426,8 @@ impl GlobalDb {
             CREATE TABLE IF NOT EXISTS parse_offsets (
                 file_path TEXT PRIMARY KEY,
                 byte_offset INTEGER NOT NULL,
-                mtime INTEGER NOT NULL
+                mtime INTEGER NOT NULL,
+                file_id INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS savings_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -313,7 +508,13 @@ impl GlobalDb {
         .await
         .ok()?;
         ensure_session_parent_columns(&db.conn).await?;
+        ensure_parse_offset_columns(&db.conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
+        // One-off self-heal: re-derive timestamps and token-usage counters
+        // for legacy messages ingested before extraction existed.
+        // Marker-guarded (runs once per store) and fail-open, like the LCM
+        // schema migrations above.
+        let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
 
         Some(db)
     }
@@ -346,9 +547,80 @@ impl GlobalDb {
         Self::open_at(&db_path).await
     }
 
+    /// Raw connection for crate-internal read layers (the dashboard HTTP
+    /// server queries the LCM tables directly).
+    pub(crate) fn dashboard_connection(&self) -> Connection {
+        self.conn.clone()
+    }
+
+    /// Transcript-ingest backlog for the session store backing this DB.
+    ///
+    /// For every session with a known transcript path, compares the on-disk
+    /// transcript size against the persisted parse offset. `pending_bytes` is
+    /// the total un-ingested tail across transcripts; `last_ingest_unix` is
+    /// the newest transcript mtime recorded at ingest time. Surfaced by
+    /// `tokensave_status` and `tokensave doctor --agent cursor` so a stalled
+    /// ingest (e.g. a backlog larger than the hook ingest caps) is visible
+    /// instead of silently eroding trust in session recall.
+    pub async fn session_ingest_health(&self) -> SessionIngestHealth {
+        let mut health = SessionIngestHealth::default();
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT DISTINCT transcript_path FROM sessions
+                 WHERE transcript_path IS NOT NULL AND transcript_path != ''
+                 LIMIT 1000",
+                (),
+            )
+            .await
+        else {
+            return health;
+        };
+        let mut paths = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Ok(path) = row.get::<String>(0) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            health.tracked_transcripts += 1;
+            let cursor = self.get_parse_offset(&path).await.unwrap_or_default();
+            if cursor.mtime > 0 {
+                let mtime = cursor.mtime as i64;
+                health.last_ingest_unix = Some(
+                    health
+                        .last_ingest_unix
+                        .map_or(mtime, |prev| prev.max(mtime)),
+                );
+            }
+            let pending = meta.len().saturating_sub(cursor.byte_offset);
+            if pending > 0 {
+                health.pending_transcripts += 1;
+                health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                health.max_transcript_pending_bytes =
+                    health.max_transcript_pending_bytes.max(pending);
+            }
+        }
+        health
+    }
+
+    /// Canonical registry key for a project path. Falls back to the lossy path
+    /// string when canonicalization fails (e.g. the path no longer exists) so
+    /// upserts and lookups always agree on a single key per project, instead of
+    /// creating divergent rows for `/p`, `/p/`, and symlinked spellings (#6).
+    fn canonical_project_key(project_path: &Path) -> String {
+        std::fs::canonicalize(project_path)
+            .unwrap_or_else(|_| project_path.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let _ = self
             .conn
             .execute(
@@ -361,7 +633,7 @@ impl GlobalDb {
 
     /// Returns the stored `tokens_saved` count for a specific project, or 0 if not found.
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let Ok(mut rows) = self
             .conn
             .query(
@@ -476,6 +748,84 @@ impl GlobalDb {
             });
         }
         out
+    }
+
+    /// Ensures the dashboard token-count sidecar table exists.
+    ///
+    /// Dashboard-scope only: called once when the dashboard opens the global
+    /// accounting DB. Deliberately NOT part of the shared `open_at` DDL batch
+    /// so project-local session stores keep their schema untouched.
+    pub async fn ensure_token_count_cache(&self) -> bool {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
+                    store TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    text_len INTEGER NOT NULL,
+                    encoder TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    computed_at INTEGER NOT NULL,
+                    PRIMARY KEY (store, provider, message_id)
+                )",
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Loads every cached token count for one session store. Returns
+    /// `(provider, message_id, text_len, token_count)` tuples; empty on any
+    /// error (including the sidecar table not existing yet).
+    pub async fn load_token_counts(&self, store: &str) -> Vec<(String, String, i64, i64)> {
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT provider, message_id, text_len, token_count
+                 FROM dashboard_token_counts WHERE store = ?1",
+                params![store],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let (Ok(provider), Ok(message_id), Ok(text_len), Ok(tokens)) = (
+                row.get::<String>(0),
+                row.get::<String>(1),
+                row.get::<i64>(2),
+                row.get::<i64>(3),
+            ) else {
+                continue;
+            };
+            out.push((provider, message_id, text_len, tokens));
+        }
+        out
+    }
+
+    /// Upserts freshly computed token counts for one session store.
+    /// Best-effort: the cache is an optimization, so errors are swallowed.
+    pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
+        let now = crate::tokensave::current_timestamp();
+        for row in rows {
+            let _ = self
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO dashboard_token_counts
+                     (store, provider, message_id, text_len, encoder, token_count, computed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        store,
+                        row.provider.as_str(),
+                        row.message_id.as_str(),
+                        row.text_len,
+                        row.encoder,
+                        row.token_count,
+                        now
+                    ],
+                )
+                .await;
+        }
     }
 
     /// Removes a project's row from the global DB. Best-effort.
@@ -593,13 +943,25 @@ impl GlobalDb {
             return false;
         }
 
+        if !self.upsert_session_message_in_existing_tx(message).await {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
+    }
+
+    async fn upsert_session_message_in_existing_tx(&self, message: &SessionMessageRecord) -> bool {
         let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
             &self.conn,
             &self.storage_root,
             message,
         )
         .await;
-        let projection_ok = match raw_result {
+        match raw_result {
             Ok(raw) => {
                 self.upsert_session_message_projection(
                     message,
@@ -609,9 +971,99 @@ impl GlobalDb {
                 .await
             }
             Err(_) => false,
-        };
+        }
+    }
 
-        if !projection_ok {
+    /// Atomically upserts one transcript session + all parsed messages and then
+    /// advances the parse cursor. Any failure rolls back the entire batch so a
+    /// follow-up ingest can safely replay from the previous offset.
+    pub async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        let batch = TranscriptBatch {
+            session: session.clone(),
+            messages: messages.to_vec(),
+        };
+        self.upsert_transcript_batches_inner(
+            std::slice::from_ref(&batch),
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::Full,
+        )
+        .await
+    }
+
+    /// Atomically upserts several transcript sessions (and their messages),
+    /// writing only the searchable `session_messages` projection — never
+    /// `lcm_raw_messages` — and then advances one shared parse cursor.
+    ///
+    /// Used by the Hermes `state.db` sweep: Hermes already ingests its raw
+    /// conversation losslessly into the LCM store at runtime (the generated
+    /// plugin's `lcm_preflight` active-message ingest) and via the one-time
+    /// legacy-store migration, under its own message ids. Writing raw rows
+    /// again from the transcript sweep would duplicate the LCM store, so
+    /// Hermes transcripts only fill the provider-neutral projection. Any
+    /// failure rolls back the whole batch so a follow-up ingest can safely
+    /// replay from the previous cursor.
+    pub async fn upsert_transcript_projection_batches(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        self.upsert_transcript_batches_inner(
+            batches,
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::ProjectionOnly,
+        )
+        .await
+    }
+
+    async fn upsert_transcript_batches_inner(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+        mode: TranscriptWriteMode,
+    ) -> bool {
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return false;
+        }
+        for batch in batches {
+            if !self.upsert_session(&batch.session).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return false;
+            }
+            for message in &batch.messages {
+                let upserted = match mode {
+                    TranscriptWriteMode::Full => {
+                        self.upsert_session_message_in_existing_tx(message).await
+                    }
+                    TranscriptWriteMode::ProjectionOnly => {
+                        let text = crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+                        self.upsert_session_message_projection(
+                            message,
+                            &text,
+                            message.metadata_json.as_deref(),
+                        )
+                        .await
+                    }
+                };
+                if !upserted {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return false;
+                }
+            }
+        }
+        if !self
+            .set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
+            .await
+        {
             let _ = self.conn.execute("ROLLBACK", ()).await;
             return false;
         }
@@ -1090,33 +1542,83 @@ impl GlobalDb {
 
     // ── Accounting: parse_offsets table ────────────────────────────────
 
-    /// Get the saved parse offset for a JSONL file.
-    /// Returns `(byte_offset, mtime)` or `None` if not tracked.
-    pub async fn get_parse_offset(&self, path: &str) -> Option<(u64, u64)> {
-        let mut rows = self
+    /// Returns the saved parse cursor for a JSONL file, including the
+    /// optional file identity id, or `None` if the path is not tracked.
+    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
+        let Ok(mut rows) = self
             .conn
             .query(
-                "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
                 params![path],
             )
             .await
-            .ok()?;
+        else {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                    params![path],
+                )
+                .await
+                .ok()?;
+            let row = rows.next().await.ok()??;
+            let offset: i64 = row.get(0).ok()?;
+            let mtime: i64 = row.get(1).ok()?;
+            return Some(ParseOffset {
+                byte_offset: offset as u64,
+                mtime: mtime as u64,
+                file_id: 0,
+            });
+        };
         let row = rows.next().await.ok()??;
         let offset: i64 = row.get(0).ok()?;
         let mtime: i64 = row.get(1).ok()?;
-        Some((offset as u64, mtime as u64))
+        let file_id: i64 = row.get(2).ok()?;
+        Some(ParseOffset {
+            byte_offset: offset as u64,
+            mtime: mtime as u64,
+            file_id: file_id as u64,
+        })
     }
 
-    /// Save the parse offset for a JSONL file. Best-effort.
-    pub async fn set_parse_offset(&self, path: &str, offset: u64, mtime: u64) {
-        let _ = self
+    /// Saves the parse cursor for a transcript path. Best-effort.
+    pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
+        let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
+    }
+
+    async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {
+        if self
             .conn
             .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(file_path) DO UPDATE SET byte_offset = ?2, mtime = ?3",
-                params![path, offset as i64, mtime as i64],
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3,
+                    file_id = ?4",
+                params![
+                    path,
+                    offset.byte_offset as i64,
+                    offset.mtime as i64,
+                    offset.file_id as i64
+                ],
             )
-            .await;
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3",
+                params![path, offset.byte_offset as i64, offset.mtime as i64],
+            )
+            .await
+            .is_ok()
     }
 
     /// Checkpoints the WAL. Best-effort.

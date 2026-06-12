@@ -5,6 +5,7 @@
 //! formats the result.
 
 pub mod analysis;
+pub mod dashboard;
 pub mod edit;
 pub mod git;
 pub mod graph;
@@ -17,7 +18,7 @@ pub mod workflow;
 
 use std::collections::HashSet;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
 use crate::tokensave::TokenSave;
@@ -100,6 +101,37 @@ pub(crate) fn truncate_response(s: &str) -> String {
             end -= 1;
         }
         format!("{}\n\n[... truncated at {} chars]", &s[..end], end)
+    }
+}
+
+/// Wraps a JSON string that exceeds `MAX_RESPONSE_CHARS` in a
+/// `{"truncated": true, "preview": "..."}` envelope so the result is
+/// always valid JSON, never a mid-structure cut.
+///
+/// Prefer this over [`truncate_response`] for handlers whose payload is
+/// always JSON (e.g. the dashboard handler) to avoid breaking consumers
+/// that parse the entire response text.
+pub(crate) fn truncated_json_envelope(formatted: &str) -> String {
+    if formatted.len() <= MAX_RESPONSE_CHARS {
+        return formatted.to_string();
+    }
+    let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
+    loop {
+        while end > 0 && !formatted.is_char_boundary(end) {
+            end -= 1;
+        }
+        let preview = &formatted[..end];
+        let envelope = json!({
+            "truncated": true,
+            "original_chars": formatted.len(),
+            "preview_chars": preview.len(),
+            "preview": preview,
+        });
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            return text;
+        }
+        end = end.saturating_sub(1024);
     }
 }
 
@@ -208,6 +240,7 @@ pub async fn handle_tool_call(
         "tokensave_fact_store" => memory::handle_fact_store(cg, args).await,
         "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
         "tokensave_memory_status" => memory::handle_memory_status(cg).await,
+        "tokensave_dashboard" => dashboard::handle_dashboard(cg, args).await,
         "tokensave_message_search" => session::handle_message_search(cg, args).await,
         "tokensave_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
         "tokensave_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
@@ -281,9 +314,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            87
+            88
         } else {
-            86
+            87
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -358,6 +391,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_fact_store"));
         assert!(tool_names.contains(&"tokensave_fact_feedback"));
         assert!(tool_names.contains(&"tokensave_memory_status"));
+        assert!(tool_names.contains(&"tokensave_dashboard"));
         assert!(tool_names.contains(&"tokensave_message_search"));
         assert!(tool_names.contains(&"tokensave_lcm_status"));
         assert!(tool_names.contains(&"tokensave_lcm_doctor"));

@@ -1,0 +1,9 @@
+{
+  "name": "graph",
+  "label": "Code Graph",
+  "description": "Search and explore the indexed TokenSave code graph.",
+  "icon": "Network",
+  "version": "0.1.0",
+  "entry": "dist/index.js",
+  "css": "dist/style.css"
+}

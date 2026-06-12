@@ -167,6 +167,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_fact_store(),
         def_fact_feedback(),
         def_memory_status(),
+        def_dashboard(),
         def_message_search(),
         def_lcm_status(),
         def_lcm_doctor(),
@@ -1358,6 +1359,32 @@ fn def_runtime() -> ToolDefinition {
     )
 }
 
+fn def_dashboard() -> ToolDefinition {
+    def(
+        "tokensave_dashboard",
+        "Dashboard",
+        "Start (or manage) the tokensave dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. Optional host/port (defaults match `tokensave dashboard`).",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "stop"],
+                    "description": "Action to perform (default: \"start\"). \"stop\" shuts down a previously started dashboard if any."
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Host address to bind (default: \"127.0.0.1\")"
+                },
+                "port": {
+                    "type": "number",
+                    "description": "Port to listen on; 0 picks an ephemeral port (default: 7341)"
+                }
+            }
+        }),
+    )
+}
+
 fn def_redundancy() -> ToolDefinition {
     def(
         "tokensave_redundancy",
@@ -1701,8 +1728,8 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Message provider to search (default: cursor).",
-                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"]
+                    "description": "Message provider to search (default: cursor). Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
+                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"]
                 },
                 "project_key": {
                     "type": "string",
@@ -2126,13 +2153,14 @@ fn def_lcm_expand_query() -> ToolDefinition {
                 "max_tokens": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Desired synthesized answer token budget."
+                    "maximum": 8192,
+                    "description": "Desired synthesized answer token budget passed through to the LCM engine. Does not affect the retrieval context size; use context_max_tokens for that."
                 },
                 "context_max_tokens": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 65536,
-                    "description": "Maximum retrieval context budget assembled before host-side synthesis."
+                    "description": "Maximum retrieval context budget (tokens of LCM material assembled before synthesis). Defaults to 32000. Independent of max_tokens, which governs the synthesis output size."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()

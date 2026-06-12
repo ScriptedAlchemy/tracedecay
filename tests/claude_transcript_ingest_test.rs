@@ -46,6 +46,13 @@ fn write_claude_transcript(
                 "id": "msg_claude_1",
                 "role": "assistant",
                 "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 340,
+                    "cache_creation_input_tokens": 500,
+                    "cache_read_input_tokens": 8000,
+                    "service_tier": "standard"
+                },
                 "content": [
                     {"type": "text", "text": "The billing pipeline regression is fixed."},
                     {"type": "tool_use", "name": "tokensave_context", "input": {}}
@@ -118,6 +125,34 @@ async fn claude_transcript_populates_searchable_messages() {
     assert!(results
         .iter()
         .any(|hit| hit.message.model.as_deref() == Some("claude-opus-4-8")));
+    // The structured ISO-8601 timestamps land as epoch seconds (2026-01-01).
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_600)));
+    assert!(results
+        .iter()
+        .any(|hit| hit.message.timestamp == Some(1_767_225_605)));
+
+    // Anthropic-style `message.usage` counters land in metadata under the
+    // keys the savings dashboard reads; non-counter fields are dropped.
+    let assistant = results
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("assistant message should be searchable");
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["usage"]["input_tokens"], 1200);
+    assert_eq!(metadata["usage"]["output_tokens"], 340);
+    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
+    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
+    assert!(metadata["usage"].get("service_tier").is_none());
+    let user = results
+        .iter()
+        .find(|hit| hit.message.role == "user")
+        .expect("user message should be searchable");
+    let user_metadata: serde_json::Value =
+        serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(user_metadata.get("usage").is_none());
 
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
@@ -189,6 +224,24 @@ async fn claude_transcript_for_other_project_is_skipped() {
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
     );
+}
+
+/// The real machine has `~/.claude` but no `projects/` dir (no Claude Code
+/// sessions); the scan must be a silent no-op, not an error.
+#[tokio::test]
+async fn claude_missing_projects_dir_is_silent_noop() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    // `~/.claude` exists but holds no `projects/` subdir, like a machine
+    // where Claude Code never ran (only backups or settings live there).
+    std::fs::create_dir_all(home.join(".claude/backups")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.sessions_upserted, 0);
+    assert_eq!(stats.messages_upserted, 0);
 }
 
 #[tokio::test]

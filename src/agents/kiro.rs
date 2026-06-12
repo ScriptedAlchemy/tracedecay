@@ -21,6 +21,7 @@ use crate::errors::{Result, TokenSaveError};
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
     safe_write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
+    UpdatePluginOutcome,
 };
 
 /// Kiro agent.
@@ -121,6 +122,19 @@ impl AgentIntegration for KiroIntegration {
         install_managed_agent(&agent_path, &ctx.tokensave_bin, &steering)?;
 
         Ok(())
+    }
+
+    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        // The managed agent file is the only generated artifact (it bakes the
+        // tokensave binary path into its hook commands). The shared MCP
+        // config, CLI default-agent setting, and steering rules are config —
+        // they stay untouched. A user-managed agent file is never rewritten.
+        let agent_path = managed_agent_path(&ctx.home);
+        if !is_owned_agent_file(&agent_path) {
+            return Ok(UpdatePluginOutcome::NotInstalled);
+        }
+        install_managed_agent(&agent_path, &ctx.tokensave_bin, &steering_path(&ctx.home))?;
+        Ok(UpdatePluginOutcome::Refreshed(vec![agent_path]))
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {

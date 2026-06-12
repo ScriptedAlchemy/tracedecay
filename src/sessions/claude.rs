@@ -17,9 +17,9 @@ use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::source::{
-    append_tool_calls_metadata, collect_files_with_ext, content_storage_text_and_tools,
-    paths_equal, stream_new_jsonl, title_from_messages, ParsedTranscript, SessionDraft,
-    StoredCursor, TranscriptSource,
+    append_tool_calls_metadata, append_usage_metadata, collect_files_with_ext,
+    content_storage_text_and_tools, paths_equal, stream_new_jsonl, title_from_messages,
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -243,5 +243,8 @@ fn message_metadata(kind: &str, message: &Value) -> Value {
     );
     metadata.insert("raw_type".to_string(), Value::String(kind.to_string()));
     append_tool_calls_metadata(&mut metadata, message);
+    // Anthropic-style per-message counters: `message.usage.{input_tokens,
+    // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.
+    append_usage_metadata(&mut metadata, &[message]);
     Value::Object(metadata)
 }

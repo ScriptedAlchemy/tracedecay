@@ -17,6 +17,10 @@ description: Recall prior decisions, durable facts, and past agent conversations
 
 - `tokensave_message_search` and `fact_store` searches are read-only. `fact_store` adds, `fact_feedback`, and `memory_status` mutate memory state; use them only for explicit user requests or ratings.
 
+## Handoff
+
+- For raw conversation recall beyond FTS — scoped/role/time-filtered grep, lossless session replay, or summary-DAG drill-down — use `tokensave:recalling-session-context`.
+
 ## Output
 
 - The relevant prior context/decisions found, with source.

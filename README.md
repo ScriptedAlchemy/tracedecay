@@ -74,8 +74,10 @@ AI coding agents waste tokens exploring codebases. Every grep, glob, and file re
 | From call graph traversal to dead code detection, atomic edit primitives, code-health metrics, test mapping, and complexity analysis. | Rust, Go, Java, Python, TypeScript, C, C++, Swift, Svelte, Astro, and 42 more including WGSL/HLSL/Metal shaders and Markdown. Three tiers (lite/medium/full) control binary size. | Claude Code, Codex CLI, Gemini CLI, Hermes, Kiro, Cursor, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo CLI, Kimi CLI, Mistral Vibe. |
 | **Multi-Branch Indexing (opt-in)** | **100% Local** | **Always Fresh** |
 | Optional per-branch databases. Cross-branch diff and search without switching your checkout. | Source code and memory content stay on your machine. No API keys or hosted database are required; the index runs on local libSQL. | On-demand staleness check on every MCP call (30 s cooldown) plus catch-up sync when the server connects. Multi-agent work is expected to use git worktrees — each agent gets its own checkout and the index diverges are merged by git, not by a file watcher. |
-| **Subprocess-Isolated Extraction** | **Code-Health Analytics** | **Atomic Edit Primitives** |
-| A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. | Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. |
+| **Local Dashboard** | **Subprocess-Isolated Extraction** | **Code-Health Analytics** |
+| Explore holographic memory (facts, entities, similarity detection) and LCM session data via a local web UI. Built-in PCA projection, duplicate detection, and curation tools. | A native crash in any tree-sitter grammar (abort, segfault, anything) kills only the worker; the pool respawns it and sync continues. Sync never dies on a malformed file. | Composite health score (0-10000), Gini inequality, file-DAG depth, design-structure matrix, risk-weighted test gaps, and session deltas. |
+| **Atomic Edit Primitives** | | |
+| Edit files without regex or shell-quoting hazards: unique-anchor `str_replace`, atomic multi-replace, AST-rewrite, anchored insert. Auto re-indexes after writes. | | |
 
 ---
 
@@ -147,17 +149,17 @@ For project-scoped setup, run from the repository root:
 tokensave install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Project-local Hermes plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. For Cursor, both global and `--local` install put the plugin in `~/.cursor/plugins/local/tokensave` and require a Cursor reload. The plugin MCP config runs `tokensave serve --path ${workspaceFolder}`, so it resolves the active workspace instead of the plugin directory and uses the workspace `.tokensave/` index rather than the legacy global Cursor MCP registration. Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tokensave.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior. The plugin hooks are:
+Local install writes only workspace files such as `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tokensave/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tokensave` executable path. Hermes installs into `~/.hermes/plugins/tokensave/` by default, or into `~/.hermes/profiles/<name>/plugins/tokensave/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. The generated context engine resolves its project from explicit host kwargs first, then a `project_root` key on the Hermes config object, then the install-time pin, and finally the session cwd. Pin a profile to one project with `tokensave install --agent hermes [--profile <name>] --project-root /abs/path` — the pin is written into the generated plugin, applies to every plugin tool call regardless of the Hermes working directory, and survives later unpinned reinstalls. Use `tokensave uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. To refresh generated plugin code after an upgrade without any config writes, run `tokensave update-plugin` (alias `update-plugins`): it rewrites only tokensave-generated artifacts — the Hermes plugin files and dashboard page for every detected profile (pin re-read from `config.yaml`, never written), the Cursor plugin bundle, and the Kiro managed agent — and leaves `config.yaml`, `mcp.json`, settings, and prompt rules byte-for-byte intact. Config-managed integrations (Claude, Codex, Gemini, …) have no generated artifacts and are reported as untouched; `tokensave reinstall` remains the command that reconciles their config entries. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tokensave install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Project-local Hermes plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. For Cursor, both global and `--local` install put the plugin in `~/.cursor/plugins/local/tokensave` and require a Cursor reload. The plugin MCP config runs `tokensave serve --path ${workspaceFolder}`, so it resolves the active workspace instead of the plugin directory and uses the workspace `.tokensave/` index rather than the legacy global Cursor MCP registration. Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tokensave.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior. The plugin hooks are:
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tokensave MCP tools and reports index freshness (suggests `tokensave init` when no `.tokensave/` exists).
-- `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried.
-- `preToolUse` (matcher `Shell|Bash|Grep|Glob|Search`) — fail-open; injects a soft `additional_context` hint before broad search tools so Cursor can switch to `tokensave_context`, `tokensave_search`, or `tokensave_files` before spending a Grep/rg call.
+- `subagentStart` — blocks research/explore subagents until tokensave MCP tools have been tried; the plugin's own `code-explorer`/`code-health-auditor`/`session-historian` agents are allow-listed.
+- `postToolUse` (unmatched — Cursor's docs enumerate no matcher value for semantic search) — fail-open; injects a soft `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor switches to `tokensave_context`, `tokensave_search`, `tokensave_outline`, or `tokensave_files`. Each hint category is emitted at most once per session (persisted in `.tokensave/tool_hints_seen.json`).
 - `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into `.tokensave/sessions.db` when `transcript_path` is present.
-- `afterFileEdit` (matcher `Write`) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
+- `afterFileEdit` (unmatched, so every Agent edit tool counts) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
 - `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tokensave branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
 - `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
 
-All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally keep Cursor `preToolUse` nonblocking: it nudges broad search toward tokensave but does not deny reads/search.
+All Cursor hooks are fail-open and only act when a `.tokensave/` index already exists. **Blind spot:** Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual/external-terminal `git checkout` and in-place branch switches are NOT seen by these hooks (`workspaceOpen` does not fire for an in-place checkout). For those, the git post-commit hook and the on-demand MCP staleness check remain the freshness mechanism. We intentionally keep the Cursor `postToolUse` hint nonblocking: it nudges broad search toward tokensave but does not deny reads/search.
 
 Manual Cursor plugin install for local development:
 
@@ -189,6 +191,8 @@ cd /path/to/your/project
 tokensave init
 ```
 
+**Non-interactive environments** (CI, containers, headless shells): `init`, `status`, and bare invocation skip prompts and use safe defaults. `init` creates the index without modifying `.gitignore` (prints a notice); `status` exits cleanly without creating an index if none exists.
+
 This creates a `.tokensave/` directory with the knowledge graph database. Initialization and sync are separate commands: `init` is a one-time opt-in per project, while `sync` only updates projects that were already initialized. This prevents the global git post-commit hook from silently creating databases in repos you never intended to index. After `init`, use `tokensave sync` to incrementally update -- only changed files are re-indexed.
 
 <details>
@@ -219,6 +223,65 @@ Appends instructions to `~/.claude/CLAUDE.md` that tell Claude to use tokensave 
 
 ---
 
+## Local Dashboard
+
+tokensave includes a local web dashboard for exploring your project's holographic memory and LCM (Lossless Context Management) session data. Everything runs locally — no external services or API keys required.
+
+### Quick Start
+
+```bash
+# Start the dashboard (serves on http://127.0.0.1:7341 by default)
+tokensave dashboard
+
+# Use a custom port or bind to a different address
+tokensave dashboard --port 8080
+tokensave dashboard --host 0.0.0.0 --port 7341
+
+# Let the OS pick a free port (prints the URL)
+tokensave dashboard --port 0
+
+# Open the dashboard in your default browser automatically
+tokensave dashboard --open
+```
+
+MCP-connected agents can also start/stop the dashboard via the `tokensave_dashboard` tool, which runs the server as a background task inside the MCP server and returns the listening URL (idempotent; pass `action: "stop"` to shut it down gracefully).
+
+### What You'll See
+
+The dashboard has four main tabs:
+
+**Holographic Memory** — Explore your project's persistent memory:
+- **Inspector**: Browse facts, entities, and memory banks with trust scores and HRR coverage
+- **Semantic Map**: 2D PCA visualization of holographic vectors showing fact relationships
+- **Association Graph**: Interactive graph of facts, entities, categories, and banks
+- **Similarity**: Detect likely duplicates and merge candidates using phase-vector cosine similarity
+- **Curation**: *(feature-flagged)* Preview and run similarity-based deduplication; applying a plan **permanently deletes** (hard-delete) the lower-trust fact in each duplicate pair. There is no archive, no restore, and no soft-delete state—deleted facts immediately disappear from all recall paths.
+
+**LCM** — Analyze Lossless Context Management session data:
+- **Overview**: Message counts, summary nodes, compression ratios, and role/source breakdowns
+- **Search**: Full-text search across raw messages and summary nodes with role/source/session filters
+- **Timeline**: Time-bucketed activity visualization (hourly or daily)
+- **Compression**: Per-session and per-node compression statistics showing token savings
+
+**Code Graph** — Interactively explore the indexed code graph:
+- **Overview**: Symbols by kind family, files by language, most-connected symbols, largest files
+- **Canvas**: Force-directed explorer with search-to-focus, progressive neighbor expansion, callers/callees, filters, and shortest-path finding between two symbols
+
+See [docs/graph-explorer.md](docs/graph-explorer.md) for the Code Graph tab's API and interaction details.
+
+**Savings & Cost** — Token usage analytics and cost tracking (under active development).
+
+### Dashboard with Hermes
+
+When using the Hermes agent, the dashboard can be accessed via the **TokenSave** tab. Two integration modes are supported:
+
+1. **Spawn mode** (default): Hermes automatically launches the dashboard server
+2. **External URL mode**: Point Hermes at an already-running dashboard
+
+See [docs/dashboard.md](docs/dashboard.md) for full documentation on environment variables, API endpoints, and troubleshooting.
+
+---
+
 ## Crash-Resilient Sync
 
 Tree-sitter grammars are compiled C/C++ code. They occasionally hit an internal assertion or otherwise terminate the process by paths that Rust panic handling cannot intercept. As of v4.3.0, every file is parsed inside a short-lived worker subprocess: if a grammar segfaults, calls `abort()`, or hits a stack overflow, only the worker dies. The pool respawns it, the offending file is logged and skipped, and `sync` keeps going.
@@ -236,6 +299,8 @@ tokensave can optionally maintain a separate code graph per git branch. When ena
 ### How it works
 
 When you track a branch, tokensave copies the nearest ancestor DB and syncs only the files that differ. This means tracking a feature branch off `main` is nearly instant -- it only parses the files you've changed.
+
+Branch databases are stored with **collision-safe names** (special characters encoded) to support any valid git branch name, including those with slashes, spaces, or Unicode characters.
 
 ### CLI commands
 
@@ -281,7 +346,7 @@ See [docs/USER-GUIDE.md](docs/USER-GUIDE.md#memory-and-fact-recall) for common m
 
 ## Savings Ledger
 
-Every MCP call writes an append-only row to `~/.tokensave/global.db` (`savings_ledger` table). Inspect with `tokensave gain`:
+Every MCP call writes an append-only row to `~/.tokensave/global.db` (`savings_ledger` table). Each row records `before` (the indexed size of every file the response references, bytes/4, as if each had been read in full) and `after` (the response size, chars/4); reported savings are `max(0, before - after)` per call. This is an estimated upper bound: chars/4 approximates real tokenization, repeated calls re-count the same files, and an agent would not always have read every referenced file raw. The in-process lifetime counters credit the same net amount per call (full-file reads credit zero). Inspect with `tokensave gain`:
 
 ```bash
 tokensave gain                    # current project, last 30 days
@@ -615,6 +680,10 @@ tokensave sync --doctor [path]     # Sync and list added/modified/removed files
 tokensave status [path]            # Show statistics + cost summary
 tokensave status [path] --json     # Show statistics (JSON output)
 tokensave status --details         # Include node-kind breakdown
+tokensave dashboard                # Start local web dashboard (default port 7341)
+tokensave dashboard --port 8080    # Start dashboard on custom port
+tokensave dashboard --port 0       # Auto-select a free port
+tokensave dashboard --open         # Open the URL in the default browser
 tokensave cost [range]             # Token cost summary (default: 7d)
 tokensave cost --by-model          # Cost grouped by model
 tokensave cost --by-task           # Cost grouped by task category
@@ -624,6 +693,7 @@ tokensave files [--filter dir] [--pattern glob] [--json]   # List indexed files
 tokensave affected <files...> [--stdin] [--depth N]        # Find affected test files
 tokensave install [--agent NAME]   # Configure agent integration
 tokensave reinstall                # Refresh settings for all installed agents
+tokensave update-plugin            # Refresh generated plugin code/assets only; never writes agent configs
 tokensave uninstall [--agent NAME] [--profile NAME] # Remove agent integration
 tokensave serve                    # Start MCP server
 tokensave monitor                  # Live TUI showing MCP calls across all projects
@@ -880,6 +950,18 @@ Large projects take longer on the first full index.
 - Subsequent runs use incremental sync and are much faster
 - Use `tokensave sync` (not `--force`) for day-to-day updates
 - Staleness is checked automatically on every MCP tool call while an agent is connected
+
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `TOKENSAVE_GLOBAL_DB` | Override the path to the global database (used for LCM session storage selection). When set, the dashboard serves this store instead of the project-local sessions.db. |
+| `TOKENSAVE_BIN` | Path to the tokensave binary (used by Hermes wrapper for spawn mode). |
+| `TOKENSAVE_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd). |
+| `TOKENSAVE_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode). |
+| `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation. |
+| `TOKENSAVE_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback). |
+| `DISABLE_TOKENSAVE` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing). |
 
 ### Disabling tokensave for specific projects
 

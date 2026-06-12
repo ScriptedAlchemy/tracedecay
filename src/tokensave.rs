@@ -53,6 +53,67 @@ fn normalize_rel_paths(paths: &[String]) -> Vec<String> {
     paths.iter().map(|p| normalize_rel_path(p)).collect()
 }
 
+/// Metadata flag recording that the *complete* extracted reference set has
+/// been persisted to `unresolved_refs`. Indexes built before refs were
+/// persisted (older `index_all`, which resolved in memory only) lack this key,
+/// so the first sync after upgrading re-extracts every file once to rebuild
+/// the full set and self-heal cross-file edges dropped on earlier edits (#1).
+const UNRESOLVED_REFS_PERSISTED_KEY: &str = "unresolved_refs_persisted";
+/// Marker value for [`UNRESOLVED_REFS_PERSISTED_KEY`]. Bump this string if a
+/// future change requires the ref set to be repopulated again on upgrade.
+const UNRESOLVED_REFS_PERSISTED_VALUE: &str = "1";
+
+/// The final `::`-separated segment of a reference name. Every resolver
+/// strategy ultimately binds a reference to a target whose short name equals
+/// this segment, so it is the key used to scope incremental re-resolution.
+fn simple_ref_name(reference_name: &str) -> &str {
+    reference_name.rsplit("::").next().unwrap_or(reference_name)
+}
+
+/// Adds a qualified name and each of its `::` suffixes to `keys`, mirroring how
+/// [`ReferenceResolver`] indexes nodes. Used to scope re-resolution to the
+/// reference spellings that could bind to a re-indexed file's symbols.
+fn add_resolver_keys(keys: &mut HashSet<String>, qualified_name: &str) {
+    keys.insert(qualified_name.to_string());
+    let mut pos = 0;
+    while let Some(idx) = qualified_name[pos..].find("::") {
+        let suffix = &qualified_name[pos + idx + 2..];
+        if !suffix.is_empty() {
+            keys.insert(suffix.to_string());
+        }
+        pos += idx + 2;
+    }
+}
+
+/// Accumulates the short names and resolver keys of `nodes` (skipping `Use`
+/// nodes, which the resolver also ignores) into the scope sets used to filter
+/// references for incremental re-resolution.
+fn accumulate_symbol_scope(
+    nodes: &[Node],
+    short: &mut HashSet<String>,
+    keys: &mut HashSet<String>,
+) {
+    for node in nodes {
+        if node.kind == NodeKind::Use {
+            continue;
+        }
+        short.insert(node.name.clone());
+        add_resolver_keys(keys, &node.qualified_name);
+    }
+}
+
+/// Builds the `(short names, resolver keys)` scope from re-indexed extraction
+/// tuples — the symbols whose (re)definition can create or drop cross-file
+/// edges during an incremental sync.
+fn reindexed_symbol_scope(extractions: &[ExtractTuple]) -> (HashSet<String>, HashSet<String>) {
+    let mut short = HashSet::new();
+    let mut keys = HashSet::new();
+    for (_path, result, _hash, _size, _mtime) in extractions {
+        accumulate_symbol_scope(&result.nodes, &mut short, &mut keys);
+    }
+    (short, keys)
+}
+
 /// Run `extractor.extract()` inside `catch_unwind` so a panic (e.g. from a
 /// malformed file or an extractor bug) skips the file instead of aborting sync.
 fn safe_extract(
@@ -606,18 +667,55 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
         }
     }
 
-    // Stale lock — reclaim it.
-    let _ = std::fs::remove_file(&lock_path);
-    let mut f = std::fs::OpenOptions::new()
+    // Stale lock — reclaim it atomically. The previous implementation removed
+    // the lockfile and then created a new one in two steps; two processes that
+    // both observed the same dead PID could each `remove_file` the other's
+    // freshly created lock and both believe they won. Instead, atomically
+    // rename the stale entry aside: rename(2) moves one specific directory
+    // entry, so at most one racer can move *this* stale file. The real claim is
+    // still the O_EXCL create below — the single source of truth for ownership.
+    let nonce = RECLAIM_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let reclaim_path = lock_path.with_file_name(format!("sync.lock.reclaim.{pid}.{nonce}"));
+    if std::fs::rename(&lock_path, &reclaim_path).is_ok() {
+        // We won the move. Guard against the race where another process
+        // replaced the stale lock with a *live* one between our staleness check
+        // and the rename: if what we moved is a live PID, put it back and
+        // report contention rather than stealing a valid lock.
+        let moved = std::fs::read_to_string(&reclaim_path).unwrap_or_default();
+        let moved_is_live = moved.trim().parse::<u32>().is_ok_and(is_pid_alive);
+        if moved_is_live {
+            let _ = std::fs::rename(&reclaim_path, &lock_path);
+            return Err(TokenSaveError::SyncLock {
+                message: "another sync is already in progress".to_string(),
+            });
+        }
+        let _ = std::fs::remove_file(&reclaim_path);
+    }
+
+    // Claim the canonical path via the same atomic O_EXCL create as the fast
+    // path. If another racer created it first (won the create after we both
+    // cleared the stale file), report contention instead of clobbering it.
+    match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&lock_path)
-        .map_err(|e| TokenSaveError::SyncLock {
+    {
+        Ok(mut f) => {
+            let _ = write!(f, "{pid}");
+            Ok(SyncLockGuard { path: lock_path })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TokenSaveError::SyncLock {
+            message: "another sync is already in progress".to_string(),
+        }),
+        Err(e) => Err(TokenSaveError::SyncLock {
             message: format!("could not reclaim lockfile: {e}"),
-        })?;
-    let _ = write!(f, "{pid}");
-    Ok(SyncLockGuard { path: lock_path })
+        }),
+    }
 }
+
+/// Per-process counter making each stale-lock reclaim sidecar path unique, so
+/// two threads in the same process never collide on the reclaim filename.
+static RECLAIM_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Returns `true` if a process with the given PID is currently running.
 fn is_pid_alive(pid: u32) -> bool {
@@ -785,6 +883,14 @@ impl TokenSave {
         // 7. Bulk-insert via prepared statements (zero SQL re-parsing)
         let phase_start = Instant::now();
         self.db.insert_nodes(&all_nodes).await?;
+        // Persist the full extracted reference set (after nodes exist for the
+        // FK). Later incremental syncs re-resolve from this set to rebuild
+        // cross-file edges into files they re-index; without it, editing a
+        // symbol deletes unchanged callers' edges (which cascade off the
+        // target node) and they can never be resolved again (#1).
+        if !all_unresolved.is_empty() {
+            self.db.insert_unresolved_refs(&all_unresolved).await?;
+        }
         self.db.insert_edges(&all_edges).await?;
         self.db.upsert_files(&file_records).await?;
 
@@ -801,6 +907,14 @@ impl TokenSave {
         self.db.set_metadata("last_sync_at", &now_str).await?;
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
+            .await?;
+        // The unresolved_refs table now holds the complete extracted set, so
+        // incremental syncs can self-heal without re-extracting everything.
+        self.db
+            .set_metadata(
+                UNRESOLVED_REFS_PERSISTED_KEY,
+                UNRESOLVED_REFS_PERSISTED_VALUE,
+            )
             .await?;
 
         let result = IndexResult {
@@ -1010,9 +1124,12 @@ impl TokenSave {
             self.db.insert_edges(&owned).await?;
         }
 
-        // Resolve references for any new/changed unresolved refs.
+        // Resolve references for any new/changed unresolved refs, scoped to the
+        // re-indexed files so we don't re-resolve the whole repo on each call.
         if !existing_file_paths.is_empty() {
-            self.resolve_unresolved_refs().await?;
+            let (short, keys) = reindexed_symbol_scope(&sync_extractions);
+            self.reresolve_after_reindex(&existing_file_paths, &short, &keys)
+                .await?;
         }
 
         self.db
@@ -1029,20 +1146,121 @@ impl TokenSave {
         Ok(())
     }
 
-    async fn resolve_unresolved_refs(&self) -> Result<()> {
-        let unresolved = self.db.get_unresolved_refs().await?;
-        if unresolved.is_empty() {
-            return Ok(());
+    /// Re-resolves only the references whose edge can appear or disappear when
+    /// `reindexed_files` are re-indexed: references originating in those files,
+    /// and references anywhere whose target symbol is (re)defined in them.
+    ///
+    /// `delete_nodes_by_file` deletes every edge incident to a re-indexed file's
+    /// nodes (source *or* target), so an unchanged caller's edge into an edited
+    /// file is dropped on every sync; re-resolving these references rebuilds it
+    /// without paying to re-resolve and re-insert the whole repository each time
+    /// (#1). Completeness: every resolver strategy binds a reference to a target
+    /// whose short name equals the reference's final `::` segment, so scoping on
+    /// the re-indexed files' symbol short names (plus their qualified
+    /// names/suffixes, and the re-indexed file paths) captures every reference
+    /// that could resolve into or out of them. Immediately after a self-heal —
+    /// which repopulates the full set — it resolves globally once instead.
+    async fn reresolve_after_reindex(
+        &self,
+        reindexed_files: &[String],
+        reindexed_short: &HashSet<String>,
+        reindexed_keys: &HashSet<String>,
+    ) -> Result<()> {
+        if self.heal_unresolved_refs_if_needed().await? {
+            return self.resolve_all_unresolved_refs().await;
         }
 
+        let unresolved = self.db.get_unresolved_refs().await?;
+        let file_set: HashSet<&str> = reindexed_files.iter().map(String::as_str).collect();
+        let scoped: Vec<UnresolvedRef> = unresolved
+            .into_iter()
+            .filter(|uref| {
+                file_set.contains(uref.file_path.as_str())
+                    || reindexed_short.contains(simple_ref_name(&uref.reference_name))
+                    || reindexed_keys.contains(uref.reference_name.as_str())
+            })
+            .collect();
+        self.resolve_refs(scoped).await
+    }
+
+    /// Global re-resolution over every persisted unresolved reference. Used
+    /// after a self-heal (which repopulates the complete set) and as the safe
+    /// fallback. The incremental path prefers
+    /// [`reresolve_after_reindex`](Self::reresolve_after_reindex), which scopes
+    /// work to the changed files.
+    async fn resolve_all_unresolved_refs(&self) -> Result<()> {
+        let unresolved = self.db.get_unresolved_refs().await?;
+        self.resolve_refs(unresolved).await
+    }
+
+    /// Resolves a batch of references against the current graph and persists the
+    /// resulting edges. Idempotent: `insert_edges` uses `INSERT OR IGNORE`, so
+    /// re-resolving an already-present edge is a no-op.
+    async fn resolve_refs(&self, refs: Vec<UnresolvedRef>) -> Result<()> {
+        if refs.is_empty() {
+            return Ok(());
+        }
         let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
         let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
-        let resolution = resolver.resolve_all(&unresolved);
+        let resolution = resolver.resolve_all(&refs);
         let edges = resolver.create_edges(&resolution.resolved);
         if !edges.is_empty() {
             self.db.insert_edges(&edges).await?;
         }
         Ok(())
+    }
+
+    /// Self-heals indexes built before unresolved refs were persisted.
+    ///
+    /// Older `index_all` resolved references in memory but never wrote them to
+    /// `unresolved_refs`, so such an index is missing the refs of every file
+    /// that has not changed since. Editing a symbol then permanently drops the
+    /// unchanged callers' edges (they cascade off the deleted target node and
+    /// can never be re-resolved). The first sync after upgrading re-extracts
+    /// every indexed file once to rebuild the complete ref set, then records
+    /// the [`UNRESOLVED_REFS_PERSISTED_KEY`] marker so this runs at most once.
+    ///
+    /// Returns `true` when it performed a heal (so the caller resolves globally
+    /// once), `false` when the index was already complete.
+    async fn heal_unresolved_refs_if_needed(&self) -> Result<bool> {
+        let already_complete = self
+            .db
+            .get_metadata(UNRESOLVED_REFS_PERSISTED_KEY)
+            .await?
+            .as_deref()
+            == Some(UNRESOLVED_REFS_PERSISTED_VALUE);
+        if already_complete {
+            return Ok(false);
+        }
+
+        let files: Vec<String> = self
+            .db
+            .get_all_files()
+            .await?
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
+        if !files.is_empty() {
+            let (extractions, _skipped) =
+                extract_files_isolated(&self.project_root, &self.registry, files);
+            let mut all_unresolved = Vec::new();
+            for (_path, result, _hash, _size, _mtime) in &extractions {
+                all_unresolved.extend_from_slice(&result.unresolved_refs);
+            }
+            // Replace the incomplete persisted set with the freshly extracted
+            // complete one. Clearing first also bounds unbounded ref growth (#4).
+            self.db.clear_unresolved_refs().await?;
+            if !all_unresolved.is_empty() {
+                self.db.insert_unresolved_refs(&all_unresolved).await?;
+            }
+        }
+        self.db
+            .set_metadata(
+                UNRESOLVED_REFS_PERSISTED_KEY,
+                UNRESOLVED_REFS_PERSISTED_VALUE,
+            )
+            .await?;
+        Ok(true)
     }
 
     /// Like `sync()`, but calls `on_progress` with a description and the
@@ -1106,6 +1324,11 @@ impl TokenSave {
         let db_files = self.db.get_all_files().await?;
         let db_map: HashMap<String, FileRecord> =
             db_files.into_iter().map(|f| (f.path.clone(), f)).collect();
+        // A sync that starts from an empty DB builds the whole index, so the
+        // persisted ref set is complete afterwards — used to skip the self-heal
+        // re-extraction on this first sync (e.g. `init()` + `sync()` without a
+        // prior `index_all`).
+        let built_from_empty = db_map.is_empty();
 
         // Partition files by comparing (mtime, size) against stored values
         let mut new_files: Vec<String> = Vec::new();
@@ -1277,25 +1500,45 @@ impl TokenSave {
             ));
         }
 
+        // If this sync built the index from an empty DB, the persisted ref set
+        // is now complete; mark it so the self-heal does not redundantly
+        // re-extract every file on this first sync (#1).
+        if built_from_empty {
+            self.db
+                .set_metadata(
+                    UNRESOLVED_REFS_PERSISTED_KEY,
+                    UNRESOLVED_REFS_PERSISTED_VALUE,
+                )
+                .await?;
+        }
+
         // Resolve references (call edges, uses, etc.) across all files.
         // This must run after all files are indexed so cross-file references
         // can find their targets.
         if !to_index.is_empty() {
             on_progress(0, 0, "resolving references");
             let phase_start = Instant::now();
-            let unresolved = self.db.get_unresolved_refs().await?;
-            if !unresolved.is_empty() {
-                let all_nodes = self.db.get_all_nodes().await.unwrap_or_default();
-                let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
-                let resolution = resolver.resolve_all(&unresolved);
-                let edges = resolver.create_edges(&resolution.resolved);
-                if !edges.is_empty() {
-                    self.db.insert_edges(&edges).await?;
-                }
-            }
+            let (short, keys) = reindexed_symbol_scope(&sync_extractions);
+            self.reresolve_after_reindex(&to_index, &short, &keys)
+                .await?;
             on_verbose(&format!(
-                "resolved {} references in {:.1}s",
-                unresolved.len(),
+                "resolved references in {:.1}s",
+                phase_start.elapsed().as_secs_f64()
+            ));
+        } else if self.heal_unresolved_refs_if_needed().await? {
+            // Eager heal: a clean repo (zero changed files) indexed before
+            // refs were persisted would otherwise never reach the heal —
+            // it only ran on the re-index path, so its dropped cross-file
+            // edges stayed missing until some file happened to change. The
+            // marker check drives the heal directly; the at-most-once
+            // guarantee lives in the marker stamped inside the heal, and a
+            // healed (or `built_from_empty`-stamped) index skips this with a
+            // single metadata read.
+            on_progress(0, 0, "resolving references");
+            let phase_start = Instant::now();
+            self.resolve_all_unresolved_refs().await?;
+            on_verbose(&format!(
+                "healed and resolved references in {:.1}s",
                 phase_start.elapsed().as_secs_f64()
             ));
         }
@@ -1553,7 +1796,11 @@ impl TokenSave {
             node_count: result.nodes.len() as u32,
         };
         self.db.upsert_file(&file_record).await?;
-        self.resolve_unresolved_refs().await?;
+        let mut short = HashSet::new();
+        let mut keys = HashSet::new();
+        accumulate_symbol_scope(&result.nodes, &mut short, &mut keys);
+        self.reresolve_after_reindex(&[file_path.to_string()], &short, &keys)
+            .await?;
 
         Ok(())
     }
@@ -2630,24 +2877,83 @@ impl TokenSave {
         &self.project_root
     }
 
+    /// Raw connection to the project database for crate-internal read layers
+    /// (the dashboard HTTP server). Honors whatever branch DB `open` selected.
+    pub(crate) fn dashboard_connection(&self) -> libsql::Connection {
+        self.db.conn().clone()
+    }
+
+    /// Filesystem path of the project's tokensave directory, for display in
+    /// dashboard payloads (mirrors the `path` field of the Hermes plugin API).
+    pub(crate) fn dashboard_db_path(&self) -> std::path::PathBuf {
+        self.db_path()
+    }
+
     fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
-        if !self.is_fallback() {
-            return Ok(());
+        if self.is_fallback() {
+            let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
+            let serving = self.serving_branch.as_deref().unwrap_or("default branch");
+            let hint = self.active_branch.as_deref().map_or_else(
+                || " Check out a tracked branch before writing.".to_string(),
+                |branch| format!(" Run `tokensave branch add {branch}` before writing."),
+            );
+
+            return Err(TokenSaveError::Config {
+                message: format!(
+                    "cannot {operation}: active branch '{active}' is served from fallback branch \
+                     '{serving}'.{hint}"
+                ),
+            });
         }
 
-        let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
-        let serving = self.serving_branch.as_deref().unwrap_or("default branch");
-        let hint = self.active_branch.as_deref().map_or_else(
-            || " Check out a tracked branch before writing.".to_string(),
-            |branch| format!(" Run `tokensave branch add {branch}` before writing."),
-        );
+        // Branch-drift guard. A long-running MCP server resolves its branch DB
+        // once at open time and caches `serving_branch`. If the working tree
+        // switched branches since then, this instance still holds the *old*
+        // branch's DB — a write would persist the new branch's files into the
+        // wrong DB. Re-read the live branch and refuse when it no longer matches
+        // the branch we serve. Single-DB mode (no branch metadata) leaves
+        // `serving_branch == None` and is exempt: there is only one DB (#2).
+        if let Some(serving) = self.serving_branch.as_deref() {
+            let live = branch::current_branch(&self.project_root);
+            if live.as_deref() != Some(serving) {
+                let live_name = live.as_deref().unwrap_or("detached HEAD");
+                return Err(TokenSaveError::Config {
+                    message: format!(
+                        "cannot {operation}: index is open for branch '{serving}' but the working \
+                         tree is now on '{live_name}'. Reopen tokensave so it serves '{live_name}' \
+                         (e.g. restart the MCP server)."
+                    ),
+                });
+            }
+        }
 
-        Err(TokenSaveError::Config {
-            message: format!(
-                "cannot {operation}: active branch '{active}' is served from fallback branch \
-                 '{serving}'.{hint}"
-            ),
-        })
+        Ok(())
+    }
+
+    /// Returns `true` when the live git branch differs from the branch this
+    /// instance resolved at open time (and branch tracking is active).
+    ///
+    /// A long-running MCP server resolves its branch DB once at open time; a
+    /// mid-session `git checkout` makes the cached DB stale. Callers detect
+    /// that here and reopen the correct branch DB via
+    /// [`reopen_for_current_branch`](Self::reopen_for_current_branch) before
+    /// serving reads or writes. The comparison is against the open-time branch
+    /// (`active_branch`), so reopening clears the drift even when the new
+    /// branch is untracked and legitimately falls back to an ancestor DB —
+    /// avoiding a reopen loop. Returns `false` in single-DB mode (no branch
+    /// metadata), where every branch maps to the same DB.
+    pub fn branch_drifted(&self) -> bool {
+        if self.serving_branch.is_none() {
+            return false;
+        }
+        branch::current_branch(&self.project_root).as_deref() != self.active_branch.as_deref()
+    }
+
+    /// Reopens this project for the live git branch, returning a fresh instance
+    /// bound to the correct branch DB. Use after [`branch_drifted`](Self::branch_drifted)
+    /// reports drift so subsequent reads and writes target the right DB.
+    pub async fn reopen_for_current_branch(&self) -> Result<Self> {
+        Self::open(&self.project_root).await
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is

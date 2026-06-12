@@ -1,11 +1,14 @@
 ---
-description: Prefer tokensave MCP tools for codebase exploration
+description: Prefer tokensave MCP tools for exploration, reading, editing, and recall
 alwaysApply: true
 ---
 
 # Prefer tokensave MCP tools
 
-- For codebase exploration, symbol lookup, call graphs, callers/callees, impact analysis, affected files, and architectural navigation, use the tokensave MCP tools first. Treat `tokensave_context` as the default starting point before Grep/Glob/search when `.tokensave/` exists.
-- Prefer tools such as `tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_files`, `tokensave_affected`, and related read-only tokensave tools before broad file reads or search.
-- For durable project/user facts, prefer `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. Use `tokensave_message_search` for project-local Cursor transcript recall when prior conversation context matters.
-- Only fall back to regular file reads, search, or shell commands when tokensave cannot answer the question or after tokensave has identified the exact files or symbols to inspect.
+- **Explore:** for codebase exploration, symbol lookup, call graphs, impact analysis, and affected files, use the tokensave MCP tools first — `tokensave_context` is the default starting point before Grep/Glob/semantic search when `.tokensave/` exists.
+- **Read:** before reading a whole file, follow `tokensave:reading-code-cheaply` — `tokensave_outline` (table of contents), `tokensave_body` (one symbol's source), or `tokensave_read` (`mode: "lines"` slices). Full-file Read is the fallback, not the default.
+- **Write:** before adding a new helper/util, run the `tokensave:finding-duplicate-logic` pre-write probe — it may already exist.
+- **Edit:** for anchored or structural source edits, follow the `tokensave:atomic-code-edits` skill (`tokensave_str_replace`, `tokensave_replace_symbol`, `tokensave_ast_grep_rewrite`, …) — the graph re-indexes itself after each write.
+- **Recall:** for prior decisions or past conversations, use `tokensave_message_search` / `tokensave_fact_store` search (skills: `tokensave:recalling-project-memory`, `tokensave:recalling-session-context`).
+- Every common workflow has a `tokensave:*` skill (searching-for-code, tracing-functions, finding-impacted-areas, running-impacted-tests, reviewing-a-diff, code-health-report, …) — reach for the matching skill before improvising.
+- Fall back to plain file reads, search, or shell only when tokensave cannot answer or has already pinpointed the exact files.

@@ -12,6 +12,8 @@ fn make_ctx(home: &Path) -> InstallContext {
         tokensave_bin: "/usr/local/bin/tokensave".to_string(),
         tool_permissions: Vec::new(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     }
 }
 

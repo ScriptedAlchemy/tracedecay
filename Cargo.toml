@@ -9,22 +9,42 @@ homepage = "https://github.com/ScriptedAlchemy/tokensave"
 readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
-exclude = [
-    ".mcpregistry_*",
-    ".rtk/",
-    ".claude/",
-    "CLAUDE.md",
-    "cache/",
-    "docs/LSP-INTEGRATION.md",
-    "docs/TOKENSAVE-ALTERNATIVES.md",
-    "docs/TOKENSAVIOR-REPORT.md",
-    "generated-illustrations/",
-    "local-only/",
-    ".worktrees/",
+# Explicit whitelist so `cargo package`/`cargo publish` ship everything the
+# build needs — including the PREBUILT dashboard dist bundles, which are
+# gitignored (an `exclude`-style package can never pick them up). Run
+# `cd dashboard && npm ci && npm run build` before packaging; build.rs fails
+# fast (or auto-builds from a git checkout) when they are missing.
+include = [
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/rust-toolchain.toml",
+    "/.cargo/config.toml",
+    "/build.rs",
+    "/src/**",
+    "/benches/**",
+    "/examples/**",
+    "/benchmarks/queries/default.toml",
+    "/cursor-plugin/**",
+    "/vendor/**",
+    "/dashboard/shell/dist/**",
+    "/dashboard/holographic/dist/**",
+    "/dashboard/lcm/dist/**",
+    "/dashboard/graph/dist/**",
+    "/dashboard/savings/dist/**",
+    "/dashboard/hermes-wrapper/manifest.json",
+    "/dashboard/hermes-wrapper/plugin_api.py",
+    "/dashboard/hermes-wrapper/src/**",
 ]
 
 [features]
-default = ["full"]
+default = ["full", "token-counting"]
+
+# Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
+# Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
+# vocab decoding is lazy (first count pays it, idle servers never do).
+# Disable for a leaner binary — cost estimation falls back to chars/4.
+token-counting = ["dep:tiktoken-rs"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
@@ -81,6 +101,7 @@ name = "tokensave"
 path = "src/main.rs"
 
 [dependencies]
+axum = "0.8"
 libsql = "0.9.30"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
@@ -122,6 +143,8 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 amari-holographic = "0.23.0"
 regex = "1.12.3"
+open = "5.3"
+tiktoken-rs = { version = "0.12", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

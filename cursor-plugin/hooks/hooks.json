@@ -7,16 +7,21 @@
         "timeout": 5
       }
     ],
+    "sessionEnd": [
+      {
+        "command": "tokensave hook-cursor-session-end",
+        "timeout": 30
+      }
+    ],
     "subagentStart": [
       {
         "command": "tokensave hook-cursor-subagent-start",
         "timeout": 5
       }
     ],
-    "preToolUse": [
+    "postToolUse": [
       {
-        "command": "tokensave hook-cursor-pre-tool-use",
-        "matcher": "Shell|Bash|Grep|Glob|Search",
+        "command": "tokensave hook-cursor-post-tool-use",
         "timeout": 5
       }
     ],
@@ -29,7 +34,6 @@
     "afterFileEdit": [
       {
         "command": "tokensave hook-cursor-after-file-edit",
-        "matcher": "Write",
         "timeout": 30
       }
     ],

@@ -25,6 +25,7 @@ description: Determine the blast radius of a change — every symbol/file that d
 ## Handoff
 
 - To run the selected tests, use the `tokensave:running-impacted-tests` skill.
+- For deeper read-only coverage questions, `tokensave:assessing-test-coverage`; for a mechanical refactor (rename, signature/field change) where impact analysis becomes an edit checklist, `tokensave:refactoring-safely`.
 
 ## Output
 

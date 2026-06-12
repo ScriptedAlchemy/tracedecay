@@ -9,15 +9,19 @@ pub mod claude;
 pub mod cline_like;
 pub mod codex;
 pub mod cursor;
+pub mod hermes;
+pub mod kiro;
 pub mod lcm;
 pub mod source;
+pub(crate) mod transcript_backfill;
 pub mod vibe;
 
-/// Ingest transcripts from every hookless, path-discoverable agent whose
-/// sessions belong to `project_root`, into the project-local `sessions.db`
-/// (`db`). This is the serve-side counterpart to the Cursor hooks: these agents
-/// register no end-of-turn hook, so their transcripts are reconciled by the
-/// startup catch-up sweep instead. Fail-open and incremental (unchanged files
+/// Ingest transcripts from every path-discoverable agent whose sessions
+/// belong to `project_root`, into the project-local `sessions.db` (`db`).
+/// Hookless agents (Claude, Codex, …) are reconciled exclusively by this
+/// startup catch-up sweep; Cursor additionally has live end-of-turn hooks,
+/// and its sweep entry shares the hooks' parse offsets so neither path ever
+/// re-ingests the other's work. Fail-open and incremental (unchanged files
 /// are a no-op).
 pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
@@ -39,7 +43,19 @@ pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> Transc
     if let Some(source) = cline_like::ClineLikeSource::kilo() {
         sources.push(Box::new(source));
     }
-    ingest_sources(db, project_root, &sources).await
+    if let Some(source) = kiro::KiroSource::new() {
+        sources.push(Box::new(source));
+    }
+    // Cursor has live hook ingestion, but transcripts written before a project
+    // was indexed (or while hooks were absent) need this catch-up path; shared
+    // parse offsets make hook-ingested files no-ops here and vice versa.
+    if let Some(source) = cursor::CursorSweepSource::new() {
+        sources.push(Box::new(source));
+    }
+    let stats = ingest_sources(db, project_root, &sources).await;
+    // Hermes stores many sessions in one SQLite file per profile, so it plugs
+    // in beside the file-based sources rather than through `TranscriptSource`.
+    stats.merge(hermes::ingest_for_project(db, project_root).await)
 }
 
 /// Drive a set of sources against `db` for `project_root`. Separated from

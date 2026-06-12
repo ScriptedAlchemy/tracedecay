@@ -403,7 +403,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
     assert!(table_exists(&conn, "nodes").await);
     assert!(table_exists(&conn, "edges").await);
     assert!(table_exists(&conn, "files").await);
@@ -434,7 +434,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 }
 
 /// migrate returns false when already at the latest version.
@@ -452,7 +452,7 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -471,7 +471,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -512,7 +512,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -548,7 +548,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -578,7 +578,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -606,7 +606,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -736,7 +736,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    assert_eq!(get_user_version(db.conn()).await, 12);
+    assert_eq!(get_user_version(db.conn()).await, 13);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -791,7 +791,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 12);
+    assert_eq!(get_user_version(db.conn()).await, 13);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -942,7 +942,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
 
     let mut rows = conn
         .query(
@@ -1112,7 +1112,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -1133,7 +1133,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
     let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 12);
+    assert_eq!(get_user_version(&conn).await, 13);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -1512,5 +1512,76 @@ async fn test_v11_backfill_preserves_duplicate_legacy_content() {
         )
         .await,
         2
+    );
+}
+
+/// Reads the column names of `table` via PRAGMA table_info.
+async fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+    let mut rows = conn
+        .query(&format!("PRAGMA table_info({table})"), ())
+        .await
+        .expect("failed to read table_info");
+    let mut names = Vec::new();
+    while let Some(row) = rows.next().await.expect("failed to iterate table_info") {
+        names.push(row.get::<String>(1).expect("failed to read column name"));
+    }
+    names
+}
+
+/// v13 archive-column cleanup must handle the odd dev-DB state where the
+/// abandoned archive revision left `superseded_by` as a generated column
+/// referencing `merged_into`: SQLite refuses to drop `merged_into` while the
+/// generated column still references it, so the migration has to drop the
+/// dependent column first. Regression test for the "no such column" failure.
+#[tokio::test]
+async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn).await.unwrap();
+
+    // Recreate the abandoned archive-revision shape, with superseded_by as a
+    // VIRTUAL generated column that references merged_into.
+    conn.execute_batch(
+        "ALTER TABLE memory_facts ADD COLUMN state TEXT NOT NULL DEFAULT 'active';
+         ALTER TABLE memory_facts ADD COLUMN archived_at INTEGER;
+         ALTER TABLE memory_facts ADD COLUMN archived_reason TEXT;
+         ALTER TABLE memory_facts ADD COLUMN merged_into INTEGER;
+         ALTER TABLE memory_facts ADD COLUMN superseded_by INTEGER
+             GENERATED ALWAYS AS (merged_into) VIRTUAL;
+         CREATE INDEX IF NOT EXISTS idx_memory_facts_state
+             ON memory_facts(state);",
+    )
+    .await
+    .expect("failed to seed archive-revision columns");
+    conn.execute(
+        "INSERT INTO memory_facts (content, category) VALUES ('Archived-era fact', 'test')",
+        (),
+    )
+    .await
+    .expect("failed to insert fixture fact");
+    set_user_version(&conn, 12).await;
+
+    let migrated = migrate(&conn)
+        .await
+        .expect("v13 must drop archive columns even with a generated-column dependency");
+    assert!(migrated, "expected migrate() to run the v13 cleanup");
+    assert_eq!(get_user_version(&conn).await, 13);
+
+    let columns = column_names(&conn, "memory_facts").await;
+    for col in [
+        "state",
+        "archived_at",
+        "archived_reason",
+        "merged_into",
+        "superseded_by",
+    ] {
+        assert!(
+            !columns.iter().any(|c| c == col),
+            "archive column `{col}` must be dropped by v13; remaining: {columns:?}"
+        );
+    }
+    // The data row survives the column drops.
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
+        1
     );
 }

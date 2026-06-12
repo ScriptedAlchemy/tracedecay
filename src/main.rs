@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
 use tokensave::tokensave::TokenSave;
@@ -41,7 +41,9 @@ impl Spinner {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let mut idx = 0usize;
             while !stp.load(std::sync::atomic::Ordering::Relaxed) {
-                let text = msg.lock().unwrap().clone();
+                let text = msg
+                    .lock()
+                    .map_or_else(|_| String::new(), |locked| locked.clone());
                 if !text.is_empty() {
                     let frame = frames[idx % frames.len()];
                     idx += 1;
@@ -66,7 +68,9 @@ impl Spinner {
     }
 
     pub(crate) fn set_message(&self, msg: &str) {
-        *self.message.lock().unwrap() = msg.to_string();
+        if let Ok(mut locked) = self.message.lock() {
+            *locked = msg.to_string();
+        }
     }
 
     pub(crate) fn done(mut self, message: &str) {
@@ -166,6 +170,29 @@ fn validate_hermes_profile_flags(
         });
     }
     Ok(())
+}
+
+/// Validates `--project-root` (Hermes plugin project pin): hermes-only and
+/// absolute, so the generated plugin never depends on the install cwd.
+fn validate_hermes_project_root_flag(
+    agent: Option<&str>,
+    project_root: &Option<String>,
+) -> tokensave::errors::Result<Option<std::path::PathBuf>> {
+    let Some(project_root) = project_root else {
+        return Ok(None);
+    };
+    if agent != Some("hermes") {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: "`--project-root` is only supported with `--agent hermes`".to_string(),
+        });
+    }
+    let path = std::path::PathBuf::from(project_root);
+    if !path.is_absolute() {
+        return Err(tokensave::errors::TokenSaveError::Config {
+            message: format!("`--project-root` must be an absolute path, got '{project_root}'"),
+        });
+    }
+    Ok(Some(path))
 }
 
 fn hermes_selected_profile_targets(
@@ -318,6 +345,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
+                            project_root: None,
+                            dashboard: true,
                         };
                         if ag.install(&ctx).is_err() {
                             all_ok = false;
@@ -498,6 +527,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let project_path = tokensave::config::resolve_path_with_discovery(path);
             let cg = if TokenSave::is_initialized(&project_path) {
                 TokenSave::open(&project_path).await?
+            } else if !io::stdin().is_terminal() {
+                eprintln!(
+                    "No TokenSave index found at '{}'. Non-interactive: skipping index creation (run `tokensave init`).",
+                    project_path.display()
+                );
+                return Ok(());
             } else {
                 eprint!(
                     "No TokenSave index found at '{}'. Create one now? [Y/n] ",
@@ -666,8 +701,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             local,
             profile,
             all_profiles,
+            project_root,
+            no_dashboard,
         } => {
             validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
+            let pinned_project_root =
+                validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
             let home = tokensave::agents::home_dir().ok_or_else(|| {
                 tokensave::errors::TokenSaveError::Config {
                     message: "could not determine home directory".to_string(),
@@ -692,6 +731,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     tokensave_bin: tokensave_bin.clone(),
                     tool_permissions: tokensave::agents::expected_tool_perms(),
                     profile: profile.clone(),
+                    project_root: pinned_project_root.clone(),
+                    dashboard: !no_dashboard,
                 };
                 let mut installed_names: Vec<String> = Vec::new();
 
@@ -705,6 +746,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: tokensave_bin.clone(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: target_profile,
+                            project_root: pinned_project_root.clone(),
+                            dashboard: !no_dashboard,
                         };
                         ag.install_local(&ctx, &project_path)?;
                         ag.post_install(Some(&project_path)).await;
@@ -757,6 +800,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
+                        project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -779,6 +824,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
+                        project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.uninstall(&ctx)?;
                     removed_names.push(ag.name().to_string());
@@ -791,6 +838,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: profile.clone(),
+                        project_root: pinned_project_root.clone(),
+                        dashboard: !no_dashboard,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -850,6 +899,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: tokensave_bin.clone(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: None,
+                        project_root: None,
+                        dashboard: true,
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
@@ -857,6 +908,72 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
                 user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
                 user_cfg.save();
+            }
+        }
+        Commands::UpdatePlugin => {
+            let home = tokensave::agents::home_dir().ok_or_else(|| {
+                tokensave::errors::TokenSaveError::Config {
+                    message: "could not determine home directory".to_string(),
+                }
+            })?;
+            let tokensave_bin = tokensave::agents::which_tokensave().ok_or_else(|| {
+                tokensave::errors::TokenSaveError::Config {
+                    message: "tokensave not found on PATH".to_string(),
+                }
+            })?;
+            eprintln!(
+                "Refreshing tokensave-generated plugin artifacts (agent configs are not touched)"
+            );
+
+            // Detection-driven, not `installed_agents`-driven: each
+            // integration decides whether generated artifacts exist on this
+            // machine, so stale tracking state can neither skip a real
+            // install nor install anywhere new.
+            let mut refreshed_any = false;
+            let mut config_only_installed: Vec<&'static str> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
+            for ag in tokensave::agents::all_integrations() {
+                let ctx = tokensave::agents::InstallContext {
+                    home: home.clone(),
+                    tokensave_bin: tokensave_bin.clone(),
+                    tool_permissions: tokensave::agents::expected_tool_perms(),
+                    profile: None,
+                    project_root: None,
+                    dashboard: true,
+                };
+                match ag.update_plugin(&ctx) {
+                    Ok(tokensave::agents::UpdatePluginOutcome::Refreshed(paths)) => {
+                        refreshed_any = true;
+                        for path in paths {
+                            eprintln!(
+                                "  \x1b[32m✔\x1b[0m {}: refreshed {}",
+                                ag.id(),
+                                path.display()
+                            );
+                        }
+                    }
+                    Ok(tokensave::agents::UpdatePluginOutcome::NotInstalled) => {}
+                    Ok(tokensave::agents::UpdatePluginOutcome::ConfigOnly) => {
+                        if ag.has_tokensave(&home) {
+                            config_only_installed.push(ag.id());
+                        }
+                    }
+                    Err(e) => failures.push(format!("{}: {e}", ag.id())),
+                }
+            }
+            if !config_only_installed.is_empty() {
+                eprintln!(
+                    "  Config-managed integrations left untouched: {} (run `tokensave reinstall` to refresh their config entries)",
+                    config_only_installed.join(", ")
+                );
+            }
+            if !refreshed_any {
+                eprintln!("No generated plugin installs detected — nothing to update.");
+            }
+            if !failures.is_empty() {
+                return Err(tokensave::errors::TokenSaveError::Config {
+                    message: format!("update-plugin failed for {}", failures.join("; ")),
+                });
             }
         }
         Commands::Uninstall {
@@ -883,6 +1000,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         tokensave_bin: String::new(),
                         tool_permissions: tokensave::agents::expected_tool_perms(),
                         profile: target_profile,
+                        project_root: None,
+                        dashboard: true,
                     };
                     ag.uninstall(&ctx)?;
                 }
@@ -896,6 +1015,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                             tokensave_bin: String::new(),
                             tool_permissions: tokensave::agents::expected_tool_perms(),
                             profile: None,
+                            project_root: None,
+                            dashboard: true,
                         };
                         ag.uninstall(&ctx).ok();
                     }
@@ -943,8 +1064,8 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 process::exit(code);
             }
         }
-        Commands::HookCursorPreToolUse => {
-            let code = tokensave::hooks::hook_cursor_pre_tool_use();
+        Commands::HookCursorPostToolUse => {
+            let code = tokensave::hooks::hook_cursor_post_tool_use();
             if code != 0 {
                 process::exit(code);
             }
@@ -963,6 +1084,12 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         }
         Commands::HookCursorSessionStart => {
             let code = tokensave::hooks::hook_cursor_session_start().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
+        Commands::HookCursorSessionEnd => {
+            let code = tokensave::hooks::hook_cursor_session_end().await;
             if code != 0 {
                 process::exit(code);
             }
@@ -1008,6 +1135,16 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             if code != 0 {
                 process::exit(code);
             }
+        }
+        Commands::Dashboard {
+            path,
+            host,
+            port,
+            open,
+        } => {
+            let project_path = tokensave::config::resolve_path_with_discovery(path);
+            let cg = serve::ensure_initialized(&project_path).await?;
+            tokensave::dashboard::run(&cg, &host, port, open).await?;
         }
         Commands::Serve { path, timings } => {
             if std::env::var("DISABLE_TOKENSAVE").as_deref() == Ok("true") {
@@ -1351,6 +1488,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
         }
+        Commands::Memory { action } => {
+            commands::handle_memory_action(action).await?;
+        }
         Commands::Wipe { all } => {
             commands::handle_wipe(all).await?;
         }
@@ -1366,6 +1506,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
         command,
         Commands::Install { .. }
             | Commands::Reinstall
+            | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
             | Commands::HookPreToolUse
@@ -1375,10 +1516,11 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookKiroPromptSubmit
             | Commands::HookKiroPostToolUse
             | Commands::HookCursorSubagentStart
-            | Commands::HookCursorPreToolUse
+            | Commands::HookCursorPostToolUse
             | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart
+            | Commands::HookCursorSessionEnd
             | Commands::HookCursorAfterShell
             | Commands::HookCursorWorkspaceOpen
             | Commands::HookCursorStop
@@ -1406,6 +1548,9 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     can blow that budget, so it must stay off `serve`.
     //   - `Install` / `Reinstall`: already perform installation — don't
     //     double-install as an implicit prelude to the explicit command.
+    //   - `UpdatePlugin`: guarantees that agent config files are not written;
+    //     an implicit silent reinstall beforehand would rewrite configs and
+    //     break that contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
     //   - `Doctor`: a read-only diagnostic — must not mutate agent configs as
@@ -1418,6 +1563,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
         Commands::Serve { .. }
             | Commands::Install { .. }
             | Commands::Reinstall
+            | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
             | Commands::Tool { .. }
@@ -1447,8 +1593,11 @@ mod startup_tests {
             local: false,
             profile: None,
             all_profiles: false,
+            project_root: None,
+            no_dashboard: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
+        assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
         assert!(should_skip_startup_maintenance(&Commands::Uninstall {
             agent: Some("kiro".to_string()),
             profile: None,
@@ -1481,8 +1630,15 @@ mod startup_tests {
             local: false,
             profile: None,
             all_profiles: false,
+            project_root: None,
+            no_dashboard: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
+        // `update-plugin` promises byte-identical configs; the implicit
+        // silent-reinstall prelude would rewrite them.
+        assert!(should_skip_agent_install_maintenance(
+            &Commands::UpdatePlugin
+        ));
         assert!(should_skip_agent_install_maintenance(&Commands::Tool {
             project: None,
             name: Some("message_search".to_string()),
