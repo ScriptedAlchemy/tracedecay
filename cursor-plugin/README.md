@@ -28,7 +28,7 @@ Hook commands derive the active project from Cursor's event payload /
 
 Slash workflows ship as skills with `disable-model-invocation: true`
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-review-diff`, ...) - Cursor's Commands surface was absorbed into
+`/tracedecay-curate-memory`, `/tracedecay-review-diff`, …) — Cursor's Commands surface was absorbed into
 Skills, so this bundle no longer ships a `commands/` directory. Their slugs
 keep the `tracedecay-` prefix so typing `/tracedecay` lists every command, and
 the suffix is a verb phrase so the human-facing title (Cursor displays the
@@ -107,6 +107,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_recursion",
     "tracedecay:tracedecay_redundancy",
     "tracedecay:tracedecay_rename_preview",
+    "tracedecay:tracedecay_retrieve",
     "tracedecay:tracedecay_runtime",
     "tracedecay:tracedecay_search",
     "tracedecay:tracedecay_signature",
@@ -133,7 +134,10 @@ Notes:
 - Two borderline entries: `tracedecay_diagnostics` runs your toolchain
   (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.
-- Do **not** use `tracedecay:*` - it would auto-approve the editing tools too.
+- `tracedecay_retrieve` only dereferences the required `handle` from a
+  project-local truncated MCP response. Use it when omitted details are needed;
+  it restores that exact cached response and does not re-run the source tool.
+- Do **not** use `tracedecay:*` — it would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.
 

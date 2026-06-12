@@ -1,6 +1,6 @@
 ---
 name: tracking-session-health
-description: Bracket a work session with a code-health baseline and a final per-dimension delta to prove whether changes improved or degraded the codebase. Use for "did my refactor make things better", "track quality while I work", "show a before/after health delta", or wrapping a cleanup/refactor session with evidence.
+description: Use when bracketing refactor or cleanup work with a code-health baseline and final per-dimension delta to prove whether quality improved or degraded.
 ---
 
 # Tracking session health

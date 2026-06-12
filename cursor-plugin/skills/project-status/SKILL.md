@@ -1,6 +1,6 @@
 ---
 name: project-status
-description: Report TraceDecay index status, query config files, list outstanding TODO/FIXME markers, and triage MCP server runtime usage. Use for "tracedecay status", "what version is dependency X", "what TODOs are left", "is the index fresh", or diagnosing TraceDecay CPU/RAM.
+description: Use when checking tracedecay index freshness, project file/config status, TODO/FIXME markers, MCP runtime CPU/RAM, dashboard URL, or memory subsystem counts.
 ---
 
 # Project status & config
@@ -19,7 +19,7 @@ Cheap, read-only surface for the index, project config, work markers, and server
 ## Guardrails
 
 - `tracedecay_status`, `tracedecay_config`, `tracedecay_todos`, `tracedecay_runtime` are read-only. `tracedecay_dashboard` starts/stops a local server and `tracedecay_memory_status` repairs/normalizes memory state — use them only when the user wants the dashboard or memory counts.
-- For deeper structural/quality questions hand off to `tracedecay:architecture-overview` or `tracedecay:code-health-report`; for memory recall, `tracedecay:recalling-project-memory`; for past-session recall, `tracedecay:recalling-session-context`.
+- For deeper structural/quality questions hand off to `tracedecay:architecture-overview` or `tracedecay:code-health-report`; for memory recall, `tracedecay:recalling-project-memory`; for memory curation/update/delete, `tracedecay:curating-project-memory`; for past-session recall, `tracedecay:recalling-session-context`.
 
 ## Output
 

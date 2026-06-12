@@ -1,6 +1,6 @@
 ---
 name: tracing-functions
-description: Trace call relationships — who calls a function, what it calls, the shortest path between two symbols, and all references to a symbol. Use for "who calls X", "what does X call", "is X used anywhere", call chains, and dynamic dispatch.
+description: Use when tracing call relationships: who calls a function, what it calls, shortest call paths between symbols, references for rename prep, recursion, hubs, or dynamic dispatch.
 ---
 
 # Tracing functions
@@ -18,6 +18,7 @@ description: Trace call relationships — who calls a function, what it calls, t
 ## Guardrails
 
 - Read-only and parallel-safe. Keep `max_depth` small (1–2) first; widen only when the chain is not yet clear. `tracedecay_rename_preview` only previews references — it does not rename.
+- If a trace response is truncated and includes a `handle`, narrow depth or target set first when possible; call `tracedecay_retrieve` with that `handle` when the omitted chain details are needed.
 
 ## Output
 

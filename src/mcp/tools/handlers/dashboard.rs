@@ -11,7 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::truncated_json_envelope;
+use super::truncated_json_envelope_with_handle;
 
 use crate::dashboard::{bind_dashboard, build_state, router, DEFAULT_PORT};
 
@@ -28,6 +28,19 @@ static DASHBOARD_MANAGER: std::sync::OnceLock<tokio::sync::Mutex<Option<RunningD
 
 fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
+        return Ok(host);
+    }
+
+    Err(TraceDecayError::Config {
+        message: format!(
+            "tracedecay_dashboard host is loopback-only; use 127.0.0.1, localhost, or ::1 (got {host:?})"
+        ),
+    })
 }
 
 /// Handles `tracedecay_dashboard` tool calls.
@@ -50,7 +63,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                    "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })
@@ -59,6 +72,8 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
             let host = args
                 .get("host")
                 .and_then(|v| v.as_str())
+                .map(validate_mcp_dashboard_host)
+                .transpose()?
                 .unwrap_or("127.0.0.1")
                 .to_string();
             let port = args
@@ -79,7 +94,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
                 .unwrap_or_default();
                 return Ok(ToolResult {
                     value: json!({
-                        "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                     }),
                     touched_files: vec![],
                 });
@@ -120,7 +135,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
 
             Ok(ToolResult {
                 value: json!({
-                    "content": [{ "type": "text", "text": truncated_json_envelope(&formatted) }]
+                        "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(Some(cg.project_root()), &formatted) }]
                 }),
                 touched_files: vec![],
             })

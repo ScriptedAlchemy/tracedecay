@@ -344,6 +344,8 @@ Trust scoring is fact-level, not just text-level. The store combines source meta
 
 See [docs/USER-GUIDE.md](docs/USER-GUIDE.md#memory-and-fact-recall) for common memory payloads. For the exact current input schema, inspect the live MCP descriptors for `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
+Memory hygiene is covered by a behavioral eval suite (no-pollution, secret rejection, supersede-without-dup, multi-turn continuity, curation conservatism): a deterministic layer runs in the normal test suite, and a cost-gated real-agent layer drives Hermes or `cursor-agent` against throwaway fixtures. See [docs/memory-evals.md](docs/memory-evals.md).
+
 ---
 
 ## Savings Ledger
@@ -469,6 +471,16 @@ Different from the criterion bench above: criterion measures per-iteration laten
 ## 70+ MCP Tools
 
 The server exposes more than 70 tools (one fewer when the optional `ast-grep` binary is not on `PATH`); the tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory tools also mutate local `.tracedecay` state and are annotated as non-read-only. The three core tools (`tracedecay_context`, `tracedecay_search`, `tracedecay_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
+
+### Recovering Truncated Responses
+
+Large JSON MCP responses may return a valid envelope with `truncated: true`, a
+`preview`, and a local response `handle`. Prefer narrowing the original query
+first when that answers the task. If the omitted details are needed, call
+`tracedecay_retrieve` with the required `handle` argument from the envelope; this
+returns the exact cached original response without re-running the source tool.
+Handles are stored locally under the project `.tracedecay/` directory, expire
+automatically after their TTL, and cache the response text in plaintext.
 
 ### Discovery
 

@@ -236,7 +236,7 @@ Memory maintenance tools:
 - **Preview**: Dry-run analysis showing proposed actions (persisted to `.tracedecay/dashboard/curation_preview.json` so it survives server restarts)
 - **Run Curation**: Execute deduplication (**permanently hard-DELETES** the lower-trust fact in each duplicate pair)
 
-Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap).
+Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap). Rule-based hygiene signals are emitted separately as `hygiene_candidates`; they are review evidence for a human or external LLM curator, not deterministic apply operations.
 
 **Deletion is permanent — there is no archive, no restore, and no soft-delete state.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tracedecay_fact_store` recall. The winner fact in a merge operation may have its content rewritten and HRR vector re-encoded.
 
@@ -578,6 +578,8 @@ complete row — plus linked entities — from here. Returns `404` with a
     "tags": "[\"lcm\",\"ux\"]",
     "trust_score": 0.76,
     "retrieval_count": 3,
+    "access_count": 1,
+    "last_recalled_at": 1700000150,
     "helpful_count": 2,
     "created_at": 1700000020,
     "updated_at": 1700000120,
@@ -589,6 +591,12 @@ complete row — plus linked entities — from here. Returns `404` with a
   "error": ""
 }
 ```
+
+`access_count` / `last_recalled_at` track only recall-search returns
+(`fact_store` `action: "search"` results actually handed to a caller);
+`retrieval_count` also counts probe/list/related/reason scans. Access
+frequency deliberately does NOT feed recall ranking (rich-get-richer risk) —
+it is a curation signal (delete-reluctance for actively used facts).
 
 #### `GET /api/plugins/holographic/projection`
 
@@ -714,6 +722,24 @@ memory-bank dirty marking).
       "tier": "duplicate"
     }
   ],
+  "hygiene_candidates": {
+    "secret_like": [ /* review_required candidates, tier "secret_like" */ ],
+    "transient": [ /* review_required candidates, tier "transient" */ ],
+    "supersession": [
+      {
+        "recommended_op": "delete",
+        "fact_id": 4,
+        "superseded_by": 7,
+        "similarity": 0.8123,
+        "reason": "Possible supersession: negation/state-change cue ...",
+        "content": "Fact content preview...",
+        "status": "candidate",
+        "review_required": true,
+        "access_count": 2,
+        "tier": "supersession"
+      }
+    ]
+  },
   "counts": { "delete": 1 },
   "coverage": {
     "scanned": 500,
@@ -724,6 +750,19 @@ memory-bank dirty marking).
   "mode": "similarity_dedup"
 }
 ```
+
+`hygiene_candidates` is the deterministic rule-based evidence set
+(secret-like content, transient run output, negation-cue supersession pairs).
+These entries are **never auto-applied** — `dry_run=false` only executes
+`actions` (dedup deletes); a reviewer (human, the `tracedecay memory curate
+--llm` two-phase flow, or the Hermes LLM wrapper) confirms hygiene candidates by
+submitting explicit delete/merge ops through `POST /curate/apply`. Low trust by
+itself is not a delete signal; trust only helps calibrate candidate confidence.
+The dedup planner also applies access-count delete-reluctance: the
+higher-access fact of a pair is never auto-proposed as the loser unless the
+similarity is extreme (≥ 0.98). Helpful feedback raises trust, and recall access
+updates `access_count`/`last_recalled_at`, giving useful facts protection during
+curation review.
 
 **Response (dry_run=false):**
 Same structure with `applied_counts` showing what was actually deleted and
@@ -777,6 +816,33 @@ only fails wholesale (400) on a malformed body.
 
 Failed ops carry `"status": "error"` and an `"error"` message (e.g.
 `fact 99999 not found`, `unsupported op 'x'`, `winner fact 42 not found`).
+
+#### `GET /api/plugins/holographic/oplog`
+
+Recent memory operations, newest first, from `memory_oplog` — the append-only
+audit written by the store mutation paths (`add` / `update` / `remove` /
+`feedback`, plus `reject_secret_like` for blocked writes) and curation applies
+(`curate_apply`). `detail` never carries fact content beyond what the op
+needs; deletes record a `content_hash`, not the content (the hard-delete
+stance is preserved).
+
+**Query Parameters:**
+- `limit` — Max rows (default: 50, max: 300)
+
+**Response:**
+```json
+{
+  "events": [
+    { "id": 12, "ts": 1765000000, "op": "curate_apply", "fact_id": null,
+      "detail": { "mode": "ops", "deleted": 1, "merged": 0, "errors": 0 } },
+    { "id": 11, "ts": 1765000000, "op": "remove", "fact_id": 103,
+      "detail": { "category": "tool", "content_hash": "9f2c..." } }
+  ],
+  "count": 2,
+  "limit": 50,
+  "error": ""
+}
+```
 
 ---
 

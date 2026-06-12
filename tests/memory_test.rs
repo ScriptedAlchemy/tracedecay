@@ -8,7 +8,7 @@ use tracedecay::memory::trust::{
     apply_feedback, clamp_trust, temporal_decay, trust_bucket, trust_distribution, DEFAULT_TRUST,
 };
 use tracedecay::memory::types::{
-    AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
+    AddFactDiffKind, AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
     SearchFactsRequest, UpdateFactRequest,
 };
 use tracedecay::tracedecay::TraceDecay;
@@ -171,11 +171,13 @@ fn core_memory_types_use_stable_json_strings() {
         trust_score: 0.7,
         source: Some("test".to_string()),
         retrieval_count: 3,
+        access_count: 2,
         helpful_count: 1,
         unhelpful_count: 0,
         created_at: 1,
         updated_at: 2,
         last_retrieved_at: Some(3),
+        last_recalled_at: Some(5),
         last_feedback_at: Some(4),
         metadata: serde_json::json!({"scope": "core"}),
     };
@@ -372,6 +374,8 @@ async fn memory_store_marks_and_rebuilds_dirty_banks() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     assert_eq!(dirty_bank_names(&db).await, vec!["all", "project"]);
 
@@ -427,6 +431,8 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     let before = dirty_bank_updated_at(&db, "project").await;
 
@@ -460,6 +466,8 @@ async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     let first = dirty_bank_updated_at(&db, "project").await;
 
@@ -469,6 +477,8 @@ async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     let second = dirty_bank_updated_at(&db, "project").await;
 
@@ -497,8 +507,15 @@ async fn memory_store_add_list_get_and_deduplicates_by_content() {
     let first = store
         .add_fact(request.clone(), DEFAULT_TRUST)
         .await
+        .unwrap()
+        .fact
         .unwrap();
-    let duplicate = store.add_fact(request, DEFAULT_TRUST).await.unwrap();
+    let duplicate = store
+        .add_fact(request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     assert_eq!(duplicate.fact_id, first.fact_id);
     assert_eq!(first.tags, vec!["storage"]);
@@ -528,7 +545,12 @@ async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
 
     let mut first_request = fact_request(content, MemoryCategory::Project, 0.8);
     first_request.entities = vec!["FirstEntity".to_string()];
-    let first = store.add_fact(first_request, DEFAULT_TRUST).await.unwrap();
+    let first = store
+        .add_fact(first_request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
     assert_eq!(
         fact_hrr_vector(&db, first.fact_id).await,
         encoder.encode_fact(content, &["FirstEntity".to_string()])
@@ -539,6 +561,8 @@ async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
     let duplicate = store
         .add_fact(duplicate_request, DEFAULT_TRUST)
         .await
+        .unwrap()
+        .fact
         .unwrap();
 
     assert_eq!(duplicate.fact_id, first.fact_id);
@@ -565,7 +589,12 @@ async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields()
     );
     request.entities = vec!["Manual Entity".to_string(), "Project Phoenix".to_string()];
 
-    let fact = store.add_fact(request, DEFAULT_TRUST).await.unwrap();
+    let fact = store
+        .add_fact(request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
     assert!(fact.entities.contains(&"Manual Entity".to_string()));
     assert!(fact.entities.contains(&"Project Phoenix".to_string()));
     assert!(fact.entities.contains(&"src/memory/store.rs".to_string()));
@@ -596,6 +625,66 @@ async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields()
 }
 
 #[tokio::test]
+async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let fact = store
+        .add_fact(
+            fact_request(
+                "Store only non-secret project preferences",
+                MemoryCategory::Project,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+
+    let attempted =
+        "Do not persist this api_key=sk-test-742913 value in project memory".to_string();
+    let err = store
+        .update_fact(UpdateFactRequest {
+            fact_id: fact.fact_id,
+            content: Some(attempted.clone()),
+            category: None,
+            tags: None,
+            entities: None,
+            trust: None,
+            source: None,
+            metadata: None,
+        })
+        .await
+        .expect_err("secret-like update should be rejected");
+    let err = err.to_string();
+    assert!(err.contains("rejected_secret_like"), "{err}");
+
+    let unchanged = store.get_fact(fact.fact_id).await.unwrap().unwrap();
+    assert_eq!(unchanged.content, fact.content);
+    assert!(!unchanged.content.contains("sk-test-742913"));
+
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("reject oplog row");
+    assert_eq!(row.get::<String>(0).unwrap(), "reject_secret_like");
+    assert_eq!(row.get::<i64>(1).unwrap(), fact.fact_id);
+    let detail = row.get::<String>(2).unwrap();
+    assert!(detail.contains("content_hash"), "{detail}");
+    assert!(detail.contains("reason"), "{detail}");
+    assert!(
+        !detail.contains("sk-test-742913") && !detail.contains("api_key"),
+        "reject oplog must not leak attempted secret content: {detail}"
+    );
+}
+
+#[tokio::test]
 async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());
@@ -610,6 +699,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     let fact_without_vector = store
         .add_fact(
@@ -621,6 +712,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
 
     let mut rows = db
@@ -699,6 +792,8 @@ async fn memory_store_records_feedback_audit_and_retrieval_counts() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     let other_fact = store
         .add_fact(
@@ -710,6 +805,8 @@ async fn memory_store_records_feedback_audit_and_retrieval_counts() {
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
 
     store
@@ -782,6 +879,8 @@ async fn memory_status_reports_exact_bucket_and_feedback_counts() {
                 metadata: serde_json::json!({}),
             })
             .await
+            .unwrap()
+            .fact
             .unwrap();
         fact_ids.push(fact.fact_id);
     }
@@ -837,6 +936,8 @@ async fn memory_status_repairs_missing_vectors_and_reports_stats() {
             metadata: serde_json::json!({}),
         })
         .await
+        .unwrap()
+        .fact
         .unwrap();
     clear_fact_vector(&cg, fact.fact_id).await;
 
@@ -861,6 +962,8 @@ async fn memory_status_repair_preserves_fact_updated_at() {
             metadata: serde_json::json!({}),
         })
         .await
+        .unwrap()
+        .fact
         .unwrap();
     clear_fact_vector(&cg, fact.fact_id).await;
     set_fact_updated_at(&cg, fact.fact_id, 1000).await;
@@ -892,6 +995,8 @@ async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() 
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
     store
         .add_fact(
@@ -903,6 +1008,8 @@ async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() 
             DEFAULT_TRUST,
         )
         .await
+        .unwrap()
+        .fact
         .unwrap();
 
     let results = retriever
@@ -937,7 +1044,12 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
         0.9,
     );
     matching.entities = vec!["EntityNeedle".to_string()];
-    store.add_fact(matching, DEFAULT_TRUST).await.unwrap();
+    store
+        .add_fact(matching, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     for i in 0..125 {
         let mut unrelated = fact_request(
@@ -946,7 +1058,12 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
             0.9,
         );
         unrelated.entities = vec![format!("UnrelatedEntity{i}")];
-        store.add_fact(unrelated, DEFAULT_TRUST).await.unwrap();
+        store
+            .add_fact(unrelated, DEFAULT_TRUST)
+            .await
+            .unwrap()
+            .fact
+            .unwrap();
     }
 
     let results = retriever
@@ -974,7 +1091,12 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
         0.8,
     );
     first.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
-    store.add_fact(first, DEFAULT_TRUST).await.unwrap();
+    store
+        .add_fact(first, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     let mut second = fact_request(
         "Project Phoenix uses HRR banks",
@@ -982,7 +1104,12 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
         0.8,
     );
     second.entities = vec!["Project Phoenix".to_string(), "HRR banks".to_string()];
-    store.add_fact(second, DEFAULT_TRUST).await.unwrap();
+    store
+        .add_fact(second, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     let mut third = fact_request(
         "Do not use SQLite memory for Project Phoenix",
@@ -990,7 +1117,12 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
         0.8,
     );
     third.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
-    store.add_fact(third, DEFAULT_TRUST).await.unwrap();
+    store
+        .add_fact(third, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     let probe = retriever
         .probe("Project Phoenix", None, Some(0.0), 10)
@@ -1037,7 +1169,12 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         0.9,
     );
     matching.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
-    store.add_fact(matching, DEFAULT_TRUST).await.unwrap();
+    store
+        .add_fact(matching, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
 
     for i in 0..125 {
         let mut unrelated = fact_request(
@@ -1046,7 +1183,12 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
             0.9,
         );
         unrelated.entities = vec![format!("Unrelated {i}")];
-        store.add_fact(unrelated, DEFAULT_TRUST).await.unwrap();
+        store
+            .add_fact(unrelated, DEFAULT_TRUST)
+            .await
+            .unwrap()
+            .fact
+            .unwrap();
     }
 
     let results = retriever
@@ -1082,7 +1224,12 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
         0.8,
     );
     request.entities = vec!["CascadeEntity".to_string()];
-    let fact = store.add_fact(request, DEFAULT_TRUST).await.unwrap();
+    let fact = store
+        .add_fact(request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
     store
         .record_feedback_event(FeedbackRequest {
             fact_id: fact.fact_id,
@@ -1131,5 +1278,364 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
     assert!(
         dirty_bank_names(&db).await.contains(&"project".to_string()),
         "the deleted fact's bank must be marked dirty for rebuild"
+    );
+}
+
+async fn scalar_count(db: &Database, sql: &str) -> i64 {
+    let mut rows = db.conn().query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[tokio::test]
+async fn search_facts_bump_access_count_only_for_returned_results() {
+    let (_tmp, cg) = make_project().await;
+    let outcome = cg
+        .add_fact(AddFactRequest {
+            content: "Phoenix cache invalidation must be explicit".to_string(),
+            category: MemoryCategory::Project,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: vec!["PhoenixCache".to_string()],
+            trust: Some(0.9),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let fact = outcome.fact.expect("fact should be stored");
+    assert_eq!(fact.access_count, 0);
+    assert!(fact.last_recalled_at.is_none());
+
+    // Probe and list scans bump retrieval_count but never access_count.
+    cg.probe_entity("PhoenixCache", None, Some(0.0), 10)
+        .await
+        .unwrap();
+    cg.list_facts(None, Some(0.0), 10).await.unwrap();
+    let after_probe = cg.get_fact(fact.fact_id).await.unwrap().unwrap();
+    assert!(after_probe.retrieval_count >= 2);
+    assert_eq!(
+        after_probe.access_count, 0,
+        "probe/list scans must not bump access_count"
+    );
+    assert!(after_probe.last_recalled_at.is_none());
+
+    // A recall search that RETURNS the fact bumps both access fields.
+    let results = cg
+        .search_facts(SearchFactsRequest {
+            query: "phoenix cache invalidation".to_string(),
+            category: None,
+            limit: Some(5),
+            min_trust: Some(0.0),
+            include_why: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.fact.fact_id == fact.fact_id),
+        "search should return the seeded fact"
+    );
+    let after_search = cg.get_fact(fact.fact_id).await.unwrap().unwrap();
+    assert_eq!(after_search.access_count, 1);
+    assert!(after_search.last_recalled_at.is_some());
+
+    // A search whose results do NOT include the fact leaves it untouched.
+    cg.search_facts(SearchFactsRequest {
+        query: "completely unrelated quasar telemetry".to_string(),
+        category: None,
+        limit: Some(5),
+        min_trust: Some(0.0),
+        include_why: false,
+    })
+    .await
+    .unwrap();
+    let after_miss = cg.get_fact(fact.fact_id).await.unwrap().unwrap();
+    assert_eq!(
+        after_miss.access_count, 1,
+        "non-returning searches must not bump access_count"
+    );
+}
+
+#[tokio::test]
+async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let encoder = HolographicEncoder;
+    let retriever = FactRetriever::new(db.conn());
+    let mut original_request = fact_request(
+        "Use pnpm for installs in this repository",
+        MemoryCategory::Tool,
+        0.8,
+    );
+    original_request.entities = vec!["OldPackageManager".to_string()];
+    let original = store
+        .add_fact(original_request, DEFAULT_TRUST)
+        .await
+        .unwrap();
+    assert_eq!(original.diff.diff, AddFactDiffKind::Add);
+    let original_fact = original.fact.expect("original fact should be stored");
+    let original_vector = fact_hrr_vector(&db, original_fact.fact_id).await;
+    store.rebuild_dirty_banks().await.unwrap();
+    assert!(
+        dirty_bank_names(&db).await.is_empty(),
+        "test setup should start with clean banks before the duplicate add"
+    );
+
+    // Case/whitespace variant: near-exact AND content-normalized equivalent,
+    // so the insert is skipped and the existing fact is returned.
+    let mut normalized_duplicate = fact_request(
+        "USE  PNPM   for installs in this Repository",
+        MemoryCategory::Tool,
+        0.8,
+    );
+    normalized_duplicate.entities = vec!["NewPackageManager".to_string()];
+    normalized_duplicate.metadata = serde_json::json!({"source": "normalized"});
+    let skipped = store
+        .add_fact(normalized_duplicate, DEFAULT_TRUST)
+        .await
+        .unwrap();
+    assert_eq!(skipped.diff.diff, AddFactDiffKind::NearDuplicate);
+    assert_eq!(skipped.diff.closest_fact_id, Some(original_fact.fact_id));
+    let skipped_fact = skipped.fact.expect("existing fact returned");
+    assert_eq!(skipped_fact.fact_id, original_fact.fact_id);
+    assert!(skipped_fact
+        .entities
+        .contains(&"NewPackageManager".to_string()));
+    assert!(skipped_fact
+        .entities
+        .contains(&"OldPackageManager".to_string()));
+    assert_eq!(
+        skipped_fact.metadata,
+        serde_json::json!({"source": "normalized"})
+    );
+    assert_eq!(
+        scalar_count(&db, "SELECT COUNT(*) FROM memory_facts").await,
+        1,
+        "normalized-equivalent add must not insert a second row"
+    );
+    let updated_vector = fact_hrr_vector(&db, original_fact.fact_id).await;
+    assert_ne!(
+        updated_vector, original_vector,
+        "normalized-equivalent entity merge must refresh the stored vector"
+    );
+    assert_eq!(
+        updated_vector,
+        encoder.encode_fact(&skipped_fact.content, &skipped_fact.entities)
+    );
+    assert!(
+        dirty_bank_names(&db).await.contains(&"tool".to_string()),
+        "normalized-equivalent vector refresh must dirty its memory bank"
+    );
+
+    let probe_results = retriever
+        .probe(
+            "NewPackageManager",
+            Some(MemoryCategory::Tool),
+            Some(0.3),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        probe_results
+            .iter()
+            .any(|result| result.fact.fact_id == original_fact.fact_id),
+        "probe by newly merged entity must find the existing fact"
+    );
+    let search_results = retriever
+        .search(
+            "NewPackageManager",
+            Some(MemoryCategory::Tool),
+            Some(0.3),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        search_results
+            .iter()
+            .any(|result| result.fact.fact_id == original_fact.fact_id),
+        "search by newly merged entity must find the existing fact"
+    );
+
+    // Near-exact but NOT normalized-equivalent (trailing punctuation):
+    // conservative path inserts anyway and only reports.
+    let reported = store
+        .add_fact(
+            fact_request(
+                "Use pnpm for installs in this repository.",
+                MemoryCategory::Tool,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reported.diff.diff, AddFactDiffKind::NearDuplicate);
+    assert_eq!(reported.diff.closest_fact_id, Some(original_fact.fact_id));
+    let reported_fact = reported.fact.expect("near-duplicate is still stored");
+    assert_ne!(reported_fact.fact_id, original_fact.fact_id);
+    assert_eq!(
+        scalar_count(&db, "SELECT COUNT(*) FROM memory_facts").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn add_fact_flags_possible_conflict_on_negation_cues() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let original = store
+        .add_fact(
+            fact_request(
+                "The project uses Redis for caching sessions and tokens",
+                MemoryCategory::Decision,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    let original_fact = original.fact.expect("original fact should be stored");
+
+    let conflicted = store
+        .add_fact(
+            fact_request(
+                "The project no longer uses Redis for caching sessions and tokens",
+                MemoryCategory::Decision,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflicted.diff.diff, AddFactDiffKind::PossibleConflict);
+    assert_eq!(conflicted.diff.closest_fact_id, Some(original_fact.fact_id));
+    assert!(conflicted
+        .diff
+        .reason
+        .as_deref()
+        .unwrap_or("")
+        .contains("supersession"));
+    // Conflicts are reported, never auto-resolved: both facts remain stored.
+    assert!(conflicted.fact.is_some());
+    assert_eq!(
+        scalar_count(&db, "SELECT COUNT(*) FROM memory_facts").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn add_fact_rejects_secret_like_content_without_storing() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let rejected = store
+        .add_fact(
+            fact_request(
+                "Staging deploy uses api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH for auth",
+                MemoryCategory::Tool,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.diff.diff, AddFactDiffKind::RejectedSecretLike);
+    assert!(rejected.fact.is_none(), "secret-like adds must not store");
+    assert_eq!(
+        scalar_count(&db, "SELECT COUNT(*) FROM memory_facts").await,
+        0
+    );
+
+    // The rejection is auditable via a content-hash-only oplog row.
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT op, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("oplog row expected");
+    assert_eq!(row.get::<String>(0).unwrap(), "reject_secret_like");
+    let detail = row.get::<String>(1).unwrap();
+    assert!(detail.contains("content_hash"));
+    assert!(
+        !detail.contains("Zx9mQ4tR7wLp2NvK8sBd1FgH"),
+        "the oplog must never carry the rejected secret content"
+    );
+}
+
+#[tokio::test]
+async fn memory_oplog_records_mutations_with_hashes_not_content() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let fact = store
+        .add_fact(
+            fact_request(
+                "Durable decision: keep curation hard-delete only",
+                MemoryCategory::Decision,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    store
+        .update_fact(UpdateFactRequest {
+            fact_id: fact.fact_id,
+            content: Some("Durable decision: curation stays hard-delete only".to_string()),
+            category: None,
+            tags: None,
+            entities: None,
+            trust: None,
+            source: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    store
+        .record_feedback_event(FeedbackRequest {
+            fact_id: fact.fact_id,
+            action: FeedbackAction::Helpful,
+            source: None,
+            note: None,
+        })
+        .await
+        .unwrap();
+    assert!(store.remove_fact(fact.fact_id).await.unwrap());
+
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut ops = Vec::new();
+    let mut remove_detail = String::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        let op = row.get::<String>(0).unwrap();
+        assert_eq!(row.get::<Option<i64>>(1).unwrap(), Some(fact.fact_id));
+        if op == "remove" {
+            remove_detail = row.get::<String>(2).unwrap();
+        }
+        ops.push(op);
+    }
+    assert_eq!(ops, vec!["add", "update", "feedback", "remove"]);
+    assert!(
+        remove_detail.contains("content_hash"),
+        "remove rows must record a content hash: {remove_detail}"
+    );
+    assert!(
+        !remove_detail.contains("hard-delete only"),
+        "remove rows must not carry the deleted content: {remove_detail}"
     );
 }

@@ -8,25 +8,20 @@
 //! The sidecar is a best-effort cache:
 //! load/save/clear failures are logged and never fail an API request, and
 //! the API shape of `GET /curation/preview` is unchanged — staleness is
-//! still recomputed against the live fact count on every read.
+//! still recomputed against the live fact fingerprint on every read.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::config::get_tracedecay_dir;
+
 use super::CuratePreviewEntry;
 
 pub(crate) fn sidecar_path(project_root: &Path) -> PathBuf {
-    let preferred = project_root.join(".tracedecay");
-    let legacy = project_root.join(".tokensave");
-    // Mirror the repo-wide ".tracedecay primary, .tokensave fallback"
-    // convention; later this should delegate to the central data-dir helper.
-    let data_dir = if preferred.exists() || !legacy.exists() {
-        preferred
-    } else {
-        legacy
-    };
-    data_dir.join("dashboard").join("curation_preview.json")
+    get_tracedecay_dir(project_root)
+        .join("dashboard")
+        .join("curation_preview.json")
 }
 
 /// Loads the persisted preview, or `None` when absent/unreadable/malformed.
@@ -42,6 +37,12 @@ pub(crate) async fn load(project_root: &Path) -> Option<CuratePreviewEntry> {
         report,
         saved_at: value.get("saved_at")?.as_str()?.to_string(),
         active_facts_at_save: value.get("active_facts_at_save")?.as_i64()?,
+        memory_fingerprint_at_save: (
+            value.get("active_facts_at_save")?.as_i64()?,
+            value.get("max_updated_at_at_save")?.as_i64()?,
+            value.get("sum_fact_id_at_save")?.as_i64()?,
+            value.get("sum_updated_at_at_save")?.as_i64()?,
+        ),
     })
 }
 
@@ -51,6 +52,9 @@ pub(crate) async fn save(project_root: &Path, entry: &CuratePreviewEntry) {
         "report": entry.report,
         "saved_at": entry.saved_at,
         "active_facts_at_save": entry.active_facts_at_save,
+        "max_updated_at_at_save": entry.memory_fingerprint_at_save.1,
+        "sum_fact_id_at_save": entry.memory_fingerprint_at_save.2,
+        "sum_updated_at_at_save": entry.memory_fingerprint_at_save.3,
     });
     let result = async {
         if let Some(parent) = path.parent() {

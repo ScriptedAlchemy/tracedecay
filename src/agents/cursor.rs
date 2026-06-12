@@ -219,6 +219,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../../cursor-plugin/skills/cross-branch-investigation/SKILL.md"),
     ),
     (
+        "skills/curating-project-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/curating-project-memory/SKILL.md"),
+    ),
+    (
         "skills/drafting-commit-and-pr/SKILL.md",
         include_str!("../../cursor-plugin/skills/drafting-commit-and-pr/SKILL.md"),
     ),
@@ -301,6 +305,10 @@ const EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (
         "skills/tracedecay-compare-branches/SKILL.md",
         include_str!("../../cursor-plugin/skills/tracedecay-compare-branches/SKILL.md"),
+    ),
+    (
+        "skills/tracedecay-curate-memory/SKILL.md",
+        include_str!("../../cursor-plugin/skills/tracedecay-curate-memory/SKILL.md"),
     ),
     (
         "skills/tracedecay-draft-commit/SKILL.md",

@@ -97,8 +97,8 @@ fn write_workspace_session_json(
             "sessionId": session_id,
             "modelId": "claude-sonnet-4.6",
             "messages": [
-                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_i64},
-                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_i64}
+                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_000_i64},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_000_i64}
             ]
         }))
         .unwrap(),
@@ -136,6 +136,19 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
         hit.message.model.as_deref() == Some("claude-sonnet-4-6")
             || hit.message.model.as_deref() == Some("claude-sonnet-4.6")
     }));
+    let session = db.get_session("kiro", "kiro-workflow-1").await.unwrap();
+    assert_eq!(session.started_at, Some(1_800_000_000));
+    assert_eq!(session.ended_at, Some(1_800_000_001));
+    let first = db
+        .get_session_message("kiro", "kiro-workflow-1:0")
+        .await
+        .unwrap();
+    assert_eq!(first.timestamp, Some(1_800_000_000));
+    let second = db
+        .get_session_message("kiro", "kiro-workflow-1:1")
+        .await
+        .unwrap();
+    assert_eq!(second.timestamp, Some(1_800_000_001));
 
     assert_eq!(
         ingest_source(&db, &source, &project, None)
@@ -165,6 +178,19 @@ async fn kiro_workspace_sessions_json_is_ingested() {
         )
         .await;
     assert_eq!(results.len(), 2);
+    let session = db.get_session("kiro", "sess-modern").await.unwrap();
+    assert_eq!(session.started_at, Some(1_800_000_000));
+    assert_eq!(session.ended_at, Some(1_800_000_010));
+    let first = db
+        .get_session_message("kiro", "sess-modern:0")
+        .await
+        .unwrap();
+    assert_eq!(first.timestamp, Some(1_800_000_000));
+    let second = db
+        .get_session_message("kiro", "sess-modern:1")
+        .await
+        .unwrap();
+    assert_eq!(second.timestamp, Some(1_800_000_010));
 }
 
 #[tokio::test]

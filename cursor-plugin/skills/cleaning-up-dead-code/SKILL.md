@@ -1,6 +1,6 @@
 ---
 name: cleaning-up-dead-code
-description: Find and safely remove dead code, unused imports, and duplication using the code graph. Use for "clean up dead code", "remove unused code", "dedupe helpers", or codebase health cleanup.
+description: Use when removing or consolidating dead code, unused imports, duplicate implementations, stale helpers, or cleanup findings after confirming callers and references.
 ---
 
 # Cleaning up dead code

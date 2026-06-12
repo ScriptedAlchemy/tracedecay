@@ -1,6 +1,6 @@
 ---
 name: reviewing-a-diff
-description: Review a PR or working-tree diff for impact, risk, and quality using the code graph. Use for "review this diff", "review this PR", "TraceDecay review", change-set risk review, or pre-merge checks.
+description: Use when reviewing a PR, branch diff, or working-tree diff for impact, behavioral risk, quality issues, unsafe patterns, affected tests, or pre-merge readiness.
 ---
 
 # Reviewing a diff
@@ -18,6 +18,7 @@ description: Review a PR or working-tree diff for impact, risk, and quality usin
 ## Guardrails
 
 - Read-only review. Do not edit or run tests from this skill; to verify behavior, hand off to the `tracedecay:running-impacted-tests` skill.
+- If diff context is truncated and includes a `handle`, narrow by file/symbol first when possible; call `tracedecay_retrieve` with that `handle` only when the omitted risk detail is needed.
 
 ## Output
 

@@ -20,6 +20,7 @@ Climb this ladder and stop at the first rung that answers the question. Most "re
 
 - All read-only and parallel-safe. Don't chain rungs you don't need — outline + one body beats a full read of a 2000-line file.
 - The graph covers symbols, not prose: comments, string literals, and config bodies need Grep/Read (or `tracedecay_config` for TOML/JSON keys). If results look empty or stale, check `tracedecay_status` (index freshness, branch-fallback warning) before falling back to raw reads.
+- If a tracedecay read response is truncated and includes a `handle`, prefer a narrower symbol/range request first; call `tracedecay_retrieve` with that `handle` when the omitted content is needed.
 
 ## Handoff
 

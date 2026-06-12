@@ -52,6 +52,8 @@ use crate::tracedecay::TraceDecay;
 /// defaults; override with `--port`).
 pub const DEFAULT_PORT: u16 = 7341;
 
+pub(crate) type CuratePreviewFingerprint = (i64, i64, i64, i64);
+
 /// Cached last curation preview, written by `POST /curate?dry_run=true`.
 #[derive(Debug, Clone)]
 pub(crate) struct CuratePreviewEntry {
@@ -60,6 +62,8 @@ pub(crate) struct CuratePreviewEntry {
     pub(crate) saved_at: String,
     /// Active fact count at the time the preview was generated (for stale detection).
     pub(crate) active_facts_at_save: i64,
+    /// `(active count, max updated_at, sum fact_id, sum updated_at)` at preview generation.
+    pub(crate) memory_fingerprint_at_save: CuratePreviewFingerprint,
 }
 
 #[derive(Clone)]
@@ -281,6 +285,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/holographic/curate/apply",
             post(memory_api::curate_apply),
         )
+        .route("/api/plugins/holographic/oplog", get(memory_api::oplog))
         // LCM plugin API (mirrors hermes-lcm dashboard/plugin_api.py)
         .route("/api/plugins/hermes-lcm/overview", get(lcm_api::overview))
         .route("/api/plugins/hermes-lcm/search", get(lcm_api::search))

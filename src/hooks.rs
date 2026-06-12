@@ -891,6 +891,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "cleaning-up-dead-code",
     "code-health-report",
     "cross-branch-investigation",
+    "curating-project-memory",
     "drafting-commit-and-pr",
     "exploring-types-and-traits",
     "finding-duplicate-logic",

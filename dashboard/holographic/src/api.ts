@@ -17,6 +17,7 @@ import type {
   MemoryCuratorStatusResponse,
   MemoryDashboardResponse,
   MemoryFactDetailResponse,
+  MemoryOplogResponse,
   MemoryProjectionResponse,
   MemorySimilarityResponse,
 } from "./types";
@@ -107,6 +108,16 @@ export const api = {
     const suffix = qs.toString();
     return fetchJSON<MemoryCuratorActivityResponse>(
       `${BASE}/curation/activity${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
+  /** Recent memory operations from the append-only oplog (GET /oplog). */
+  getMemoryOplog: (params: { limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString();
+    return fetchJSON<MemoryOplogResponse>(
+      `${BASE}/oplog${suffix ? `?${suffix}` : ""}`,
     );
   },
 

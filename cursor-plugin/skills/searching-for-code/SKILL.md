@@ -26,6 +26,7 @@ Use the TraceDecay code graph before Grep/Glob/file reads. Pick the cheapest too
 - All tools above are read-only and parallel-safe. Do not call mutating/editing tools from this skill.
 - Only fall back to Grep/Glob/Read for non-indexed content (string literals, comments, config the graph does not cover) or after TraceDecay pinpoints exact files.
 - Prefer one well-formed `tracedecay_context` call over many narrow searches.
+- If a response is truncated and includes a `handle`, narrow the query/result set first when possible; call `tracedecay_retrieve` with that `handle` only when the omitted details are needed.
 - About to write a new helper because the search came up empty? Run the `tracedecay:finding-duplicate-logic` pre-write probe first.
 
 ## Output

@@ -22,9 +22,9 @@ use crate::memory::retrieval::FactRetriever;
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
-    AddFactRequest, ContradictionResult, FactRecord, FactSearchResult, FeedbackRequest,
-    FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus, SearchFactsRequest,
-    UpdateFactRequest,
+    AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
+    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus,
+    SearchFactsRequest, UpdateFactRequest,
 };
 use crate::resolution::ReferenceResolver;
 use crate::sync;
@@ -3207,8 +3207,10 @@ fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
 }
 
 impl TraceDecay {
-    /// Add or replace a fact in the holographic memory store.
-    pub async fn add_fact(&self, request: AddFactRequest) -> Result<FactRecord> {
+    /// Add a fact to the holographic memory store. The outcome carries the
+    /// stored (or pre-existing) fact plus a write-time diff report
+    /// (near-duplicate / possible-conflict / secret rejection).
+    pub async fn add_fact(&self, request: AddFactRequest) -> Result<AddFactOutcome> {
         MemoryStore::new(self.db.conn())
             .add_fact(request, DEFAULT_TRUST)
             .await

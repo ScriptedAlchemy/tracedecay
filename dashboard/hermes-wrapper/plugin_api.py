@@ -664,8 +664,26 @@ _CURATION_SYSTEM_PROMPT = (
     "\"merged_content\" (string) when the winner's text should be replaced "
     "by a consolidated fact.\n"
     "  delete: {\"fact_id\": <id>}\n"
-    "Only reference fact ids that appear in the input clusters. "
-    "Return ONLY the JSON object."
+    "Only reference fact ids that appear in the input clusters or in "
+    "hygiene_candidates. Return ONLY the JSON object.\n\n"
+    # Keep this hygiene paragraph in sync with CURATION_SYSTEM_PROMPT in
+    # src/dashboard/memory_curate.rs (the CLI half of the same contract).
+    "Hygiene categories: the input may also carry \"hygiene_candidates\" - "
+    "deterministic rule-flagged evidence with status=\"candidate\", "
+    "review_required=true, and recommended_op hints. Review these candidates "
+    "with the same conservatism; do not treat them as already-approved "
+    "operations. secret_like: flagged as credential-like content; delete "
+    "unless it is clearly a false positive (e.g. prose ABOUT secret handling "
+    "with no actual credential). transient: looks like ephemeral run output "
+    "(ports, PIDs, temp paths, run logs); delete unless it encodes a durable "
+    "decision. supersession: a negation/state-change cue pairs an older fact "
+    "with a newer one; confirm from the texts which fact is current, delete "
+    "the stale one, or emit a time-aware merge when both matter. Usage "
+    "signals: members may carry access_count / last_recalled_at "
+    "(recall-search returns). Treat high access as evidence a fact is "
+    "actively used - avoid deleting the more-accessed fact of a pair unless "
+    "the duplication is near-exact. Low trust alone is never a delete reason; "
+    "use it only to temper confidence."
 )
 
 
@@ -785,6 +803,10 @@ def _build_curation_clusters(
                     "trust_score": fact.get("trust_score"),
                     "created_at": fact.get("created_at"),
                     "updated_at": fact.get("updated_at"),
+                    # Usage signals for the delete-reluctance instruction:
+                    # recall-search returns only (probe/list scans excluded).
+                    "access_count": fact.get("access_count", 0),
+                    "last_recalled_at": fact.get("last_recalled_at"),
                 }
             )
         clusters.append(
@@ -966,20 +988,47 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
             continue
 
     clusters = _build_curation_clusters(pairs, facts_by_id, max_clusters)
+
+    # Deterministic hygiene candidates (secret_like / transient / supersession)
+    # come from the tracedecay server's rule-based dry-run plan; the LLM here
+    # is the review layer that confirms them through the same ops contract.
+    hygiene_candidates: dict[str, Any] = {}
+    try:
+        _, curate_report = _post_upstream_json(
+            "/api/plugins/holographic/curate", {"dry_run": True}
+        )
+        if isinstance(curate_report, dict) and isinstance(
+            curate_report.get("hygiene_candidates"), dict
+        ):
+            hygiene_candidates = curate_report["hygiene_candidates"]
+    except HTTPException:
+        hygiene_candidates = {}
+    hygiene_ids = {
+        int(entry["fact_id"])
+        for entries in hygiene_candidates.values()
+        if isinstance(entries, list)
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("fact_id") is not None
+    }
+
     plan: dict[str, Any] = {
         "dry_run": dry_run,
         "clusters_reviewed": len(clusters),
         "clusters": clusters,
+        "hygiene_candidates": hygiene_candidates,
         "ops": [],
         "rejected_ops": [],
         "applied": None,
     }
-    if not clusters:
+    if not clusters and not hygiene_ids:
         return JSONResponse(plan)
 
     user_message = (
         "Review these candidate clusters and return ops as strict JSON.\n\n"
-        + json.dumps({"clusters": clusters}, default=str)
+        + json.dumps(
+            {"clusters": clusters, "hygiene_candidates": hygiene_candidates},
+            default=str,
+        )
     )
     content = _call_curation_llm(
         [
@@ -994,9 +1043,11 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
             detail="curation LLM returned no valid JSON ops",
         )
 
+    # Evidence guard: cluster members plus rule-flagged hygiene candidates
+    # are the only legal op targets.
     allowed_ids = {
         member["fact_id"] for cluster in clusters for member in cluster["members"]
-    }
+    } | hygiene_ids
     valid_ops, rejected_ops = _validate_llm_ops(
         parsed["ops"], allowed_ids, min_confidence
     )

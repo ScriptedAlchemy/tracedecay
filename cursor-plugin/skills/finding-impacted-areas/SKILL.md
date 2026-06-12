@@ -1,6 +1,6 @@
 ---
 name: finding-impacted-areas
-description: Determine the blast radius of a change — every symbol/file that depends on a target and which tests to run. Use for "what breaks if I change X", impact/regression analysis, pre-refactor safety checks, or judging the risk of an edit.
+description: Use when estimating blast radius: what depends on a symbol or file, affected tests, risk of a change, impacted areas for a refactor, or what could break if a target changes.
 ---
 
 # Finding impacted areas

@@ -1,6 +1,6 @@
 ---
 name: assessing-test-coverage
-description: Map which tests cover which code and where coverage is missing — without running anything. Use for "which tests cover X", "is this function tested", "what tests should I run for these files", or "where should the next test go".
+description: Use when answering which tests cover code, whether a function or file is tested, which tests are affected by changed files, or where the next test should go without running tests.
 ---
 
 # Assessing test coverage

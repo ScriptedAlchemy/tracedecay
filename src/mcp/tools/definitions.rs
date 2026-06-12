@@ -106,6 +106,7 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
+        def_retrieve(),
         def_context(),
         def_callers(),
         def_callees(),
@@ -244,6 +245,24 @@ fn def_search() -> ToolDefinition {
                 }
             },
             "required": ["query"]
+        }),
+    )
+}
+
+fn def_retrieve() -> ToolDefinition {
+    def(
+        "tracedecay_retrieve",
+        "Retrieve Truncated Response",
+        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are project-local, expire automatically, and never reference remote storage. Only call it when the missing details are needed to answer the user's request.",
+        json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
+                }
+            },
+            "required": ["handle"]
         }),
     )
 }
@@ -1365,7 +1384,7 @@ fn def_dashboard() -> ToolDefinition {
     def(
         "tracedecay_dashboard",
         "Dashboard",
-        "Start (or manage) the tracedecay dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. Optional host/port (defaults match `tracedecay dashboard`).",
+        "Start (or manage) the tracedecay dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. MCP dashboard binds are loopback-only: optional host must be 127.0.0.1, localhost, or ::1. Port is optional.",
         json!({
             "type": "object",
             "properties": {
@@ -1376,7 +1395,7 @@ fn def_dashboard() -> ToolDefinition {
                 },
                 "host": {
                     "type": "string",
-                    "description": "Host address to bind (default: \"127.0.0.1\")"
+                    "description": "Loopback host address to bind: 127.0.0.1, localhost, or ::1 (default: \"127.0.0.1\"). Wildcard, LAN, public IPs, and other hostnames are rejected."
                 },
                 "port": {
                     "type": "number",
@@ -1648,7 +1667,11 @@ fn def_fact_store() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store",
         "Fact Store",
-        "Add, search, probe, relate, reason over, update, remove, or list holographic memory facts. The action field selects the operation.",
+        "Add, search, probe, relate, reason over, update, remove, or list holographic memory facts. The action field selects the operation. \
+         The add result carries a write-time diff report (diff/closest_fact_id/similarity/reason): near_duplicate = a very similar fact exists \
+         (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
+         rejected_secret_like = credential-like content was NOT stored. Calibrate trust on add instead of defaulting high \
+         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups.",
         json!({
             "type": "object",
             "properties": memory_fact_properties(),

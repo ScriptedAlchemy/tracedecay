@@ -17,10 +17,16 @@ pub mod session;
 pub mod workflow;
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::mcp::response_handles::{
+    retrieve_response_handle, store_response_handle, RESPONSE_HANDLE_TTL_SECS,
+    RESPONSE_RETRIEVE_TOOL,
+};
+use crate::tracedecay::current_timestamp;
 use crate::tracedecay::TraceDecay;
 
 use super::{ToolResult, MAX_RESPONSE_CHARS};
@@ -111,28 +117,85 @@ pub(crate) fn truncate_response(s: &str) -> String {
 /// Prefer this over [`truncate_response`] for handlers whose payload is
 /// always JSON (e.g. the dashboard handler) to avoid breaking consumers
 /// that parse the entire response text.
-pub(crate) fn truncated_json_envelope(formatted: &str) -> String {
+/// Wraps oversized JSON text in a valid preview envelope. When a project root
+/// is available, stores the full original locally and includes a retrieval
+/// handle.
+pub(crate) fn truncated_json_envelope_with_handle(
+    project_root: Option<&Path>,
+    formatted: &str,
+) -> String {
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
     }
+    let stored = project_root
+        .and_then(|root| store_response_handle(root, formatted, current_timestamp()).ok());
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
         while end > 0 && !formatted.is_char_boundary(end) {
             end -= 1;
         }
         let preview = &formatted[..end];
-        let envelope = json!({
+        let mut envelope = json!({
             "truncated": true,
             "original_chars": formatted.len(),
             "preview_chars": preview.len(),
             "preview": preview,
         });
+        if let (Some(record), Some(object)) = (&stored, envelope.as_object_mut()) {
+            object.insert("handle".to_string(), json!(record.handle));
+            object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
+            object.insert(
+                "retrieve_ttl_seconds".to_string(),
+                json!(RESPONSE_HANDLE_TTL_SECS),
+            );
+            object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
+            object.insert(
+                "retrieve_instruction".to_string(),
+                json!(format!(
+                    "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. Only call it if the missing details are needed to answer the user's request.",
+                    preview.len(),
+                    formatted.len(),
+                    record.expires_at,
+                    RESPONSE_HANDLE_TTL_SECS,
+                    record.handle
+                )),
+            );
+        }
         let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
             return text;
         }
         end = end.saturating_sub(1024);
     }
+}
+
+fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+    let handle =
+        args.get("handle")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: handle".to_string(),
+            })?;
+    let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())? {
+        Some(record) => json!({
+            "handle": record.handle,
+            "expired": false,
+            "original_chars": record.original_chars(),
+            "created_at": record.created_at,
+            "expires_at": record.expires_at,
+            "content": record.content,
+        }),
+        None => json!({
+            "handle": handle,
+            "expired": true,
+            "content": null,
+        }),
+    };
+    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    Ok(ToolResult {
+        value: json!({ "content": [{ "type": "text", "text": formatted }] }),
+        touched_files: Vec::new(),
+    })
 }
 
 /// Dispatches a tool call to the appropriate handler.
@@ -157,6 +220,7 @@ pub async fn handle_tool_call(
     );
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, scope_prefix).await,
+        "tracedecay_retrieve" => handle_retrieve(cg, &args),
         "tracedecay_context" => graph::handle_context(cg, args, scope_prefix).await,
         "tracedecay_callers" => graph::handle_callers(cg, args).await,
         "tracedecay_callees" => graph::handle_callees(cg, args).await,
@@ -318,14 +382,15 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            88
+            89
         } else {
-            87
+            88
         };
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"tracedecay_search"));
+        assert!(tool_names.contains(&"tracedecay_retrieve"));
         assert!(tool_names.contains(&"tracedecay_context"));
         assert!(tool_names.contains(&"tracedecay_callers"));
         assert!(tool_names.contains(&"tracedecay_callees"));
@@ -527,6 +592,36 @@ mod tests {
         let result = truncate_response(&long);
         assert!(result.len() < 20_000);
         assert!(result.contains("[... truncated at 15000 chars]"));
+    }
+
+    #[test]
+    fn test_truncated_json_envelope_includes_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let long = format!(
+            "{{\"items\":[{}]}}",
+            (0..3_000)
+                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["retrieve_tool"], "tracedecay_retrieve");
+        assert!(parsed.get("retrieve_handle").is_none());
+        let handle = parsed["handle"].as_str().unwrap();
+        assert!(handle.starts_with("rh_"));
+
+        let stored = crate::mcp::response_handles::retrieve_response_handle(
+            dir.path(),
+            handle,
+            crate::tracedecay::current_timestamp(),
+        )
+        .unwrap()
+        .expect("stored response should be retrievable");
+        assert_eq!(stored.content, long);
     }
 
     #[test]

@@ -274,6 +274,34 @@ async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+#[test]
+fn retrieve_tool_schema_uses_handle_only() {
+    let tools = get_tool_definitions();
+    let retrieve = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_retrieve")
+        .expect("tracedecay_retrieve definition");
+    let properties = retrieve
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("retrieve properties");
+
+    assert!(properties.contains_key("handle"));
+    assert!(!properties.contains_key("retrieve_handle"));
+    assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+
+    assert!(retrieve.description.contains("tracedecay_retrieve"));
+    assert!(retrieve.description.contains("required argument `handle`"));
+    assert!(retrieve
+        .description
+        .contains("Only call it when the missing details are needed"));
+    assert!(properties["handle"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("required `handle` argument"));
+}
+
 // 1. tracedecay_search
 // ---------------------------------------------------------------------------
 
@@ -294,6 +322,154 @@ async fn test_search() {
     assert!(
         text.contains("helper"),
         "search results should contain 'helper'"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_tool_returns_full_stored_response() {
+    let (cg, _dir) = setup_project().await;
+    let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
+    let stored = tracedecay::mcp::response_handles::store_response_handle(
+        cg.project_root(),
+        original,
+        tracedecay::tracedecay::current_timestamp(),
+    )
+    .unwrap();
+
+    let stored_payload: Value = serde_json::from_str(
+        &fs::read_to_string(
+            cg.project_root()
+                .join(".tracedecay/response-handles")
+                .join(format!("{}.json", stored.handle)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(stored_payload.get("handle").is_none());
+    assert!(stored_payload.get("original_chars").is_none());
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": stored.handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["handle"], stored.handle);
+    assert_eq!(payload["content"], original);
+    assert_eq!(payload["expired"], false);
+
+    let alias_result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "retrieve_handle": stored.handle }),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        alias_result.is_err(),
+        "tracedecay_retrieve must accept only the canonical `handle` field"
+    );
+}
+
+#[tokio::test]
+async fn fact_store_large_list_response_uses_retrieve_handle() {
+    let (cg, _dir) = setup_project().await;
+    let mut last_fact_id = None;
+    for i in 0..35 {
+        let added = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "LONG_FACT_MARKER_{i:02}: {}",
+                    "large fact-store response should remain retrievable ".repeat(80)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        if i == 34 {
+            let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+            last_fact_id = added["fact"]["fact_id"].as_i64();
+        }
+    }
+    let last_fact_id = last_fact_id.expect("tail fact id");
+
+    let listed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&listed.value);
+    let envelope: Value = serde_json::from_str(text).expect("large response should stay JSON");
+    assert_eq!(envelope["truncated"], true);
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("large fact-store response should include retrieve handle")
+        .to_string();
+    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
+    let instruction = envelope["retrieve_instruction"]
+        .as_str()
+        .expect("large response envelope should teach retrieval");
+    assert!(instruction.contains("This response was truncated"));
+    assert!(instruction.contains("original response is stored locally"));
+    assert!(instruction.contains("expires"));
+    assert!(instruction.contains("tracedecay_retrieve"));
+    assert!(instruction.contains("required argument `handle`"));
+    assert!(instruction.contains(&handle));
+    assert!(instruction.contains("Only call it if the missing details are needed"));
+
+    let removed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({ "action": "remove", "fact_id": last_fact_id }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
+    assert_eq!(removed["removed"], true);
+    assert!(
+        cg.get_fact(last_fact_id).await.unwrap().is_none(),
+        "tail fact should be absent from the live store before handle retrieval"
+    );
+
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    assert_eq!(retrieved_payload["expired"], false);
+    let full_json = retrieved_payload["content"]
+        .as_str()
+        .expect("retrieve response should contain original JSON text");
+    let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
+    assert_eq!(full["count"].as_u64(), Some(35));
+    assert!(
+        full_json.contains("LONG_FACT_MARKER_34"),
+        "retrieved response should include the full fact list"
     );
 }
 
@@ -3419,6 +3595,59 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     .unwrap();
     let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
     assert_eq!(removed["removed"], true);
+}
+
+#[tokio::test]
+async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project preference: never store provider API keys",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+
+    let rejected = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": fact_id,
+            "content": "api_key=sk-test-742913 must not be persisted"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rejected: Value = serde_json::from_str(extract_text(&rejected.value)).unwrap();
+    assert_eq!(rejected["action"], "update");
+    assert_eq!(rejected["count"], 0);
+    assert_eq!(rejected["diff"], "rejected_secret_like");
+    assert!(rejected["fact"].is_null());
+    assert!(
+        rejected["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("secret"),
+        "reason should describe the hygiene rejection: {rejected}"
+    );
+
+    let stored = cg.get_fact(fact_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.content,
+        "Project preference: never store provider API keys"
+    );
+    assert!(!stored.content.contains("sk-test-742913"));
 }
 
 #[tokio::test]
