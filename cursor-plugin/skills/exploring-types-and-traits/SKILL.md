@@ -1,6 +1,6 @@
 ---
 name: exploring-types-and-traits
-description: Navigate type-level structure — every implementor of a trait, impl blocks, full type hierarchies, inheritance depth, derive-generated methods, struct construction sites, and field read/write sites. Use for "what implements trait X", "which traits does this type satisfy", "where is this struct constructed", "who reads/writes this field", or "where does .clone() come from".
+description: Use when answering type-level questions: trait implementors, impl blocks, type hierarchies, struct construction sites, field read/write sites, derive-generated methods, or method bodies across implementors.
 ---
 
 # Exploring types & traits

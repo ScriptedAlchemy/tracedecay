@@ -1,6 +1,6 @@
 ---
 name: atomic-code-edits
-description: Apply safe, anchored source edits — unique-match string replace, all-or-nothing multi-replace, anchored insert, whole-symbol rewrite, and structural pattern rewrite — each auto re-indexing the graph after writing. Use when editing code ("replace this function", "insert after X", "rewrite every call site"), for multi-part edits that must land atomically, or instead of sed/awk and regex/shell-quoting hazards.
+description: Use when editing source with safe anchored primitives: unique string replacement, atomic multi-replace, anchored insert, whole-symbol rewrite, structural ast-grep rewrite, or mechanical edits that should re-index the graph.
 ---
 
 # Atomic code edits

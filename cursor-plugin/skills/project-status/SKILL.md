@@ -1,6 +1,6 @@
 ---
 name: project-status
-description: Report tokensave index status, query config files, list outstanding TODO/FIXME markers, and triage MCP server runtime usage. Use for "tokensave status", "what version is dependency X", "what TODOs are left", "is the index fresh", or diagnosing tokensave CPU/RAM.
+description: Use when checking tokensave index freshness, project file/config status, TODO/FIXME markers, MCP runtime CPU/RAM, dashboard URL, or memory subsystem counts.
 ---
 
 # Project status & config
@@ -19,7 +19,7 @@ Cheap, read-only surface for the index, project config, work markers, and server
 ## Guardrails
 
 - `tokensave_status`, `tokensave_config`, `tokensave_todos`, `tokensave_runtime` are read-only. `tokensave_dashboard` starts/stops a local server and `tokensave_memory_status` repairs/normalizes memory state — use them only when the user wants the dashboard or memory counts.
-- For deeper structural/quality questions hand off to `tokensave:architecture-overview` or `tokensave:code-health-report`; for memory recall, `tokensave:recalling-project-memory`; for past-session recall, `tokensave:recalling-session-context`.
+- For deeper structural/quality questions hand off to `tokensave:architecture-overview` or `tokensave:code-health-report`; for memory recall, `tokensave:recalling-project-memory`; for memory curation/update/delete, `tokensave:curating-project-memory`; for past-session recall, `tokensave:recalling-session-context`.
 
 ## Output
 

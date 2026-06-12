@@ -1,6 +1,6 @@
 ---
 name: cross-branch-investigation
-description: Search and compare code across git branches without switching your checkout, using tokensave's per-branch graphs. Use for "does symbol X exist on main", "what changed between branch A and B", cross-branch diff/search, or checking another branch's API before you depend on it.
+description: Use when searching or comparing code across git branches without switching checkout, checking whether a symbol exists on another branch, or diffing branch graph changes.
 ---
 
 # Cross-branch investigation

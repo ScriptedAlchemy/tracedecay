@@ -1,6 +1,6 @@
 ---
 name: fixing-build-and-type-errors
-description: Turn compiler/type-checker errors into graph-anchored fixes. Runs the project type-checker (cargo check / tsc / pyright) or parses pasted cargo output, maps each diagnostic to the enclosing symbol with callers attached, then guides the fix. Use for "fix the build", "why won't this compile", "resolve type errors", or triaging cargo/clippy output.
+description: Use when diagnosing or fixing compiler/type-checker errors, cargo/clippy output, tsc/pyright failures, mapped diagnostics, or build failures that need graph-anchored context.
 ---
 
 # Fixing build & type errors

@@ -1,6 +1,6 @@
 ---
 name: auditing-code-safety
-description: Sweep the repo or a directory for ship-blocking risk — panic sites (unwrap/expect/panic/todo/unimplemented and unsafe blocks), unfinished-work markers, unreachable code, unused imports, and risky untested symbols. Use for "audit for unsafe code", "find panic sites", "is this ready to ship", a pre-release safety check, or a security-flavored code sweep.
+description: Use when auditing ship-blocking code risk: panic/unwrap/expect/todo/unimplemented/unsafe sites, FIXME/HACK markers, dead code, unused imports, or high-risk untested symbols.
 ---
 
 # Auditing code safety

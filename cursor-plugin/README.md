@@ -28,7 +28,7 @@ Hook commands derive the active project from Cursor's event payload /
 
 Slash workflows ship as skills with `disable-model-invocation: true`
 (`/tokensave-map-architecture`, `/tokensave-check-health`,
-`/tokensave-review-diff`, …) — Cursor's Commands surface was absorbed into
+`/tokensave-curate-memory`, `/tokensave-review-diff`, …) — Cursor's Commands surface was absorbed into
 Skills, so this bundle no longer ships a `commands/` directory. Their slugs
 keep the `tokensave-` prefix so typing `/tokensave` lists every command, and
 the suffix is a verb phrase so the human-facing title (Cursor displays the

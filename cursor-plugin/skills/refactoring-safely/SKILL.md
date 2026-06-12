@@ -1,6 +1,6 @@
 ---
 name: refactoring-safely
-description: Recon and execute mechanical refactors — renames, signature changes, field add/remove/rename, moving helpers — with every affected site enumerated before editing. Use for "rename X everywhere", "change this function's signature", "add/remove a struct field", or any refactor where a missed call site breaks the build.
+description: Use when planning or executing mechanical refactors: renames, signature changes, field add/remove/rename, moving helpers, or any edit where missed call sites break the build.
 ---
 
 # Refactoring safely

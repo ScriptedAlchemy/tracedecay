@@ -1,6 +1,6 @@
 ---
 name: recalling-project-memory
-description: Recall prior decisions, durable facts, and past agent conversations for this project before answering or planning. Use for "what did we decide about X", "did we discuss Y", "remember this decision", or to load durable project context.
+description: Use when recalling prior decisions, durable facts, user/project preferences, or past project context before answering or planning; use curating-project-memory for updating or deleting stored facts.
 ---
 
 # Recalling project memory
@@ -22,6 +22,7 @@ Recall memory **before** reaching for external or web search — prior sessions 
 ## Handoff
 
 - For raw conversation recall beyond FTS — scoped/role/time-filtered grep, lossless session replay, or summary-DAG drill-down — use `tokensave:recalling-session-context`.
+- For stale, contradictory, duplicate, or user-requested fact updates/deletes — use `tokensave:curating-project-memory`.
 
 ## Output
 

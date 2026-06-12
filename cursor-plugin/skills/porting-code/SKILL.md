@@ -1,6 +1,6 @@
 ---
 name: porting-code
-description: Port or migrate code between directories or languages in dependency-safe order and track progress. Use when porting, migrating, or rewriting a module from one location/language to another (e.g. legacy → new, src → crate).
+description: Use when porting, migrating, or rewriting code between directories, crates, modules, branches, or languages while preserving dependency order and tracking port progress.
 ---
 
 # Porting code

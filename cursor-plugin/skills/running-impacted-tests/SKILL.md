@@ -1,6 +1,6 @@
 ---
 name: running-impacted-tests
-description: Run only the tests affected by your changes and map failures back to source. Use for "run the affected tests", "run impacted tests", or "tokensave test" to verify a change without a full test run. (Rust/cargo projects.)
+description: Use when running only tests affected by changed Rust files, mapping failures back to source, verifying a change without a full suite, or handling cargo-backed impacted-test checks.
 paths:
   - "**/*.rs"
   - "**/Cargo.toml"
