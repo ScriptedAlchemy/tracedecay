@@ -887,7 +887,7 @@ async fn vector_state_fingerprint(
 static SIMILARITY_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<SimilarityComputation>>>> =
     OnceLock::new();
 
-async fn similarity_computation(
+pub(crate) async fn similarity_computation(
     state: &DashboardState,
 ) -> Result<Arc<SimilarityComputation>, String> {
     let key = vector_state_fingerprint(state).await?;
@@ -1092,7 +1092,7 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
 ///
 /// Returns (actions, counts, total) where actions is the list of proposed
 /// `delete` operations for `likely_duplicate` pairs.
-async fn build_delete_plan(
+pub(crate) async fn build_delete_plan(
     state: &DashboardState,
 ) -> Result<(Vec<Value>, Map<String, Value>, i64), String> {
     let total = query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
@@ -1119,7 +1119,7 @@ async fn build_delete_plan(
 
 /// Hard-deletes one fact through the canonical store path (transactional
 /// delete + FK-cascaded entity links + FTS trigger + bank dirty-marking).
-async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
+pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
     let store = MemoryStore::new(&state.mem_conn);
     store.remove_fact(fact_id).await.map_err(|e| e.to_string())
 }
@@ -1232,7 +1232,7 @@ pub(crate) struct CurateApplyBody {
 }
 
 /// Applies one `delete` op; returns the per-op result object.
-async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
+pub(crate) async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
     let Some(fact_id) = op.get("fact_id").and_then(Value::as_i64) else {
         return (
             json!({ "op": "delete", "status": "error", "error": "missing or invalid fact_id" }),
@@ -1268,7 +1268,7 @@ async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
 
 /// Applies one `merge` op: optionally rewrites the winner's content, then
 /// hard-deletes the losers. Returns the per-op result object.
-async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value, bool) {
+pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value, bool) {
     let Some(winner_id) = op.get("winner_id").and_then(Value::as_i64) else {
         return (
             json!({ "op": "merge", "status": "error", "error": "missing or invalid winner_id" }),

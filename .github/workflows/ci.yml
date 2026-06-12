@@ -214,6 +214,9 @@ jobs:
       - name: Build tokensave binary
         run: cargo build --bin tokensave
 
+      - name: Run generated-plugin unit checks (no Hermes required)
+        run: python3 scripts/hermes_plugin_unit_check.py
+
       - name: Clone stock Hermes at pinned ref
         run: |
           set -euo pipefail

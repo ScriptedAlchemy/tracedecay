@@ -4,10 +4,10 @@
 //! per-profile `SQLite` store at `<profile>/state.db` (tables `sessions` +
 //! `messages`), where `<profile>` is `~/.hermes` for the default profile or
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
-//! one project through the `plugins.tokensave.project_root` pin in its
-//! `config.yaml` — the same pin the generated Hermes plugin resolves at
-//! runtime — so the sweep ingests a profile's history only into the project
-//! it is pinned to.
+//! one ingest target: the `plugins.tokensave.project_root` pin in its
+//! `config.yaml` when set (the same pin the generated Hermes plugin resolves
+//! at runtime), or — for unpinned profiles — the profile home itself, whose
+//! `.tokensave/sessions.db` is the profile-scoped store the plugin serves.
 //!
 //! Unlike the file-based adapters this source holds *many* sessions in one
 //! store, so it does not implement [`TranscriptSource`]; it drives the shared
@@ -79,10 +79,18 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Locates the `state.db` of every profile whose `plugins.tokensave`
-/// `project_root` pin matches `project_root`. Returns `(state_db_path,
-/// profile_name)`; the default profile (the home directory itself) has no
-/// profile name.
+/// Locates the `state.db` of every profile that maps to `project_root`.
+///
+/// A profile maps to a project either through its `plugins.tokensave`
+/// `project_root` pin, or — for unpinned profiles (the default since the
+/// installer stopped writing storage-home pins) — through its own profile
+/// home: sweeping with `project_root == <profile dir>` ingests that
+/// profile's history into the profile-scoped store at
+/// `<profile dir>/.tokensave/sessions.db`, which is exactly the store the
+/// generated plugin's `hermes_profile` storage scope serves.
+///
+/// Returns `(state_db_path, profile_name)`; the default profile (the home
+/// directory itself) has no profile name.
 fn pinned_state_dbs(
     hermes_homes: &[PathBuf],
     project_root: &Path,
@@ -108,11 +116,17 @@ fn pinned_state_dbs(
             }
         }
         for (profile_dir, profile_name) in candidates {
-            let Some(pin) = read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-            else {
-                continue;
+            let matches = match read_config_pinned_project_root(&profile_dir.join("config.yaml")) {
+                // An explicit pin (including the legacy home-equal pin)
+                // maps the profile to that project.
+                Some(pin) => paths_equal(Path::new(&pin), project_root),
+                // Unpinned profiles map to their own home, so sweeping
+                // `<profile dir>` as the project ingests their history
+                // into the profile-scoped store the generated plugin's
+                // `hermes_profile` storage serves.
+                None => paths_equal(&profile_dir, project_root),
             };
-            if !paths_equal(Path::new(&pin), project_root) {
+            if !matches {
                 continue;
             }
             let state_db = profile_dir.join("state.db");
@@ -144,15 +158,49 @@ struct HermesRow {
     session_cache_read_tokens: Option<i64>,
     session_cache_write_tokens: Option<i64>,
     session_reasoning_tokens: Option<i64>,
+    /// `messages.active` soft-delete flag (0 = rewound/undone turn). Legacy
+    /// stores without the column read as 1.
+    active: i64,
 }
 
-fn select_new_messages_sql() -> String {
+/// Column names of the `messages` table — `active` (v12 rewind soft-delete)
+/// and `reasoning` arrived in later Hermes schema revisions, so the sweep
+/// probes before selecting to stay readable on legacy stores.
+async fn message_columns(conn: &libsql::Connection) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(mut rows) = conn
+        .query("SELECT name FROM pragma_table_info('messages')", ())
+        .await
+    else {
+        return out;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if let Ok(name) = row.get::<String>(0) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+fn select_new_messages_sql(columns: &std::collections::BTreeSet<String>) -> String {
+    // Reasoning-only assistant turns carry no `content`; surface the
+    // reasoning text so the turn stays searchable.
+    let content_expr = if columns.contains("reasoning") {
+        "COALESCE(NULLIF(m.content, ''), m.reasoning)"
+    } else {
+        "m.content"
+    };
+    let active_expr = if columns.contains("active") {
+        "m.active"
+    } else {
+        "1"
+    };
     format!(
-        "SELECT m.id, m.session_id, m.role, m.content, m.tool_name,
+        "SELECT m.id, m.session_id, m.role, {content_expr}, m.tool_name,
                 m.tool_calls, m.timestamp,
                 s.title, s.model, s.parent_session_id, s.started_at, s.ended_at, s.source,
                 s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens,
-                s.reasoning_tokens
+                s.reasoning_tokens, {active_expr}
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
          WHERE m.id > ?
          ORDER BY m.id
@@ -183,7 +231,7 @@ async fn ingest_state_db(
         }
     };
     let mut sessions_seen = BTreeSet::new();
-    let select_sql = select_new_messages_sql();
+    let select_sql = select_new_messages_sql(&message_columns(&conn).await);
 
     loop {
         let Some(new) = read_new_rows(&conn, &select_sql, cursor, map_row).await else {
@@ -263,6 +311,7 @@ fn map_row(rowid: i64, row: &libsql::Row) -> Option<HermesRow> {
         session_cache_read_tokens: row.get::<Option<i64>>(15).ok().flatten(),
         session_cache_write_tokens: row.get::<Option<i64>>(16).ok().flatten(),
         session_reasoning_tokens: row.get::<Option<i64>>(17).ok().flatten(),
+        active: row.get::<Option<i64>>(18).ok().flatten().unwrap_or(1),
     })
 }
 
@@ -281,6 +330,11 @@ async fn build_batches(
 
     for row in rows {
         if row.role == "session_meta" || row.role.is_empty() {
+            continue;
+        }
+        if row.active == 0 {
+            // Rewound/undone turns are soft-deleted in Hermes; surfacing
+            // them as live history would misrepresent the conversation.
             continue;
         }
         let Some(message) = message_from_row(row, state_db_path, profile) else {
