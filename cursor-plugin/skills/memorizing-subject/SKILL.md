@@ -36,13 +36,30 @@ Each candidate fact reports: `content`, a `category` (one of `project`, `general
 ## Parent synthesis
 
 - Merge and dedupe the candidates; reject anything transient, uncited, low-confidence, secret, oversized, or out-of-scope.
-- Map confidence to a `trust` score: **high = 0.85**, **medium = 0.7**, **low = do not store without user approval**.
+
+## Trust calibration (tiered)
+
+Map confidence to a `trust` score — and **avoid defaulting everything to high trust; aim for a spread** that reflects real confidence. A store where every fact is 0.9 carries no signal:
+
+- **≥ 0.85 (high)** — verified, durable facts: confirmed decisions, behavior you observed directly, explicit user statements, citations that you re-checked.
+- **~ 0.7 (medium)** — ordinary well-sourced observations that were not independently verified.
+- **~ 0.5 (low)** — plausible but unverified; usually **do not store without user approval** — prefer not storing over storing noise.
+
+Trust is recall ranking input, so inflated trust pollutes future retrieval for every agent that follows.
 
 ## Dedupe before writing
 
-- For each surviving fact, search first: `tokensave_fact_store` with `action: "search"`, `query` (subject + the fact), the candidate's `category`, `limit: 10`, and `min_trust: 0.5`.
+- For each surviving fact, search first: `tokensave_fact_store` with `action: "search"`, `query` (subject + the fact), the candidate's `category`, `limit: 10`, and `min_trust: 0.5`. (Recall memory first in general — before any external or web search, prior sessions often already answered the question.)
 - Skip near-duplicates that already exist.
 - If a stored fact is close-but-stale or contradictory, report it for user approval — do not overwrite it.
+
+## Read the add result's diff report
+
+Every `action: "add"` result includes additive fields `diff`, `closest_fact_id`, `similarity`, `reason`:
+
+- `near_duplicate` — a very similar fact already exists; prefer `action: "update"` on `closest_fact_id` (or accept the dedupe) instead of piling on duplicates.
+- `possible_conflict` — a negation/state-change cue ("no longer", "switched from", "instead of", "replaced", "deprecated") suggests supersession; confirm which fact is current and report the pair for user review.
+- `rejected_secret_like` — the content matched a credential pattern and was **not stored**; never rephrase to sneak it past the filter.
 
 ## Store accepted facts
 

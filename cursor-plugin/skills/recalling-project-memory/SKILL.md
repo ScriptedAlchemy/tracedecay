@@ -5,6 +5,8 @@ description: Recall prior decisions, durable facts, and past agent conversations
 
 # Recalling project memory
 
+Recall memory **before** reaching for external or web search — prior sessions often already answered the question, and a memory hit is cheaper and project-specific.
+
 ## Workflow
 
 1. **Past conversations → `tokensave_message_search`** (`query`, optional `provider`, `limit`) over ingested Cursor/Codex/agent transcripts (project-local FTS index).
