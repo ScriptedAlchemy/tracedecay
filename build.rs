@@ -153,9 +153,6 @@ fn main() {
     println!("cargo::rerun-if-changed=src/resources/logo.png");
     let asset_stamp = emit_dashboard_asset_inputs();
     println!("cargo::rustc-env=TRACEDECAY_DASHBOARD_ASSET_STAMP={asset_stamp}");
-    // Legacy compatibility for any older embedded consumers still checking the
-    // pre-rename stamp name. The runtime dashboard reads TRACEDECAY_*.
-    println!("cargo::rustc-env=TOKENSAVE_DASHBOARD_ASSET_STAMP={asset_stamp}");
 
     // Generator provenance: baked into generated agent plugins (manifest +
     // module header) so a stale installed plugin is distinguishable from
