@@ -35,10 +35,9 @@ use super::memory_analysis::{
 use super::util::{
     coerce_limit, http_detail, like_pattern, query_i64, query_rows, JsonPath, JsonQuery,
 };
-use super::{CuratePreviewEntry, DashboardState};
+use super::{CuratePreviewEntry, CuratePreviewFingerprint, DashboardState};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::store::MemoryStore;
-use crate::memory::types::UpdateFactRequest;
 
 #[derive(Deserialize)]
 pub(crate) struct OverviewParams {
@@ -1065,6 +1064,32 @@ pub(crate) async fn curation_activity(JsonQuery(params): JsonQuery<LimitParams>)
     Json(json!({ "events": [], "count": 0, "limit": limit, "error": "" }))
 }
 
+async fn curation_preview_fingerprint(
+    state: &DashboardState,
+) -> Result<CuratePreviewFingerprint, String> {
+    let mut rows = state
+        .mem_conn
+        .query(
+            "SELECT COUNT(*),
+                    COALESCE(MAX(updated_at), 0),
+                    COALESCE(SUM(fact_id), 0),
+                    COALESCE(SUM(updated_at), 0)
+             FROM memory_facts",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
+        return Ok((0, 0, 0, 0));
+    };
+    Ok((
+        row.get::<i64>(0).unwrap_or(0),
+        row.get::<i64>(1).unwrap_or(0),
+        row.get::<i64>(2).unwrap_or(0),
+        row.get::<i64>(3).unwrap_or(0),
+    ))
+}
+
 /// `GET /api/plugins/holographic/curation/preview` — returns the last saved
 /// dry-run preview, or null if none has been run this server session.
 pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Json<Value> {
@@ -1080,11 +1105,12 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
         Some(entry) => {
             let report = entry.report.clone();
             let saved_at = entry.saved_at.clone();
-            let active_facts_at_save = entry.active_facts_at_save;
+            let memory_fingerprint_at_save = entry.memory_fingerprint_at_save;
             drop(preview);
-            let current_active =
-                query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
-            let stale = current_active != active_facts_at_save;
+            let current_fingerprint = curation_preview_fingerprint(&state)
+                .await
+                .unwrap_or((-1, -1, -1, -1));
+            let stale = current_fingerprint != memory_fingerprint_at_save;
             let stale_reason = if stale {
                 "Memory store changed since this preview was generated."
             } else {
@@ -1211,10 +1237,14 @@ pub(crate) async fn curate(
 
     if dry_run {
         let saved_at = crate::timeutil::now_iso_utc();
+        let memory_fingerprint_at_save = curation_preview_fingerprint(&state)
+            .await
+            .unwrap_or((total, 0, 0, 0));
         let entry = CuratePreviewEntry {
             report: report.clone(),
             saved_at,
             active_facts_at_save: total,
+            memory_fingerprint_at_save,
         };
         super::curate_preview_store::save(&state.project_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
@@ -1336,100 +1366,57 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
             false,
         );
     };
-    let loser_ids: Vec<i64> = loser_ids.iter().filter_map(Value::as_i64).collect();
-
-    let store = MemoryStore::new(&state.mem_conn);
-
-    // Validate the winner exists before touching anything.
-    match store.get_fact(winner_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    let mut parsed_loser_ids = Vec::with_capacity(loser_ids.len());
+    for (index, value) in loser_ids.iter().enumerate() {
+        let Some(loser_id) = value.as_i64() else {
             return (
                 json!({
                     "op": "merge",
                     "winner_id": winner_id,
                     "status": "error",
-                    "error": format!("winner fact {winner_id} not found"),
+                    "error": format!("loser_ids[{index}] must be an integer"),
                 }),
                 false,
             );
-        }
-        Err(e) => {
-            return (
-                json!({
-                    "op": "merge",
-                    "winner_id": winner_id,
-                    "status": "error",
-                    "error": e.to_string(),
-                }),
-                false,
-            );
-        }
+        };
+        parsed_loser_ids.push(loser_id);
     }
 
-    // Optionally rewrite the winner's content (re-encodes HRR + entities).
+    let store = MemoryStore::new(&state.mem_conn);
     let merged_content = op
         .get("merged_content")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let mut content_updated = false;
-    if let Some(content) = merged_content {
-        let request = UpdateFactRequest {
-            fact_id: winner_id,
-            content: Some(content.to_string()),
-            category: None,
-            tags: None,
-            entities: None,
-            trust: None,
-            source: None,
-            metadata: None,
-        };
-        if let Err(e) = store.update_fact(request).await {
-            return (
-                json!({
-                    "op": "merge",
-                    "winner_id": winner_id,
-                    "status": "error",
-                    "error": format!("failed to update winner content: {e}"),
-                }),
-                false,
-            );
-        }
-        content_updated = true;
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    match store
+        .merge_facts(winner_id, parsed_loser_ids, merged_content)
+        .await
+    {
+        Ok((content_updated, deleted)) => (
+            json!({
+                "op": "merge",
+                "winner_id": winner_id,
+                "content_updated": content_updated,
+                "deleted_loser_ids": deleted,
+                "failed_losers": [],
+                "status": "merged",
+            }),
+            true,
+        ),
+        Err(e) => (
+            json!({
+                "op": "merge",
+                "winner_id": winner_id,
+                "content_updated": false,
+                "deleted_loser_ids": [],
+                "failed_losers": [],
+                "status": "error",
+                "error": e.to_string(),
+            }),
+            false,
+        ),
     }
-
-    // Hard-delete each loser (the winner itself is never deletable here).
-    let mut deleted: Vec<i64> = Vec::new();
-    let mut failed: Vec<Value> = Vec::new();
-    for loser_id in loser_ids {
-        if loser_id == winner_id {
-            failed.push(json!({ "fact_id": loser_id, "error": "loser equals winner" }));
-            continue;
-        }
-        match delete_fact(state, loser_id).await {
-            Ok(true) => deleted.push(loser_id),
-            Ok(false) => {
-                failed.push(json!({ "fact_id": loser_id, "error": "not found" }));
-            }
-            Err(e) => {
-                failed.push(json!({ "fact_id": loser_id, "error": e }));
-            }
-        }
-    }
-
-    let ok = failed.is_empty();
-    (
-        json!({
-            "op": "merge",
-            "winner_id": winner_id,
-            "content_updated": content_updated,
-            "deleted_loser_ids": deleted,
-            "failed_losers": failed,
-            "status": if ok { "merged" } else { "error" },
-        }),
-        ok,
-    )
 }
 
 /// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply

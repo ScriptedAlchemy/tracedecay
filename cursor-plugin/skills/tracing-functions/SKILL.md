@@ -18,6 +18,7 @@ description: Trace call relationships — who calls a function, what it calls, t
 ## Guardrails
 
 - Read-only and parallel-safe. Keep `max_depth` small (1–2) first; widen only when the chain is not yet clear. `tokensave_rename_preview` only previews references — it does not rename.
+- If a trace response is truncated and includes a `handle`, narrow depth or target set first when possible; call `tokensave_retrieve` with that `handle` when the omitted chain details are needed.
 
 ## Output
 

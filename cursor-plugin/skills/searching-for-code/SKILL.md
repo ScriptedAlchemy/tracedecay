@@ -26,6 +26,7 @@ Use the tokensave code graph before Grep/Glob/file reads. Pick the cheapest tool
 - All tools above are read-only and parallel-safe. Do not call mutating/editing tools from this skill.
 - Only fall back to Grep/Glob/Read for non-indexed content (string literals, comments, config the graph does not cover) or after tokensave pinpoints exact files.
 - Prefer one well-formed `tokensave_context` call over many narrow searches.
+- If a response is truncated and includes a `handle`, narrow the query/result set first when possible; call `tokensave_retrieve` with that `handle` only when the omitted details are needed.
 - About to write a new helper because the search came up empty? Run the `tokensave:finding-duplicate-logic` pre-write probe first.
 
 ## Output

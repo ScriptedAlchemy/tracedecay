@@ -18,6 +18,7 @@ description: Review a PR or working-tree diff for impact, risk, and quality usin
 ## Guardrails
 
 - Read-only review. Do not edit or run tests from this skill; to verify behavior, hand off to the `tokensave:running-impacted-tests` skill.
+- If diff context is truncated and includes a `handle`, narrow by file/symbol first when possible; call `tokensave_retrieve` with that `handle` only when the omitted risk detail is needed.
 
 ## Output
 

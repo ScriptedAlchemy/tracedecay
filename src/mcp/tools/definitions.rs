@@ -251,13 +251,13 @@ fn def_retrieve() -> ToolDefinition {
     def(
         "tokensave_retrieve",
         "Retrieve Truncated Response",
-        "Retrieve the full original text for a local response handle emitted by a truncated MCP response. Handles are project-local, expire automatically, and never reference remote storage.",
+        "Use `tokensave_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are project-local, expire automatically, and never reference remote storage. Only call it when the missing details are needed to answer the user's request.",
         json!({
             "type": "object",
             "properties": {
                 "handle": {
                     "type": "string",
-                    "description": "Response handle from a truncated MCP response envelope."
+                    "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
                 }
             },
             "required": ["handle"]
@@ -1382,7 +1382,7 @@ fn def_dashboard() -> ToolDefinition {
     def(
         "tokensave_dashboard",
         "Dashboard",
-        "Start (or manage) the tokensave dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. Optional host/port (defaults match `tokensave dashboard`).",
+        "Start (or manage) the tokensave dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. MCP dashboard binds are loopback-only: optional host must be 127.0.0.1, localhost, or ::1. Port is optional.",
         json!({
             "type": "object",
             "properties": {
@@ -1393,7 +1393,7 @@ fn def_dashboard() -> ToolDefinition {
                 },
                 "host": {
                     "type": "string",
-                    "description": "Host address to bind (default: \"127.0.0.1\")"
+                    "description": "Loopback host address to bind: 127.0.0.1, localhost, or ::1 (default: \"127.0.0.1\"). Wildcard, LAN, public IPs, and other hostnames are rejected."
                 },
                 "port": {
                     "type": "number",

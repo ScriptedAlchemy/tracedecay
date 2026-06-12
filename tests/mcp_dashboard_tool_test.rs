@@ -37,6 +37,40 @@ fn main() { println!("hi"); }
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned
 // axum server task (same reason dashboard_api_test.rs builds a 2-worker runtime).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tokensave_dashboard_tool_rejects_wildcard_host_without_starting() {
+    let _guard = TEST_LOCK.lock().await;
+    let (cg, _tmp) = setup_minimal_project().await;
+
+    let err = match handle_tool_call(
+        &cg,
+        "tokensave_dashboard",
+        json!({ "host": "0.0.0.0", "port": 0 }),
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("wildcard host should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("loopback-only"),
+        "unexpected error: {err}"
+    );
+
+    let stop_res = handle_tool_call(
+        &cg,
+        "tokensave_dashboard",
+        json!({ "action": "stop" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(extract_text(&stop_res.value).contains("not_running"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tokensave_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
     let (cg, _tmp) = setup_minimal_project().await;

@@ -30,6 +30,19 @@ fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
+fn validate_mcp_dashboard_host(host: &str) -> Result<&str> {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
+        return Ok(host);
+    }
+
+    Err(TokenSaveError::Config {
+        message: format!(
+            "tokensave_dashboard host is loopback-only; use 127.0.0.1, localhost, or ::1 (got {host:?})"
+        ),
+    })
+}
+
 /// Handles `tokensave_dashboard` tool calls.
 pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<ToolResult> {
     let action = args
@@ -59,6 +72,8 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
             let host = args
                 .get("host")
                 .and_then(|v| v.as_str())
+                .map(validate_mcp_dashboard_host)
+                .transpose()?
                 .unwrap_or("127.0.0.1")
                 .to_string();
             let port = args

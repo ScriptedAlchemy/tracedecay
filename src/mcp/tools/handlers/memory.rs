@@ -1,5 +1,7 @@
 //! Cross-session and holographic memory handlers.
 
+use std::path::Path;
+
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TokenSaveError};
@@ -10,12 +12,12 @@ use crate::memory::types::{
 use crate::tokensave::TokenSave;
 
 use super::super::ToolResult;
-use super::truncate_response;
+use super::truncated_json_envelope_with_handle;
 
-fn tool_json(value: &Value) -> ToolResult {
+fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": truncate_response(&formatted) }] }),
+        value: json!({ "content": [{ "type": "text", "text": truncated_json_envelope_with_handle(project_root, &formatted) }] }),
         touched_files: vec![],
     }
 }
@@ -132,6 +134,17 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
+fn update_rejected_secret_like(err: &TokenSaveError) -> Option<String> {
+    match err {
+        TokenSaveError::Database { message, operation }
+            if operation == "update_fact" && message.contains("rejected_secret_like") =>
+        {
+            Some(message.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn update_trust(args: &Value, cg: &TokenSave, fact_id: i64) -> Result<Option<f64>> {
     if let Some(trust) = optional_f64(args, "trust") {
         return Ok(Some(trust));
@@ -240,25 +253,39 @@ pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<Too
         }
         "update" => {
             let id = fact_id(&args)?;
-            let fact = cg
-                .update_fact(UpdateFactRequest {
-                    fact_id: id,
-                    content: args
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    category: optional_category(&args)?,
-                    tags: args.get("tags").map(|_| string_array(&args, "tags")),
-                    entities: args.get("entities").map(|_| request_entities(&args)),
-                    trust: update_trust(&args, cg, id).await?,
-                    source: args
-                        .get("source")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    metadata: args.get("metadata").cloned(),
-                })
-                .await?;
-            json!({ "action": action, "fact": fact, "count": 1 })
+            let update = UpdateFactRequest {
+                fact_id: id,
+                content: args
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                category: optional_category(&args)?,
+                tags: args.get("tags").map(|_| string_array(&args, "tags")),
+                entities: args.get("entities").map(|_| request_entities(&args)),
+                trust: update_trust(&args, cg, id).await?,
+                source: args
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                metadata: args.get("metadata").cloned(),
+            };
+            match cg.update_fact(update).await {
+                Ok(fact) => json!({ "action": action, "fact": fact, "count": 1 }),
+                Err(err) => {
+                    if let Some(reason) = update_rejected_secret_like(&err) {
+                        json!({
+                            "action": action,
+                            "fact": Value::Null,
+                            "count": 0,
+                            "diff": "rejected_secret_like",
+                            "reason": reason,
+                            "error": reason,
+                        })
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
         }
         "remove" => {
             let removed = cg.remove_fact(fact_id(&args)?).await?;
@@ -277,7 +304,7 @@ pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<Too
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
-    Ok(tool_json(&out))
+    Ok(tool_json(Some(cg.project_root()), &out))
 }
 
 pub(super) async fn handle_fact_feedback(cg: &TokenSave, args: Value) -> Result<ToolResult> {
@@ -298,11 +325,15 @@ pub(super) async fn handle_fact_feedback(cg: &TokenSave, args: Value) -> Result<
         })
         .await?;
     Ok(tool_json(
+        Some(cg.project_root()),
         &json!({ "status": "recorded", "feedback": result }),
     ))
 }
 
 pub(super) async fn handle_memory_status(cg: &TokenSave) -> Result<ToolResult> {
     let status = cg.memory_status().await?;
-    Ok(tool_json(&json!({ "status": "ok", "memory": status })))
+    Ok(tool_json(
+        Some(cg.project_root()),
+        &json!({ "status": "ok", "memory": status }),
+    ))
 }

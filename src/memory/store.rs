@@ -362,6 +362,33 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
+        if let Some(content) = request.content.as_ref().map(|value| value.trim()) {
+            if !content.is_empty() {
+                if let Some(reason) = detect_secret_like(content) {
+                    self.get_fact(request.fact_id).await?.ok_or_else(|| {
+                        db_message(
+                            "update_fact",
+                            format!("fact {} does not exist", request.fact_id),
+                        )
+                    })?;
+                    self.log_oplog(
+                        "reject_secret_like",
+                        Some(request.fact_id),
+                        &serde_json::json!({
+                            "content_hash": content_hash(content),
+                            "reason": reason
+                        }),
+                    )
+                    .await?;
+                    return Err(db_message(
+                        "update_fact",
+                        format!(
+                            "rejected_secret_like: content matched secret-likeness rule: {reason}"
+                        ),
+                    ));
+                }
+            }
+        }
         self.with_immediate_tx("update_fact", self.update_fact_inner(request))
             .await
     }
@@ -374,12 +401,21 @@ impl<'a> MemoryStore<'a> {
             )
         })?;
 
+        let content_was_supplied = request.content.is_some();
         let content = request.content.map_or_else(
             || existing.content.clone(),
             |value| value.trim().to_string(),
         );
         if content.is_empty() {
             return Err(db_message("update_fact", "fact content cannot be empty"));
+        }
+        if content_was_supplied {
+            if let Some(reason) = detect_secret_like(&content) {
+                return Err(db_message(
+                    "update_fact",
+                    format!("rejected_secret_like: content matched secret-likeness rule: {reason}"),
+                ));
+            }
         }
 
         let category = request.category.unwrap_or(existing.category);
@@ -445,6 +481,76 @@ impl<'a> MemoryStore<'a> {
         )
         .await?;
         Ok(updated)
+    }
+
+    pub async fn merge_facts(
+        &self,
+        winner_id: i64,
+        loser_ids: Vec<i64>,
+        merged_content: Option<String>,
+    ) -> Result<(bool, Vec<i64>)> {
+        self.with_immediate_tx(
+            "merge_facts",
+            self.merge_facts_inner(winner_id, loser_ids, merged_content),
+        )
+        .await
+    }
+
+    async fn merge_facts_inner(
+        &self,
+        winner_id: i64,
+        loser_ids: Vec<i64>,
+        merged_content: Option<String>,
+    ) -> Result<(bool, Vec<i64>)> {
+        self.get_fact(winner_id).await?.ok_or_else(|| {
+            db_message("merge_facts", format!("winner fact {winner_id} not found"))
+        })?;
+
+        let mut seen = BTreeSet::new();
+        for loser_id in &loser_ids {
+            if *loser_id == winner_id {
+                return Err(db_message(
+                    "merge_facts",
+                    format!("loser fact {loser_id} equals winner"),
+                ));
+            }
+            if !seen.insert(*loser_id) {
+                return Err(db_message(
+                    "merge_facts",
+                    format!("duplicate loser fact {loser_id}"),
+                ));
+            }
+            if self.get_fact(*loser_id).await?.is_none() {
+                return Err(db_message(
+                    "merge_facts",
+                    format!("loser fact {loser_id} not found"),
+                ));
+            }
+        }
+
+        let mut content_updated = false;
+        if let Some(content) = merged_content {
+            self.update_fact_inner(UpdateFactRequest {
+                fact_id: winner_id,
+                content: Some(content),
+                category: None,
+                tags: None,
+                entities: None,
+                trust: None,
+                source: None,
+                metadata: None,
+            })
+            .await?;
+            content_updated = true;
+        }
+
+        let mut deleted = Vec::with_capacity(loser_ids.len());
+        for loser_id in loser_ids {
+            if self.remove_fact_inner(loser_id).await? {
+                deleted.push(loser_id);
+            }
+        }
+        Ok((content_updated, deleted))
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {

@@ -134,6 +134,9 @@ Notes:
 - Two borderline entries: `tokensave_diagnostics` runs your toolchain
   (cargo/tsc/pyright) and `tokensave_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.
+- `tokensave_retrieve` only dereferences the required `handle` from a
+  project-local truncated MCP response. Use it when omitted details are needed;
+  it restores that exact cached response and does not re-run the source tool.
 - Do **not** use `tokensave:*` — it would auto-approve the editing tools too.
 - Entries from per-user and per-repo files are concatenated; allowlists are a
   convenience, not a security boundary.

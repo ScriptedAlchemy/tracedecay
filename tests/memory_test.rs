@@ -625,6 +625,66 @@ async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields()
 }
 
 #[tokio::test]
+async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let fact = store
+        .add_fact(
+            fact_request(
+                "Store only non-secret project preferences",
+                MemoryCategory::Project,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+
+    let attempted =
+        "Do not persist this api_key=sk-test-742913 value in project memory".to_string();
+    let err = store
+        .update_fact(UpdateFactRequest {
+            fact_id: fact.fact_id,
+            content: Some(attempted.clone()),
+            category: None,
+            tags: None,
+            entities: None,
+            trust: None,
+            source: None,
+            metadata: None,
+        })
+        .await
+        .expect_err("secret-like update should be rejected");
+    let err = err.to_string();
+    assert!(err.contains("rejected_secret_like"), "{err}");
+
+    let unchanged = store.get_fact(fact.fact_id).await.unwrap().unwrap();
+    assert_eq!(unchanged.content, fact.content);
+    assert!(!unchanged.content.contains("sk-test-742913"));
+
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT op, fact_id, detail_json FROM memory_oplog ORDER BY id DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("reject oplog row");
+    assert_eq!(row.get::<String>(0).unwrap(), "reject_secret_like");
+    assert_eq!(row.get::<i64>(1).unwrap(), fact.fact_id);
+    let detail = row.get::<String>(2).unwrap();
+    assert!(detail.contains("content_hash"), "{detail}");
+    assert!(detail.contains("reason"), "{detail}");
+    assert!(
+        !detail.contains("sk-test-742913") && !detail.contains("api_key"),
+        "reject oplog must not leak attempted secret content: {detail}"
+    );
+}
+
+#[tokio::test]
 async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());

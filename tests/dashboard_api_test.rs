@@ -423,6 +423,23 @@ async fn count_in_project_db(fixture: &DashboardFixture, sql: &str, fact_id: i64
     }
 }
 
+async fn string_in_project_db(
+    fixture: &DashboardFixture,
+    sql: &str,
+    fact_id: i64,
+) -> Option<String> {
+    let conn = project_db_conn(fixture).await;
+    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
+        Ok(rows) => rows,
+        Err(err) => panic!("verification query failed: {err}"),
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).ok(),
+        Ok(None) => None,
+        Err(err) => panic!("verification row read failed: {err}"),
+    }
+}
+
 async fn project_db_conn(fixture: &DashboardFixture) -> libsql::Connection {
     let db = match libsql::Builder::new_local(&fixture.project_db_path)
         .build()
@@ -1268,6 +1285,56 @@ fn curation_delete_lifecycle() {
 }
 
 #[test]
+fn curation_preview_marks_same_count_updates_stale() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        let (status, dry) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(dry["dry_run"], true);
+
+        let conn = project_db_conn(&fixture).await;
+        conn.execute(
+            "UPDATE memory_facts
+             SET content = content || ' after preview', updated_at = updated_at + 1
+             WHERE fact_id = 101",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (status, preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/preview",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            preview["stale"], true,
+            "same-count edits must stale previews"
+        );
+        assert!(
+            preview["stale_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("changed"),
+            "stale response should explain the memory store changed: {preview}"
+        );
+    });
+}
+
+#[test]
 fn memory_oplog_endpoint_lists_recent_operations() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -1474,6 +1541,120 @@ fn curate_apply_ops_contract() {
         assert!(
             status == 400 || status == 415 || status == 422,
             "missing/malformed body should be rejected, got {status}"
+        );
+    });
+}
+
+#[test]
+fn curate_apply_merge_with_missing_loser_is_atomic() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+        let apply_url = format!("{}/api/plugins/holographic/curate/apply", fixture.base_url);
+
+        let (status, dry) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(dry["dry_run"], true);
+
+        let original_winner = string_in_project_db(
+            &fixture,
+            "SELECT content FROM memory_facts WHERE fact_id = ?1",
+            101,
+        )
+        .await
+        .expect("winner content");
+
+        let (status, response) = post_json_body(
+            &agent,
+            &apply_url,
+            &serde_json::json!({
+                "ops": [{
+                    "op": "merge",
+                    "winner_id": 101,
+                    "loser_ids": [102, 99999],
+                    "merged_content": "Cache invalidation policy should not partially merge"
+                }]
+            }),
+        );
+        assert_eq!(status, 200, "per-op failures stay in-band");
+        assert_eq!(response["counts"]["deleted"], 0);
+        assert_eq!(response["counts"]["merged"], 0);
+        assert_eq!(response["counts"]["errors"], 1);
+        assert_eq!(response["results"][0]["op"], "merge");
+        assert_eq!(response["results"][0]["status"], "error");
+        assert!(
+            response["results"][0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("loser fact 99999 not found"),
+            "missing loser should be reported before mutation: {response}"
+        );
+
+        let winner_after = string_in_project_db(
+            &fixture,
+            "SELECT content FROM memory_facts WHERE fact_id = ?1",
+            101,
+        )
+        .await
+        .expect("winner content after failed merge");
+        assert_eq!(
+            winner_after, original_winner,
+            "failed merge must not update winner content"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+                102,
+            )
+            .await,
+            1,
+            "failed merge must not delete valid losers"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
+                101,
+            )
+            .await,
+            0,
+            "failed merge must not write a winner update oplog"
+        );
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
+                102,
+            )
+            .await,
+            0,
+            "failed merge must not write loser delete oplogs"
+        );
+
+        let (status, preview) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/curation/preview",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            !preview["report"].is_null(),
+            "failed merge must not clear saved preview"
+        );
+        assert_eq!(
+            preview["stale"], false,
+            "unchanged store should leave preview fresh"
         );
     });
 }

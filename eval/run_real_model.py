@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -103,8 +104,18 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--profile",
-        default=DEFAULT_PROFILE,
-        help="Hermes profile name used for the eval (created if missing).",
+        help=(
+            "Hermes profile name used for the eval. By default the runner creates "
+            "a unique temporary Hermes home instead of writing to ~/.hermes."
+        ),
+    )
+    parser.add_argument(
+        "--hermes-home",
+        type=Path,
+        help=(
+            "Explicit HERMES_HOME/profile directory to use. Passing this or "
+            "--profile opts into user-managed Hermes storage."
+        ),
     )
     parser.add_argument(
         "--tokensave-bin",
@@ -117,6 +128,41 @@ def parse_args(argv):
         help="Keep the throwaway fixture project for inspection.",
     )
     return parser.parse_args(argv)
+
+
+@dataclass
+class HermesProfileSelection:
+    profile: str
+    profile_dir: Path
+    install_home: Path | None = None
+    _temp_dir: tempfile.TemporaryDirectory | None = None
+
+    def cleanup(self):
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
+
+
+def resolve_hermes_profile(args):
+    profile = args.profile or DEFAULT_PROFILE
+    if args.hermes_home is not None:
+        return HermesProfileSelection(profile=profile, profile_dir=args.hermes_home)
+    if args.profile:
+        home = Path.home()
+        return HermesProfileSelection(
+            profile=profile,
+            profile_dir=home / ".hermes/profiles" / profile,
+            install_home=home,
+        )
+
+    temp_home = tempfile.TemporaryDirectory(prefix="tokensave-eval-hermes-")
+    home = Path(temp_home.name)
+    return HermesProfileSelection(
+        profile=profile,
+        profile_dir=home / ".hermes/profiles" / profile,
+        install_home=home,
+        _temp_dir=temp_home,
+    )
 
 
 def resolve_tokensave_bin(explicit):
@@ -206,8 +252,9 @@ def provider_env_passthrough(env):
             env[key] = value.strip().strip('"').strip("'")
 
 
-def ensure_hermes_profile(profile, model, provider, tokensave_bin, fixture):
-    profile_dir = Path.home() / ".hermes/profiles" / profile
+def ensure_hermes_profile(selection, model, provider, tokensave_bin, fixture):
+    profile = selection.profile
+    profile_dir = selection.profile_dir
     profile_dir.mkdir(parents=True, exist_ok=True)
     config_path = profile_dir / "config.yaml"
     config_path.write_text(
@@ -217,27 +264,36 @@ def ensure_hermes_profile(profile, model, provider, tokensave_bin, fixture):
         "agent:\n"
         "  max_turns: 16\n"
     )
-    run(
-        [
-            tokensave_bin,
-            "install",
-            "--agent",
-            "hermes",
-            "--profile",
-            profile,
-            "--project-root",
-            str(fixture),
-            "--no-dashboard",
-        ],
-        cwd=fixture,
-        timeout=120,
-    )
+    if selection.install_home is not None:
+        install_env = dict(os.environ)
+        install_env["HOME"] = str(selection.install_home)
+        run(
+            [
+                tokensave_bin,
+                "install",
+                "--agent",
+                "hermes",
+                "--profile",
+                profile,
+                "--project-root",
+                str(fixture),
+                "--no-dashboard",
+            ],
+            cwd=fixture,
+            env=install_env,
+            timeout=120,
+        )
+    else:
+        print(
+            f"[warn] --hermes-home was explicit; assuming tokensave plugin is already installed in {profile_dir}",
+            file=sys.stderr,
+        )
     return profile_dir
 
 
 def drive_hermes(args, scenario, fixture, log_dir):
     profile_dir = ensure_hermes_profile(
-        args.profile, args.model, args.provider, args.tokensave_bin, fixture
+        args.hermes_profile, args.model, args.provider, args.tokensave_bin, fixture
     )
     max_turns = args.max_turns or scenario["real_model"].get("max_turns", 8)
     env = dict(os.environ)
@@ -429,43 +485,47 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
+    args.hermes_profile = resolve_hermes_profile(args)
     overall_ok = True
-    for scenario in scenarios:
-        fixture = build_fixture(scenario, args.tokensave_bin)
-        try:
-            if args.driver == "hermes":
-                transcripts = drive_hermes(args, scenario, fixture, run_dir)
-            else:
-                transcripts = drive_cursor_agent(args, scenario, fixture, run_dir)
-            outcomes = evaluate_assertions(scenario, fixture)
-            failed = [o for o in outcomes if not o["passed"]]
-            status = "pass" if not failed else "fail"
-            if failed and scenario.get("contract") == "pending-sibling":
-                status = "fail (note: scenario contract is pending-sibling — see contract_notes)"
-            if not all(t["turn_valid"] for t in transcripts):
-                status = "error (agent turn invalid — see transcript logs)"
-                failed = failed or [{"name": "agent-turn", "passed": False}]
-            report["scenarios"].append(
-                {
-                    "id": scenario["id"],
-                    "contract": scenario.get("contract", "stable"),
-                    "status": status,
-                    "assertions": outcomes,
-                    "transcripts": transcripts,
-                    "fixture": str(fixture) if args.keep_fixture else "(removed)",
-                }
-            )
-            overall_ok &= not failed
-            print(f"[{scenario['id']}] {status}")
-            for outcome in outcomes:
-                marker = "pass" if outcome["passed"] else "FAIL"
-                print(
-                    f"  [{marker}] {outcome['name']} — actual {outcome['actual']} "
-                    f"{outcome['op']} expected {outcome['expected']}"
+    try:
+        for scenario in scenarios:
+            fixture = build_fixture(scenario, args.tokensave_bin)
+            try:
+                if args.driver == "hermes":
+                    transcripts = drive_hermes(args, scenario, fixture, run_dir)
+                else:
+                    transcripts = drive_cursor_agent(args, scenario, fixture, run_dir)
+                outcomes = evaluate_assertions(scenario, fixture)
+                failed = [o for o in outcomes if not o["passed"]]
+                status = "pass" if not failed else "fail"
+                if failed and scenario.get("contract") == "pending-sibling":
+                    status = "fail (note: scenario contract is pending-sibling — see contract_notes)"
+                if not all(t["turn_valid"] for t in transcripts):
+                    status = "error (agent turn invalid — see transcript logs)"
+                    failed = failed or [{"name": "agent-turn", "passed": False}]
+                report["scenarios"].append(
+                    {
+                        "id": scenario["id"],
+                        "contract": scenario.get("contract", "stable"),
+                        "status": status,
+                        "assertions": outcomes,
+                        "transcripts": transcripts,
+                        "fixture": str(fixture) if args.keep_fixture else "(removed)",
+                    }
                 )
-        finally:
-            if not args.keep_fixture:
-                shutil.rmtree(fixture, ignore_errors=True)
+                overall_ok &= not failed
+                print(f"[{scenario['id']}] {status}")
+                for outcome in outcomes:
+                    marker = "pass" if outcome["passed"] else "FAIL"
+                    print(
+                        f"  [{marker}] {outcome['name']} — actual {outcome['actual']} "
+                        f"{outcome['op']} expected {outcome['expected']}"
+                    )
+            finally:
+                if not args.keep_fixture:
+                    shutil.rmtree(fixture, ignore_errors=True)
+    finally:
+        args.hermes_profile.cleanup()
 
     report["status"] = "pass" if overall_ok else "fail"
     report_path = run_dir / "report.json"

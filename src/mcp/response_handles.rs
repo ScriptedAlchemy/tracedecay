@@ -6,7 +6,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,11 +17,8 @@ pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tokensave_retrieve";
 
 const CACHE_DIR_NAME: &str = "response-handles";
-const CLEANUP_INTERVAL_SECS: i64 = 3_600;
 const HANDLE_HEX_CHARS: usize = 24;
 const HANDLE_PREFIX: &str = "rh_";
-
-static LAST_CLEANUP_AT: OnceLock<Mutex<i64>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ResponseHandleRecord {
@@ -50,7 +46,6 @@ pub fn store_response_handle(
     content: &str,
     now: i64,
 ) -> Result<ResponseHandleRecord> {
-    let _ = cleanup_expired_response_handles_if_due(project_root, now);
     let handle = response_handle_for(content);
     let record = ResponseHandleRecord {
         handle: handle.clone(),
@@ -94,19 +89,6 @@ pub fn retrieve_response_handle(
         expires_at: record.expires_at,
         content: record.content,
     }))
-}
-
-fn cleanup_expired_response_handles_if_due(project_root: &Path, now: i64) -> Result<usize> {
-    let cleanup_at = LAST_CLEANUP_AT.get_or_init(|| Mutex::new(0));
-    let Ok(mut last_cleanup_at) = cleanup_at.lock() else {
-        return Ok(0);
-    };
-    if now.saturating_sub(*last_cleanup_at) < CLEANUP_INTERVAL_SECS {
-        return Ok(0);
-    }
-    *last_cleanup_at = now;
-    drop(last_cleanup_at);
-    cleanup_expired_response_handles(project_root, now)
 }
 
 pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result<usize> {

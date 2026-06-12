@@ -152,7 +152,11 @@ pub(crate) fn truncated_json_envelope_with_handle(
             object.insert(
                 "retrieve_instruction".to_string(),
                 json!(format!(
-                    "Call {RESPONSE_RETRIEVE_TOOL} with handle '{}' to retrieve the full original response from local project storage.",
+                    "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. Only call it if the missing details are needed to answer the user's request.",
+                    preview.len(),
+                    formatted.len(),
+                    record.expires_at,
+                    RESPONSE_HANDLE_TTL_SECS,
                     record.handle
                 )),
             );
