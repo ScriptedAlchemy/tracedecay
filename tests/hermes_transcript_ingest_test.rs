@@ -90,6 +90,7 @@ async fn write_hermes_profile(
             timestamp REAL NOT NULL,
             token_count INTEGER,
             finish_reason TEXT,
+            reasoning TEXT,
             observed INTEGER DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1
         )",
@@ -309,6 +310,91 @@ async fn hermes_profile_pinned_elsewhere_is_not_ingested() {
     assert_eq!(stats.messages_upserted, 0);
     assert_eq!(stats.sessions_upserted, 0);
     assert!(db.get_session("hermes", SESSION_ID).await.is_none());
+}
+
+#[tokio::test]
+async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+
+    let conn = open_state_db(&state_db).await;
+    // A rewound (soft-deleted) turn and a reasoning-only assistant turn.
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, active)
+         VALUES (?1, 'user', 'rewound secret prompt', 1780629400.0, 0)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, reasoning, timestamp)
+         VALUES (?1, 'assistant', '', 'thinking about the billing fix', 1780629410.0)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    // 4 fixture turns + the reasoning-only turn; the rewound row is skipped.
+    assert_eq!(stats.messages_upserted, 5);
+    assert!(db
+        .get_session_message("hermes", &format!("{SESSION_ID}:6"))
+        .await
+        .is_none());
+    let reasoning_turn = db
+        .get_session_message("hermes", &format!("{SESSION_ID}:7"))
+        .await
+        .expect("reasoning-only turn should be searchable");
+    assert!(reasoning_turn
+        .text
+        .contains("thinking about the billing fix"));
+    let hits = db
+        .search_session_messages("hermes", None, "rewound secret prompt", 10)
+        .await;
+    assert!(hits.is_empty(), "rewound rows must not surface as history");
+}
+
+#[tokio::test]
+async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+
+    // Rebuild `messages` with the pre-v12 shape (no active, no reasoning).
+    let conn = open_state_db(&state_db).await;
+    conn.execute("DROP TABLE messages", ()).await.unwrap();
+    conn.execute(
+        "CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL
+        )",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'user', 'legacy schema prompt', 1780629300.0)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    assert_eq!(stats.messages_upserted, 1);
+    let turn = db
+        .get_session_message("hermes", &format!("{SESSION_ID}:1"))
+        .await
+        .expect("legacy-store rows should ingest");
+    assert!(turn.text.contains("legacy schema prompt"));
 }
 
 #[tokio::test]
