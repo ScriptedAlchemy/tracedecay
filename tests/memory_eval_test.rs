@@ -421,14 +421,20 @@ fn curate_delete_ids(report: &Value) -> HashSet<i64> {
 
     for key in ["secret_like", "transient", "supersession"] {
         if let Some(entries) = report
-            .get("hygiene")
-            .and_then(|hygiene| hygiene.get(key))
+            .get("hygiene_candidates")
+            .and_then(|hygiene_candidates| hygiene_candidates.get(key))
             .and_then(Value::as_array)
         {
             ids.extend(
                 entries
                     .iter()
-                    .filter(|action| action.get("op").and_then(Value::as_str) == Some("delete"))
+                    .filter(|candidate| {
+                        candidate.get("recommended_op").and_then(Value::as_str) == Some("delete")
+                            && candidate
+                                .get("review_required")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                    })
                     .filter_map(|action| action.get("fact_id").and_then(Value::as_i64)),
             );
         }

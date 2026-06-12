@@ -275,16 +275,31 @@ export interface MemoryCurateAction {
   supersedes?: number[];
 }
 
+/** One deterministic hygiene candidate; review must turn it into an op. */
+export interface MemoryCurateHygieneCandidate {
+  recommended_op: "delete" | "merge" | string;
+  status: "candidate" | string;
+  review_required: boolean;
+  tier: "secret_like" | "transient" | "supersession" | string;
+  reason?: string;
+  confidence?: number;
+  fact_id?: number;
+  superseded_by?: number;
+  similarity?: number;
+  access_count?: number;
+  content?: string;
+}
+
 /**
  * Wire contract for `POST /api/plugins/holographic/curate`: the curation
  * plan/report. With `dry_run` the actions are proposals; otherwise
  * `applied_counts`/`apply_errors` describe what was actually executed.
  */
-/** Deterministic rule-based hygiene proposals (never auto-applied). */
-export interface MemoryCurateHygiene {
-  secret_like: MemoryCurateAction[];
-  transient: MemoryCurateAction[];
-  supersession: MemoryCurateAction[];
+/** Deterministic rule-based hygiene candidates (never auto-applied). */
+export interface MemoryCurateHygieneCandidates {
+  secret_like: MemoryCurateHygieneCandidate[];
+  transient: MemoryCurateHygieneCandidate[];
+  supersession: MemoryCurateHygieneCandidate[];
 }
 
 export interface MemoryCurateResponse {
@@ -292,7 +307,7 @@ export interface MemoryCurateResponse {
   ran: boolean;
   dry_run: boolean;
   actions: MemoryCurateAction[];
-  hygiene?: MemoryCurateHygiene;
+  hygiene_candidates?: MemoryCurateHygieneCandidates;
   counts: Record<string, number>;
   applied_counts?: Record<string, number>;
   skipped_actions?: number;

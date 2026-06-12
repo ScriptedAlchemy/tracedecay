@@ -990,11 +990,11 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             curate["actions"].as_array().is_some(),
             "curate dry-run should return an actions array"
         );
-        // The deterministic hygiene proposal section is always present.
+        // The deterministic hygiene candidate section is always present.
         for key in ["secret_like", "transient", "supersession"] {
             assert!(
-                curate["hygiene"][key].as_array().is_some(),
-                "curate dry-run should include hygiene.{key} proposals"
+                curate["hygiene_candidates"][key].as_array().is_some(),
+                "curate dry-run should include hygiene_candidates.{key} proposals"
             );
         }
     });
@@ -1127,14 +1127,39 @@ fn curate_hygiene_scans_unvectored_facts() {
         );
 
         assert_eq!(status, 200);
-        let secret_like = curate["hygiene"]["secret_like"]
+        let secret_like = curate["hygiene_candidates"]["secret_like"]
             .as_array()
-            .unwrap_or_else(|| panic!("expected hygiene.secret_like array"));
-        assert!(
-            secret_like
+            .unwrap_or_else(|| panic!("expected hygiene_candidates.secret_like array"));
+        let secret_candidate = secret_like
+            .iter()
+            .find(|action| action["fact_id"].as_i64() == Some(901))
+            .unwrap_or_else(|| {
+                panic!("hygiene scan must include secret-like facts without HRR vectors: {curate}")
+            });
+        assert_eq!(secret_candidate["status"], "candidate");
+        assert_eq!(secret_candidate["review_required"], true);
+        assert_eq!(secret_candidate["recommended_op"], "delete");
+
+        let (status, applied) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate", fixture.base_url),
+            &serde_json::json!({ "dry_run": false }),
+        );
+        assert_eq!(status, 200);
+        assert!(applied["hygiene_candidates"]["secret_like"]
+            .as_array()
+            .is_some_and(|candidates| candidates
                 .iter()
-                .any(|action| action["fact_id"].as_i64() == Some(901)),
-            "hygiene scan must include secret-like facts without HRR vectors: {curate}"
+                .any(|candidate| candidate["fact_id"].as_i64() == Some(901))));
+        assert_eq!(
+            count_in_project_db(
+                &fixture,
+                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+                901,
+            )
+            .await,
+            1,
+            "deterministic curate apply must not delete hygiene candidates without explicit review"
         );
     });
 }

@@ -471,15 +471,30 @@ fn fact_i64(fact: &Value, key: &str) -> i64 {
     fact.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-/// Deterministic hygiene PROPOSALS for the curation dry-run plan: secret-like
+fn candidate_confidence(base: f64, fact: &Value) -> f64 {
+    let trust = fact
+        .get("trust_score")
+        .and_then(Value::as_f64)
+        .unwrap_or(crate::memory::trust::DEFAULT_TRUST)
+        .clamp(0.0, 1.0);
+    let access_discount = if fact_i64(fact, "access_count") > 0 {
+        0.05
+    } else {
+        0.0
+    };
+    ((base * (0.75 + trust * 0.25) - access_discount) * 10_000.0).round() / 10_000.0
+}
+
+/// Deterministic hygiene CANDIDATES for the curation dry-run plan: secret-like
 /// facts, transient run-output facts, and negation-cue "possible
 /// supersession" pairs. Pure rule-based scanning — no model is invoked.
 ///
-/// Entries are shaped like `/curate/apply` delete ops so an external reviewer
-/// (human, or the Hermes LLM curation layer) can confirm and apply them
-/// through the existing ops contract. They are NEVER auto-applied: the
-/// `/curate` apply path only executes the dedup `actions` list.
-pub(crate) fn propose_hygiene_actions(
+/// Entries are review evidence, not applyable ops. An external reviewer
+/// (human, or the Hermes LLM curation layer) can turn a confirmed candidate
+/// into an explicit `/curate/apply` delete/merge op. They are NEVER
+/// auto-applied: the `/curate` apply path only executes the dedup `actions`
+/// list.
+pub(crate) fn propose_hygiene_candidates(
     scan_facts: &[Value],
     pair_facts: &[Value],
     supersession_pairs: &[ScoredPair],
@@ -498,19 +513,25 @@ pub(crate) fn propose_hygiene_actions(
         if let Some(reason) = crate::memory::hygiene::detect_secret_like(content) {
             flagged.insert(fact_id);
             secret_like.push(json!({
-                "op": "delete",
+                "recommended_op": "delete",
                 "fact_id": fact_id,
                 "reason": format!("Secret-like content ({reason}); memory must not retain credentials"),
                 "content": truncated_content(fact),
+                "confidence": candidate_confidence(0.95, fact),
+                "review_required": true,
+                "status": "candidate",
                 "tier": "secret_like",
             }));
         } else if let Some(reason) = crate::memory::hygiene::detect_transient(content) {
             flagged.insert(fact_id);
             transient.push(json!({
-                "op": "delete",
+                "recommended_op": "delete",
                 "fact_id": fact_id,
                 "reason": format!("Transient run output ({reason}); likely ephemeral, not durable knowledge"),
                 "content": truncated_content(fact),
+                "confidence": candidate_confidence(0.65, fact),
+                "review_required": true,
+                "status": "candidate",
                 "tier": "transient",
             }));
         }
@@ -553,7 +574,7 @@ pub(crate) fn propose_hygiene_actions(
         }
         let similarity_rounded = (pair.similarity * 10_000.0).round() / 10_000.0;
         supersession.push(json!({
-            "op": "delete",
+            "recommended_op": "delete",
             "fact_id": older_id,
             "superseded_by": newer_id,
             "similarity": similarity_rounded,
@@ -561,6 +582,9 @@ pub(crate) fn propose_hygiene_actions(
                 "Possible supersession: negation/state-change cue with similarity {similarity_rounded:.4} to newer fact #{newer_id}; confirm which fact is current before applying"
             ),
             "content": truncated_content(older),
+            "confidence": candidate_confidence(0.70, older),
+            "review_required": true,
+            "status": "candidate",
             "access_count": fact_i64(older, "access_count"),
             "tier": "supersession",
         }));
@@ -650,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn propose_dedup_actions_deletes_lower_trust() {
+    fn propose_dedup_actions_deletes_lower_trust_duplicate_only() {
         let facts = vec![
             json!({"fact_id": 1, "content": "same text here", "trust_score": 0.9}),
             json!({"fact_id": 2, "content": "same text here", "trust_score": 0.5}),
@@ -664,7 +688,33 @@ mod tests {
     }
 
     #[test]
-    fn propose_dedup_actions_spares_higher_access_losers_below_extreme_similarity() {
+    fn low_trust_fact_alone_is_not_proposed_for_deletion() {
+        let facts = vec![json!({
+            "fact_id": 9,
+            "content": "Plausible but unverified project note",
+            "trust_score": 0.1,
+            "created_at": 1,
+            "access_count": 0,
+        })];
+
+        assert!(
+            propose_dedup_actions(&facts, &[]).is_empty(),
+            "low trust without duplicate evidence must not become a delete action"
+        );
+        let hygiene_candidates =
+            propose_hygiene_candidates(&facts, &facts, &[], &std::collections::HashSet::new());
+        for tier in ["secret_like", "transient", "supersession"] {
+            assert!(
+                hygiene_candidates[tier]
+                    .as_array()
+                    .is_some_and(std::vec::Vec::is_empty),
+                "low trust alone must not produce hygiene candidate tier {tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn propose_dedup_actions_spares_accessed_low_trust_losers_below_extreme_similarity() {
         let facts = vec![
             json!({"fact_id": 1, "content": "same text here", "trust_score": 0.9, "access_count": 0}),
             json!({"fact_id": 2, "content": "same text here", "trust_score": 0.5, "access_count": 7}),
@@ -684,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn propose_hygiene_actions_flags_secret_transient_and_supersession() {
+    fn propose_hygiene_candidates_flags_secret_transient_and_supersession_for_review() {
         let facts = vec![
             json!({"fact_id": 1, "content": "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH", "trust_score": 0.5, "created_at": 10}),
             json!({"fact_id": 2, "content": "dev server listening on 127.0.0.1:8081", "trust_score": 0.5, "created_at": 11}),
@@ -692,37 +742,45 @@ mod tests {
             json!({"fact_id": 4, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 9}),
         ];
         let pairs = vec![ScoredPair::analyze(&facts, 0.85, 2, 3)];
-        let hygiene =
-            propose_hygiene_actions(&facts, &facts, &pairs, &std::collections::HashSet::new());
+        let hygiene_candidates =
+            propose_hygiene_candidates(&facts, &facts, &pairs, &std::collections::HashSet::new());
 
-        let secret = hygiene["secret_like"]
+        let secret = hygiene_candidates["secret_like"]
             .as_array()
             .unwrap_or_else(|| panic!("expected secret_like array"));
         assert_eq!(secret.len(), 1);
         assert_eq!(secret[0]["fact_id"], 1);
-        assert_eq!(secret[0]["op"], "delete");
+        assert_eq!(secret[0]["recommended_op"], "delete");
+        assert_eq!(secret[0]["status"], "candidate");
+        assert_eq!(secret[0]["review_required"], true);
         assert_eq!(secret[0]["tier"], "secret_like");
 
-        let transient = hygiene["transient"]
+        let transient = hygiene_candidates["transient"]
             .as_array()
             .unwrap_or_else(|| panic!("expected transient array"));
         assert_eq!(transient.len(), 1);
         assert_eq!(transient[0]["fact_id"], 2);
+        assert_eq!(transient[0]["recommended_op"], "delete");
+        assert_eq!(transient[0]["status"], "candidate");
+        assert_eq!(transient[0]["review_required"], true);
         assert_eq!(transient[0]["tier"], "transient");
 
         // Supersession proposes deleting the OLDER fact of the cue pair.
-        let supersession = hygiene["supersession"]
+        let supersession = hygiene_candidates["supersession"]
             .as_array()
             .unwrap_or_else(|| panic!("expected supersession array"));
         assert_eq!(supersession.len(), 1);
         assert_eq!(supersession[0]["fact_id"], 3);
+        assert_eq!(supersession[0]["recommended_op"], "delete");
+        assert_eq!(supersession[0]["status"], "candidate");
+        assert_eq!(supersession[0]["review_required"], true);
         assert_eq!(supersession[0]["superseded_by"], 4);
         assert_eq!(supersession[0]["access_count"], 4);
         assert_eq!(supersession[0]["tier"], "supersession");
     }
 
     #[test]
-    fn propose_hygiene_actions_respects_exclusions_and_thresholds() {
+    fn propose_hygiene_candidates_respects_exclusions_and_thresholds() {
         let facts = vec![
             json!({"fact_id": 1, "content": "scratch file at /tmp/run-output.json", "trust_score": 0.5, "created_at": 1}),
             json!({"fact_id": 2, "content": "We use Redis for caching sessions", "trust_score": 0.8, "created_at": 5}),
@@ -732,11 +790,11 @@ mod tests {
         let consumed: std::collections::HashSet<i64> = [1].into_iter().collect();
         // Below the supersession similarity floor the cue pair is ignored.
         let weak_pair = vec![ScoredPair::analyze(&facts, 0.5, 1, 2)];
-        let hygiene = propose_hygiene_actions(&facts, &facts, &weak_pair, &consumed);
-        assert!(hygiene["transient"]
+        let hygiene_candidates = propose_hygiene_candidates(&facts, &facts, &weak_pair, &consumed);
+        assert!(hygiene_candidates["transient"]
             .as_array()
             .is_some_and(std::vec::Vec::is_empty));
-        assert!(hygiene["supersession"]
+        assert!(hygiene_candidates["supersession"]
             .as_array()
             .is_some_and(std::vec::Vec::is_empty));
     }
@@ -793,14 +851,14 @@ mod tests {
         let computation = build_similarity_computation((4, 0, 10, 7), 4, facts, scored);
 
         assert_eq!(computation.pairs.len(), SIMILARITY_PAIR_CAP as usize);
-        let hygiene = propose_hygiene_actions(
+        let hygiene_candidates = propose_hygiene_candidates(
             &computation.facts,
             &computation.facts,
             &computation.supersession_pairs,
             &std::collections::HashSet::new(),
         );
         assert_eq!(
-            hygiene["supersession"].as_array().map(Vec::len),
+            hygiene_candidates["supersession"].as_array().map(Vec::len),
             Some(1),
             "supersession candidates at the floor must not be lost below the response pair cap"
         );

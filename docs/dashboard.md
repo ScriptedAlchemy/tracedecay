@@ -230,7 +230,7 @@ Memory maintenance tools:
 - **Preview**: Dry-run analysis showing proposed actions (persisted to `.tokensave/dashboard/curation_preview.json` so it survives server restarts)
 - **Run Curation**: Execute deduplication (**permanently hard-DELETES** the lower-trust fact in each duplicate pair)
 
-Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap).
+Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap). Rule-based hygiene signals are emitted separately as `hygiene_candidates`; they are review evidence for a human or external LLM curator, not deterministic apply operations.
 
 **Deletion is permanent — there is no archive, no restore, and no soft-delete state.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tokensave_fact_store` recall. The winner fact in a merge operation may have its content rewritten and HRR vector re-encoded.
 
@@ -716,17 +716,19 @@ memory-bank dirty marking).
       "tier": "duplicate"
     }
   ],
-  "hygiene": {
-    "secret_like": [ /* delete-shaped proposals, tier "secret_like" */ ],
-    "transient": [ /* delete-shaped proposals, tier "transient" */ ],
+  "hygiene_candidates": {
+    "secret_like": [ /* review_required candidates, tier "secret_like" */ ],
+    "transient": [ /* review_required candidates, tier "transient" */ ],
     "supersession": [
       {
-        "op": "delete",
+        "recommended_op": "delete",
         "fact_id": 4,
         "superseded_by": 7,
         "similarity": 0.8123,
         "reason": "Possible supersession: negation/state-change cue ...",
         "content": "Fact content preview...",
+        "status": "candidate",
+        "review_required": true,
         "access_count": 2,
         "tier": "supersession"
       }
@@ -743,14 +745,18 @@ memory-bank dirty marking).
 }
 ```
 
-`hygiene` is the deterministic rule-based proposal set (secret-like content,
-transient run output, negation-cue supersession pairs). These entries are
-**never auto-applied** — `dry_run=false` only executes `actions` (dedup
-deletes); a reviewer (human, the `tokensave memory curate --llm` two-phase
-flow, or the Hermes LLM wrapper) confirms hygiene entries through
-`POST /curate/apply`. The dedup planner also applies access-count
-delete-reluctance: the higher-access fact of a pair is never auto-proposed as
-the loser unless the similarity is extreme (≥ 0.98).
+`hygiene_candidates` is the deterministic rule-based evidence set
+(secret-like content, transient run output, negation-cue supersession pairs).
+These entries are **never auto-applied** — `dry_run=false` only executes
+`actions` (dedup deletes); a reviewer (human, the `tokensave memory curate
+--llm` two-phase flow, or the Hermes LLM wrapper) confirms hygiene candidates by
+submitting explicit delete/merge ops through `POST /curate/apply`. Low trust by
+itself is not a delete signal; trust only helps calibrate candidate confidence.
+The dedup planner also applies access-count delete-reluctance: the
+higher-access fact of a pair is never auto-proposed as the loser unless the
+similarity is extreme (≥ 0.98). Helpful feedback raises trust, and recall access
+updates `access_count`/`last_recalled_at`, giving useful facts protection during
+curation review.
 
 **Response (dry_run=false):**
 Same structure with `applied_counts` showing what was actually deleted and

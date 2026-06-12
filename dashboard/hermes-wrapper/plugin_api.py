@@ -643,8 +643,10 @@ _CURATION_SYSTEM_PROMPT = (
     # Keep this hygiene paragraph in sync with CURATION_SYSTEM_PROMPT in
     # src/dashboard/memory_curate.rs (the CLI half of the same contract).
     "Hygiene categories: the input may also carry \"hygiene_candidates\" - "
-    "deterministic rule-flagged proposals to review with the same "
-    "conservatism. secret_like: flagged as credential-like content; delete "
+    "deterministic rule-flagged evidence with status=\"candidate\", "
+    "review_required=true, and recommended_op hints. Review these candidates "
+    "with the same conservatism; do not treat them as already-approved "
+    "operations. secret_like: flagged as credential-like content; delete "
     "unless it is clearly a false positive (e.g. prose ABOUT secret handling "
     "with no actual credential). transient: looks like ephemeral run output "
     "(ports, PIDs, temp paths, run logs); delete unless it encodes a durable "
@@ -654,7 +656,8 @@ _CURATION_SYSTEM_PROMPT = (
     "signals: members may carry access_count / last_recalled_at "
     "(recall-search returns). Treat high access as evidence a fact is "
     "actively used - avoid deleting the more-accessed fact of a pair unless "
-    "the duplication is near-exact."
+    "the duplication is near-exact. Low trust alone is never a delete reason; "
+    "use it only to temper confidence."
 )
 
 
@@ -960,25 +963,23 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
 
     clusters = _build_curation_clusters(pairs, facts_by_id, max_clusters)
 
-    # Deterministic hygiene proposals (secret_like / transient / supersession)
+    # Deterministic hygiene candidates (secret_like / transient / supersession)
     # come from the tokensave server's rule-based dry-run plan; the LLM here
     # is the review layer that confirms them through the same ops contract.
-    # Best-effort: an upstream without the hygiene section reviews clusters
-    # only.
-    hygiene: dict[str, Any] = {}
+    hygiene_candidates: dict[str, Any] = {}
     try:
         _, curate_report = _post_upstream_json(
             "/api/plugins/holographic/curate", {"dry_run": True}
         )
         if isinstance(curate_report, dict) and isinstance(
-            curate_report.get("hygiene"), dict
+            curate_report.get("hygiene_candidates"), dict
         ):
-            hygiene = curate_report["hygiene"]
+            hygiene_candidates = curate_report["hygiene_candidates"]
     except HTTPException:
-        hygiene = {}
+        hygiene_candidates = {}
     hygiene_ids = {
         int(entry["fact_id"])
-        for entries in hygiene.values()
+        for entries in hygiene_candidates.values()
         if isinstance(entries, list)
         for entry in entries
         if isinstance(entry, dict) and entry.get("fact_id") is not None
@@ -988,7 +989,7 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
         "dry_run": dry_run,
         "clusters_reviewed": len(clusters),
         "clusters": clusters,
-        "hygiene_candidates": hygiene,
+        "hygiene_candidates": hygiene_candidates,
         "ops": [],
         "rejected_ops": [],
         "applied": None,
@@ -999,7 +1000,8 @@ def _curation_llm_plan(body: dict) -> JSONResponse:
     user_message = (
         "Review these candidate clusters and return ops as strict JSON.\n\n"
         + json.dumps(
-            {"clusters": clusters, "hygiene_candidates": hygiene}, default=str
+            {"clusters": clusters, "hygiene_candidates": hygiene_candidates},
+            default=str,
         )
     )
     content = _call_curation_llm(

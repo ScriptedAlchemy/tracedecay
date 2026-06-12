@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::memory_analysis::{
-    build_similarity_computation, pca_scores, propose_dedup_actions, propose_hygiene_actions,
+    build_similarity_computation, pca_scores, propose_dedup_actions, propose_hygiene_candidates,
     score_distribution, score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
     SIMILARITY_FACT_CAP, SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX,
     SIMILARITY_SCORE_MIN,
@@ -1133,11 +1133,12 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
 
 /// Build a deduplication plan from the cached similarity computation.
 ///
-/// Returns (actions, hygiene, counts, total): `actions` is the list of
-/// auto-appliable `delete` operations for `likely_duplicate` pairs; `hygiene`
-/// is the deterministic rule-based proposal set (`secret_like` / `transient` /
-/// `supersession` — see `propose_hygiene_actions`). Hygiene entries are
-/// PROPOSALS only: the `/curate` apply path never executes them; a reviewer
+/// Returns (`actions`, `hygiene_candidates`, `counts`, `total`): `actions` is
+/// the list of auto-appliable `delete` operations for `likely_duplicate` pairs;
+/// `hygiene_candidates` is the deterministic rule-based proposal set
+/// (`secret_like` / `transient` / `supersession` — see
+/// `propose_hygiene_candidates`). Hygiene candidates are review evidence only:
+/// the `/curate` apply path never executes them; a reviewer
 /// (human, or the external-LLM flows in `memory_curate` / the Hermes wrapper)
 /// confirms them through the existing ops contract.
 pub(crate) async fn build_delete_plan(
@@ -1164,7 +1165,7 @@ pub(crate) async fn build_delete_plan(
         .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
         .collect();
     let hygiene_facts = fetch_facts(state, "", total).await?;
-    let hygiene = propose_hygiene_actions(
+    let hygiene_candidates = propose_hygiene_candidates(
         &hygiene_facts,
         &computation.facts,
         &computation.supersession_pairs,
@@ -1175,7 +1176,7 @@ pub(crate) async fn build_delete_plan(
     if !actions.is_empty() {
         counts.insert("delete".to_string(), json!(actions.len()));
     }
-    Ok((actions, hygiene, counts, total))
+    Ok((actions, hygiene_candidates, counts, total))
 }
 
 /// Hard-deletes one fact through the canonical store path (transactional
@@ -1205,7 +1206,7 @@ pub(crate) async fn curate(
 ) -> (StatusCode, Json<Value>) {
     let dry_run = body.is_none_or(|b| b.dry_run);
 
-    let (actions, hygiene, counts, total) = match build_delete_plan(&state).await {
+    let (actions, hygiene_candidates, counts, total) = match build_delete_plan(&state).await {
         Ok(result) => result,
         Err(e) => {
             return (
@@ -1215,14 +1216,14 @@ pub(crate) async fn curate(
         }
     };
 
-    // `hygiene` is additive and proposal-only: the apply branch below only
-    // executes `actions` (dedup deletes); hygiene entries wait for explicit
+    // `hygiene_candidates` is additive review evidence: the apply branch below
+    // only executes `actions` (dedup deletes); candidates wait for explicit
     // confirmation through `/curate/apply`.
     let report = json!({
         "ran": true,
         "dry_run": dry_run,
         "actions": actions,
-        "hygiene": hygiene,
+        "hygiene_candidates": hygiene_candidates,
         "counts": counts,
         "applied_counts": if dry_run { Value::Null } else { json!(counts.clone()) },
         "llm_calls": 0,
@@ -1289,7 +1290,7 @@ pub(crate) async fn curate(
         "ran": true,
         "dry_run": false,
         "actions": report["actions"],
-        "hygiene": report["hygiene"],
+        "hygiene_candidates": report["hygiene_candidates"],
         "counts": report["counts"],
         "applied_counts": applied_counts,
         "skipped_actions": skipped,
