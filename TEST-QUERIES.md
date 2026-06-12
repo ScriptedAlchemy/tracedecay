@@ -1,23 +1,23 @@
 # MCP Tool Test Queries
 
-Manual test queries for verifying the tokensave MCP tools. Run these in a Claude Code session after `tokensave init` and `tokensave install`.
+Manual test queries for verifying the tracedecay MCP tools. Run these in a Claude Code session after `tracedecay init` and `tracedecay install`.
 
 ### Staleness warnings
 
 All tool responses may be prepended with staleness warnings when the index is out of date:
 
-- **Per-file**: `WARNING: STALE INDEX — N file(s) modified since last sync: file1.rs, file2.rs. Run tokensave sync to update.`
-- **Index age**: `WARNING: Index last synced Xh Ym ago. Run tokensave sync to update.`
-- **Branch fallback**: `WARNING: branch 'feature-x' is not tracked — serving from 'main'. Run tokensave branch add feature-x to track it.`
+- **Per-file**: `WARNING: STALE INDEX — N file(s) modified since last sync: file1.rs, file2.rs. Run tracedecay sync to update.`
+- **Index age**: `WARNING: Index last synced Xh Ym ago. Run tracedecay sync to update.`
+- **Branch fallback**: `WARNING: branch 'feature-x' is not tracked — serving from 'main'. Run tracedecay branch add feature-x to track it.`
 
 To test staleness: edit a file without re-syncing, then call any tool that touches that file.
 To test branch fallback: check out an untracked branch while multi-branch is active, then call any tool.
 
 ---
 
-## tokensave_status
+## tracedecay_status
 
-> What's the current status of the tokensave index?
+> What's the current status of the tracedecay index?
 
 Expected: Returns node/edge/file counts, DB size, language distribution, tokens saved. Also includes staleness info:
 - `stale_commits`: number of git commits since last sync (if > 0)
@@ -29,11 +29,11 @@ When multi-branch is active, also includes:
 - `branch_fallback`: `true` if serving from an ancestor branch DB
 - `branch_warning`: explanation of which branch DB is being used
 
-To test staleness: make a git commit without running `tokensave sync`, then call status.
+To test staleness: make a git commit without running `tracedecay sync`, then call status.
 
 ---
 
-## tokensave_search
+## tracedecay_search
 
 > Search for symbols named "Database" in this project.
 
@@ -41,7 +41,7 @@ Expected: Returns matching symbols with IDs, file paths, line numbers, and signa
 
 ---
 
-## tokensave_context
+## tracedecay_context
 
 > Build context for the task: "understand how the MCP server handles incoming tool calls"
 
@@ -49,13 +49,13 @@ Expected: Returns entry points, related symbols, relationships, and code snippet
 
 Test with code snippets:
 ```
-tokensave_context(task="how does the search tool work", include_code=true, max_code_blocks=3)
+tracedecay_context(task="how does the search tool work", include_code=true, max_code_blocks=3)
 ```
 Expected: Same as above but with source code snippets embedded for the most relevant symbols.
 
 Test plan mode:
 ```
-tokensave_context(task="add a new MCP tool for dependency visualization", mode="plan", include_code=true)
+tracedecay_context(task="add a new MCP tool for dependency visualization", mode="plan", include_code=true)
 ```
 Expected: Standard context plus additional sections:
 - **Extension Points**: public traits/interfaces with implementor counts
@@ -63,15 +63,15 @@ Expected: Standard context plus additional sections:
 
 ---
 
-## tokensave_node
+## tracedecay_node
 
-> Get detailed information about the `TokenSave` struct. First search for it, then use the node ID.
+> Get detailed information about the `TraceDecay` struct. First search for it, then use the node ID.
 
 Expected: Returns full node details including qualified name, signature, docstring, visibility, line range.
 
 ---
 
-## tokensave_callers
+## tracedecay_callers
 
 > What functions call `get_tokens_saved`? Search for it first to get the node ID.
 
@@ -79,7 +79,7 @@ Expected: Returns caller symbols with file paths and edge types.
 
 ---
 
-## tokensave_callees
+## tracedecay_callees
 
 > What does the `run` function in main.rs call? Search for it first to get the node ID.
 
@@ -87,7 +87,7 @@ Expected: Returns callee symbols showing the call graph from `run`.
 
 ---
 
-## tokensave_impact
+## tracedecay_impact
 
 > What would be affected if I changed the `Database` struct? Search for it first, then compute impact.
 
@@ -95,7 +95,7 @@ Expected: Returns all symbols that directly or indirectly depend on `Database`.
 
 ---
 
-## tokensave_files
+## tracedecay_files
 
 > List all indexed files under the `src/mcp/` directory.
 
@@ -103,15 +103,15 @@ Expected: Returns files in `src/mcp/` with symbol counts and sizes.
 
 ---
 
-## tokensave_affected
+## tracedecay_affected
 
-> If I changed `src/mcp/tools.rs` and `src/tokensave.rs`, what test files would be affected?
+> If I changed `src/mcp/tools.rs` and `src/tracedecay.rs`, what test files would be affected?
 
 Expected: Returns test files that transitively depend on those source files.
 
 ---
 
-## tokensave_dead_code
+## tracedecay_dead_code
 
 > Find potentially dead code — functions and methods that nothing calls.
 
@@ -119,7 +119,7 @@ Expected: Returns symbols with no incoming edges. Some may be entry points (main
 
 ---
 
-## tokensave_diff_context
+## tracedecay_diff_context
 
 > What's the semantic context for changes to `src/cloud.rs` and `src/user_config.rs`?
 
@@ -127,15 +127,15 @@ Expected: Returns symbols in those files, what depends on them, and affected tes
 
 ---
 
-## tokensave_module_api
+## tracedecay_module_api
 
-> Show the public API of `src/tokensave.rs`.
+> Show the public API of `src/tracedecay.rs`.
 
-Expected: Returns all public symbols in that file with their signatures — the external interface of the TokenSave struct.
+Expected: Returns all public symbols in that file with their signatures — the external interface of the TraceDecay struct.
 
 ---
 
-## tokensave_circular
+## tracedecay_circular
 
 > Are there any circular dependencies between files in this project?
 
@@ -143,7 +143,7 @@ Expected: Returns a list of dependency cycles (may be empty if the codebase has 
 
 ---
 
-## tokensave_hotspots
+## tracedecay_hotspots
 
 > What are the most connected symbols in the codebase? Show the top 5.
 
@@ -151,7 +151,7 @@ Expected: Returns the 5 symbols with the highest combined incoming + outgoing ed
 
 ---
 
-## tokensave_similar
+## tracedecay_similar
 
 > Find symbols with names similar to "extract".
 
@@ -159,7 +159,7 @@ Expected: Returns symbols like `extract_python`, `extract_ruby`, `RustExtractor`
 
 ---
 
-## tokensave_rename_preview
+## tracedecay_rename_preview
 
 > If I rename the `search` method, what would be affected? Search for it first, then preview the rename.
 
@@ -167,7 +167,7 @@ Expected: Returns all edges (callers, containers, etc.) referencing that symbol.
 
 ---
 
-## tokensave_unused_imports
+## tracedecay_unused_imports
 
 > Are there any unused imports in the project?
 
@@ -175,7 +175,7 @@ Expected: Returns import/use nodes that have no matching references in the graph
 
 ---
 
-## tokensave_changelog
+## tracedecay_changelog
 
 > What symbols changed between the last two commits? Use `HEAD~1` and `HEAD`.
 
@@ -183,19 +183,19 @@ Expected: Returns a structured changelog showing added/removed/modified symbols 
 
 ---
 
-## tokensave_rank
+## tracedecay_rank
 
 > What is the most implemented interface? What class implements the most interfaces?
 
 Test incoming (default):
 ```
-tokensave_rank(edge_kind="implements", node_kind="interface", limit=5)
+tracedecay_rank(edge_kind="implements", node_kind="interface", limit=5)
 ```
 Expected: Returns interfaces ranked by number of implementations (e.g. `Versioned` with 104).
 
 Test outgoing:
 ```
-tokensave_rank(edge_kind="implements", direction="outgoing", node_kind="class", limit=5)
+tracedecay_rank(edge_kind="implements", direction="outgoing", node_kind="class", limit=5)
 ```
 Expected: Returns classes ranked by how many interfaces they implement (e.g. `PartitionData` with 16).
 
@@ -206,142 +206,142 @@ Other useful queries:
 
 ---
 
-## tokensave_largest
+## tracedecay_largest
 
 > What are the largest classes? What are the longest methods?
 
 Test:
 ```
-tokensave_largest(node_kind="class", limit=5)
-tokensave_largest(node_kind="method", limit=5)
+tracedecay_largest(node_kind="class", limit=5)
+tracedecay_largest(node_kind="method", limit=5)
 ```
 Expected: Returns nodes ranked by line count (end_line - start_line + 1) with start/end lines.
 
 ---
 
-## tokensave_coupling
+## tracedecay_coupling
 
 > Which files are depended on by the most other files? Which files have the most outward dependencies?
 
 Test fan-in:
 ```
-tokensave_coupling(direction="fan_in", limit=5)
+tracedecay_coupling(direction="fan_in", limit=5)
 ```
 Expected: Returns files ranked by how many other files depend on them.
 
 Test fan-out:
 ```
-tokensave_coupling(direction="fan_out", limit=5)
+tracedecay_coupling(direction="fan_out", limit=5)
 ```
 Expected: Returns files ranked by how many other files they depend on.
 
 ---
 
-## tokensave_inheritance_depth
+## tracedecay_inheritance_depth
 
 > What are the deepest class inheritance hierarchies?
 
 Test:
 ```
-tokensave_inheritance_depth(limit=5)
+tracedecay_inheritance_depth(limit=5)
 ```
 Expected: Returns classes ranked by inheritance chain depth via `extends` edges. Uses recursive CTE.
 
 ---
 
-## tokensave_distribution
+## tracedecay_distribution
 
 > How many classes vs interfaces vs methods are in a given package?
 
 Test summary mode:
 ```
-tokensave_distribution(path="kafka/clients/src/main/java/org/apache/kafka/common/config", summary=true)
+tracedecay_distribution(path="kafka/clients/src/main/java/org/apache/kafka/common/config", summary=true)
 ```
 Expected: Returns aggregated node kind counts (e.g. 355 fields, 193 methods, 20 classes).
 
 Test per-file mode:
 ```
-tokensave_distribution(path="src/mcp")
+tracedecay_distribution(path="src/mcp")
 ```
 Expected: Returns per-file breakdown of node kinds.
 
 ---
 
-## tokensave_recursion
+## tracedecay_recursion
 
 > Are there any recursive or mutually-recursive call cycles? (NASA Power of 10, Rule 1)
 
 Test:
 ```
-tokensave_recursion(limit=5)
+tracedecay_recursion(limit=5)
 ```
 Expected: Returns call cycles found via DFS on the calls-only edge subgraph. Each cycle shows the chain of functions forming the loop. Self-recursive functions appear as length-1 cycles.
 
 ---
 
-## tokensave_complexity
+## tracedecay_complexity
 
 > What are the most complex functions in the codebase?
 
 Test:
 ```
-tokensave_complexity(limit=5)
-tokensave_complexity(node_kind="function", limit=10)
+tracedecay_complexity(limit=5)
+tracedecay_complexity(node_kind="function", limit=10)
 ```
 Expected: Returns functions/methods ranked by composite score: `lines + (fan_out × 3) + fan_in`. Shows individual metrics (lines, fan_out, fan_in) alongside the total score. Also includes real cyclomatic complexity (`branches + 1`), branch count, loop count, return count, and max nesting depth — all extracted from the AST during indexing.
 
 ---
 
-## tokensave_doc_coverage
+## tracedecay_doc_coverage
 
 > Which public symbols are missing documentation?
 
 Test:
 ```
-tokensave_doc_coverage(limit=20)
-tokensave_doc_coverage(path="kafka/clients/src/main", limit=10)
+tracedecay_doc_coverage(limit=20)
+tracedecay_doc_coverage(path="kafka/clients/src/main", limit=10)
 ```
 Expected: Returns public functions, methods, classes, interfaces, traits, structs, and enums that have no docstring. Grouped by file with counts.
 
 ---
 
-## tokensave_god_class
+## tracedecay_god_class
 
 > Which classes have the most members? Are there any god classes that need decomposition?
 
 Test:
 ```
-tokensave_god_class(limit=5)
+tracedecay_god_class(limit=5)
 ```
 Expected: Returns classes ranked by total member count (methods + fields). Shows method count, field count, and total separately.
 
 ---
 
-## tokensave_port_status
+## tracedecay_port_status
 
 > Compare porting progress between `src/python/` (source) and `src/rust/` (target).
 
 Test:
 ```
-tokensave_port_status(source_dir="src/python/", target_dir="src/rust/")
+tracedecay_port_status(source_dir="src/python/", target_dir="src/rust/")
 ```
 Expected: Returns coverage summary with matched/unmatched/target-only counts. Matches by name (case-insensitive) with cross-language kind compatibility (`class` matches `struct`, `interface` matches `trait`). Unmatched symbols are grouped by source file. Shows `coverage_percent`.
 
 Custom kinds filter:
 ```
-tokensave_port_status(source_dir="lib/old/", target_dir="lib/new/", kinds=["function", "method"])
+tracedecay_port_status(source_dir="lib/old/", target_dir="lib/new/", kinds=["function", "method"])
 ```
 Expected: Only compares functions and methods between the two directories.
 
 ---
 
-## tokensave_port_order
+## tracedecay_port_order
 
 > What order should I port symbols from `src/python/` to minimize dependency issues?
 
 Test:
 ```
-tokensave_port_order(source_dir="src/python/", limit=30)
+tracedecay_port_order(source_dir="src/python/", limit=30)
 ```
 Expected: Returns symbols in topological dependency order, organized into levels:
 - **Level 0**: No internal dependencies (utilities, constants) — port these first
@@ -353,25 +353,25 @@ Each symbol shows its `depends_on` list (names of dependencies within the source
 
 Custom kinds:
 ```
-tokensave_port_order(source_dir="src/legacy/", kinds=["function", "class"], limit=50)
+tracedecay_port_order(source_dir="src/legacy/", kinds=["function", "class"], limit=50)
 ```
 Expected: Only includes functions and classes in the topological sort.
 
 ---
 
-## tokensave_commit_context
+## tracedecay_commit_context
 
 > Summarize my uncommitted changes for a commit message.
 
 Test all changes:
 ```
-tokensave_commit_context()
+tracedecay_commit_context()
 ```
 Expected: Returns changed files with semantic roles (source/test/config/docs), symbols in each file, a suggested commit category (feature/fix/refactor/test/chore), and the 5 most recent commit subjects for style matching.
 
 Test staged only:
 ```
-tokensave_commit_context(staged_only=true)
+tracedecay_commit_context(staged_only=true)
 ```
 Expected: Same as above but only includes staged changes (git index vs HEAD).
 
@@ -380,13 +380,13 @@ If not a git repo: returns a git error message.
 
 ---
 
-## tokensave_pr_context
+## tracedecay_pr_context
 
 > Summarize changes for a pull request from the current branch against main.
 
 Test with defaults:
 ```
-tokensave_pr_context()
+tracedecay_pr_context()
 ```
 Expected: Returns semantic diff between `main` and `HEAD`:
 - Commit log (hash + subject for each commit)
@@ -398,19 +398,19 @@ Expected: Returns semantic diff between `main` and `HEAD`:
 
 Test with custom refs:
 ```
-tokensave_pr_context(base_ref="develop", head_ref="feature-branch")
+tracedecay_pr_context(base_ref="develop", head_ref="feature-branch")
 ```
 Expected: Same structure but comparing the specified refs.
 
 ---
 
-## tokensave_simplify_scan
+## tracedecay_simplify_scan
 
 > Analyze changed files for quality issues.
 
 Test:
 ```
-tokensave_simplify_scan(files=["src/mcp/tools/handlers.rs", "src/mcp/tools/definitions.rs"])
+tracedecay_simplify_scan(files=["src/mcp/tools/handlers.rs", "src/mcp/tools/definitions.rs"])
 ```
 Expected: Returns four categories of findings:
 - **duplications**: symbols with >0.8 name similarity to symbols in other files
@@ -422,13 +422,13 @@ Each finding includes the symbol name, file, line number, and reason.
 
 ---
 
-## tokensave_test_map
+## tracedecay_test_map
 
-> Which tests cover the functions in `src/tokensave.rs`?
+> Which tests cover the functions in `src/tracedecay.rs`?
 
 Test by file:
 ```
-tokensave_test_map(file="src/tokensave.rs")
+tracedecay_test_map(file="src/tracedecay.rs")
 ```
 Expected: Returns:
 - **coverage**: list of source functions/methods paired with their test callers (test name, file, line)
@@ -438,19 +438,19 @@ Expected: Returns:
 
 Test by node ID:
 ```
-tokensave_test_map(node_id="fn:search_nodes")
+tracedecay_test_map(node_id="fn:search_nodes")
 ```
 Expected: Same structure but for a single symbol. If it's not a function/method, no coverage data is returned.
 
 ---
 
-## tokensave_type_hierarchy
+## tracedecay_type_hierarchy
 
 > Show the full type hierarchy for a trait. Search for the trait first, then use its node ID.
 
 Test:
 ```
-tokensave_type_hierarchy(node_id="trait:McpTransport")
+tracedecay_type_hierarchy(node_id="trait:McpTransport")
 ```
 Expected: Returns an indented tree showing the root type and all implementors/extenders recursively:
 ```
@@ -461,41 +461,41 @@ McpTransport (trait) -- src/mcp/transport.rs:191
 
 Test with depth limit:
 ```
-tokensave_type_hierarchy(node_id="interface:Serializable", max_depth=2)
+tracedecay_type_hierarchy(node_id="interface:Serializable", max_depth=2)
 ```
 Expected: Same tree structure but stops at depth 2 (no grandchildren of grandchildren).
 
 ---
 
-## tokensave_branch_search
+## tracedecay_branch_search
 
 > Search for a symbol in another branch's graph without switching your checkout.
 
-**Prerequisites:** Multi-branch must be active. Run `tokensave branch add main` and `tokensave branch add feature-x` first.
+**Prerequisites:** Multi-branch must be active. Run `tracedecay branch add main` and `tracedecay branch add feature-x` first.
 
 Test:
 ```
-tokensave_branch_search(branch="main", query="Database", limit=5)
+tracedecay_branch_search(branch="main", query="Database", limit=5)
 ```
 Expected: Returns matching symbols from `main`'s graph, each tagged with `"branch": "main"`. Results may differ from the current branch if the symbol was modified or removed.
 
 Test with untracked branch:
 ```
-tokensave_branch_search(branch="nonexistent-branch", query="test")
+tracedecay_branch_search(branch="nonexistent-branch", query="test")
 ```
 Expected: Returns an error: `branch 'nonexistent-branch' is not tracked`.
 
 ---
 
-## tokensave_branch_diff
+## tracedecay_branch_diff
 
 > Compare code graphs between two branches to see what symbols were added, removed, or changed.
 
-**Prerequisites:** Both branches must be tracked via `tokensave branch add`.
+**Prerequisites:** Both branches must be tracked via `tracedecay branch add`.
 
 Test with defaults (current branch vs main):
 ```
-tokensave_branch_diff()
+tracedecay_branch_diff()
 ```
 Expected: Returns a JSON object with:
 - `base`: the default branch name (e.g. "main")
@@ -507,91 +507,91 @@ Expected: Returns a JSON object with:
 
 Test with explicit branches:
 ```
-tokensave_branch_diff(base="main", head="feature/foo")
+tracedecay_branch_diff(base="main", head="feature/foo")
 ```
 Expected: Same structure comparing the specified branches.
 
 Test with file filter:
 ```
-tokensave_branch_diff(base="main", head="feature/foo", file="src/tokensave.rs")
+tracedecay_branch_diff(base="main", head="feature/foo", file="src/tracedecay.rs")
 ```
-Expected: Only symbols from `src/tokensave.rs` appear in the diff.
+Expected: Only symbols from `src/tracedecay.rs` appear in the diff.
 
 Test with kind filter:
 ```
-tokensave_branch_diff(base="main", head="feature/foo", kind="function")
+tracedecay_branch_diff(base="main", head="feature/foo", kind="function")
 ```
 Expected: Only function symbols appear in the diff.
 
 Test same branch error:
 ```
-tokensave_branch_diff(base="main", head="main")
+tracedecay_branch_diff(base="main", head="main")
 ```
 Expected: Returns an error: `base and head are the same branch: 'main'`.
 
 ---
 
-## tokensave_health
+## tracedecay_health
 
 > How healthy is this codebase? Show the quality signal with details.
 
 Test with defaults:
 ```
-tokensave_health()
+tracedecay_health()
 ```
 Expected: Returns `{quality_signal: N, files_analyzed: N}` where `quality_signal` is a composite score from 0 to 10000.
 
 Test with details:
 ```
-tokensave_health(details=true)
+tracedecay_health(details=true)
 ```
 Expected: Same response plus a `dimensions` breakdown with five named dimensions — `acyclicity`, `depth`, `equality`, `redundancy`, `modularity` — each with a score (0.0–1.0) and supporting metrics explaining the rating.
 
 Test with path filter:
 ```
-tokensave_health(path="src/mcp", details=true)
+tracedecay_health(path="src/mcp", details=true)
 ```
 Expected: Same structure but scoped to files under `src/mcp/` only.
 
 Test that `details=true` surfaces raw counts + interpretation per dimension:
 ```
-tokensave_health(details=true)
+tracedecay_health(details=true)
 ```
 Expected: Each dimension is a `{ score, source, ... }` object. `equality` carries `gini` and an `interpretation` string. `acyclicity` carries `edges_in_cycles`. `depth` carries `max_chain` / `ideal_chain`. `modularity` carries `interpretation` and `components_after_hub_removal`. `redundancy` carries `dead_count` / `total_fns`. `coverage_discipline` carries `skip_test_coverage_count` / `total_fns`.
 
 ---
 
-## tokensave_redundancy
+## tracedecay_redundancy
 
 > Find functions and methods that look like duplicates of each other.
 
 Test with defaults:
 ```
-tokensave_redundancy()
+tracedecay_redundancy()
 ```
 Expected: Returns `{candidates, scanned, skipped_for_size, pair_count, pairs: [...], ranked_by, scope, thresholds}`. Each pair has `similarity` (0.0-1.0), `severity` (`definite` / `likely` / `naming_only`), `overlap_kind` (`ast_isomorphic` / `control_flow` / `algorithmic` / `token_overlap` / `naming`), `a` / `b` symbol info (`file`, `line`, `name`, `id`), and a `signals` block with `ast_match`, `cfg_match`, `call_seq_match`, `shingle_jaccard`, and `body_tokens`. Pairs are sorted by similarity descending. Default thresholds: `min_lines=8`, `max_pairs=20`, `similarity_threshold=0.6`, `include_naming_only=false`.
 
 Test path scope:
 ```
-tokensave_redundancy(path="src/mcp/")
+tracedecay_redundancy(path="src/mcp/")
 ```
 Expected: Same structure but only candidates under `src/mcp/`. Useful for module-scoped consolidation work.
 
 Test tightened threshold (only "definite" duplicates):
 ```
-tokensave_redundancy(similarity_threshold=0.85)
+tracedecay_redundancy(similarity_threshold=0.85)
 ```
 Expected: Only AST-isomorphic pairs survive — the AST signal alone contributes 0.40 to the composite score, so anything ≥ 0.85 with `severity: "definite"` is a strong consolidation candidate.
 
 Test surface naming-only candidates:
 ```
-tokensave_redundancy(include_naming_only=true, similarity_threshold=0.1)
+tracedecay_redundancy(include_naming_only=true, similarity_threshold=0.1)
 ```
 Expected: Long-tail matches where only names look similar but bodies diverge. Most are false positives — useful for naming-convention audits, not for refactoring.
 
 Test minimum function size:
 ```
-tokensave_redundancy(min_lines=20)
+tracedecay_redundancy(min_lines=20)
 ```
 Expected: Skips functions shorter than 20 source lines. Helps suppress noise from tiny boilerplate (getters, simple wrappers) that often look structurally identical without warranting consolidation.
 
@@ -604,19 +604,19 @@ Cross-language note: signals derive from raw tree-sitter kind names. Two duplica
 
 ---
 
-## tokensave_runtime
+## tracedecay_runtime
 
 > Capture process + database telemetry for triaging unexpected CPU or RAM consumption (issue #80).
 
 Test:
 ```
-tokensave_runtime()
+tracedecay_runtime()
 ```
 Expected: Returns a snapshot with the shape:
 ```
 {
   "captured_at": <unix-seconds>,
-  "tokensave_version": "6.0.0",
+  "tracedecay_version": "6.0.0",
   "host_os": "macos" | "linux" | "windows" | ...,
   "process": {
     "pid": ...,
@@ -647,8 +647,8 @@ Latency note: the tool blocks for ~200 ms because the CPU% sample needs two read
 
 CLI equivalent (for offline reporters who can't call MCP tools):
 ```
-tokensave status --runtime           # human-readable text
-tokensave status --runtime --json    # machine-parseable JSON, same shape
+tracedecay status --runtime           # human-readable text
+tracedecay status --runtime --json    # machine-parseable JSON, same shape
 ```
 
 Diagnostic ratios worth eyeballing:
@@ -658,258 +658,258 @@ Diagnostic ratios worth eyeballing:
 
 ---
 
-## tokensave_gini
+## tracedecay_gini
 
 > How evenly is complexity distributed across files? Are there any god files?
 
 Test default:
 ```
-tokensave_gini()
+tracedecay_gini()
 ```
 Expected: Returns `{gini: 0.XX, interpretation: "...", total_items: N, metric: "complexity", scope: "file", outliers: [...]}`. A Gini coefficient close to 1.0 indicates high inequality (a few files dominate).
 
 Test alternative metrics:
 ```
-tokensave_gini(metric="lines")
-tokensave_gini(metric="fan_in")
+tracedecay_gini(metric="lines")
+tracedecay_gini(metric="fan_in")
 ```
 Expected: Same structure ranked by lines or fan-in instead of complexity.
 
 Test per-symbol scope:
 ```
-tokensave_gini(metric="complexity", scope="symbol")
+tracedecay_gini(metric="complexity", scope="symbol")
 ```
 Expected: Same structure but computes inequality across individual symbols rather than files.
 
 Test members:
 ```
-tokensave_gini(metric="members")
+tracedecay_gini(metric="members")
 ```
 Expected: Scope is forced to `symbol`; counts methods and fields per class/struct to surface god-class candidates.
 
 ---
 
-## tokensave_dependency_depth
+## tracedecay_dependency_depth
 
 > What are the longest dependency chains in the codebase?
 
 Test with limit:
 ```
-tokensave_dependency_depth(limit=5)
+tracedecay_dependency_depth(limit=5)
 ```
 Expected: Returns `{max_depth: N, ideal_depth: N, depth_score: 0.XX, chains: [{file, depth, chain: [...]}]}` showing the five deepest transitive import chains.
 
 Test with path filter:
 ```
-tokensave_dependency_depth(path="src/mcp")
+tracedecay_dependency_depth(path="src/mcp")
 ```
 Expected: Same structure but only considers files under `src/mcp/` as roots.
 
 ---
 
-## tokensave_dsm
+## tracedecay_dsm
 
 > Show me the design structure matrix — how do files depend on each other?
 
 Test stats (default):
 ```
-tokensave_dsm()
-tokensave_dsm(format="stats")
+tracedecay_dsm()
+tracedecay_dsm(format="stats")
 ```
 Expected: Returns `{files: N, edges: N, density: 0.XXX, clusters: N, largest_cluster: {name, files}}` — a high-level summary of file coupling.
 
 Test clusters:
 ```
-tokensave_dsm(format="clusters")
+tracedecay_dsm(format="clusters")
 ```
 Expected: Returns `{clusters: [{name, files: [...], internal_edges, outgoing_edges, incoming_edges}]}` — each strongly-connected cluster listed with its coupling metrics.
 
 Test matrix:
 ```
-tokensave_dsm(format="matrix", max_files=15)
+tracedecay_dsm(format="matrix", max_files=15)
 ```
 Expected: Returns `{files: [...short names...], matrix: [[NxN]], note: "..."}` — a compact NxN adjacency matrix where entry `[i][j]` is non-zero when file `i` depends on file `j`.
 
 ---
 
-## tokensave_test_risk
+## tracedecay_test_risk
 
 > Where should I write the next test? What's the riskiest untested code?
 
 Test with limit:
 ```
-tokensave_test_risk(limit=10)
+tracedecay_test_risk(limit=10)
 ```
 Expected: Returns `{risks: [{symbol, file, line, complexity, fan_in, has_test, risk_score, churn}], summary: {total_functions, tested, coverage_pct, top_risk_untested}}`. Results are sorted by `risk_score` descending; untested symbols appear first by default.
 
 Test with path filter:
 ```
-tokensave_test_risk(path="src/mcp", limit=5)
+tracedecay_test_risk(path="src/mcp", limit=5)
 ```
 Expected: Same structure but scoped to functions under `src/mcp/`.
 
 Test include tested:
 ```
-tokensave_test_risk(include_tested=true, limit=5)
+tracedecay_test_risk(include_tested=true, limit=5)
 ```
 Expected: Also returns already-tested symbols ranked by risk score — useful for identifying weak-test candidates (high-risk code that has a test but may need more coverage).
 
 ---
 
-## tokensave_session_start
+## tracedecay_session_start
 
 > Save a health baseline before I start working.
 
 Test:
 ```
-tokensave_session_start()
+tracedecay_session_start()
 ```
-Expected: Returns `{status: "baseline_saved", quality_signal: N, files_analyzed: N}`. Also writes `.tokensave/session_baseline.json` in the project root with the full health snapshot for later comparison.
+Expected: Returns `{status: "baseline_saved", quality_signal: N, files_analyzed: N}`. Also writes `.tracedecay/session_baseline.json` in the project root with the full health snapshot for later comparison.
 
 ---
 
-## tokensave_session_end
+## tracedecay_session_end
 
 > Compare current health against the baseline — did my changes degrade the codebase?
 
-Test after a prior `tokensave_session_start`:
+Test after a prior `tracedecay_session_start`:
 ```
-tokensave_session_end()
+tracedecay_session_end()
 ```
 Expected: Returns `{pass: true/false, signal_before: N, signal_after: N, delta: N, files_analyzed: N, degraded_dimensions: [...], dimensions: {per_dim with before/after/delta/direction}}`. The baseline file is removed after `session_end` completes.
 
 Test without a baseline:
 ```
-tokensave_session_end()
+tracedecay_session_end()
 ```
-Expected: Returns `{status: "no_baseline", message: "No session baseline found. Call tokensave_session_start first."}`.
+Expected: Returns `{status: "no_baseline", message: "No session baseline found. Call tracedecay_session_start first."}`.
 
 ---
 
-## tokensave_read
+## tracedecay_read
 
 > Read a file with mode-aware compression. Modes: `full`, `lines`, `map`, `signatures`. Cross-session cached.
 
 Test full content:
 ```
-tokensave_read(file="src/sync.rs", mode="full")
+tracedecay_read(file="src/sync.rs", mode="full")
 ```
 Expected: Returns the entire file body, plus `mtime_ns`, `digest`, and `token_count`.
 
 Test line slice:
 ```
-tokensave_read(file="src/sync.rs", mode="lines", lines="120-180")
+tracedecay_read(file="src/sync.rs", mode="lines", lines="120-180")
 ```
 Expected: Returns only the requested 1-based inclusive range.
 
 Test map (graph-only, no source bytes touched):
 ```
-tokensave_read(file="src/sync.rs", mode="map")
+tracedecay_read(file="src/sync.rs", mode="map")
 ```
 Expected: Flat list of every top-level symbol with `kind`, `name`, `line`, `end_line`, `visibility`.
 
 Test signatures:
 ```
-tokensave_read(file="src/sync.rs", mode="signatures")
+tracedecay_read(file="src/sync.rs", mode="signatures")
 ```
 Expected: Functions and types with their cached signature strings.
 
 Test cache hit (call the same query twice):
 ```
-tokensave_read(file="src/sync.rs", mode="full")  # populates cache
-tokensave_read(file="src/sync.rs", mode="full")  # second call
+tracedecay_read(file="src/sync.rs", mode="full")  # populates cache
+tracedecay_read(file="src/sync.rs", mode="full")  # second call
 ```
 Expected: The second call returns `{"unchanged": true, "digest": ..., "mtime_ns": ..., "token_count": ...}` — a small stub instead of the full body.
 
 ---
 
-## tokensave_outline
+## tracedecay_outline
 
 > Flat list of every top-level symbol in a file, with optional kind filter.
 
 Test default (all kinds):
 ```
-tokensave_outline(file="src/mcp/tools/handlers/info.rs")
+tracedecay_outline(file="src/mcp/tools/handlers/info.rs")
 ```
 Expected: Returns `{file, symbol_count, symbols: [{kind, name, line, end_line, visibility}]}` sorted by line.
 
 Test kinds filter:
 ```
-tokensave_outline(file="src/mcp/tools/handlers/info.rs", kinds=["function"])
+tracedecay_outline(file="src/mcp/tools/handlers/info.rs", kinds=["function"])
 ```
 Expected: Only function-kind entries. Filter is case-insensitive (`["FUNCTION"]` works the same).
 
 Unknown kind returns empty:
 ```
-tokensave_outline(file="src/mcp/tools/handlers/info.rs", kinds=["banana"])
+tracedecay_outline(file="src/mcp/tools/handlers/info.rs", kinds=["banana"])
 ```
 Expected: `symbol_count: 0`.
 
 ---
 
-## tokensave_implementations
+## tracedecay_implementations
 
 > Find every type implementing a given trait, or every body of a given method name.
 
 Test trait form:
 ```
-tokensave_implementations(trait="LanguageExtractor")
+tracedecay_implementations(trait="LanguageExtractor")
 ```
 Expected: For each implementing type, returns the type name, file, line, the trait name, and an array of method bodies (signature + body for each method on the impl).
 
 Test method form:
 ```
-tokensave_implementations(method="extensions")
+tracedecay_implementations(method="extensions")
 ```
 Expected: Every Function/Method node named `extensions` with full body. Useful for cross-impl comparisons.
 
 Errors:
 ```
-tokensave_implementations()                          # no args → error
-tokensave_implementations(trait="X", method="y")     # both args → error (mutually exclusive)
+tracedecay_implementations()                          # no args → error
+tracedecay_implementations(trait="X", method="y")     # both args → error (mutually exclusive)
 ```
 
 ---
 
-## tokensave_unsafe_patterns
+## tracedecay_unsafe_patterns
 
 > Surface unwrap, expect, panic!, todo!, unimplemented!, and unsafe { } sites.
 
 Test all kinds (default):
 ```
-tokensave_unsafe_patterns()
+tracedecay_unsafe_patterns()
 ```
 Expected: Returns `{match_count, by_kind: {...}, matches: [{kind, file, line, snippet, enclosing, in_test}]}`. AST-style word-boundary matching — `.unwrap_or` does NOT match the `unwrap` kind.
 
 Test exclude tests:
 ```
-tokensave_unsafe_patterns(exclude_tests=true)
+tracedecay_unsafe_patterns(exclude_tests=true)
 ```
 Expected: Filters out files whose path looks like a test (`tests/`, `_test.rs`, `__tests__/`, etc.).
 
 Test specific kinds:
 ```
-tokensave_unsafe_patterns(kinds=["panic", "unsafe_block"])
+tracedecay_unsafe_patterns(kinds=["panic", "unsafe_block"])
 ```
 Expected: Only panic and unsafe-block matches.
 
 Path scope:
 ```
-tokensave_unsafe_patterns(kinds=["unwrap"], path="src/mcp/")
+tracedecay_unsafe_patterns(kinds=["unwrap"], path="src/mcp/")
 ```
 Expected: Only matches under `src/mcp/`.
 
 ---
 
-## tokensave_diagnostics
+## tracedecay_diagnostics
 
 > Run the project's compile/type checker and return structured errors mapped to graph nodes.
 
 Test workspace (default scope):
 ```
-tokensave_diagnostics()
+tracedecay_diagnostics()
 ```
-Expected: For Rust projects, runs `cargo check --message-format=json --target-dir .tokensave/target`. Returns `{scope, diagnostic_count, error_count, warning_count, diagnostics: [{file, line_start, line_end, level, code, message, driver, enclosing}]}`.
+Expected: For Rust projects, runs `cargo check --message-format=json --target-dir .tracedecay/target`. Returns `{scope, diagnostic_count, error_count, warning_count, diagnostics: [{file, line_start, line_end, level, code, message, driver, enclosing}]}`.
 
 For TypeScript projects (tsconfig.json present), runs `tsc --noEmit --pretty false`. For Python projects (pyproject.toml or pyrightconfig.json present), runs `pyright --outputjson`.
 
@@ -917,114 +917,114 @@ Mixed-language projects run every detected driver and merge results.
 
 Test package scope (Rust only):
 ```
-tokensave_diagnostics(scope="package", name="tokensave")
+tracedecay_diagnostics(scope="package", name="tracedecay")
 ```
-Expected: `cargo check -p tokensave` rather than the full workspace.
+Expected: `cargo check -p tracedecay` rather than the full workspace.
 
 Test file scope:
 ```
-tokensave_diagnostics(scope="file", path="src/lib.rs")
+tracedecay_diagnostics(scope="file", path="src/lib.rs")
 ```
 Expected: Workspace check + post-filter to the requested file.
 
 Errors:
 ```
-tokensave_diagnostics(scope="package")               # missing name → error
-tokensave_diagnostics(scope="file")                  # missing path → error
-tokensave_diagnostics(scope="lunch")                 # unknown scope → error
+tracedecay_diagnostics(scope="package")               # missing name → error
+tracedecay_diagnostics(scope="file")                  # missing path → error
+tracedecay_diagnostics(scope="lunch")                 # unknown scope → error
 ```
 
 If a tool isn't installed (tsc, pyright), the driver returns no diagnostics rather than failing.
 
 ---
 
-## tokensave_config
+## tracedecay_config
 
 > Query TOML or JSON config files by dotted key path.
 
 Test single file:
 ```
-tokensave_config(path="Cargo.toml", key="package.version")
+tracedecay_config(path="Cargo.toml", key="package.version")
 ```
 Expected: Returns `{match_count: 1, matches: [{file, key, value, line}]}`. The line number is heuristic — finds the row where the final key segment is defined.
 
 Test JSON:
 ```
-tokensave_config(path="tsconfig.json", key="compilerOptions.target")
+tracedecay_config(path="tsconfig.json", key="compilerOptions.target")
 ```
 Expected: Same shape; the `value` field carries the parsed JSON value.
 
 Test glob across the workspace:
 ```
-tokensave_config(glob="**/Cargo.toml", key="package.name")
+tracedecay_config(glob="**/Cargo.toml", key="package.name")
 ```
 Expected: One match per matching file.
 
 Test missing key:
 ```
-tokensave_config(path="Cargo.toml", key="package.no_such_field")
+tracedecay_config(path="Cargo.toml", key="package.no_such_field")
 ```
 Expected: `match_count: 0`, the entry has `found: false`.
 
 Errors:
 ```
-tokensave_config(key="x")                            # missing path/glob → error
-tokensave_config(path="a", glob="b", key="x")        # both → error
-tokensave_config(path="a")                           # missing key → error
+tracedecay_config(key="x")                            # missing path/glob → error
+tracedecay_config(path="a", glob="b", key="x")        # both → error
+tracedecay_config(path="a")                           # missing key → error
 ```
 
 This tool is DB-free; it works on uninitialized projects.
 
 ---
 
-## tokensave_signature_search
+## tracedecay_signature_search
 
 > Search functions and methods by signature shape: return type, params, async.
 
 Test by return type:
 ```
-tokensave_signature_search(returns="Result<")
+tracedecay_signature_search(returns="Result<")
 ```
 Expected: Every function whose signature contains `Result<` after `->`. Returns `{match_count, matches: [{name, qualified_name, kind, file, line, is_async, signature}]}`.
 
 Test by params:
 ```
-tokensave_signature_search(params=["&mut self"])
+tracedecay_signature_search(params=["&mut self"])
 ```
 Expected: Every method whose parameter list contains `&mut self`. Multiple params are AND-composed.
 
 Test async only:
 ```
-tokensave_signature_search(async=true)
+tracedecay_signature_search(async=true)
 ```
 Expected: Every async function/method. Set `async=false` to exclude them.
 
 Combined filters:
 ```
-tokensave_signature_search(params=["&mut self"], async=true, returns="i32")
+tracedecay_signature_search(params=["&mut self"], async=true, returns="i32")
 ```
 Expected: Only methods that match all three.
 
 Path scope:
 ```
-tokensave_signature_search(returns="Result<", path="src/mcp/")
+tracedecay_signature_search(returns="Result<", path="src/mcp/")
 ```
 Expected: Only symbols defined under `src/mcp/`.
 
 Errors:
 ```
-tokensave_signature_search()                         # no filters → error
+tracedecay_signature_search()                         # no filters → error
 ```
 
 ---
 
-## tokensave_constructors
+## tracedecay_constructors
 
 > Find every literal-instantiation site of a struct, plus missing fields per site.
 
 Test:
 ```
-tokensave_constructors(struct="GraphStats")
+tracedecay_constructors(struct="GraphStats")
 ```
 Expected: Returns `{struct, expected_fields, match_count, sites: [{file, line, fields, missing_fields}]}`. Each site lists the fields actually present in that literal; `missing_fields` lists fields the struct has but this literal doesn't.
 
@@ -1032,7 +1032,7 @@ After adding a required field, this surfaces every site that needs updating befo
 
 Test unknown struct:
 ```
-tokensave_constructors(struct="DoesNotExist")
+tracedecay_constructors(struct="DoesNotExist")
 ```
 Expected: Returns "No struct, class, or case-class named ...".
 
@@ -1040,38 +1040,38 @@ Pattern-matching sites (`match Foo { ... }`, `if let Foo { ... }`) are filtered 
 
 Errors:
 ```
-tokensave_constructors()                             # missing struct → error
+tracedecay_constructors()                             # missing struct → error
 ```
 
 ---
 
-## tokensave_field_sites
+## tracedecay_field_sites
 
 > Partition every reference to a field into reads and writes.
 
 Test default:
 ```
-tokensave_field_sites(field="last_sync_at")
+tracedecay_field_sites(field="last_sync_at")
 ```
 Expected: Returns `{field, qualifier, qualifier_applied, write_count, read_count, write_sites: [...], read_sites: [...]}`. Writes include simple assignments (`x.field = ...`), compound assignments (`x.field += ...`), and `&mut x.field` borrows. Everything else is a read; `==` and `=>` do NOT count as writes.
 
 Test writes only:
 ```
-tokensave_field_sites(field="last_sync_at", writes_only=true)
+tracedecay_field_sites(field="last_sync_at", writes_only=true)
 ```
 Expected: Returns only `write_sites`; `read_sites` is omitted entirely.
 
 Test qualified form:
 ```
-tokensave_field_sites(field="GraphStats::last_sync_at")
+tracedecay_field_sites(field="GraphStats::last_sync_at")
 ```
 Expected: The `qualifier` field carries `"GraphStats"` but `qualifier_applied` is `false` — the scan uses the bare field name because the tool has no type information to disambiguate `.foo` to a specific struct.
 
 Errors:
 ```
-tokensave_field_sites()                              # missing field → error
+tracedecay_field_sites()                              # missing field → error
 ```
 
 ---
 
-> **Note:** Most tools are read-only and safe to call in parallel. The exceptions mutate state and should not be parallelised: the edit tools (`tokensave_str_replace`, `tokensave_multi_str_replace`, `tokensave_insert_at`, `tokensave_insert_at_symbol`, `tokensave_replace_symbol`, `tokensave_ast_grep_rewrite`) modify source files; the session and memory tools (`tokensave_session_start`, `tokensave_session_end`, `tokensave_fact_store`, `tokensave_fact_feedback`, `tokensave_memory_status`) write to `.tokensave/`; and `tokensave_run_affected_tests` runs a `cargo` test subprocess.
+> **Note:** Most tools are read-only and safe to call in parallel. The exceptions mutate state and should not be parallelised: the edit tools (`tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_insert_at_symbol`, `tracedecay_replace_symbol`, `tracedecay_ast_grep_rewrite`) modify source files; the session and memory tools (`tracedecay_session_start`, `tracedecay_session_end`, `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`) write to `.tracedecay/`; and `tracedecay_run_affected_tests` runs a `cargo` test subprocess.

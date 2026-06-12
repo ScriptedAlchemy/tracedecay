@@ -1,6 +1,6 @@
 /**
  * Aggregate cost summaries: per-model and per-day rollups from the session
- * store, the `turns` accounting (actual costs from `tokensave cost`), and
+ * store, the `turns` accounting (actual costs from `tracedecay cost`), and
  * the model-pricing source panel.
  */
 
@@ -29,11 +29,11 @@ function PricingSourceCard({ pricing }: { pricing: PricingResponse | null }) {
           <Badge>{sourceLabel}</Badge>
           <Badge>{fmtTokens(pricing.model_count)} models</Badge>
           {pricing.fetched_at && <Badge>fetched {timeAgo(pricing.fetched_at)}</Badge>}
-          {pricing.offline && <Badge>TOKENSAVE_OFFLINE=1 — network disabled</Badge>}
+          {pricing.offline && <Badge>TRACEDECAY_OFFLINE=1 — network disabled</Badge>}
         </div>
         <p className="tss-chart-hint">
           Prices come from OpenRouter’s public model list, cached at{" "}
-          <code>{pricing.cache_path || "~/.tokensave/model-prices.json"}</code>{" "}
+          <code>{pricing.cache_path || "~/.tracedecay/model-prices.json"}</code>{" "}
           and refreshed in the background at most once per day. When the cache
           is missing and the network is unavailable, a snapshot bundled with
           the binary keeps this tab working. Transcript model ids are
@@ -220,7 +220,7 @@ export default function ModelsPanel({
               </table>
             </div>
             <p className="tss-chart-hint">
-              Imported by <code>tokensave cost</code> from Claude Code
+              Imported by <code>tracedecay cost</code> from Claude Code
               transcripts, which record real usage data per turn.
             </p>
           </CardContent>

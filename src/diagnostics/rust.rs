@@ -5,7 +5,7 @@
 //! `Diagnostic` rows: zero when the message has no spans (rare; usually a
 //! cross-cutting note), one per `spans[]` entry otherwise.
 //!
-//! The cargo target dir is forced to `.tokensave/target/` so concurrent
+//! The cargo target dir is forced to `.tracedecay/target/` so concurrent
 //! IDE / user `cargo check` runs don't fight us for `target/`'s lockfile.
 //! That doubles disk usage on the project but is the only safe option
 //! without coordination.
@@ -22,7 +22,7 @@ use std::process::Stdio;
 use serde::Deserialize;
 
 use crate::diagnostics::{Diagnostic, Driver, Scope};
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
 pub struct CargoDriver;
@@ -59,7 +59,7 @@ impl Driver for CargoDriver {
                 cmd.arg("-p").arg(name);
             }
 
-            let output = cmd.output().await.map_err(|e| TokenSaveError::Config {
+            let output = cmd.output().await.map_err(|e| TraceDecayError::Config {
                 message: format!("failed to spawn cargo: {e}"),
             })?;
 
@@ -112,15 +112,15 @@ impl Driver for CargoDriver {
     }
 }
 
-/// `.tokensave/target/` is our private cargo target dir — set so we don't
+/// `.tracedecay/target/` is our private cargo target dir — set so we don't
 /// race with the user's IDE or interactive `cargo check`. Created lazily
 /// by cargo on first run.
 fn target_dir_for(project_root: &Path) -> PathBuf {
-    project_root.join(".tokensave").join("target")
+    crate::config::get_tracedecay_dir(project_root).join("target")
 }
 
 /// Convert cargo's reported `file_name` (project-relative or absolute) into
-/// the project-relative form the rest of tokensave uses. Cargo emits paths
+/// the project-relative form the rest of tracedecay uses. Cargo emits paths
 /// relative to the manifest dir; we strip a leading `project_root` prefix
 /// when present in case the path is absolute.
 fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
@@ -205,8 +205,8 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_under_dot_tokensave() {
+    fn target_dir_under_dot_tracedecay() {
         let p = target_dir_for(Path::new("/tmp/proj"));
-        assert_eq!(p, Path::new("/tmp/proj/.tokensave/target"));
+        assert_eq!(p, Path::new("/tmp/proj/.tracedecay/target"));
     }
 }

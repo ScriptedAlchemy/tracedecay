@@ -12,8 +12,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::diagnose::{parse_cargo_output, Severity};
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::{is_test_file, TokenSave};
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::{is_test_file, TraceDecay};
 use crate::types::NodeKind;
 
 use super::super::ToolResult;
@@ -24,12 +24,12 @@ use super::{truncate_response, unique_file_paths};
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
 
-/// Handles `tokensave_diagnose`.
-pub(super) async fn handle_diagnose(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_diagnose`.
+pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let cargo_output =
         args.get("cargo_output")
             .and_then(|v| v.as_str())
-            .ok_or(TokenSaveError::Config {
+            .ok_or(TraceDecayError::Config {
                 message: "missing required parameter: cargo_output".to_string(),
             })?;
 
@@ -136,8 +136,8 @@ fn severity_string(s: Severity) -> &'static str {
     }
 }
 
-/// Handles `tokensave_run_affected_tests`.
-pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_run_affected_tests`.
+pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let explicit_paths: Option<Vec<String>> = args.get("changed_paths").and_then(|v| {
         v.as_array().map(|arr| {
             arr.iter()

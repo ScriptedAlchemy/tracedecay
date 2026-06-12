@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::graph::health::{
     acyclicity_score, compute_composite_health, dependency_depth, depth_score, gini_coefficient,
     gini_label, modularity_score, HealthDimensions,
@@ -22,7 +22,7 @@ fn modularity_label(score: f64) -> &'static str {
     }
 }
 use crate::graph::queries::GraphQueryManager;
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 use crate::types::{EdgeKind, NodeKind};
 
 use super::super::ToolResult;
@@ -54,7 +54,7 @@ pub(super) struct HealthSnapshot {
 
 /// Computes all 5 health dimensions and the composite signal for a given scope.
 pub(super) async fn compute_health_snapshot(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     path_prefix: Option<&str>,
 ) -> Result<HealthSnapshot> {
     let adj = GraphQueryManager::new(cg.db())
@@ -165,9 +165,9 @@ pub(super) async fn compute_health_snapshot(
     })
 }
 
-/// Handles `tokensave_gini` tool calls.
+/// Handles `tracedecay_gini` tool calls.
 pub(super) async fn handle_gini(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -353,9 +353,9 @@ pub(super) async fn handle_gini(
     })
 }
 
-/// Handles `tokensave_dependency_depth` tool calls.
+/// Handles `tracedecay_dependency_depth` tool calls.
 pub(super) async fn handle_dependency_depth(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -400,9 +400,9 @@ pub(super) async fn handle_dependency_depth(
     })
 }
 
-/// Handles `tokensave_health` tool calls.
+/// Handles `tracedecay_health` tool calls.
 pub(super) async fn handle_health(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -476,12 +476,12 @@ pub(super) async fn handle_health(
     })
 }
 
-/// Handles `tokensave_runtime` tool calls.
+/// Handles `tracedecay_runtime` tool calls.
 ///
 /// Issue #80 — surface process and database telemetry so users hitting
 /// unexpected CPU/RAM pressure can attach a structured snapshot to a
 /// bug report. The MCP wrapper just delegates to `runtime_telemetry`.
-pub(super) async fn handle_runtime(cg: &TokenSave, _args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_runtime(cg: &TraceDecay, _args: Value) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
     let formatted = crate::runtime_telemetry::to_pretty_json(&snap);
     Ok(ToolResult {
@@ -492,9 +492,9 @@ pub(super) async fn handle_runtime(cg: &TokenSave, _args: Value) -> Result<ToolR
     })
 }
 
-/// Handles `tokensave_dsm` tool calls.
+/// Handles `tracedecay_dsm` tool calls.
 pub(super) async fn handle_dsm(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -646,9 +646,9 @@ struct RiskEntry {
     churn: usize,
 }
 
-/// Handles `tokensave_test_risk` tool calls.
+/// Handles `tracedecay_test_risk` tool calls.
 pub(super) async fn handle_test_risk(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -687,7 +687,7 @@ pub(super) async fn handle_test_risk(
         .iter()
         .filter(|n| {
             matches!(n.kind, NodeKind::Function | NodeKind::Method)
-                && !crate::tokensave::is_test_file(&n.file_path)
+                && !crate::tracedecay::is_test_file(&n.file_path)
                 && !n.name.starts_with("test_")
                 && !n.name.starts_with("test")
                 && !n.file_path.contains("/test")
@@ -728,7 +728,7 @@ pub(super) async fn handle_test_risk(
         if e.kind == EdgeKind::Calls {
             let is_test = node_to_file
                 .get(&e.source)
-                .is_some_and(|f| crate::tokensave::is_test_file(f))
+                .is_some_and(|f| crate::tracedecay::is_test_file(f))
                 || test_annotated_callers.contains(&e.source);
             if is_test {
                 tested.insert(e.target.clone());
@@ -743,7 +743,7 @@ pub(super) async fn handle_test_risk(
         .filter(|n| {
             matches!(n.kind, NodeKind::Function | NodeKind::Method)
                 && skip_coverage.contains(&n.id)
-                && !crate::tokensave::is_test_file(&n.file_path)
+                && !crate::tracedecay::is_test_file(&n.file_path)
                 && !n.qualified_name.contains("::tests::")
         })
         .count();
@@ -841,9 +841,9 @@ pub(super) async fn handle_test_risk(
     })
 }
 
-/// Handles `tokensave_test_map` tool calls.
+/// Handles `tracedecay_test_map` tool calls.
 pub(super) async fn handle_test_map(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -856,7 +856,7 @@ pub(super) async fn handle_test_map(
     {
         cg.get_node(node_id).await?.into_iter().collect()
     } else {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "provide either 'file' or 'node_id'".to_string(),
         });
     };
@@ -877,7 +877,7 @@ pub(super) async fn handle_test_map(
         let test_callers: Vec<Value> = callers
             .iter()
             .filter(|(n, _)| {
-                crate::tokensave::is_test_file(&n.file_path) || test_annotated.contains(&n.id)
+                crate::tracedecay::is_test_file(&n.file_path) || test_annotated.contains(&n.id)
             })
             .map(|(n, _)| {
                 all_test_files.insert(n.file_path.clone());
@@ -930,9 +930,9 @@ pub(super) async fn handle_test_map(
 // Session start / end handlers
 // ---------------------------------------------------------------------------
 
-/// Handles `tokensave_session_start` tool calls.
+/// Handles `tracedecay_session_start` tool calls.
 pub(super) async fn handle_session_start(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -950,20 +950,22 @@ pub(super) async fn handle_session_start(
             "modularity": snap.modularity,
             "coverage_discipline": snap.coverage_discipline,
         },
-        "timestamp": crate::tokensave::current_timestamp(),
+        "timestamp": crate::tracedecay::current_timestamp(),
     });
 
-    // Write baseline to .tokensave/session_baseline.json
-    let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
-    std::fs::create_dir_all(&tokensave_dir).map_err(|e| crate::errors::TokenSaveError::Config {
-        message: format!("failed to create .tokensave dir: {e}"),
+    // Write baseline to .tracedecay/session_baseline.json
+    let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
+    std::fs::create_dir_all(&tracedecay_dir).map_err(|e| {
+        crate::errors::TraceDecayError::Config {
+            message: format!("failed to create .tracedecay dir: {e}"),
+        }
     })?;
-    let baseline_path = tokensave_dir.join("session_baseline.json");
+    let baseline_path = tracedecay_dir.join("session_baseline.json");
     std::fs::write(
         &baseline_path,
         serde_json::to_string_pretty(&baseline).unwrap_or_default(),
     )
-    .map_err(|e| crate::errors::TokenSaveError::Config {
+    .map_err(|e| crate::errors::TraceDecayError::Config {
         message: format!("failed to write session baseline: {e}"),
     })?;
 
@@ -981,20 +983,20 @@ pub(super) async fn handle_session_start(
     })
 }
 
-/// Handles `tokensave_session_end` tool calls.
+/// Handles `tracedecay_session_end` tool calls.
 pub(super) async fn handle_session_end(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
-    let baseline_path = tokensave_dir.join("session_baseline.json");
+    let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
+    let baseline_path = tracedecay_dir.join("session_baseline.json");
 
     // Check if baseline exists
     if !baseline_path.exists() {
         let output = json!({
             "status": "no_baseline",
-            "message": "No session baseline found. Call tokensave_session_start first.",
+            "message": "No session baseline found. Call tracedecay_session_start first.",
         });
         let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
         return Ok(ToolResult {
@@ -1007,14 +1009,15 @@ pub(super) async fn handle_session_end(
 
     // Read baseline
     let baseline_raw = std::fs::read_to_string(&baseline_path).map_err(|e| {
-        crate::errors::TokenSaveError::Config {
+        crate::errors::TraceDecayError::Config {
             message: format!("failed to read session baseline: {e}"),
         }
     })?;
-    let baseline: Value =
-        serde_json::from_str(&baseline_raw).map_err(|e| crate::errors::TokenSaveError::Config {
+    let baseline: Value = serde_json::from_str(&baseline_raw).map_err(|e| {
+        crate::errors::TraceDecayError::Config {
             message: format!("failed to parse session baseline: {e}"),
-        })?;
+        }
+    })?;
 
     let signal_before = baseline["quality_signal"].as_u64().unwrap_or(0) as u32;
     let dims_before = &baseline["dimensions"];

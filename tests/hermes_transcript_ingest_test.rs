@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::hermes::ingest_homes;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::hermes::ingest_homes;
 
 const SESSION_ID: &str = "20260101_000000_abc123";
 
@@ -16,24 +16,24 @@ fn setup(tmp: &TempDir) -> (PathBuf, PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home.join(".hermes"), project)
 }
 
 /// Writes a Hermes profile dir: a `config.yaml` pinning `pinned_project` (the
-/// real `plugins.tokensave.project_root` shape) and a `state.db` with the
+/// real `plugins.tracedecay.project_root` shape) and a `state.db` with the
 /// real Hermes schema.
 async fn write_hermes_profile(hermes_home: &Path, profile: &str, pinned_project: &Path) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
-    // The pin is JSON-encoded exactly as `tokensave install --agent hermes`
+    // The pin is JSON-encoded exactly as `tracedecay install --agent hermes`
     // writes it, so Windows backslashes survive the double-quoted YAML scalar.
     let pin = serde_json::to_string(pinned_project.to_string_lossy().as_ref()).unwrap();
     std::fs::write(
         profile_dir.join("config.yaml"),
         format!(
-            "memory:\n  provider: tokensave\nplugins:\n  enabled:\n    - tokensave\n  tokensave:\n    project_root: {pin}\n",
+            "memory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: {pin}\n",
         ),
     )
     .unwrap();

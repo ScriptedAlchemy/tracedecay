@@ -1,235 +1,235 @@
-[mcp_servers.tokensave]
+[mcp_servers.tracedecay]
 args = [
     "serve",
     "--path",
     ".",
 ]
-command = "/home/zack/projects/tokensave/target/debug/tokensave"
+command = "/home/zack/projects/tokensave/target/debug/tracedecay"
 
-[mcp_servers.tokensave.tools.tokensave_affected]
+[mcp_servers.tracedecay.tools.tracedecay_affected]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_body]
+[mcp_servers.tracedecay.tools.tracedecay_body]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_branch_diff]
+[mcp_servers.tracedecay.tools.tracedecay_branch_diff]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_branch_list]
+[mcp_servers.tracedecay.tools.tracedecay_branch_list]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_branch_search]
+[mcp_servers.tracedecay.tools.tracedecay_branch_search]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_by_qualified_name]
+[mcp_servers.tracedecay.tools.tracedecay_by_qualified_name]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_call_chain]
+[mcp_servers.tracedecay.tools.tracedecay_call_chain]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_callees]
+[mcp_servers.tracedecay.tools.tracedecay_callees]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_callers]
+[mcp_servers.tracedecay.tools.tracedecay_callers]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_callers_for]
+[mcp_servers.tracedecay.tools.tracedecay_callers_for]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_changelog]
+[mcp_servers.tracedecay.tools.tracedecay_changelog]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_circular]
+[mcp_servers.tracedecay.tools.tracedecay_circular]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_commit_context]
+[mcp_servers.tracedecay.tools.tracedecay_commit_context]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_complexity]
+[mcp_servers.tracedecay.tools.tracedecay_complexity]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_config]
+[mcp_servers.tracedecay.tools.tracedecay_config]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_constructors]
+[mcp_servers.tracedecay.tools.tracedecay_constructors]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_context]
+[mcp_servers.tracedecay.tools.tracedecay_context]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_coupling]
+[mcp_servers.tracedecay.tools.tracedecay_coupling]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_dead_code]
+[mcp_servers.tracedecay.tools.tracedecay_dead_code]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_dependency_depth]
+[mcp_servers.tracedecay.tools.tracedecay_dependency_depth]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_derives]
+[mcp_servers.tracedecay.tools.tracedecay_derives]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_diagnose]
+[mcp_servers.tracedecay.tools.tracedecay_diagnose]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_diagnostics]
+[mcp_servers.tracedecay.tools.tracedecay_diagnostics]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_diff_context]
+[mcp_servers.tracedecay.tools.tracedecay_diff_context]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_distribution]
+[mcp_servers.tracedecay.tools.tracedecay_distribution]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_doc_coverage]
+[mcp_servers.tracedecay.tools.tracedecay_doc_coverage]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_dsm]
+[mcp_servers.tracedecay.tools.tracedecay_dsm]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_fact_feedback]
+[mcp_servers.tracedecay.tools.tracedecay_fact_feedback]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_fact_store]
+[mcp_servers.tracedecay.tools.tracedecay_fact_store]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_field_sites]
+[mcp_servers.tracedecay.tools.tracedecay_field_sites]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_file_dependents]
+[mcp_servers.tracedecay.tools.tracedecay_file_dependents]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_files]
+[mcp_servers.tracedecay.tools.tracedecay_files]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_find_exact_symbol]
+[mcp_servers.tracedecay.tools.tracedecay_find_exact_symbol]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_gini]
+[mcp_servers.tracedecay.tools.tracedecay_gini]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_god_class]
+[mcp_servers.tracedecay.tools.tracedecay_god_class]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_health]
+[mcp_servers.tracedecay.tools.tracedecay_health]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_hotspots]
+[mcp_servers.tracedecay.tools.tracedecay_hotspots]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_impact]
+[mcp_servers.tracedecay.tools.tracedecay_impact]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_implementations]
+[mcp_servers.tracedecay.tools.tracedecay_implementations]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_impls]
+[mcp_servers.tracedecay.tools.tracedecay_impls]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_inheritance_depth]
+[mcp_servers.tracedecay.tools.tracedecay_inheritance_depth]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_insert_at]
+[mcp_servers.tracedecay.tools.tracedecay_insert_at]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_insert_at_symbol]
+[mcp_servers.tracedecay.tools.tracedecay_insert_at_symbol]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_largest]
+[mcp_servers.tracedecay.tools.tracedecay_largest]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_memory_status]
+[mcp_servers.tracedecay.tools.tracedecay_memory_status]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_message_search]
+[mcp_servers.tracedecay.tools.tracedecay_message_search]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_module_api]
+[mcp_servers.tracedecay.tools.tracedecay_module_api]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_multi_str_replace]
+[mcp_servers.tracedecay.tools.tracedecay_multi_str_replace]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_node]
+[mcp_servers.tracedecay.tools.tracedecay_node]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_outline]
+[mcp_servers.tracedecay.tools.tracedecay_outline]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_port_order]
+[mcp_servers.tracedecay.tools.tracedecay_port_order]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_port_status]
+[mcp_servers.tracedecay.tools.tracedecay_port_status]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_pr_context]
+[mcp_servers.tracedecay.tools.tracedecay_pr_context]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_rank]
+[mcp_servers.tracedecay.tools.tracedecay_rank]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_read]
+[mcp_servers.tracedecay.tools.tracedecay_read]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_recursion]
+[mcp_servers.tracedecay.tools.tracedecay_recursion]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_redundancy]
+[mcp_servers.tracedecay.tools.tracedecay_redundancy]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_rename_preview]
+[mcp_servers.tracedecay.tools.tracedecay_rename_preview]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_replace_symbol]
+[mcp_servers.tracedecay.tools.tracedecay_replace_symbol]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_run_affected_tests]
+[mcp_servers.tracedecay.tools.tracedecay_run_affected_tests]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_runtime]
+[mcp_servers.tracedecay.tools.tracedecay_runtime]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_search]
+[mcp_servers.tracedecay.tools.tracedecay_search]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_session_end]
+[mcp_servers.tracedecay.tools.tracedecay_session_end]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_session_start]
+[mcp_servers.tracedecay.tools.tracedecay_session_start]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_signature]
+[mcp_servers.tracedecay.tools.tracedecay_signature]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_signature_search]
+[mcp_servers.tracedecay.tools.tracedecay_signature_search]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_similar]
+[mcp_servers.tracedecay.tools.tracedecay_similar]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_simplify_scan]
+[mcp_servers.tracedecay.tools.tracedecay_simplify_scan]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_status]
+[mcp_servers.tracedecay.tools.tracedecay_status]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_str_replace]
+[mcp_servers.tracedecay.tools.tracedecay_str_replace]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_test_map]
+[mcp_servers.tracedecay.tools.tracedecay_test_map]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_test_risk]
+[mcp_servers.tracedecay.tools.tracedecay_test_risk]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_todos]
+[mcp_servers.tracedecay.tools.tracedecay_todos]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_type_hierarchy]
+[mcp_servers.tracedecay.tools.tracedecay_type_hierarchy]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_unsafe_patterns]
+[mcp_servers.tracedecay.tools.tracedecay_unsafe_patterns]
 approval_mode = "auto"
 
-[mcp_servers.tokensave.tools.tokensave_unused_imports]
+[mcp_servers.tracedecay.tools.tracedecay_unused_imports]
 approval_mode = "auto"

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use tokensave::agents::{
+use tracedecay::agents::{
     expected_tool_perms, AgentIntegration, CopilotIntegration, DoctorCounters, HealthcheckContext,
     InstallContext,
 };
@@ -13,7 +13,7 @@ use tokensave::agents::{
 fn make_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
@@ -68,8 +68,8 @@ fn test_install_creates_vscode_settings_with_mcp_server() {
     );
 
     let settings = read_json(&settings_path);
-    let ts = &settings["mcp"]["servers"]["tokensave"];
-    assert!(ts.is_object(), "mcp.servers.tokensave should be an object");
+    let ts = &settings["mcp"]["servers"]["tracedecay"];
+    assert!(ts.is_object(), "mcp.servers.tracedecay should be an object");
     assert_eq!(
         ts["type"].as_str().unwrap(),
         "stdio",
@@ -77,7 +77,7 @@ fn test_install_creates_vscode_settings_with_mcp_server() {
     );
     assert_eq!(
         ts["command"].as_str().unwrap(),
-        "/usr/local/bin/tokensave",
+        "/usr/local/bin/tracedecay",
         "command should match the bin path"
     );
     let args: Vec<&str> = ts["args"]
@@ -104,13 +104,13 @@ fn test_install_creates_cli_config_with_mcp_server() {
     );
 
     let config = read_json(&cli_path);
-    let ts = &config["mcpServers"]["tokensave"];
+    let ts = &config["mcpServers"]["tracedecay"];
     assert!(
         ts.is_object(),
-        "mcpServers.tokensave should be an object in CLI config"
+        "mcpServers.tracedecay should be an object in CLI config"
     );
     assert_eq!(ts["type"].as_str().unwrap(), "stdio");
-    assert_eq!(ts["command"].as_str().unwrap(), "/usr/local/bin/tokensave");
+    assert_eq!(ts["command"].as_str().unwrap(), "/usr/local/bin/tracedecay");
     let args: Vec<&str> = ts["args"]
         .as_array()
         .unwrap()
@@ -144,8 +144,8 @@ fn test_install_preserves_existing_vscode_settings() {
         "existing VS Code setting should be preserved"
     );
     assert!(
-        settings["mcp"]["servers"]["tokensave"].is_object(),
-        "tokensave MCP server should be added"
+        settings["mcp"]["servers"]["tracedecay"].is_object(),
+        "tracedecay MCP server should be added"
     );
 }
 
@@ -172,8 +172,8 @@ fn test_install_preserves_existing_cli_config() {
         "existing server should be preserved in CLI config"
     );
     assert!(
-        config["mcpServers"]["tokensave"].is_object(),
-        "tokensave should be added alongside existing servers"
+        config["mcpServers"]["tracedecay"].is_object(),
+        "tracedecay should be added alongside existing servers"
     );
 }
 
@@ -188,13 +188,13 @@ fn test_install_idempotent_vscode() {
 
     let settings = read_json(&vscode_settings_path(home));
     assert!(
-        settings["mcp"]["servers"]["tokensave"].is_object(),
-        "tokensave should still be registered after double install"
+        settings["mcp"]["servers"]["tracedecay"].is_object(),
+        "tracedecay should still be registered after double install"
     );
-    // Ensure there's exactly one "tokensave" key (no duplication)
+    // Ensure there's exactly one "tracedecay" key (no duplication)
     let servers = settings["mcp"]["servers"].as_object().unwrap();
-    let ts_count = servers.keys().filter(|k| *k == "tokensave").count();
-    assert_eq!(ts_count, 1, "tokensave should appear exactly once");
+    let ts_count = servers.keys().filter(|k| *k == "tracedecay").count();
+    assert_eq!(ts_count, 1, "tracedecay should appear exactly once");
 }
 
 #[test]
@@ -208,10 +208,10 @@ fn test_install_idempotent_cli() {
 
     let config = read_json(&cli_config_path(home));
     let servers = config["mcpServers"].as_object().unwrap();
-    let ts_count = servers.keys().filter(|k| *k == "tokensave").count();
+    let ts_count = servers.keys().filter(|k| *k == "tracedecay").count();
     assert_eq!(
         ts_count, 1,
-        "tokensave should appear exactly once in CLI config"
+        "tracedecay should appear exactly once in CLI config"
     );
 }
 
@@ -235,14 +235,14 @@ fn test_uninstall_removes_vscode_mcp_entry() {
         "settings.json should still exist after uninstall"
     );
     let settings = read_json(&settings_path);
-    let has_tokensave = settings
+    let has_tracedecay = settings
         .get("mcp")
         .and_then(|v| v.get("servers"))
-        .and_then(|v| v.get("tokensave"))
+        .and_then(|v| v.get("tracedecay"))
         .is_some();
     assert!(
-        !has_tokensave,
-        "mcp.servers.tokensave should be removed after uninstall"
+        !has_tracedecay,
+        "mcp.servers.tracedecay should be removed after uninstall"
     );
 }
 
@@ -257,7 +257,7 @@ fn test_uninstall_cleans_empty_mcp_objects() {
 
     let settings_path = vscode_settings_path(home);
     let settings = read_json(&settings_path);
-    // After removing tokensave (the only server), both "servers" and "mcp"
+    // After removing tracedecay (the only server), both "servers" and "mcp"
     // should be cleaned up.
     assert!(
         settings.get("mcp").is_none() || settings["mcp"].as_object().is_some_and(|o| o.is_empty()),
@@ -275,16 +275,16 @@ fn test_uninstall_removes_cli_config() {
     CopilotIntegration.uninstall(&ctx).unwrap();
 
     let cli_path = cli_config_path(home);
-    // When tokensave was the only entry, the file should be removed entirely
+    // When tracedecay was the only entry, the file should be removed entirely
     if cli_path.exists() {
         let config = read_json(&cli_path);
-        let has_tokensave = config
+        let has_tracedecay = config
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
+            .and_then(|v| v.get("tracedecay"))
             .is_some();
         assert!(
-            !has_tokensave,
-            "mcpServers.tokensave should be removed from CLI config"
+            !has_tracedecay,
+            "mcpServers.tracedecay should be removed from CLI config"
         );
     }
 }
@@ -316,11 +316,11 @@ fn test_uninstall_preserves_other_cli_servers() {
         config["mcpServers"]["other-tool"].is_object(),
         "other server should be preserved"
     );
-    let has_tokensave = config
+    let has_tracedecay = config
         .get("mcpServers")
-        .and_then(|v| v.get("tokensave"))
+        .and_then(|v| v.get("tracedecay"))
         .is_some();
-    assert!(!has_tokensave, "tokensave should be removed");
+    assert!(!has_tracedecay, "tracedecay should be removed");
 }
 
 #[test]
@@ -354,11 +354,11 @@ fn test_uninstall_without_install_does_not_crash() {
 }
 
 #[test]
-fn test_uninstall_cli_with_no_tokensave_is_noop() {
+fn test_uninstall_cli_with_no_tracedecay_is_noop() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create a CLI config without tokensave
+    // Create a CLI config without tracedecay
     let cli_path = cli_config_path(home);
     std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -417,12 +417,12 @@ fn test_healthcheck_detects_missing_serve_arg_vscode() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create VS Code settings with tokensave but missing "serve" in args
+    // Create VS Code settings with tracedecay but missing "serve" in args
     let settings_path = vscode_settings_path(home);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(
         &settings_path,
-        r#"{"mcp": {"servers": {"tokensave": {"type": "stdio", "command": "/usr/local/bin/tokensave", "args": []}}}}"#,
+        r#"{"mcp": {"servers": {"tracedecay": {"type": "stdio", "command": "/usr/local/bin/tracedecay", "args": []}}}}"#,
     )
     .unwrap();
 
@@ -431,7 +431,7 @@ fn test_healthcheck_detects_missing_serve_arg_vscode() {
     std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
     std::fs::write(
         &cli_path,
-        r#"{"mcpServers": {"tokensave": {"type": "stdio", "command": "/usr/local/bin/tokensave", "args": ["serve"]}}}"#,
+        r#"{"mcpServers": {"tracedecay": {"type": "stdio", "command": "/usr/local/bin/tracedecay", "args": ["serve"]}}}"#,
     )
     .unwrap();
 
@@ -457,16 +457,16 @@ fn test_healthcheck_detects_missing_serve_arg_cli() {
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(
         &settings_path,
-        r#"{"mcp": {"servers": {"tokensave": {"type": "stdio", "command": "/usr/local/bin/tokensave", "args": ["serve"]}}}}"#,
+        r#"{"mcp": {"servers": {"tracedecay": {"type": "stdio", "command": "/usr/local/bin/tracedecay", "args": ["serve"]}}}}"#,
     )
     .unwrap();
 
-    // CLI config with tokensave but no "serve" in args
+    // CLI config with tracedecay but no "serve" in args
     let cli_path = cli_config_path(home);
     std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
     std::fs::write(
         &cli_path,
-        r#"{"mcpServers": {"tokensave": {"type": "stdio", "command": "/usr/local/bin/tokensave", "args": []}}}"#,
+        r#"{"mcpServers": {"tracedecay": {"type": "stdio", "command": "/usr/local/bin/tracedecay", "args": []}}}"#,
     )
     .unwrap();
 
@@ -483,11 +483,11 @@ fn test_healthcheck_detects_missing_serve_arg_cli() {
 }
 
 #[test]
-fn test_healthcheck_detects_no_tokensave_in_existing_vscode() {
+fn test_healthcheck_detects_no_tracedecay_in_existing_vscode() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create VS Code settings without tokensave
+    // Create VS Code settings without tracedecay
     let settings_path = vscode_settings_path(home);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(&settings_path, r#"{"editor.fontSize": 14}"#).unwrap();
@@ -500,25 +500,25 @@ fn test_healthcheck_detects_no_tokensave_in_existing_vscode() {
     CopilotIntegration.healthcheck(&mut dc, &hctx);
     assert!(
         dc.issues > 0,
-        "healthcheck should report issue when tokensave is not in VS Code settings"
+        "healthcheck should report issue when tracedecay is not in VS Code settings"
     );
 }
 
 #[test]
-fn test_healthcheck_detects_no_tokensave_in_existing_cli() {
+fn test_healthcheck_detects_no_tracedecay_in_existing_cli() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create VS Code settings with proper tokensave (so that check passes)
+    // Create VS Code settings with proper tracedecay (so that check passes)
     let settings_path = vscode_settings_path(home);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(
         &settings_path,
-        r#"{"mcp": {"servers": {"tokensave": {"type": "stdio", "command": "tokensave", "args": ["serve"]}}}}"#,
+        r#"{"mcp": {"servers": {"tracedecay": {"type": "stdio", "command": "tracedecay", "args": ["serve"]}}}}"#,
     )
     .unwrap();
 
-    // Create CLI config without tokensave
+    // Create CLI config without tracedecay
     let cli_path = cli_config_path(home);
     std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
     std::fs::write(&cli_path, r#"{"mcpServers": {}}"#).unwrap();
@@ -531,12 +531,12 @@ fn test_healthcheck_detects_no_tokensave_in_existing_cli() {
     CopilotIntegration.healthcheck(&mut dc, &hctx);
     assert!(
         dc.issues > 0,
-        "healthcheck should report issue when tokensave is not in CLI config"
+        "healthcheck should report issue when tracedecay is not in CLI config"
     );
 }
 
 // ===========================================================================
-// is_detected / has_tokensave
+// is_detected / has_tracedecay
 // ===========================================================================
 
 #[test]
@@ -582,77 +582,77 @@ fn test_is_detected_with_vscode_user_dir() {
 }
 
 #[test]
-fn test_has_tokensave_before_install() {
+fn test_has_tracedecay_before_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     assert!(
-        !CopilotIntegration.has_tokensave(home),
-        "has_tokensave should be false before install"
+        !CopilotIntegration.has_tracedecay(home),
+        "has_tracedecay should be false before install"
     );
 }
 
 #[test]
-fn test_has_tokensave_after_install() {
+fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
     assert!(
-        CopilotIntegration.has_tokensave(home),
-        "has_tokensave should be true after install"
+        CopilotIntegration.has_tracedecay(home),
+        "has_tracedecay should be true after install"
     );
 }
 
 #[test]
-fn test_has_tokensave_after_uninstall() {
+fn test_has_tracedecay_after_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
     CopilotIntegration.uninstall(&ctx).unwrap();
     assert!(
-        !CopilotIntegration.has_tokensave(home),
-        "has_tokensave should be false after uninstall"
+        !CopilotIntegration.has_tracedecay(home),
+        "has_tracedecay should be false after uninstall"
     );
 }
 
 #[test]
-fn test_has_tokensave_vscode_only() {
+fn test_has_tracedecay_vscode_only() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create VS Code settings with tokensave but no CLI config
+    // Create VS Code settings with tracedecay but no CLI config
     let settings_path = vscode_settings_path(home);
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(
         &settings_path,
-        r#"{"mcp": {"servers": {"tokensave": {"type": "stdio", "command": "tokensave", "args": ["serve"]}}}}"#,
+        r#"{"mcp": {"servers": {"tracedecay": {"type": "stdio", "command": "tracedecay", "args": ["serve"]}}}}"#,
     )
     .unwrap();
 
     assert!(
-        CopilotIntegration.has_tokensave(home),
-        "has_tokensave should be true with only VS Code config"
+        CopilotIntegration.has_tracedecay(home),
+        "has_tracedecay should be true with only VS Code config"
     );
 }
 
 #[test]
-fn test_has_tokensave_cli_only() {
+fn test_has_tracedecay_cli_only() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create CLI config with tokensave but no VS Code settings
+    // Create CLI config with tracedecay but no VS Code settings
     let cli_path = cli_config_path(home);
     std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
     std::fs::write(
         &cli_path,
-        r#"{"mcpServers": {"tokensave": {"type": "stdio", "command": "tokensave", "args": ["serve"]}}}"#,
+        r#"{"mcpServers": {"tracedecay": {"type": "stdio", "command": "tracedecay", "args": ["serve"]}}}"#,
     )
     .unwrap();
 
     assert!(
-        CopilotIntegration.has_tokensave(home),
-        "has_tokensave should be true with only CLI config"
+        CopilotIntegration.has_tracedecay(home),
+        "has_tracedecay should be true with only CLI config"
     );
 }
 

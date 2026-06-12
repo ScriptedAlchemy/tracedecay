@@ -12,8 +12,8 @@ use super::types::{
     AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, FeedbackResult, MemoryCategory,
     UpdateFactRequest,
 };
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::current_timestamp;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::current_timestamp;
 
 const DEFAULT_LIMIT: usize = 50;
 const ENTITY_BATCH_SIZE: usize = 500;
@@ -1137,15 +1137,15 @@ fn normalize_bank_name(bank_name: &str) -> String {
         .replace([' ', '-'], "_")
 }
 
-fn db_error(operation: &str, error: impl fmt::Display) -> TokenSaveError {
-    TokenSaveError::Database {
+fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
         message: error.to_string(),
         operation: operation.to_string(),
     }
 }
 
-fn db_message(operation: &str, message: impl Into<String>) -> TokenSaveError {
-    TokenSaveError::Database {
+fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Database {
         message: message.into(),
         operation: operation.to_string(),
     }

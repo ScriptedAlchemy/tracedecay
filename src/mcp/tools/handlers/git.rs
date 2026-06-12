@@ -8,11 +8,11 @@ use serde_json::{json, Value};
 
 use super::super::ToolResult;
 use super::{truncate_response, unique_file_paths};
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
-/// Handles `tokensave_affected` tool calls.
-pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_affected` tool calls.
+pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let files: Vec<String> = args
         .get("files")
         .and_then(|v| v.as_array())
@@ -21,7 +21,7 @@ pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolR
                 .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                 .collect()
         })
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: files (array of strings)".to_string(),
         })?;
 
@@ -39,7 +39,7 @@ pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolR
         if let Some(ref g) = custom_glob {
             g.matches(path)
         } else {
-            crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path)
+            crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
         }
     };
 
@@ -92,8 +92,8 @@ pub(super) async fn handle_affected(cg: &TokenSave, args: Value) -> Result<ToolR
     })
 }
 
-/// Handles `tokensave_diff_context` tool calls.
-pub(super) async fn handle_diff_context(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_diff_context` tool calls.
+pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     debug_assert!(
         args.is_object(),
         "handle_diff_context expects an object argument"
@@ -106,7 +106,7 @@ pub(super) async fn handle_diff_context(cg: &TokenSave, args: Value) -> Result<T
                 .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                 .collect()
         })
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: files (array of strings)".to_string(),
         })?;
 
@@ -135,8 +135,9 @@ pub(super) async fn handle_diff_context(cg: &TokenSave, args: Value) -> Result<T
 
     // Pre-compute files containing inline test modules.
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
-    let has_tests =
-        |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
+    let has_tests = |path: &str| {
+        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+    };
 
     // First pass: gather all modified symbols.
     let mut modified_ids: Vec<String> = Vec::new();
@@ -510,7 +511,7 @@ fn git_commit_log(
 /// at the bottom still has role "source".
 #[allow(clippy::ptr_arg)]
 fn classify_file_role(path: &str, _files_with_inline_tests: &HashSet<String>) -> &'static str {
-    if crate::tokensave::is_test_file(path) {
+    if crate::tracedecay::is_test_file(path) {
         return "test";
     }
     let lower = path.to_lowercase();
@@ -535,8 +536,8 @@ fn classify_file_role(path: &str, _files_with_inline_tests: &HashSet<String>) ->
     "source"
 }
 
-/// Handles `tokensave_changelog` tool calls.
-pub(super) async fn handle_changelog(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_changelog` tool calls.
+pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     debug_assert!(
         args.is_object(),
         "handle_changelog expects an object argument"
@@ -544,14 +545,14 @@ pub(super) async fn handle_changelog(cg: &TokenSave, args: Value) -> Result<Tool
     let from_ref = args
         .get("from_ref")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: from_ref".to_string(),
         })?;
 
     let to_ref =
         args.get("to_ref")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: to_ref".to_string(),
             })?;
 
@@ -623,8 +624,8 @@ pub(super) async fn handle_changelog(cg: &TokenSave, args: Value) -> Result<Tool
     })
 }
 
-/// Handles `tokensave_commit_context` tool calls.
-pub(super) async fn handle_commit_context(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_commit_context` tool calls.
+pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let staged_only = args
         .get("staged_only")
         .and_then(serde_json::Value::as_bool)
@@ -707,8 +708,8 @@ pub(super) async fn handle_commit_context(cg: &TokenSave, args: Value) -> Result
     })
 }
 
-/// Handles `tokensave_pr_context` tool calls.
-pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_pr_context` tool calls.
+pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
@@ -737,8 +738,9 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
 
     // Pre-compute files with inline test modules.
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
-    let has_tests =
-        |path: &str| crate::tokensave::is_test_file(path) || files_with_inline_tests.contains(path);
+    let has_tests = |path: &str| {
+        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+    };
 
     for file in &changed_files {
         if has_tests(file) {
@@ -840,18 +842,18 @@ pub(super) async fn handle_pr_context(cg: &TokenSave, args: Value) -> Result<Too
 
 // ── Cross-branch tools ─────────────────────────────────────────────────
 
-/// Handles `tokensave_branch_list` tool calls.
-pub(super) fn handle_branch_list(cg: &TokenSave) -> ToolResult {
-    let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
+/// Handles `tracedecay_branch_list` tool calls.
+pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
+    let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
     let current = cg.active_branch();
 
-    let meta = crate::branch_meta::load_branch_meta(&tokensave_dir);
+    let meta = crate::branch_meta::load_branch_meta(&tracedecay_dir);
     let branches: Vec<Value> = match meta {
         Some(ref meta) => meta
             .branches
             .iter()
             .map(|(name, entry)| {
-                let db_path = tokensave_dir.join(&entry.db_file);
+                let db_path = tracedecay_dir.join(&entry.db_file);
                 let size_bytes = db_path.metadata().map_or(0, |m| m.len());
                 json!({
                     "name": name,
@@ -881,18 +883,18 @@ pub(super) fn handle_branch_list(cg: &TokenSave) -> ToolResult {
     }
 }
 
-/// Handles `tokensave_branch_search` tool calls.
-pub(super) async fn handle_branch_search(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_branch_search` tool calls.
+pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let branch =
         args.get("branch")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: branch".to_string(),
             })?;
     let query =
         args.get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: query".to_string(),
             })?;
     let limit = args
@@ -900,7 +902,7 @@ pub(super) async fn handle_branch_search(cg: &TokenSave, args: Value) -> Result<
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(500) as usize);
 
-    let branch_cg = TokenSave::open_branch(cg.project_root(), branch).await?;
+    let branch_cg = TraceDecay::open_branch(cg.project_root(), branch).await?;
     let results = branch_cg.search(query, limit).await?;
 
     let items: Vec<Value> = results
@@ -928,19 +930,20 @@ pub(super) async fn handle_branch_search(cg: &TokenSave, args: Value) -> Result<
     })
 }
 
-/// Handles `tokensave_branch_diff` tool calls.
+/// Handles `tracedecay_branch_diff` tool calls.
 ///
 /// Compares code graphs between two branches. For each symbol present in
 /// either branch, reports whether it was added, removed, or changed
 /// (signature differs).
-pub(super) async fn handle_branch_diff(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let project_root = cg.project_root();
-    let tokensave_dir = crate::config::get_tokensave_dir(project_root);
+    let tracedecay_dir = crate::config::get_tracedecay_dir(project_root);
 
     // Resolve base and head branches
-    let meta = crate::branch_meta::load_branch_meta(&tokensave_dir).ok_or_else(|| {
-        TokenSaveError::Config {
-            message: "no branch tracking configured — run `tokensave branch add` first".to_string(),
+    let meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).ok_or_else(|| {
+        TraceDecayError::Config {
+            message: "no branch tracking configured — run `tracedecay branch add` first"
+                .to_string(),
         }
     })?;
 
@@ -952,7 +955,7 @@ pub(super) async fn handle_branch_diff(cg: &TokenSave, args: Value) -> Result<To
         .get("head")
         .and_then(|v| v.as_str())
         .or_else(|| cg.active_branch())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "cannot determine head branch — specify it explicitly".to_string(),
         })?;
 
@@ -980,11 +983,11 @@ pub(super) async fn handle_branch_diff(cg: &TokenSave, args: Value) -> Result<To
     let file_filter = args.get("file").and_then(|v| v.as_str());
     let kind_filter = args.get("kind").and_then(|v| v.as_str());
 
-    let base_cg = TokenSave::open_branch(project_root, base_name).await?;
+    let base_cg = TraceDecay::open_branch(project_root, base_name).await?;
     let head_cg = if cg.active_branch() == Some(head_name) && !cg.is_fallback() {
         None // use the already-open cg
     } else {
-        Some(TokenSave::open_branch(project_root, head_name).await?)
+        Some(TraceDecay::open_branch(project_root, head_name).await?)
     };
     let head_ref = head_cg.as_ref().unwrap_or(cg);
 

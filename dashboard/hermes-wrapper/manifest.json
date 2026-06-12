@@ -1,15 +1,15 @@
 {
-  "name": "tokensave",
-  "label": "TokenSave",
-  "description": "TokenSave dashboards: holographic memory, LCM, code graph, and savings explorers (served by the tokensave engine).",
+  "name": "tracedecay",
+  "label": "TraceDecay",
+  "description": "TraceDecay dashboards: holographic memory, LCM, code graph, and savings explorers (served by the tracedecay engine).",
   "icon": "Cpu",
   "version": "0.2.0",
   "provider": {
     "kind": "memory",
-    "name": "tokensave"
+    "name": "tracedecay"
   },
   "tab": {
-    "path": "/tokensave",
+    "path": "/tracedecay",
     "position": "after:plugins"
   },
   "entry": "dist/index.js",

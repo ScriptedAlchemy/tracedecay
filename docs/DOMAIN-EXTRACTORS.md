@@ -21,7 +21,7 @@ Many software systems encode their primary semantic domain as *data* inside a ho
 | i18n | Any | `t("common.button.save")` | Translation key |
 | ORM / migration | Any | `migration("add_users_table", fn)` | Migration name |
 
-In all of these cases, asking tokensave "where is X implemented?" or "what calls Y?" misses the real registration because the meaningful name is inside a string literal. A standard tree-sitter extractor sees the host language correctly and nothing else.
+In all of these cases, asking tracedecay "where is X implemented?" or "what calls Y?" misses the real registration because the meaningful name is inside a string literal. A standard tree-sitter extractor sees the host language correctly and nothing else.
 
 ---
 
@@ -77,10 +77,10 @@ Domain nodes are merged into the same `ExtractionResult` before the reference re
 
 ## Rule schema
 
-Rules live in `.tokensave/domain-symbols.toml` at the project root. Each `[[rule]]` block describes one pattern family.
+Rules live in `.tracedecay/domain-symbols.toml` at the project root. Each `[[rule]]` block describes one pattern family.
 
 ```toml
-# .tokensave/domain-symbols.toml
+# .tracedecay/domain-symbols.toml
 
 [layer]
 name  = "elisp-primitive"  # unique identifier for this set of rules
@@ -162,7 +162,7 @@ ast-grep uses a pattern language based on concrete code templates, where `$NAME`
 $OBJ.define($NAME, $VALUE)
 ```
 
-tokensave already shells out to `ast-grep` for `tokensave_ast_grep_rewrite`. ast-grep is language-aware (the same pattern matches the correct AST nodes across formatting variants).
+tracedecay already shells out to `ast-grep` for `tracedecay_ast_grep_rewrite`. ast-grep is language-aware (the same pattern matches the correct AST nodes across formatting variants).
 
 | | |
 |---|---|
@@ -218,13 +218,13 @@ Add `NodeKind::DomainSymbol` to the existing enum. Domain symbol nodes store:
 | `line` | Line of the registration call |
 | `metadata` | JSON blob: `{ "layer": "elisp-primitive", "rule": "interp-define" }` |
 
-Domain symbol nodes are returned by `tokensave_search`, `tokensave_context`, and `tokensave_dead_code`. Existing MCP tools that filter by node kind accept `"domain_symbol"` as a valid filter value.
+Domain symbol nodes are returned by `tracedecay_search`, `tracedecay_context`, and `tracedecay_dead_code`. Existing MCP tools that filter by node kind accept `"domain_symbol"` as a valid filter value.
 
 ### EdgeKind: open-ended custom edges
 
 The DB schema stores edge `kind` as `TEXT`. The `EdgeKind` Rust enum covers built-in kinds, but custom domain edges (e.g. `"registers"`, `"dispatches"`, `"aliases_to"`) are stored as plain strings and round-tripped through the existing `EdgeKind::from_str` fallback. No schema migration is required.
 
-Graph traversal tools (`tokensave_callers`, `tokensave_impact`, `tokensave_affected`) follow domain edges by default, making domain symbols fully reachable in impact analysis.
+Graph traversal tools (`tracedecay_callers`, `tracedecay_impact`, `tracedecay_affected`) follow domain edges by default, making domain symbols fully reachable in impact analysis.
 
 ### Stable node IDs for cross-file resolution
 
@@ -246,11 +246,11 @@ This means two rules in the same layer that extract the same string automaticall
 
 ### Project-local rules (primary use case)
 
-`.tokensave/domain-symbols.toml` at the project root. Rules are private to the project; they are not committed alongside the source unless the project author chooses to.
+`.tracedecay/domain-symbols.toml` at the project root (an existing legacy `.tokensave/` directory is still honored as a fallback). Rules are private to the project; they are not committed alongside the source unless the project author chooses to.
 
 ### Rule packs (shareable)
 
-Reusable TOML files installed to `~/.tokensave/domain-packs/`. A pack is just a `domain-symbols.toml` with a pack name in its header:
+Reusable TOML files installed to `~/.tracedecay/domain-packs/`. A pack is just a `domain-symbols.toml` with a pack name in its header:
 
 ```toml
 [pack]
@@ -258,9 +258,9 @@ name    = "actix-web-routes"
 version = "1.0.0"
 ```
 
-Installed via a future `tokensave domain install actix-web-routes` command (v2). Until then, users copy pack files manually.
+Installed via a future `tracedecay domain install actix-web-routes` command (v2). Until then, users copy pack files manually.
 
-### Built-in packs (shipped with tokensave)
+### Built-in packs (shipped with tracedecay)
 
 Common framework patterns can ship as optional built-ins, off by default, activated in `user_config.toml`:
 
@@ -279,20 +279,20 @@ Candidate built-in packs: Express/Fastify routes, Rails routes, Click CLI comman
 - **Shared parse tree.** The primary extractor already parses each file with tree-sitter. The domain extractor should reuse the same `Tree` rather than re-parsing. This requires threading the parse tree through `ExtractionResult` or running domain extraction inside the primary extractor's call.
 - **Incremental.** Domain extraction re-runs only when a file's content hash changes — the same condition that triggers primary re-extraction. No separate staleness tracking is needed.
 - **In-process for tree-sitter rules.** No subprocess, no IPC. Expected overhead: < 5 % on top of primary extraction for typical rule sets.
-- **ast-grep rules are batched.** If ast-grep rules are present, tokensave runs one `ast-grep` invocation per changed file rather than one per rule, passing all patterns as a YAML config file via `--config`.
+- **ast-grep rules are batched.** If ast-grep rules are present, tracedecay runs one `ast-grep` invocation per changed file rather than one per rule, passing all patterns as a YAML config file via `--config`.
 
 ---
 
 ## Open questions
 
-1. **Dead code semantics.** Should a domain symbol registered via `interp.define("foo", ...)` suppress a dead-code warning for `foo` even when no Rust function named `foo` exists? The domain layer is the only "caller." This requires `tokensave_dead_code` to understand that a `domain_symbol` node with incoming `registers` edges is not dead.
+1. **Dead code semantics.** Should a domain symbol registered via `interp.define("foo", ...)` suppress a dead-code warning for `foo` even when no Rust function named `foo` exists? The domain layer is the only "caller." This requires `tracedecay_dead_code` to understand that a `domain_symbol` node with incoming `registers` edges is not dead.
 
-2. **Parametric names.** How to handle `/api/users/:id` — is the pattern itself the symbol, or should tokensave normalise it to `/api/users/{id}` for matching purposes? Route matching is inherently parametric; symbol identity is not obvious.
+2. **Parametric names.** How to handle `/api/users/:id` — is the pattern itself the symbol, or should tracedecay normalise it to `/api/users/{id}` for matching purposes? Route matching is inherently parametric; symbol identity is not obvious.
 
 3. **Cross-layer edges.** Can a domain symbol in one layer reference a symbol in another? For example, an HTTP route pointing to a CLI command name. The ID scheme supports this (`domain:http-route:/build` → `domain:cli-command:build`) but the rule schema has no syntax for it yet.
 
 4. **Shared parse tree.** Reusing the tree-sitter `Tree` from the primary extractor is the right performance call but requires changing the `LanguageExtractor::extract` signature or the `LanguageRegistry` dispatch logic. This is the main implementation complexity in the first version.
 
-5. **Rule authoring UX.** There is no interactive way to test a rule against a file today. A `tokensave domain test <file>` command that prints matched nodes and edges without writing to the DB would significantly reduce the authoring feedback loop.
+5. **Rule authoring UX.** There is no interactive way to test a rule against a file today. A `tracedecay domain test <file>` command that prints matched nodes and edges without writing to the DB would significantly reduce the authoring feedback loop.
 
 6. **Conflict resolution.** If two rules (or a rule and a primary extractor) emit a node with the same ID, which one wins? Last-write wins is simplest; a `priority` field in the rule is the clean solution but adds schema complexity.

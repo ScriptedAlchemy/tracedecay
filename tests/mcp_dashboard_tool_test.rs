@@ -1,5 +1,5 @@
-//! Tests for the new `tokensave_dashboard` MCP tool (via direct handler dispatch).
-//! Follows conventions from mcp_handler_test.rs: real TokenSave + handle_tool_call,
+//! Tests for the new `tracedecay_dashboard` MCP tool (via direct handler dispatch).
+//! Follows conventions from mcp_handler_test.rs: real TraceDecay + handle_tool_call,
 //! plus live HTTP probe of /api/capabilities on the returned URL.
 
 mod common;
@@ -10,14 +10,14 @@ use std::time::Duration;
 use common::http_agent;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::mcp::handle_tool_call;
-use tokensave::tokensave::TokenSave;
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::tracedecay::TraceDecay;
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn setup_minimal_project() -> (TokenSave, TempDir) {
+async fn setup_minimal_project() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -29,7 +29,7 @@ fn main() { println!("hi"); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -37,14 +37,14 @@ fn main() { println!("hi"); }
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned
 // axum server task (same reason dashboard_api_test.rs builds a 2-worker runtime).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tokensave_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
+async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
     let (cg, _tmp) = setup_minimal_project().await;
 
     // Start via the MCP dispatch (uses current cg's project)
     let res = handle_tool_call(
         &cg,
-        "tokensave_dashboard",
+        "tracedecay_dashboard",
         json!({ "host": "127.0.0.1", "port": 0 }),
         None,
         None,
@@ -94,12 +94,12 @@ async fn tokensave_dashboard_tool_starts_and_returns_url_and_serves_capabilities
             if resp.status().as_u16() == 200 {
                 let raw = resp.body_mut().read_to_string().unwrap_or_default();
                 let body: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
-                assert_eq!(body.get("name"), Some(&json!("tokensave-dashboard")));
+                assert_eq!(body.get("name"), Some(&json!("tracedecay-dashboard")));
                 assert!(body.get("features").is_some());
                 // success — now stop it via tool for cleanup
                 let _stop = handle_tool_call(
                     &cg,
-                    "tokensave_dashboard",
+                    "tracedecay_dashboard",
                     json!({ "action": "stop" }),
                     None,
                     None,
@@ -117,18 +117,18 @@ async fn tokensave_dashboard_tool_starts_and_returns_url_and_serves_capabilities
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tokensave_dashboard_tool_is_idempotent_and_supports_stop() {
+async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let _guard = TEST_LOCK.lock().await;
     let (cg, _tmp) = setup_minimal_project().await;
 
-    let res1 = handle_tool_call(&cg, "tokensave_dashboard", json!({"port": 0}), None, None)
+    let res1 = handle_tool_call(&cg, "tracedecay_dashboard", json!({"port": 0}), None, None)
         .await
         .unwrap();
     let text1 = extract_text(&res1.value);
     let url1 = extract_url(&text1);
 
     // second start returns same (already)
-    let res2 = handle_tool_call(&cg, "tokensave_dashboard", json!({"port": 0}), None, None)
+    let res2 = handle_tool_call(&cg, "tracedecay_dashboard", json!({"port": 0}), None, None)
         .await
         .unwrap();
     let text2 = extract_text(&res2.value);
@@ -143,7 +143,7 @@ async fn tokensave_dashboard_tool_is_idempotent_and_supports_stop() {
     // stop
     let stop_res = handle_tool_call(
         &cg,
-        "tokensave_dashboard",
+        "tracedecay_dashboard",
         json!({"action": "stop"}),
         None,
         None,
@@ -160,7 +160,7 @@ async fn tokensave_dashboard_tool_is_idempotent_and_supports_stop() {
     // stop again is not_running
     let stop2 = handle_tool_call(
         &cg,
-        "tokensave_dashboard",
+        "tracedecay_dashboard",
         json!({"action": "stop"}),
         None,
         None,

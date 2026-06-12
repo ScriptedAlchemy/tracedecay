@@ -1,9 +1,9 @@
 #[cfg(feature = "lang-ruby")]
 mod ruby_tests {
 
-    use tokensave::extraction::LanguageExtractor;
-    use tokensave::extraction::RubyExtractor;
-    use tokensave::types::*;
+    use tracedecay::extraction::LanguageExtractor;
+    use tracedecay::extraction::RubyExtractor;
+    use tracedecay::types::*;
 
     #[test]
     fn test_ruby_file_node() {

@@ -2,7 +2,7 @@
 
 ## The problem
 
-Tokensave maintains a code graph in a single SQLite database per project. When you switch
+TraceDecay maintains a code graph in a single SQLite database per project. When you switch
 git branches, the files on disk change but the graph still reflects the old branch. The
 embedded MCP watcher eventually catches up by re-indexing changed files, but there are two costs:
 
@@ -20,22 +20,25 @@ you're actually working on.
 
 ## How it works
 
-Multi-branch is fully opt-in. Without it, tokensave behaves exactly as before: one database,
+Multi-branch is fully opt-in. Without it, tracedecay behaves exactly as before: one database,
 one graph, the watcher re-indexes whatever is on disk.
 
-When you opt in, tokensave creates a `branch-meta.json` file inside `.tokensave/` that tracks
+When you opt in, tracedecay creates a `branch-meta.json` file inside `.tracedecay/` that tracks
 which branches have their own database. The storage layout looks like this:
 
 ```
-.tokensave/
-  tokensave.db              # default branch (main/master)
+.tracedecay/
+  tracedecay.db             # default branch (main/master)
   branch-meta.json          # branch tracking metadata
   branches/
     feature_foo.db          # one DB per tracked branch
     release_3_4.db
 ```
 
-Creating a new branch database is cheap. Tokensave copies the nearest ancestor's database
+Projects indexed before the rebrand may still use a legacy `.tokensave/` directory
+with the same layout; it is honored as a fallback.
+
+Creating a new branch database is cheap. TraceDecay copies the nearest ancestor's database
 (usually `main`) and then runs an incremental sync that only re-parses files whose content
 hash differs from what's in the copy. If your branch touches 20 files out of 2,000, only
 those 20 get re-indexed.
@@ -47,7 +50,7 @@ those 20 get re-indexed.
 From a feature branch:
 
 ```
-tokensave branch add
+tracedecay branch add
 ```
 
 This detects the current branch name, copies the nearest tracked ancestor's database,
@@ -56,13 +59,13 @@ and syncs the diff. If no branch metadata exists yet, it bootstraps it automatic
 You can also track a branch by name without checking it out:
 
 ```
-tokensave branch add feature/new-parser
+tracedecay branch add feature/new-parser
 ```
 
 ### See what's tracked
 
 ```
-tokensave branch list
+tracedecay branch list
 ```
 
 Output:
@@ -81,7 +84,7 @@ branch it was copied from, and when it was last synced.
 ### Remove a tracked branch
 
 ```
-tokensave branch remove feature/foo
+tracedecay branch remove feature/foo
 ```
 
 This deletes the branch's database and removes its entry from `branch-meta.json`. The
@@ -93,7 +96,7 @@ After you merge and delete branches in git, their databases linger. To remove da
 for branches that no longer exist:
 
 ```
-tokensave branch gc
+tracedecay branch gc
 ```
 
 This checks each tracked branch against `.git/refs/heads/` and `packed-refs`, and deletes
@@ -104,7 +107,7 @@ databases for branches that are gone.
 The embedded MCP watcher's behavior depends on whether multi-branch is active:
 
 **Without multi-branch (default):** The watcher monitors for file changes and syncs the single
-`tokensave.db`. Switching branches triggers a sync of all changed files.
+`tracedecay.db`. Switching branches triggers a sync of all changed files.
 
 **With multi-branch:** Before each sync, the watcher checks the current branch. If that branch
 is tracked, it syncs that branch's database. If it's not tracked, it syncs the default
@@ -115,7 +118,7 @@ changes on the next sync cycle.
 
 ## How the MCP server selects a database
 
-When the MCP server starts (via `tokensave mcp` or `tokensave serve`), it reads `.git/HEAD`
+When the MCP server starts (via `tracedecay mcp` or `tracedecay serve`), it reads `.git/HEAD`
 to determine the current branch and opens the corresponding database.
 
 If the current branch is tracked, queries run against its own database with full accuracy.
@@ -125,7 +128,7 @@ If the current branch is not tracked, the server falls back to the nearest track
 
 ```
 WARNING: branch 'experiment-x' is not tracked — serving from 'main'.
-Run `tokensave branch add experiment-x` to track it.
+Run `tracedecay branch add experiment-x` to track it.
 ```
 
 This means queries still work, but results may be stale for files that differ between the
@@ -137,7 +140,7 @@ Two MCP tools let you query across branches without switching your checkout:
 
 ### Search in another branch
 
-`tokensave_branch_search` searches for symbols in a different branch's graph:
+`tracedecay_branch_search` searches for symbols in a different branch's graph:
 
 ```json
 {
@@ -152,7 +155,7 @@ name. Useful for checking whether a symbol exists on `main` before you try to us
 
 ### Compare branches
 
-`tokensave_branch_diff` compares the code graphs of two branches:
+`tracedecay_branch_diff` compares the code graphs of two branches:
 
 ```json
 {
@@ -179,7 +182,7 @@ You can filter by file path or symbol kind:
 ```
 
 Both `base` and `head` default to sensible values: `base` defaults to the project's default
-branch, `head` defaults to the current branch. So a bare `tokensave_branch_diff {}` with no
+branch, `head` defaults to the current branch. So a bare `tracedecay_branch_diff {}` with no
 arguments compares the current branch against `main`.
 
 ## Disk usage
@@ -194,31 +197,31 @@ index, each tracked branch adds roughly 200 MB. Plan accordingly:
 | 5 | 1 GB |
 | 10 | 2 GB |
 
-Cleanup is manual. Tokensave never deletes branch databases automatically. Use
-`tokensave branch gc` to clean up after merges, or `tokensave branch remove` to
+Cleanup is manual. TraceDecay never deletes branch databases automatically. Use
+`tracedecay branch gc` to clean up after merges, or `tracedecay branch remove` to
 delete specific branches.
 
 ## Backward compatibility
 
 Multi-branch is fully backward compatible:
 
-- If `branch-meta.json` doesn't exist, tokensave operates in single-database mode exactly
+- If `branch-meta.json` doesn't exist, tracedecay operates in single-database mode exactly
   as before. No behavior changes, no new files, no extra disk usage.
-- Running `tokensave branch add` for the first time creates `branch-meta.json` and the
-  `branches/` directory. The existing `tokensave.db` becomes the default branch's database
+- Running `tracedecay branch add` for the first time creates `branch-meta.json` and the
+  `branches/` directory. The existing `tracedecay.db` becomes the default branch's database
   with zero migration.
-- `tokensave sync` and `tokensave sync --force` continue to work. With multi-branch active,
+- `tracedecay sync` and `tracedecay sync --force` continue to work. With multi-branch active,
   they sync the current branch's database.
 
 ## FAQ
 
 **Does rebasing a branch break its database?**
-No. Tokensave syncs by comparing file content hashes on disk against what's stored in the
+No. TraceDecay syncs by comparing file content hashes on disk against what's stored in the
 database. It doesn't track git commit history. After a rebase, the next sync re-indexes
 whatever files actually changed, regardless of how the history was rewritten.
 
 **Can I query a branch I haven't checked out?**
-Yes, using `tokensave_branch_search` and `tokensave_branch_diff`. These open the target
+Yes, using `tracedecay_branch_search` and `tracedecay_branch_diff`. These open the target
 branch's database directly without requiring a checkout.
 
 **What happens on detached HEAD?**
@@ -227,7 +230,7 @@ the default branch's database.
 
 **Does this work with worktrees?**
 Each worktree has its own `.git/HEAD` pointing to a different branch. As long as each worktree
-has been indexed (has a `.tokensave/` directory), multi-branch works independently in each one.
+has been indexed (has a `.tracedecay/` directory), multi-branch works independently in each one.
 
 **Can I track branches that only exist on the remote?**
 No. The branch must have a local ref in `.git/refs/heads/`. Run `git checkout` or

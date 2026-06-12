@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -44,7 +44,7 @@ impl Drop for EnvVarGuard {
 
 /// Env var pinning the global DB path; tests that set it serialize on
 /// [`GLOBAL_DB_ENV_LOCK`].
-pub const GLOBAL_DB_ENV: &str = "TOKENSAVE_GLOBAL_DB";
+pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
 /// Serializes tests within one binary that mutate process-wide env vars.
 pub static GLOBAL_DB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -120,11 +120,11 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
 }
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("sessions.db")
+    tmp.path().join(".tracedecay").join("sessions.db")
 }
 
 pub fn isolated_global_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tokensave").join("global.db")
+    tmp.path().join(".tracedecay").join("global.db")
 }
 
 pub async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
@@ -356,7 +356,7 @@ pub fn global_message(
         1,
         text,
         "message",
-        Some("tokensave_context,tokensave_search"),
+        Some("tracedecay_context,tracedecay_search"),
         Some("/tmp/project/transcript.jsonl"),
         Some(42),
         Some(r#"{"finish_reason":"stop"}"#),
@@ -368,7 +368,7 @@ pub fn global_message(
 /// plain/quoted scalars. Hermes itself always ships PyYAML; CI's system
 /// python3 on macOS/Windows has no third-party packages, so checks that
 /// exercise the plugin's config.yaml paths get this shim via PYTHONPATH.
-pub const PYYAML_SHIM: &str = r##""""Minimal PyYAML stand-in for tokensave agent tests.
+pub const PYYAML_SHIM: &str = r##""""Minimal PyYAML stand-in for tracedecay agent tests.
 
 Implements safe_load/dump for the simple block-style YAML the generated
 Hermes config files use. Only used when the system python3 lacks PyYAML.

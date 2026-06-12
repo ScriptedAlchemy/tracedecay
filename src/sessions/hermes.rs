@@ -4,7 +4,7 @@
 //! per-profile `SQLite` store at `<profile>/state.db` (tables `sessions` +
 //! `messages`), where `<profile>` is `~/.hermes` for the default profile or
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
-//! one project through the `plugins.tokensave.project_root` pin in its
+//! one project through the `plugins.tracedecay.project_root` pin in its
 //! `config.yaml` — the same pin the generated Hermes plugin resolves at
 //! runtime — so the sweep ingests a profile's history only into the project
 //! it is pinned to.
@@ -79,7 +79,7 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Locates the `state.db` of every profile whose `plugins.tokensave`
+/// Locates the `state.db` of every profile whose `plugins.tracedecay`
 /// `project_root` pin matches `project_root`. Returns `(state_db_path,
 /// profile_name)`; the default profile (the home directory itself) has no
 /// profile name.

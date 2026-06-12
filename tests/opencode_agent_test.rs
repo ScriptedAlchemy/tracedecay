@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use tokensave::agents::{
+use tracedecay::agents::{
     expected_tool_perms, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
     OpenCodeIntegration,
 };
@@ -13,7 +13,7 @@ use tokensave::agents::{
 fn make_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
         project_root: None,
@@ -54,8 +54,8 @@ fn test_install_creates_opencode_json() {
     assert!(config_path.exists(), "opencode.json should be created");
 
     let config = read_json(&config_path);
-    let ts = &config["mcp"]["tokensave"];
-    assert!(ts.is_object(), "mcp.tokensave should be an object");
+    let ts = &config["mcp"]["tracedecay"];
+    assert!(ts.is_object(), "mcp.tracedecay should be an object");
     assert_eq!(
         ts["type"].as_str().unwrap(),
         "local",
@@ -70,7 +70,7 @@ fn test_install_creates_opencode_json() {
         .collect();
     assert_eq!(
         command,
-        vec!["/usr/local/bin/tokensave", "serve"],
+        vec!["/usr/local/bin/tracedecay", "serve"],
         "command should be [bin, \"serve\"]"
     );
 }
@@ -87,12 +87,12 @@ fn test_install_creates_opencode_md_with_rules() {
 
     let content = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(
-        content.contains("## Prefer tokensave MCP tools"),
-        "AGENTS.md should contain the tokensave rules marker"
+        content.contains("## Prefer tracedecay MCP tools"),
+        "AGENTS.md should contain the tracedecay rules marker"
     );
     assert!(
-        content.contains("tokensave_context"),
-        "AGENTS.md should mention tokensave tools"
+        content.contains("tracedecay_context"),
+        "AGENTS.md should mention tracedecay tools"
     );
 }
 
@@ -124,8 +124,8 @@ fn test_install_preserves_existing_opencode_json() {
         "existing MCP server should be preserved"
     );
     assert!(
-        config["mcp"]["tokensave"].is_object(),
-        "tokensave should be added"
+        config["mcp"]["tracedecay"].is_object(),
+        "tracedecay should be added"
     );
 }
 
@@ -140,8 +140,8 @@ fn test_install_idempotent_opencode_json() {
 
     let config = read_json(&opencode_config_path(home));
     let mcp = config["mcp"].as_object().unwrap();
-    let ts_count = mcp.keys().filter(|k| *k == "tokensave").count();
-    assert_eq!(ts_count, 1, "tokensave should appear exactly once");
+    let ts_count = mcp.keys().filter(|k| *k == "tracedecay").count();
+    assert_eq!(ts_count, 1, "tracedecay should appear exactly once");
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn test_install_idempotent_opencode_md() {
 
     let prompt_path = opencode_prompt_path(home);
     let content = std::fs::read_to_string(&prompt_path).unwrap();
-    let marker = "## Prefer tokensave MCP tools";
+    let marker = "## Prefer tracedecay MCP tools";
     let count = content.matches(marker).count();
     assert_eq!(
         count, 1,
@@ -186,8 +186,8 @@ fn test_install_preserves_existing_opencode_md_content() {
         "existing content should be preserved"
     );
     assert!(
-        content.contains("Prefer tokensave MCP tools"),
-        "tokensave rules should be appended"
+        content.contains("Prefer tracedecay MCP tools"),
+        "tracedecay rules should be appended"
     );
 }
 
@@ -205,11 +205,14 @@ fn test_uninstall_removes_mcp_from_config() {
     OpenCodeIntegration.uninstall(&ctx).unwrap();
 
     let config_path = opencode_config_path(home);
-    // When tokensave was the only content, file should be removed entirely
+    // When tracedecay was the only content, file should be removed entirely
     if config_path.exists() {
         let config = read_json(&config_path);
-        let has_tokensave = config.get("mcp").and_then(|v| v.get("tokensave")).is_some();
-        assert!(!has_tokensave, "mcp.tokensave should be removed");
+        let has_tracedecay = config
+            .get("mcp")
+            .and_then(|v| v.get("tracedecay"))
+            .is_some();
+        assert!(!has_tracedecay, "mcp.tracedecay should be removed");
     }
 }
 
@@ -223,7 +226,7 @@ fn test_uninstall_removes_empty_config_file() {
     OpenCodeIntegration.uninstall(&ctx).unwrap();
 
     let config_path = opencode_config_path(home);
-    // Since tokensave was the only entry, the file should be deleted
+    // Since tracedecay was the only entry, the file should be deleted
     assert!(
         !config_path.exists(),
         "opencode.json should be deleted when empty"
@@ -257,8 +260,11 @@ fn test_uninstall_preserves_other_mcp_servers() {
         config["mcp"]["other-tool"].is_object(),
         "other server should be preserved"
     );
-    let has_tokensave = config.get("mcp").and_then(|v| v.get("tokensave")).is_some();
-    assert!(!has_tokensave, "tokensave should be removed");
+    let has_tracedecay = config
+        .get("mcp")
+        .and_then(|v| v.get("tracedecay"))
+        .is_some();
+    assert!(!has_tracedecay, "tracedecay should be removed");
 }
 
 #[test]
@@ -273,12 +279,12 @@ fn test_uninstall_removes_opencode_md_rules() {
 
     OpenCodeIntegration.uninstall(&ctx).unwrap();
 
-    // AGENTS.md had only tokensave rules, should be removed
+    // AGENTS.md had only tracedecay rules, should be removed
     if prompt_path.exists() {
         let content = std::fs::read_to_string(&prompt_path).unwrap();
         assert!(
-            !content.contains("Prefer tokensave MCP tools"),
-            "AGENTS.md should not contain tokensave rules after uninstall"
+            !content.contains("Prefer tracedecay MCP tools"),
+            "AGENTS.md should not contain tracedecay rules after uninstall"
         );
     }
 }
@@ -309,8 +315,8 @@ fn test_uninstall_preserves_other_opencode_md_content() {
         "custom content should be preserved"
     );
     assert!(
-        !content.contains("Prefer tokensave MCP tools"),
-        "tokensave rules should be removed"
+        !content.contains("Prefer tracedecay MCP tools"),
+        "tracedecay rules should be removed"
     );
 }
 
@@ -324,11 +330,11 @@ fn test_uninstall_without_install_does_not_crash() {
 }
 
 #[test]
-fn test_uninstall_config_with_no_tokensave_is_noop() {
+fn test_uninstall_config_with_no_tracedecay_is_noop() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create opencode.json without tokensave
+    // Create opencode.json without tracedecay
     let config_path = opencode_config_path(home);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -387,7 +393,7 @@ fn test_healthcheck_detects_missing_mcp_entry() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create opencode.json without tokensave
+    // Create opencode.json without tracedecay
     let config_path = opencode_config_path(home);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(&config_path, r#"{"theme": "dark"}"#).unwrap();
@@ -406,12 +412,12 @@ fn test_healthcheck_detects_missing_serve_arg() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Create opencode.json with tokensave but no "serve" in command
+    // Create opencode.json with tracedecay but no "serve" in command
     let config_path = opencode_config_path(home);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(
         &config_path,
-        r#"{"mcp": {"tokensave": {"type": "local", "command": ["/usr/local/bin/tokensave"]}}}"#,
+        r#"{"mcp": {"tracedecay": {"type": "local", "command": ["/usr/local/bin/tracedecay"]}}}"#,
     )
     .unwrap();
 
@@ -419,7 +425,7 @@ fn test_healthcheck_detects_missing_serve_arg() {
     let prompt_path = opencode_prompt_path(home);
     std::fs::write(
         &prompt_path,
-        "## Prefer tokensave MCP tools\ntokensave rules here\n",
+        "## Prefer tracedecay MCP tools\ntracedecay rules here\n",
     )
     .unwrap();
 
@@ -459,13 +465,13 @@ fn test_healthcheck_detects_missing_opencode_md() {
 }
 
 #[test]
-fn test_healthcheck_detects_missing_tokensave_rules_in_opencode_md() {
+fn test_healthcheck_detects_missing_tracedecay_rules_in_opencode_md() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
 
-    // Overwrite AGENTS.md without any mention of tokensave
+    // Overwrite AGENTS.md without any mention of tracedecay
     let prompt_path = opencode_prompt_path(home);
     std::fs::write(
         &prompt_path,
@@ -481,12 +487,12 @@ fn test_healthcheck_detects_missing_tokensave_rules_in_opencode_md() {
     OpenCodeIntegration.healthcheck(&mut dc, &hctx);
     assert!(
         dc.issues > 0,
-        "healthcheck should detect missing tokensave rules in AGENTS.md"
+        "healthcheck should detect missing tracedecay rules in AGENTS.md"
     );
 }
 
 // ===========================================================================
-// is_detected / has_tokensave
+// is_detected / has_tracedecay
 // ===========================================================================
 
 #[test]
@@ -511,42 +517,42 @@ fn test_is_detected_with_opencode_dir() {
 }
 
 #[test]
-fn test_has_tokensave_before_install() {
+fn test_has_tracedecay_before_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     assert!(
-        !OpenCodeIntegration.has_tokensave(home),
-        "has_tokensave should be false before install"
+        !OpenCodeIntegration.has_tracedecay(home),
+        "has_tracedecay should be false before install"
     );
 }
 
 #[test]
-fn test_has_tokensave_after_install() {
+fn test_has_tracedecay_after_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
     assert!(
-        OpenCodeIntegration.has_tokensave(home),
-        "has_tokensave should be true after install"
+        OpenCodeIntegration.has_tracedecay(home),
+        "has_tracedecay should be true after install"
     );
 }
 
 #[test]
-fn test_has_tokensave_after_uninstall() {
+fn test_has_tracedecay_after_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
     OpenCodeIntegration.uninstall(&ctx).unwrap();
     assert!(
-        !OpenCodeIntegration.has_tokensave(home),
-        "has_tokensave should be false after uninstall"
+        !OpenCodeIntegration.has_tracedecay(home),
+        "has_tracedecay should be false after uninstall"
     );
 }
 
 #[test]
-fn test_has_tokensave_with_config_but_no_mcp() {
+fn test_has_tracedecay_with_config_but_no_mcp() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
@@ -556,8 +562,8 @@ fn test_has_tokensave_with_config_but_no_mcp() {
     std::fs::write(&config_path, r#"{"theme": "dark"}"#).unwrap();
 
     assert!(
-        !OpenCodeIntegration.has_tokensave(home),
-        "has_tokensave should be false when mcp section is missing"
+        !OpenCodeIntegration.has_tracedecay(home),
+        "has_tracedecay should be false when mcp section is missing"
     );
 }
 

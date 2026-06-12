@@ -1,4 +1,4 @@
-//! Doctor command: comprehensive health check of the tokensave installation.
+//! Doctor command: comprehensive health check of the tracedecay installation.
 //!
 //! Checks the binary, project index, global DB, user config, agent
 //! integrations, and network connectivity.
@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
-/// Runs a comprehensive health check of the tokensave installation.
+/// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor(agent_filter: Option<&str>) {
     debug_assert!(
         !env!("CARGO_PKG_VERSION").is_empty(),
@@ -18,7 +18,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
     let mut dc = DoctorCounters::new();
 
     eprintln!(
-        "\n\x1b[1mtokensave doctor v{}\x1b[0m\n",
+        "\n\x1b[1mtracedecay doctor v{}\x1b[0m\n",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -26,16 +26,14 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if TokenSave::is_initialized(&project_path) {
-        dc.pass(&format!(
-            "Index found: {}/.tokensave/",
-            project_path.display()
-        ));
+    let data_dir = crate::config::get_tracedecay_dir(&project_path);
+    if TraceDecay::is_initialized(&project_path) {
+        dc.pass(&format!("Index found: {}/", data_dir.display()));
         check_database(&mut dc, &project_path).await;
     } else {
         dc.warn(&format!(
-            "No index at {}/.tokensave/ — run `tokensave init`",
-            project_path.display()
+            "No index at {}/ — run `tracedecay init`",
+            data_dir.display()
         ));
     }
 
@@ -72,10 +70,10 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
 /// Check database health: report size and run VACUUM to reclaim space.
 async fn check_database(dc: &mut DoctorCounters, project_path: &Path) {
-    let db_path = crate::config::get_tokensave_dir(project_path).join("tokensave.db");
+    let db_path = crate::config::get_project_db_path(project_path);
     let size_before = std::fs::metadata(&db_path).map_or(0, |m| m.len());
 
-    let ts = match TokenSave::open(project_path).await {
+    let ts = match TraceDecay::open(project_path).await {
         Ok(ts) => ts,
         Err(e) => {
             dc.fail(&format!("Could not open database: {e}"));
@@ -132,9 +130,9 @@ fn check_global_db(dc: &mut DoctorCounters) {
     }
 }
 
-/// Lists projects registered in the global DB whose `.tokensave/` directory
+/// Lists projects registered in the global DB whose resolved data directory
 /// is gone, and offers to purge them. Stale rows are harmless but show up in
-/// `tokensave list --all` and inflate the global tokens-saved count.
+/// `tracedecay list --all` and inflate the global tokens-saved count.
 async fn check_stale_stores(dc: &mut DoctorCounters) {
     use std::io::{IsTerminal, Write};
 
@@ -145,7 +143,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
         .list_project_paths()
         .await
         .into_iter()
-        .filter(|p| !Path::new(p).join(".tokensave/tokensave.db").exists())
+        .filter(|p| !crate::config::get_project_db_path(Path::new(p)).exists())
         .collect();
     if stale.is_empty() {
         dc.pass("No stale projects in global DB");
@@ -153,7 +151,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
     }
 
     eprintln!(
-        "  \x1b[33m!\x1b[0m {} stale project(s) in global DB (registered but `.tokensave/` is gone):",
+        "  \x1b[33m!\x1b[0m {} stale project(s) in global DB (registered but the data dir is gone):",
         stale.len()
     );
     let preview = stale.len().min(10);
@@ -166,7 +164,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     if !std::io::stdin().is_terminal() {
         dc.warnings += 1;
-        dc.info("    Re-run `tokensave doctor` interactively to purge them.");
+        dc.info("    Re-run `tracedecay doctor` interactively to purge them.");
         return;
     }
 
@@ -244,7 +242,7 @@ fn print_summary(dc: &DoctorCounters) {
             "\x1b[31m{} issue(s), {} warning(s).\x1b[0m",
             dc.issues, dc.warnings
         );
-        eprintln!("Run \x1b[1mtokensave install\x1b[0m to fix most issues.");
+        eprintln!("Run \x1b[1mtracedecay install\x1b[0m to fix most issues.");
     }
     eprintln!();
 }

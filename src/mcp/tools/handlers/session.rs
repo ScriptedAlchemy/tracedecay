@@ -5,7 +5,7 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::{json, Map, Value};
 
 use super::truncated_json_envelope;
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
@@ -16,7 +16,7 @@ use crate::sessions::lcm::{
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::SessionSearchScope;
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
 const DEFAULT_LCM_CONTENT_LIMIT: usize = 4096;
 const DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT: usize = 32_000;
@@ -461,13 +461,13 @@ fn string_arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
 }
 
 fn required_string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
-    string_arg(args, name).ok_or_else(|| TokenSaveError::Config {
+    string_arg(args, name).ok_or_else(|| TraceDecayError::Config {
         message: format!("missing required parameter: {name}"),
     })
 }
 
-fn argument_error(message: impl Into<String>) -> TokenSaveError {
-    TokenSaveError::Config {
+fn argument_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
         message: message.into(),
     }
 }
@@ -575,7 +575,7 @@ fn parse_timestamp_string(value: &str, name: &str) -> Result<i64> {
     crate::timeutil::parse_rfc3339_timestamp(text).ok_or_else(|| timestamp_argument_error(name))
 }
 
-fn timestamp_argument_error(name: &str) -> TokenSaveError {
+fn timestamp_argument_error(name: &str) -> TraceDecayError {
     argument_error(format!(
         "{name} must be a non-negative Unix timestamp or timezone-aware ISO/RFC3339 string"
     ))
@@ -628,7 +628,7 @@ fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
     let Some(summarizer) = args.get("summarizer") else {
         return Ok(LcmSummarizerMode::Noop);
     };
-    serde_json::from_value(summarizer.clone()).map_err(|err| TokenSaveError::Config {
+    serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
         message: format!("invalid summarizer: {err}"),
     })
 }
@@ -693,8 +693,8 @@ fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
 
 // By-value so it can be used point-free as a `map_err` adapter.
 #[allow(clippy::needless_pass_by_value)]
-fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
-    TokenSaveError::Config {
+fn lcm_error(err: crate::sessions::lcm::LcmError) -> TraceDecayError {
+    TraceDecayError::Config {
         message: err.to_string(),
     }
 }
@@ -702,7 +702,7 @@ fn lcm_error(err: crate::sessions::lcm::LcmError) -> TokenSaveError {
 fn lcm_unavailable() -> ToolResult {
     tool_json(&json!({
         "status": "unavailable",
-        "message": "could not open project-local tokensave session database",
+        "message": "could not open project-local tracedecay session database",
     }))
 }
 
@@ -740,7 +740,7 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
 fn project_local_storage_without_project() -> ToolResult {
     lcm_scoped_unavailable(
         "project_local",
-        "project_local LCM storage requires an initialized TokenSave project root",
+        "project_local LCM storage requires an initialized TraceDecay project root",
     )
 }
 
@@ -750,7 +750,7 @@ struct LcmStorage {
 }
 
 /// Database paths whose schema (sessions DDL + LCM migrations) has already
-/// been ensured by this process. In `tokensave serve`, every LCM tool call
+/// been ensured by this process. In `tracedecay serve`, every LCM tool call
 /// re-opens the project session DB; once `GlobalDb::open_at` has ensured the
 /// schema for a path, later opens skip the DDL batch and the LCM version
 /// gate entirely via `open_at_assuming_schema`. The schema only ever grows
@@ -955,7 +955,7 @@ async fn open_lcm_storage(
             };
             let Some(db) = db else {
                 return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                    "could not open hermes_profile tokensave session database",
+                    "could not open hermes_profile tracedecay session database",
                 ));
             };
             LcmStorageResolution::Available(Box::new(LcmStorage {
@@ -997,7 +997,7 @@ fn parse_lcm_grep_sort(args: &Value) -> Result<LcmGrepSort> {
 fn parse_lcm_summary_node_id(target: &Value) -> Result<String> {
     required_string_arg(target, "node_id")
         .map(str::to_string)
-        .map_err(|_| TokenSaveError::Config {
+        .map_err(|_| TraceDecayError::Config {
             message: "target.node_id is required when target.kind is summary_node".to_string(),
         })
 }
@@ -1005,7 +1005,7 @@ fn parse_lcm_summary_node_id(target: &Value) -> Result<String> {
 fn parse_lcm_external_payload_ref(target: &Value) -> Result<String> {
     required_string_arg(target, "payload_ref")
         .map(str::to_string)
-        .map_err(|_| TokenSaveError::Config {
+        .map_err(|_| TraceDecayError::Config {
             message: "target.payload_ref is required when target.kind is external_payload"
                 .to_string(),
         })
@@ -1023,7 +1023,7 @@ fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
             payload_ref: parse_lcm_external_payload_ref(target)?,
         }),
         "session" => Ok(LcmDescribeTarget::Session),
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: "target.kind must be one of session, summary_node, external_payload"
                 .to_string(),
         }),
@@ -1031,13 +1031,13 @@ fn parse_lcm_describe_target(args: &Value) -> Result<LcmDescribeTarget> {
 }
 
 fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
-    let target = args.get("target").ok_or_else(|| TokenSaveError::Config {
+    let target = args.get("target").ok_or_else(|| TraceDecayError::Config {
         message: "missing required parameter: target".to_string(),
     })?;
     match string_arg(target, "kind").unwrap_or_default() {
         "raw_message" => {
             let store_id = non_negative_i64_arg(target, "store_id")?.ok_or_else(|| {
-                TokenSaveError::Config {
+                TraceDecayError::Config {
                     message: "target.store_id is required when target.kind is raw_message"
                         .to_string(),
                 }
@@ -1050,14 +1050,14 @@ fn parse_lcm_expand_target(args: &Value) -> Result<LcmExpandTarget> {
         "external_payload" => Ok(LcmExpandTarget::ExternalPayload {
             payload_ref: parse_lcm_external_payload_ref(target)?,
         }),
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: "target.kind must be one of raw_message, summary_node, external_payload"
                 .to_string(),
         }),
     }
 }
 
-/// Parses the `scope` argument for `tokensave_message_search`. Like
+/// Parses the `scope` argument for `tracedecay_message_search`. Like
 /// [`parse_lcm_scope`], invalid values are a hard error naming the valid set —
 /// never silently broadened to `all`.
 fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
@@ -1074,13 +1074,13 @@ fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
     }
 }
 
-pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|query| !query.is_empty())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
     let provider = args
@@ -1117,7 +1117,7 @@ pub(super) async fn handle_message_search(cg: &TokenSave, args: Value) -> Result
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(&json!({
             "status": "unavailable",
-            "message": "could not open project-local tokensave session database",
+            "message": "could not open project-local tracedecay session database",
             "results": [],
             "count": 0
         })));
@@ -1410,7 +1410,7 @@ pub(super) async fn handle_lcm_expand_query(
         })
         .await
         .map_err(lcm_error)?;
-    let mut payload = serde_json::to_value(response).map_err(|err| TokenSaveError::Config {
+    let mut payload = serde_json::to_value(response).map_err(|err| TraceDecayError::Config {
         message: format!("failed to serialize expand-query response: {err}"),
     })?;
     if let Some(object) = payload.as_object_mut() {

@@ -1,5 +1,7 @@
 # TokenSave LCM Session Rewrite Design
 
+> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated design artifact keeps the TokenSave-era names it was written with; read `tokensave` / `tokensave_*` as `tracedecay` / `tracedecay_*` when applying it to the current codebase.
+
 Date: 2026-06-09
 Branch: `feature/lcm-comparison`
 Status: Approved design direction

@@ -1,8 +1,8 @@
 # Code Graph Explorer
 
-The third dashboard tab (`tokensave dashboard` → **Code Graph**) is an
+The third dashboard tab (`tracedecay dashboard` → **Code Graph**) is an
 interactive exploration surface over the project's indexed code graph
-(`nodes`, `edges`, `files` in `.tokensave/tokensave.db`). It is designed for
+(`nodes`, `edges`, `files` in `.tracedecay/tracedecay.db`). It is designed for
 graphs with tens of thousands of nodes: every endpoint is bounded, the canvas
 only ever renders a capped, user-grown slice, and expansion is progressive.
 
@@ -10,7 +10,7 @@ only ever renders a capped, user-grown slice, and expansion is progressive.
 
 All routes are mounted under `/api/plugins/graph/*` and read the project DB.
 Under the Hermes wrapper the same routes are reverse-proxied at
-`/api/plugins/tokensave/graph/*`.
+`/api/plugins/tracedecay/graph/*`.
 
 | Route | Description |
 |---|---|

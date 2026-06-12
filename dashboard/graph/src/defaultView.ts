@@ -25,7 +25,7 @@ export interface EmptyStateInput {
  */
 export function canvasEmptyMessage({ indexedNodes, loadedNodes, loading }: EmptyStateInput): string {
   if (indexedNodes === 0) {
-    return "Nothing is indexed yet — run `tokensave init` in this project (or `tokensave sync` to refresh an existing index), then reload.";
+    return "Nothing is indexed yet — run `tracedecay init` in this project (or `tracedecay sync` to refresh an existing index), then reload.";
   }
   if (loadedNodes > 0) {
     return "All loaded nodes are hidden by the current filters.";

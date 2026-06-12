@@ -1,24 +1,24 @@
 /**
- * TokenSave dashboard for Hermes — thin wrapper over the tokensave dashboards.
+ * TraceDecay dashboard for Hermes — thin wrapper over the tracedecay dashboards.
  *
- * This is the Hermes-hosted variant of the canonical tokensave dashboard
- * (see the tokensave repo, `dashboard/`). It does NOT fork the UI bundles:
+ * This is the Hermes-hosted variant of the canonical TraceDecay dashboard
+ * (see the tracedecay repo, `dashboard/`). It does NOT fork the UI bundles:
  * the holographic, LCM, code-graph, and savings bundles shipped in this
- * plugin's dist/ are byte-identical to the ones `tokensave dashboard`
+ * plugin's dist/ are byte-identical to the ones `tracedecay dashboard`
  * serves. The wrapper:
  *
  *   1. evaluates each child bundle against a window Proxy whose
  *      `__HERMES_PLUGIN_SDK__.fetchJSON` rewrites the child's API base
  *      (`/api/plugins/holographic`, `/api/plugins/hermes-lcm`,
  *      `/api/plugins/graph`, `/api/plugins/savings`) onto this plugin's API
- *      prefix (`/api/plugins/tokensave/...`), which plugin_api.py
- *      reverse-proxies to a local `tokensave dashboard` server;
+ *      prefix (`/api/plugins/tracedecay/...`), which plugin_api.py
+ *      reverse-proxies to a local `tracedecay dashboard` server;
  *   2. captures the components the child bundles register (without touching
  *      the real host registry, so other Hermes plugins are unaffected);
- *   3. registers one combined, tabbed page as "tokensave".
+ *   3. registers one combined, tabbed page as "tracedecay".
  *
  * Future Hermes-specific capabilities should be added as extra endpoints in
- * plugin_api.py and advertised through /capabilities (see the tokensave
+ * plugin_api.py and advertised through /capabilities (see the tracedecay
  * dashboard handoff doc), not by forking the UI bundles.
  */
 (function () {
@@ -29,7 +29,7 @@
   const registry = realWindow.__HERMES_PLUGINS__;
   if (!SDK || !registry || typeof registry.register !== "function") return;
 
-  const PLUGIN = "tokensave";
+  const PLUGIN = "tracedecay";
   const ASSET_BASE = "/dashboard-plugins/" + PLUGIN + "/dist";
   const API_REWRITES = [
     ["/api/plugins/holographic", "/api/plugins/" + PLUGIN + "/holographic"],
@@ -137,7 +137,7 @@
     ["savings", "Savings"],
   ];
 
-  function TokenSavePage() {
+  function TraceDecayPage() {
     const [active, setActive] = React.useState("holographic");
     const [error, setError] = React.useState("");
     const [tick, setTick] = React.useState(0);
@@ -183,9 +183,9 @@
         ? h("div", { className: "tsiw-error" }, "Failed to load: " + error)
         : Active
           ? h(Active)
-          : h("div", { className: "tsiw-loading" }, "Loading tokensave dashboards…"),
+          : h("div", { className: "tsiw-loading" }, "Loading tracedecay dashboards…"),
     );
   }
 
-  registry.register(PLUGIN, TokenSavePage);
+  registry.register(PLUGIN, TraceDecayPage);
 })();

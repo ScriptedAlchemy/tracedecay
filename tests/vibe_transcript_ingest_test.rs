@@ -1,16 +1,16 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::source::ingest_source;
-use tokensave::sessions::vibe::VibeSource;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::vibe::VibeSource;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 

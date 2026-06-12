@@ -7,10 +7,10 @@ description: Draft a commit message, PR description, or changelog from the seman
 
 ## Workflow
 
-1. **Commit message → `tokensave_commit_context`** (`staged_only`): changed symbols + file roles + recent commit style → draft a message that matches the repo's style.
-2. **PR description → `tokensave_pr_context`** (`base_ref`, `head_ref`): semantic summary → draft body (Summary / Impact / Tests).
-3. **Release notes → `tokensave_changelog`** (`from_ref`, `to_ref`): categorized added / removed / modified symbols.
-4. **Sanity-check what actually changed → `tokensave_branch_diff`** (base vs head graph).
+1. **Commit message → `tracedecay_commit_context`** (`staged_only`): changed symbols + file roles + recent commit style → draft a message that matches the repo's style.
+2. **PR description → `tracedecay_pr_context`** (`base_ref`, `head_ref`): semantic summary → draft body (Summary / Impact / Tests).
+3. **Release notes → `tracedecay_changelog`** (`from_ref`, `to_ref`): categorized added / removed / modified symbols.
+4. **Sanity-check what actually changed → `tracedecay_branch_diff`** (base vs head graph).
 
 ## Guardrails
 
@@ -19,4 +19,4 @@ description: Draft a commit message, PR description, or changelog from the seman
 ## Output
 
 - The drafted commit / PR / changelog text.
-- If any result includes a `tokensave_metrics:` line, report the savings to the user.
+- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

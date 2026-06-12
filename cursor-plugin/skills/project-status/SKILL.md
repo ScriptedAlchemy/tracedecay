@@ -1,6 +1,6 @@
 ---
 name: project-status
-description: Report tokensave index status, query config files, list outstanding TODO/FIXME markers, and triage MCP server runtime usage. Use for "tokensave status", "what version is dependency X", "what TODOs are left", "is the index fresh", or diagnosing tokensave CPU/RAM.
+description: Report TraceDecay index status, query config files, list outstanding TODO/FIXME markers, and triage MCP server runtime usage. Use for "tracedecay status", "what version is dependency X", "what TODOs are left", "is the index fresh", or diagnosing TraceDecay CPU/RAM.
 ---
 
 # Project status & config
@@ -9,19 +9,19 @@ Cheap, read-only surface for the index, project config, work markers, and server
 
 ## Workflow
 
-1. **Index status → `tokensave_status`** (no args): node/edge/file counts, DB size, active branch + any branch-fallback warning, tokens saved. Add `tokensave_distribution` (`path?`, `summary?`) / `tokensave_files` (`path?`, `pattern?`) for a kind/file breakdown.
-2. **Config lookups → `tokensave_config`** (`key` required, plus `path` for one file **or** `glob` for many): query TOML/JSON by dotted key (e.g. `key: "package.version"` on `Cargo.toml`, or `glob: "crates/*/Cargo.toml"`). Pure filesystem parse — works even before `tokensave init`.
-3. **Outstanding work → `tokensave_todos`** (`kinds?`, `path?`, `limit?`): TODO/FIXME/XXX/HACK/WIP/NOTE/UNIMPLEMENTED markers with the enclosing symbol.
-4. **Server triage → `tokensave_runtime`** (no args): PID, resident/virtual memory, CPU%, threads, DB/WAL/SHM sizes — use when tokensave seems to hog CPU or RAM.
-5. **User wants a visual → `tokensave_dashboard`** (`action`: `start`|`stop`, optional `host`/`port`): starts the local dashboard server in the background and returns its URL (idempotent; `stop` shuts it down). Hand the URL to the user instead of describing charts.
-6. **Memory subsystem health (optional) → `tokensave_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
+1. **Index status → `tracedecay_status`** (no args): node/edge/file counts, DB size, active branch + any branch-fallback warning, tokens saved. Add `tracedecay_distribution` (`path?`, `summary?`) / `tracedecay_files` (`path?`, `pattern?`) for a kind/file breakdown.
+2. **Config lookups → `tracedecay_config`** (`key` required, plus `path` for one file **or** `glob` for many): query TOML/JSON by dotted key (e.g. `key: "package.version"` on `Cargo.toml`, or `glob: "crates/*/Cargo.toml"`). Pure filesystem parse — works even before `tracedecay init`.
+3. **Outstanding work → `tracedecay_todos`** (`kinds?`, `path?`, `limit?`): TODO/FIXME/XXX/HACK/WIP/NOTE/UNIMPLEMENTED markers with the enclosing symbol.
+4. **Server triage → `tracedecay_runtime`** (no args): PID, resident/virtual memory, CPU%, threads, DB/WAL/SHM sizes — use when TraceDecay seems to hog CPU or RAM.
+5. **User wants a visual → `tracedecay_dashboard`** (`action`: `start`|`stop`, optional `host`/`port`): starts the local dashboard server in the background and returns its URL (idempotent; `stop` shuts it down). Hand the URL to the user instead of describing charts.
+6. **Memory subsystem health (optional) → `tracedecay_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
 
 ## Guardrails
 
-- `tokensave_status`, `tokensave_config`, `tokensave_todos`, `tokensave_runtime` are read-only. `tokensave_dashboard` starts/stops a local server and `tokensave_memory_status` repairs/normalizes memory state — use them only when the user wants the dashboard or memory counts.
-- For deeper structural/quality questions hand off to `tokensave:architecture-overview` or `tokensave:code-health-report`; for memory recall, `tokensave:recalling-project-memory`; for past-session recall, `tokensave:recalling-session-context`.
+- `tracedecay_status`, `tracedecay_config`, `tracedecay_todos`, `tracedecay_runtime` are read-only. `tracedecay_dashboard` starts/stops a local server and `tracedecay_memory_status` repairs/normalizes memory state — use them only when the user wants the dashboard or memory counts.
+- For deeper structural/quality questions hand off to `tracedecay:architecture-overview` or `tracedecay:code-health-report`; for memory recall, `tracedecay:recalling-project-memory`; for past-session recall, `tracedecay:recalling-session-context`.
 
 ## Output
 
 - The status numbers, config values (with the file + line each was found at), marker list, or runtime snapshot the user asked for.
-- If any result includes a `tokensave_metrics:` line, report the savings to the user.
+- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

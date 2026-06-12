@@ -1,12 +1,12 @@
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandQueryRequest,
     LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate,
     LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope, LcmSourceRef, LcmStorageKind,
     LcmSummaryNodeDraft, LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
 };
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
 mod common;
 
@@ -228,7 +228,7 @@ async fn load_session_returns_ordered_raw_pages_with_stable_cursor() {
 #[tokio::test]
 async fn grep_searches_raw_snippets_and_summary_nodes() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
@@ -708,7 +708,7 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
 #[tokio::test]
 async fn status_reports_schema_frontier_payload_and_debt_counts() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
@@ -789,7 +789,7 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
 #[tokio::test]
 async fn describe_gives_session_overview_without_full_payload_bodies() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha".to_string()]).await;
     let payload = format!("describe secret body\n{}", "D".repeat(300_000));
@@ -837,7 +837,7 @@ async fn describe_gives_session_overview_without_full_payload_bodies() {
 #[tokio::test]
 async fn describe_node_and_external_payload_return_metadata_without_body_leaks() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
@@ -946,7 +946,7 @@ async fn describe_node_and_external_payload_return_metadata_without_body_leaks()
 #[tokio::test]
 async fn expand_returns_sliced_raw_summary_and_payload_content_with_ranges() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
         &db,
@@ -1454,7 +1454,7 @@ async fn expand_allows_cross_session_raw_store_id_with_provenance() {
     assert_eq!(same.from_current_session, Some(true));
     assert_eq!(same.externalized_note, None);
 
-    // Cross-provider raw rows stay rejected: providers are a TokenSave
+    // Cross-provider raw rows stay rejected: providers are a TraceDecay
     // concept with no hermes-lcm equivalent.
     insert_session(&db, "claude", "session-9").await;
     let err = db
@@ -1467,7 +1467,7 @@ async fn expand_allows_cross_session_raw_store_id_with_provenance() {
 #[tokio::test]
 async fn expand_cross_session_external_row_can_hydrate_payload_via_two_step_expand() {
     let tmp = TempDir::new().unwrap();
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
     insert_session(&db, "cursor", "session-2").await;

@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-//! Sequential schema migrations for the tokensave database.
+//! Sequential schema migrations for the tracedecay database.
 //!
 //! Each migration is a function that takes a connection and applies DDL
 //! statements. Migrations run inside an EXCLUSIVE transaction so that
@@ -11,7 +11,7 @@
 
 use libsql::Connection;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
@@ -23,17 +23,17 @@ async fn get_version(conn: &Connection) -> Result<u32> {
     let mut rows =
         conn.query("PRAGMA user_version", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read user_version: {e}"),
                 operation: "get_version".to_string(),
             })?;
-    let row = rows.next().await.map_err(|e| TokenSaveError::Database {
+    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
         message: format!("failed to read user_version row: {e}"),
         operation: "get_version".to_string(),
     })?;
     match row {
         Some(r) => {
-            let v: i64 = r.get(0).map_err(|e| TokenSaveError::Database {
+            let v: i64 = r.get(0).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read user_version value: {e}"),
                 operation: "get_version".to_string(),
             })?;
@@ -50,7 +50,7 @@ async fn get_version(conn: &Connection) -> Result<u32> {
 async fn set_version(conn: &Connection, version: u32) -> Result<()> {
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to set user_version: {e}"),
             operation: "set_version".to_string(),
         })?;
@@ -203,7 +203,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
             ON read_cache(session_id, created_at);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("failed to create schema: {e}"),
         operation: "create_schema".to_string(),
     })?;
@@ -229,14 +229,14 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         return Ok(false);
     }
 
-    eprintln!("[tokensave] migrating database schema v{current} → v{LATEST_VERSION}…");
+    eprintln!("[tracedecay] migrating database schema v{current} → v{LATEST_VERSION}…");
 
     // BEGIN EXCLUSIVE blocks other writers (including other MCP servers or
     // post-commit hooks) until we COMMIT. Readers using WAL mode are not
     // blocked.
     conn.execute("BEGIN EXCLUSIVE", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to acquire exclusive lock: {e}"),
             operation: "migrate".to_string(),
         })?;
@@ -251,7 +251,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         Ok(()) => {
             conn.execute("COMMIT", ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
@@ -293,7 +293,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         11 => migrate_v11(conn).await,
         12 => migrate_v12(conn).await,
         13 => migrate_v13(conn).await,
-        _ => Err(TokenSaveError::Database {
+        _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
         }),
@@ -325,16 +325,16 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
         let mut rows = conn
             .query("PRAGMA table_xinfo(memory_facts)", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v13: failed to read table_xinfo: {e}"),
                 operation: "migrate_v13".to_string(),
             })?;
         let mut names = std::collections::HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("v13: failed to iterate table_xinfo: {e}"),
             operation: "migrate_v13".to_string(),
         })? {
-            let name: String = row.get(1).map_err(|e| TokenSaveError::Database {
+            let name: String = row.get(1).map_err(|e| TraceDecayError::Database {
                 message: format!("v13: failed to read column name: {e}"),
                 operation: "migrate_v13".to_string(),
             })?;
@@ -346,7 +346,7 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
     // The index must go before its column can be dropped.
     conn.execute("DROP INDEX IF EXISTS idx_memory_facts_state", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("v13: failed to drop state index: {e}"),
             operation: "migrate_v13".to_string(),
         })?;
@@ -366,7 +366,7 @@ async fn migrate_v13(conn: &Connection) -> Result<()> {
         if existing.contains(col) {
             conn.execute(&format!("ALTER TABLE memory_facts DROP COLUMN {col}"), ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("v13: failed to drop column {col}: {e}"),
                     operation: "migrate_v13".to_string(),
                 })?;
@@ -439,7 +439,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         );",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create tables: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -473,7 +473,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         END;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create FTS: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -497,7 +497,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file_path);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create indexes: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -519,7 +519,7 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v2: failed to create metadata table: {e}"),
         operation: "migrate_v2".to_string(),
     })?;
@@ -527,7 +527,7 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
     // Drop the legacy schema_versions table if it exists.
     conn.execute("DROP TABLE IF EXISTS schema_versions", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("v2: failed to drop schema_versions: {e}"),
             operation: "migrate_v2".to_string(),
         })?;
@@ -548,7 +548,7 @@ async fn migrate_v3(conn: &Connection) -> Result<()> {
          ALTER TABLE nodes ADD COLUMN max_nesting INTEGER NOT NULL DEFAULT 0;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v3: failed to add complexity columns: {e}"),
         operation: "migrate_v3".to_string(),
     })?;
@@ -568,7 +568,7 @@ async fn migrate_v4(conn: &Connection) -> Result<()> {
          ALTER TABLE nodes ADD COLUMN assertions INTEGER NOT NULL DEFAULT 0;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v4: failed to add safety metric columns: {e}"),
         operation: "migrate_v4".to_string(),
     })?;
@@ -613,7 +613,7 @@ async fn migrate_v5(conn: &Connection) -> Result<()> {
             ON edges(source, target, kind, COALESCE(line, -1));",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v5: failed to deduplicate edges: {e}"),
         operation: "migrate_v5".to_string(),
     })?;
@@ -633,7 +633,7 @@ async fn migrate_v6(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v6: failed to create lower(name) index: {e}"),
         operation: "migrate_v6".to_string(),
     })?;
@@ -658,7 +658,7 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v7: failed to add attrs_start_line column: {e}"),
         operation: "migrate_v7".to_string(),
     })?;
@@ -668,7 +668,7 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v7: failed to backfill attrs_start_line: {e}"),
         operation: "migrate_v7".to_string(),
     })?;
@@ -736,7 +736,7 @@ async fn migrate_v8(conn: &Connection) -> Result<()> {
             END;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v8: failed to create memory tables: {e}"),
         operation: "migrate_v8".to_string(),
     })?;
@@ -750,7 +750,7 @@ async fn migrate_v8(conn: &Connection) -> Result<()> {
 
 /// Two changes:
 ///
-/// 1. Creates the `read_cache` table used by `tokensave_read` to serve
+/// 1. Creates the `read_cache` table used by `tracedecay_read` to serve
 ///    unchanged files as a tiny stub across sessions.
 /// 2. Denormalizes `Contains` edges onto a new `nodes.parent_id` column.
 ///    The column is backfilled from existing `Contains` rows, then those
@@ -776,7 +776,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
             ON read_cache(session_id, created_at);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v9: failed to create read_cache table: {e}"),
         operation: "migrate_v9".to_string(),
     })?;
@@ -789,12 +789,12 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
         let mut rows = conn
             .query("PRAGMA table_info(nodes)", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to probe nodes columns: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
         let mut found = false;
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("v9: failed to read table_info row: {e}"),
             operation: "migrate_v9".to_string(),
         })? {
@@ -811,7 +811,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
     if !has_parent_id {
         conn.execute("ALTER TABLE nodes ADD COLUMN parent_id TEXT", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to add parent_id column: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
@@ -827,13 +827,13 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to probe sqlite_master: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
         rows.next()
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to read sqlite_master row: {e}"),
                 operation: "migrate_v9".to_string(),
             })?
@@ -853,14 +853,14 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
             (),
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("v9: failed to backfill parent_id from contains edges: {e}"),
             operation: "migrate_v9".to_string(),
         })?;
 
         conn.execute("DELETE FROM edges WHERE kind = 'contains'", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to drop contains edges: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
@@ -871,7 +871,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v9: failed to create idx_nodes_parent_id: {e}"),
         operation: "migrate_v9".to_string(),
     })?;
@@ -880,10 +880,10 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Migration V10: node_fingerprints (issue #83 — tokensave_redundancy)
+// Migration V10: node_fingerprints (issue #83 — tracedecay_redundancy)
 // ---------------------------------------------------------------------------
 
-/// Creates the `node_fingerprints` table used by `tokensave_redundancy` to
+/// Creates the `node_fingerprints` table used by `tracedecay_redundancy` to
 /// detect AST-isomorphic, control-flow-equivalent, and token-similar
 /// function/method duplicates. Populated lazily on first redundancy query
 /// and invalidated by `source_hash` mismatch.
@@ -904,7 +904,7 @@ async fn migrate_v10(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_size ON node_fingerprints(body_tokens);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v10: failed to create node_fingerprints table: {e}"),
         operation: "migrate_v10".to_string(),
     })?;
@@ -948,22 +948,22 @@ async fn legacy_memory_tables_exist(conn: &Connection) -> Result<bool> {
             (),
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("migrate_v11: failed to probe legacy memory tables: {e}"),
             operation: "migrate_v11".to_string(),
         })?;
     let row = rows
         .next()
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("migrate_v11: failed to read legacy table probe: {e}"),
             operation: "migrate_v11".to_string(),
         })?
-        .ok_or_else(|| TokenSaveError::Database {
+        .ok_or_else(|| TraceDecayError::Database {
             message: "migrate_v11: legacy table probe returned no rows".to_string(),
             operation: "migrate_v11".to_string(),
         })?;
-    let count: i64 = row.get(0).map_err(|e| TokenSaveError::Database {
+    let count: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
         message: format!("migrate_v11: failed to read legacy table count: {e}"),
         operation: "migrate_v11".to_string(),
     })?;
@@ -1082,7 +1082,7 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
             END;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("{operation}: failed to create holographic memory schema: {e}"),
         operation: operation.to_string(),
     })?;
@@ -1177,7 +1177,7 @@ async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
         FROM normalized_code_areas;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("migrate_v11: failed to backfill legacy memory: {e}"),
         operation: "migrate_v11".to_string(),
     })?;
@@ -1280,7 +1280,7 @@ async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
         WHERE trim(c.path) != '';",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("migrate_v11: failed to link legacy memory entities: {e}"),
         operation: "migrate_v11".to_string(),
     })?;
@@ -1294,7 +1294,7 @@ async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
          DROP TABLE IF EXISTS memory_decisions;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("migrate_v11: failed to drop legacy memory tables: {e}"),
         operation: "migrate_v11".to_string(),
     })?;

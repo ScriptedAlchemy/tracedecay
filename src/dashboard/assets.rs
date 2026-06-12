@@ -13,7 +13,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>tokensave dashboard</title>
+    <title>tracedecay dashboard</title>
     <link rel="stylesheet" href="/shell/shell.css" />
   </head>
   <body>
@@ -36,7 +36,7 @@ pub(crate) const GRAPH_JS: &str = include_str!("../../dashboard/graph/dist/index
 pub(crate) const GRAPH_CSS: &str = include_str!("../../dashboard/graph/dist/style.css");
 pub(crate) const SAVINGS_JS: &str = include_str!("../../dashboard/savings/dist/index.js");
 pub(crate) const SAVINGS_CSS: &str = include_str!("../../dashboard/savings/dist/style.css");
-const ASSET_STAMP: &str = env!("TOKENSAVE_DASHBOARD_ASSET_STAMP");
+const ASSET_STAMP: &str = env!("TRACEDECAY_DASHBOARD_ASSET_STAMP");
 
 /// `ETag` value for every embedded asset: the compile-time bundle stamp,
 /// quoted per RFC 9110.
@@ -76,7 +76,7 @@ fn asset_headers(response: &mut Response, content_type: &'static str) {
         headers.insert(header::ETAG, etag);
     }
     headers.insert(
-        header::HeaderName::from_static("x-tokensave-asset-stamp"),
+        header::HeaderName::from_static("x-tracedecay-asset-stamp"),
         header::HeaderValue::from_static(ASSET_STAMP),
     );
 }

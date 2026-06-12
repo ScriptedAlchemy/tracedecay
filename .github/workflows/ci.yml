@@ -155,15 +155,15 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tokensave
+        run: cargo build --bin tracedecay
 
       - name: Run dashboard smoke (empty LCM)
         working-directory: dashboard
         env:
-          TOKENSAVE_GLOBAL_DB: ${{ runner.temp }}/tokensave-dashboard-smoke-empty.db
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
         run: |
           set -euo pipefail
-          rm -f "$TOKENSAVE_GLOBAL_DB"
+          rm -f "$TRACEDECAY_GLOBAL_DB"
           attempts=0
           max_attempts=3
           until [ "$attempts" -ge "$max_attempts" ]; do
@@ -211,8 +211,8 @@ jobs:
         with:
           prefix-key: v1-rust-hermes-integration
 
-      - name: Build tokensave binary
-        run: cargo build --bin tokensave
+      - name: Build tracedecay binary
+        run: cargo build --bin tracedecay
 
       - name: Clone stock Hermes at pinned ref
         run: |
@@ -233,6 +233,6 @@ jobs:
 
       - name: Run stock Hermes integration checks
         env:
-          TOKENSAVE_BIN: ${{ github.workspace }}/target/debug/tokensave
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
           HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
         run: scripts/hermes_stock_integration.sh

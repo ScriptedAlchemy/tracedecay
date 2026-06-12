@@ -1,7 +1,7 @@
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 use tempfile::TempDir;
-use tokensave::db::migrations::{create_schema, migrate};
-use tokensave::db::Database;
+use tracedecay::db::migrations::{create_schema, migrate};
+use tracedecay::db::Database;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -959,7 +959,7 @@ async fn test_v7_to_latest_upgrade_path() {
     assert_eq!(names, vec!["read_cache"]);
 }
 
-/// V9 adds the `read_cache` table used by `tokensave_read`.
+/// V9 adds the `read_cache` table used by `tracedecay_read`.
 #[tokio::test]
 async fn test_migrate_v9_adds_read_cache() {
     let (conn, _db, _dir) = create_raw_db().await;

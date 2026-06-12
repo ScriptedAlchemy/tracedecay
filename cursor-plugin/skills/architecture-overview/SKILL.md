@@ -5,14 +5,14 @@ description: Map the structure of the repo or a directory — modules, public su
 
 # Architecture overview
 
-This skill **maps structure**. Its companion `tokensave:code-health-report` **scores quality** and owns the `tokensave_health` weak-dimension drill-down ladder — don't duplicate that ladder here.
+This skill **maps structure**. Its companion `tracedecay:code-health-report` **scores quality** and owns the `tracedecay_health` weak-dimension drill-down ladder — don't duplicate that ladder here.
 
 ## Workflow
 
-1. **Shape & size:** `tokensave_status` (node/edge/file counts), `tokensave_files` + `tokensave_distribution` (what lives where).
-2. **Public surface:** `tokensave_module_api` per top-level directory.
-3. **Dependency structure:** `tokensave_dsm` (`format`: `stats`|`clusters`|`matrix` — clusters and layering violations), `tokensave_coupling` (`fan_in`/`fan_out` hubs), `tokensave_circular` (cycles), `tokensave_dependency_depth` (fragile long chains).
-4. **Quality triage (optional):** one `tokensave_health` (`details: true`) call for the composite signal. To drill into weak dimensions (complexity, duplication, doc gaps, test risk, god files), hand off to `tokensave:code-health-report` rather than re-running its ladder here.
+1. **Shape & size:** `tracedecay_status` (node/edge/file counts), `tracedecay_files` + `tracedecay_distribution` (what lives where).
+2. **Public surface:** `tracedecay_module_api` per top-level directory.
+3. **Dependency structure:** `tracedecay_dsm` (`format`: `stats`|`clusters`|`matrix` — clusters and layering violations), `tracedecay_coupling` (`fan_in`/`fan_out` hubs), `tracedecay_circular` (cycles), `tracedecay_dependency_depth` (fragile long chains).
+4. **Quality triage (optional):** one `tracedecay_health` (`details: true`) call for the composite signal. To drill into weak dimensions (complexity, duplication, doc gaps, test risk, god files), hand off to `tracedecay:code-health-report` rather than re-running its ladder here.
 
 ## Guardrails
 
@@ -22,4 +22,4 @@ This skill **maps structure**. Its companion `tokensave:code-health-report` **sc
 
 - A layered module map, the dependency hotspots/violations, and a prioritized structural risk list.
 - Pairs with the `docs-canvas` plugin (if installed) for a rendered overview.
-- If any result includes a `tokensave_metrics:` line, report the savings to the user.
+- If any result includes a `tracedecay_metrics:` line, report the savings to the user.

@@ -1,32 +1,32 @@
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::BranchAction;
 use crate::global;
 use crate::Spinner;
-use tokensave::tokensave::TokenSave;
+use tracedecay::tracedecay::TraceDecay;
 
-pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::errors::Result<()> {
-    use tokensave::branch;
-    use tokensave::branch_meta;
-    use tokensave::config::get_tokensave_dir;
+pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
+    use tracedecay::branch;
+    use tracedecay::branch_meta;
+    use tracedecay::config::get_tracedecay_dir;
 
     match action {
         BranchAction::List { path } => {
-            let project_path = tokensave::config::resolve_path(path);
-            let tokensave_dir = get_tokensave_dir(&project_path);
-            let Some(meta) = branch_meta::load_branch_meta(&tokensave_dir) else {
-                eprintln!("No branch tracking configured. Run `tokensave branch add` to start.");
+            let project_path = tracedecay::config::resolve_path(path);
+            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let Some(meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
+                eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
                 return Ok(());
             };
             let current = branch::current_branch(&project_path);
             eprintln!("Default branch: {}", meta.default_branch);
             eprintln!();
             for (name, entry) in &meta.branches {
-                let db_path = tokensave_dir.join(&entry.db_file);
+                let db_path = tracedecay_dir.join(&entry.db_file);
                 let size = if db_path.exists() {
                     let bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-                    tokensave::display::format_bytes(bytes)
+                    tracedecay::display::format_bytes(bytes)
                 } else {
                     "missing".to_string()
                 };
@@ -45,13 +45,13 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             }
         }
         BranchAction::Add { name, path } => {
-            let project_path = tokensave::config::resolve_path(path);
-            let tokensave_dir = get_tokensave_dir(&project_path);
+            let project_path = tracedecay::config::resolve_path(path);
+            let tracedecay_dir = get_tracedecay_dir(&project_path);
 
             let branch_name = match name {
                 Some(n) => n,
                 None => branch::current_branch(&project_path).ok_or_else(|| {
-                    tokensave::errors::TokenSaveError::Config {
+                    tracedecay::errors::TraceDecayError::Config {
                         message:
                             "cannot detect current branch (detached HEAD?). Specify a branch name."
                                 .to_string(),
@@ -60,10 +60,10 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             };
 
             // Load or bootstrap metadata
-            let mut meta = branch_meta::load_branch_meta(&tokensave_dir).unwrap_or_else(|| {
+            let mut meta = branch_meta::load_branch_meta(&tracedecay_dir).unwrap_or_else(|| {
                 let default = branch::detect_default_branch(&project_path)
                     .unwrap_or_else(|| "main".to_string());
-                branch_meta::BranchMeta::new(&default)
+                branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
             });
 
             if meta.is_tracked(&branch_name) {
@@ -74,19 +74,19 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             // Find parent DB to copy from
             let parent = branch::find_nearest_tracked_ancestor(&project_path, &branch_name, &meta)
                 .unwrap_or_else(|| meta.default_branch.clone());
-            let parent_db = branch::resolve_branch_db_path(&tokensave_dir, &parent, &meta)
-                .ok_or_else(|| tokensave::errors::TokenSaveError::Config {
+            let parent_db = branch::resolve_branch_db_path(&tracedecay_dir, &parent, &meta)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                     message: format!("parent branch '{parent}' has no DB"),
                 })?;
             if !parent_db.exists() {
-                return Err(tokensave::errors::TokenSaveError::Config {
+                return Err(tracedecay::errors::TraceDecayError::Config {
                     message: format!("parent DB not found at '{}'", parent_db.display()),
                 });
             }
 
             // Copy DB
             let sanitized = branch::sanitize_branch_name(&branch_name);
-            let branches_dir = branch_meta::ensure_branches_dir(&tokensave_dir)?;
+            let branches_dir = branch_meta::ensure_branches_dir(&tracedecay_dir)?;
             let new_db_path = branches_dir.join(format!("{sanitized}.db"));
             let spinner = Spinner::new();
             spinner.set_message(&format!("copying DB from '{parent}'"));
@@ -95,17 +95,17 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             // Save metadata BEFORE open() so it resolves the new branch to its DB
             let db_file = format!("branches/{sanitized}.db");
             meta.add_branch(&branch_name, &db_file, &parent);
-            branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+            branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
 
             // Run incremental sync (hash-based delta) against the new branch DB
             spinner.set_message("syncing changes");
-            let cg = TokenSave::open(&project_path).await?;
+            let cg = TraceDecay::open(&project_path).await?;
             let result = cg.sync().await?;
 
             // Update sync timestamp after successful sync
-            if let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) {
+            if let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) {
                 meta.touch_synced(&branch_name);
-                let _ = branch_meta::save_branch_meta(&tokensave_dir, &meta);
+                let _ = branch_meta::save_branch_meta(&tracedecay_dir, &meta);
             }
 
             let skipped_msg = if result.skipped_paths.is_empty() {
@@ -129,35 +129,35 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             }
         }
         BranchAction::Remove { name, path } => {
-            let project_path = tokensave::config::resolve_path(path);
-            let tokensave_dir = get_tokensave_dir(&project_path);
-            let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) else {
+            let project_path = tracedecay::config::resolve_path(path);
+            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
             };
             if name == meta.default_branch {
-                return Err(tokensave::errors::TokenSaveError::Config {
+                return Err(tracedecay::errors::TraceDecayError::Config {
                     message: format!("cannot remove default branch '{name}'"),
                 });
             }
             if let Some(entry) = meta.remove_branch(&name) {
-                let db_path = tokensave_dir.join(&entry.db_file);
+                let db_path = tracedecay_dir.join(&entry.db_file);
                 if db_path.exists() {
                     std::fs::remove_file(&db_path)?;
                     // Also remove WAL/SHM sidecar files
                     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
                     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
                 }
-                branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+                branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
                 eprintln!("\x1b[32m✔\x1b[0m Branch '{name}' removed.");
             } else {
                 eprintln!("Branch '{name}' is not tracked.");
             }
         }
         BranchAction::Removeall { path } => {
-            let project_path = tokensave::config::resolve_path(path);
-            let tokensave_dir = get_tokensave_dir(&project_path);
-            let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) else {
+            let project_path = tracedecay::config::resolve_path(path);
+            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
             };
@@ -166,7 +166,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
                 eprintln!("No non-default branches to remove.");
             } else {
                 for (name, entry) in &removed {
-                    let db_path = tokensave_dir.join(&entry.db_file);
+                    let db_path = tracedecay_dir.join(&entry.db_file);
                     if db_path.exists() {
                         std::fs::remove_file(&db_path)?;
                         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -174,7 +174,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
                     }
                     eprintln!("  removed '{name}'");
                 }
-                branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+                branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
                 eprintln!(
                     "\x1b[32m✔\x1b[0m Removed {} branch(es). Only '{}' remains.",
                     removed.len(),
@@ -183,9 +183,9 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             }
         }
         BranchAction::Gc { path } => {
-            let project_path = tokensave::config::resolve_path(path);
-            let tokensave_dir = get_tokensave_dir(&project_path);
-            let Some(mut meta) = branch_meta::load_branch_meta(&tokensave_dir) else {
+            let project_path = tracedecay::config::resolve_path(path);
+            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
             };
@@ -213,7 +213,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
             } else {
                 for name in &stale {
                     if let Some(entry) = meta.remove_branch(name) {
-                        let db_path = tokensave_dir.join(&entry.db_file);
+                        let db_path = tracedecay_dir.join(&entry.db_file);
                         if db_path.exists() {
                             std::fs::remove_file(&db_path)?;
                             let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -222,7 +222,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
                         eprintln!("  removed '{name}'");
                     }
                 }
-                branch_meta::save_branch_meta(&tokensave_dir, &meta)?;
+                branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
                 eprintln!(
                     "\x1b[32m✔\x1b[0m Cleaned up {} stale branch(es).",
                     stale.len()
@@ -234,21 +234,19 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tokensave::err
 }
 
 /// Handles the `wipe` and `wipe --all` commands.
-pub(crate) async fn handle_wipe(all: bool) -> tokensave::errors::Result<()> {
+pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     use std::fs;
-    use std::path::PathBuf;
+    let home_tracedecay = tracedecay::config::user_data_dir();
 
-    let home_tokensave: Option<PathBuf> = dirs::home_dir().map(|h| h.join(".tokensave"));
-
-    let mut targets = global::gather_target_projects(all, &home_tokensave).await;
+    let mut targets = global::gather_target_projects(all, &home_tracedecay).await;
     if all {
-        // wipe acts on the live `.tokensave/` directory; drop rows whose
-        // directory is already gone (they're handled by `tokensave doctor`).
-        targets.retain(|p| p.join(".tokensave/tokensave.db").exists());
+        // wipe acts on the resolved live data directory; drop rows whose
+        // directory is already gone (they're handled by `tracedecay doctor`).
+        targets.retain(|p| tracedecay::config::get_project_db_path(p).exists());
     }
 
     if !all && targets.is_empty() {
-        eprintln!("No tokensave projects found in current folder, parents, or children.");
+        eprintln!("No tracedecay projects found in current folder, parents, or children.");
         return Ok(());
     }
 
@@ -258,7 +256,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tokensave::errors::Result<()> {
     io::stderr().flush().ok();
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tokensave::errors::TokenSaveError::Config {
+        tracedecay::errors::TraceDecayError::Config {
             message: format!("failed to read stdin: {e}"),
         }
     })?;
@@ -275,25 +273,25 @@ pub(crate) async fn handle_wipe(all: bool) -> tokensave::errors::Result<()> {
     // own `seen`, and the `--all` branch reads from `projects.path` which is
     // a primary key. No need for a second per-loop dedupe.
     for project_root in &targets {
-        let ts_dir = project_root.join(".tokensave");
-        if !ts_dir.exists() {
+        let tracedecay_dir = tracedecay::config::get_tracedecay_dir(project_root);
+        if !tracedecay_dir.exists() {
             continue;
         }
-        match fs::remove_dir_all(&ts_dir) {
+        match fs::remove_dir_all(&tracedecay_dir) {
             Ok(()) => {
                 removed += 1;
                 wiped_paths.push(project_root.clone());
-                eprintln!("  \x1b[32m✔\x1b[0m removed {}", ts_dir.display());
+                eprintln!("  \x1b[32m✔\x1b[0m removed {}", tracedecay_dir.display());
             }
             Err(e) => {
                 errors += 1;
-                eprintln!("  \x1b[31m✗\x1b[0m {} ({e})", ts_dir.display());
+                eprintln!("  \x1b[31m✗\x1b[0m {} ({e})", tracedecay_dir.display());
             }
         }
     }
 
     if all {
-        if let Some(global_dir) = home_tokensave.as_ref() {
+        if let Some(global_dir) = home_tracedecay.as_ref() {
             for ext in ["db", "db-wal", "db-shm"] {
                 let p = global_dir.join(format!("global.{ext}"));
                 let _ = fs::remove_file(&p);
@@ -304,7 +302,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tokensave::errors::Result<()> {
             );
         }
     } else if !wiped_paths.is_empty() {
-        if let Some(gdb) = tokensave::global_db::GlobalDb::open().await {
+        if let Some(gdb) = tracedecay::global_db::GlobalDb::open().await {
             let path_strs: Vec<String> = wiped_paths
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
@@ -324,32 +322,31 @@ pub(crate) async fn handle_wipe(all: bool) -> tokensave::errors::Result<()> {
 }
 
 /// Handles the `list` and `list --all` commands.
-pub(crate) async fn handle_list(all: bool) -> tokensave::errors::Result<()> {
-    use std::path::PathBuf;
-    use tokensave::display::format_token_count;
+pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
+    use tracedecay::display::format_token_count;
 
-    let home_tokensave: Option<PathBuf> = dirs::home_dir().map(|h| h.join(".tokensave"));
-    let project_paths = global::gather_target_projects(all, &home_tokensave).await;
+    let home_tracedecay = tracedecay::config::user_data_dir();
+    let project_paths = global::gather_target_projects(all, &home_tracedecay).await;
 
     if project_paths.is_empty() {
         if all {
-            println!("No tokensave projects tracked in the global DB.");
+            println!("No tracedecay projects tracked in the global DB.");
         } else {
-            println!("No tokensave projects found in current folder, parents, or children.");
+            println!("No tracedecay projects found in current folder, parents, or children.");
         }
         return Ok(());
     }
 
-    let gdb = tokensave::global_db::GlobalDb::open().await;
+    let gdb = tracedecay::global_db::GlobalDb::open().await;
     let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
     let mut total_size: u64 = 0;
     let mut total_tokens: u64 = 0;
 
     for path in &project_paths {
-        let ts_dir = path.join(".tokensave");
-        let on_disk = ts_dir.exists();
+        let tracedecay_dir = tracedecay::config::get_tracedecay_dir(path);
+        let on_disk = tracedecay_dir.exists();
         let size = if on_disk {
-            global::tokensave_dir_size(&ts_dir)
+            global::tracedecay_dir_size(&tracedecay_dir)
         } else {
             0
         };
@@ -378,7 +375,7 @@ pub(crate) async fn handle_list(all: bool) -> tokensave::errors::Result<()> {
         .max()
         .unwrap_or(0);
 
-    println!("Found {} tokensave project(s):", rows.len());
+    println!("Found {} tracedecay project(s):", rows.len());
     println!();
     for r in &rows {
         let path_str = if r.on_disk {
@@ -391,7 +388,7 @@ pub(crate) async fn handle_list(all: bool) -> tokensave::errors::Result<()> {
                 + if r.on_disk { 0 } else { " (stale)".len() },
         );
         let size_str = if r.on_disk {
-            tokensave::display::format_bytes(r.size)
+            tracedecay::display::format_bytes(r.size)
         } else {
             "—".to_string()
         };
@@ -415,7 +412,7 @@ pub(crate) async fn handle_list(all: bool) -> tokensave::errors::Result<()> {
     };
     println!(
         "Total: {} on disk · {} tokens saved",
-        tokensave::display::format_bytes(total_size),
+        tracedecay::display::format_bytes(total_size),
         total_tokens_str
     );
     Ok(())
@@ -430,46 +427,46 @@ struct ListRow {
 }
 
 /// True when the global DB has zero registered projects (or can't be opened
-/// at all) — i.e. the user has not run `tokensave init` anywhere yet.
+/// at all) — i.e. the user has not run `tracedecay init` anywhere yet.
 async fn is_fresh_install() -> bool {
-    match tokensave::global_db::GlobalDb::open().await {
+    match tracedecay::global_db::GlobalDb::open().await {
         Some(gdb) => gdb.list_project_paths().await.is_empty(),
         None => true,
     }
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
-pub(crate) async fn handle_no_command() -> tokensave::errors::Result<()> {
-    let project_path = tokensave::config::resolve_path(None);
-    if TokenSave::is_initialized(&project_path) {
+pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
+    let project_path = tracedecay::config::resolve_path(None);
+    if TraceDecay::is_initialized(&project_path) {
         // Already initialized — show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
         return Ok(());
     }
     if is_fresh_install().await {
-        eprintln!("\x1b[1;36mWelcome to tokensave!\x1b[0m");
+        eprintln!("\x1b[1;36mWelcome to tracedecay!\x1b[0m");
         eprintln!(
-            "Looks like a new installation. To get started, run \x1b[1mtokensave init\x1b[0m \
+            "Looks like a new installation. To get started, run \x1b[1mtracedecay init\x1b[0m \
              in your project root."
         );
         eprintln!();
     }
     if !io::stdin().is_terminal() {
         eprintln!(
-            "No TokenSave index found at '{}'. Non-interactive: skipping index creation (run `tokensave init`).",
+            "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",
             project_path.display()
         );
         return Ok(());
     }
     eprint!(
-        "No TokenSave index found at '{}'. Create one now? [Y/n] ",
+        "No TraceDecay index found at '{}'. Create one now? [Y/n] ",
         project_path.display()
     );
     io::stderr().flush().ok();
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tokensave::errors::TokenSaveError::Config {
+        tracedecay::errors::TraceDecayError::Config {
             message: format!("failed to read stdin: {}", e),
         }
     })?;
@@ -485,7 +482,7 @@ pub(crate) async fn init_and_index(
     project_path: &Path,
     skip_folders: &[String],
     verbose: bool,
-) -> tokensave::errors::Result<TokenSave> {
+) -> tracedecay::errors::Result<TraceDecay> {
     debug_assert!(
         project_path.is_dir(),
         "init_and_index: project_path is not a directory"
@@ -494,27 +491,32 @@ pub(crate) async fn init_and_index(
         project_path.is_absolute(),
         "init_and_index: project_path must be absolute"
     );
-    let mut cg = if TokenSave::is_initialized(project_path) {
-        TokenSave::open(project_path).await?
+    let mut cg = if TraceDecay::is_initialized(project_path) {
+        TraceDecay::open(project_path).await?
     } else {
-        let cg = TokenSave::init(project_path).await?;
-        eprintln!("Initialized TokenSave at {}", project_path.display());
-        // Offer to add .tokensave to .gitignore if not already there
-        if !tokensave::config::is_in_gitignore(project_path) {
+        let cg = TraceDecay::init(project_path).await?;
+        eprintln!("Initialized TraceDecay at {}", project_path.display());
+        let data_dir_name = tracedecay::config::get_tracedecay_dir(project_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(tracedecay::config::TRACEDECAY_DIR)
+            .to_string();
+        // Offer to add the resolved data directory to .gitignore if needed.
+        if !tracedecay::config::is_in_gitignore(project_path) {
             if io::stdin().is_terminal() {
-                eprint!("Add .tokensave to .gitignore? [Y/n] ");
+                eprint!("Add {data_dir_name} to .gitignore? [Y/n] ");
                 io::stderr().flush().ok();
                 let mut answer = String::new();
                 if io::stdin().lock().read_line(&mut answer).is_ok() {
                     let answer = answer.trim();
                     if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                        tokensave::config::add_to_gitignore(project_path);
-                        eprintln!("Added .tokensave to .gitignore");
+                        tracedecay::config::add_to_gitignore(project_path);
+                        eprintln!("Added {data_dir_name} to .gitignore");
                     }
                 }
             } else {
                 eprintln!(
-                    "Non-interactive: skipped adding .tokensave to .gitignore (run interactively to opt in)."
+                    "Non-interactive: skipped adding {data_dir_name} to .gitignore (run interactively to opt in)."
                 );
             }
         }
@@ -559,7 +561,7 @@ pub(crate) async fn init_and_index(
 /// Sonnet is the default agent target; output-token savings are not relevant
 /// for retrieval savings.
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> f64 {
-    use tokensave::accounting::pricing;
+    use tracedecay::accounting::pricing;
     pricing::refresh_if_stale();
     let price = pricing::lookup("claude-sonnet-4")
         .map(|p| p.input_per_mtok)
@@ -572,16 +574,18 @@ pub async fn handle_gain(
     history: bool,
     range: &str,
     json_output: bool,
-) -> tokensave::errors::Result<()> {
-    let gdb = match tokensave::global_db::GlobalDb::open().await {
+) -> tracedecay::errors::Result<()> {
+    let gdb = match tracedecay::global_db::GlobalDb::open().await {
         Some(db) => db,
         None => {
-            eprintln!("Could not open the global database (~/.tokensave/global.db).");
+            eprintln!(
+                "Could not open the global database (~/.tracedecay/global.db, or legacy ~/.tokensave/global.db)."
+            );
             return Ok(());
         }
     };
 
-    let since = tokensave::accounting::metrics::parse_range(range);
+    let since = tracedecay::accounting::metrics::parse_range(range);
     let project_filter: Option<String> = if all {
         None
     } else {
@@ -608,7 +612,7 @@ pub async fn handle_gain(
                 .collect();
             println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
         } else {
-            tokensave::display::print_gain_history(&rows, estimate_dollars_saved);
+            tracedecay::display::print_gain_history(&rows, estimate_dollars_saved);
         }
         return Ok(());
     }
@@ -628,7 +632,7 @@ pub async fn handle_gain(
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
-        tokensave::display::print_gain_total(
+        tracedecay::display::print_gain_total(
             project_filter.as_deref().unwrap_or("ALL projects"),
             range,
             total.saved_tokens,
@@ -640,7 +644,7 @@ pub async fn handle_gain(
 }
 
 /// Print the `--doctor` report after an incremental sync.
-pub(crate) fn print_sync_doctor(result: &tokensave::tokensave::SyncResult) {
+pub(crate) fn print_sync_doctor(result: &tracedecay::tracedecay::SyncResult) {
     let has_changes = !result.added_paths.is_empty()
         || !result.modified_paths.is_empty()
         || !result.removed_paths.is_empty();

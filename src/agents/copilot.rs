@@ -1,8 +1,8 @@
 //! GitHub Copilot integration.
 //!
-//! Handles registration of the tokensave MCP server in both:
-//! - VS Code's `settings.json` under `mcp.servers.tokensave`
-//! - Copilot CLI's `~/.copilot/mcp-config.json` under `mcpServers.tokensave`
+//! Handles registration of the tracedecay MCP server in both:
+//! - VS Code's `settings.json` under `mcp.servers.tracedecay`
+//! - Copilot CLI's `~/.copilot/mcp-config.json` under `mcpServers.tracedecay`
 
 use std::path::Path;
 
@@ -15,6 +15,9 @@ use super::{
     load_jsonc_file, load_jsonc_file_strict, safe_write_json_file, AgentIntegration,
     DoctorCounters, HealthcheckContext, InstallContext,
 };
+
+const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
+const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 /// GitHub Copilot agent.
 pub struct CopilotIntegration;
@@ -32,16 +35,16 @@ impl AgentIntegration for CopilotIntegration {
         let vscode_settings_path = super::vscode_data_dir(&ctx.home).join("User/settings.json");
         let cli_settings_path = super::copilot_cli_dir(&ctx.home).join("mcp-config.json");
 
-        install_vscode_mcp_server(&vscode_settings_path, &ctx.tokensave_bin)?;
+        install_vscode_mcp_server(&vscode_settings_path, &ctx.tracedecay_bin)?;
         let insiders_settings_path =
             super::vscode_insiders_data_dir(&ctx.home).join("User/settings.json");
         if insiders_settings_path
             .parent()
             .is_some_and(std::path::Path::exists)
         {
-            install_vscode_mcp_server(&insiders_settings_path, &ctx.tokensave_bin)?;
+            install_vscode_mcp_server(&insiders_settings_path, &ctx.tracedecay_bin)?;
         }
-        install_cli_mcp_server(&cli_settings_path, &ctx.tokensave_bin)?;
+        install_cli_mcp_server(&cli_settings_path, &ctx.tracedecay_bin)?;
 
         // Install prompt rules
         let vscode_instructions =
@@ -60,9 +63,9 @@ impl AgentIntegration for CopilotIntegration {
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
+        eprintln!("  1. cd into your project and run: tracedecay init");
         eprintln!("  2. Restart VS Code and/or start a new Copilot CLI session");
-        eprintln!("     tokensave tools are now available in GitHub Copilot");
+        eprintln!("     tracedecay tools are now available in GitHub Copilot");
         Ok(())
     }
 
@@ -71,7 +74,7 @@ impl AgentIntegration for CopilotIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_workspace_mcp_server(&project_path.join(".vscode/mcp.json"), &ctx.tokensave_bin)?;
+        install_workspace_mcp_server(&project_path.join(".vscode/mcp.json"), &ctx.tracedecay_bin)?;
         install_prompt_rules(&project_path.join(".github/copilot-instructions.md"))
     }
 
@@ -94,7 +97,7 @@ impl AgentIntegration for CopilotIntegration {
         uninstall_prompt_rules(&cli_instructions);
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from GitHub Copilot.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from GitHub Copilot.");
         eprintln!(
             "Restart VS Code and/or start a new Copilot CLI session for changes to take effect."
         );
@@ -122,47 +125,45 @@ impl AgentIntegration for CopilotIntegration {
         Some(super::vscode_data_dir(home).join("User/settings.json"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let vscode_settings_path = super::vscode_data_dir(home).join("User/settings.json");
         let insiders_settings_path =
             super::vscode_insiders_data_dir(home).join("User/settings.json");
         let cli_settings_path = super::copilot_cli_dir(home).join("mcp-config.json");
 
-        let vscode_has_tokensave = if vscode_settings_path.exists() {
+        let vscode_has_tracedecay = if vscode_settings_path.exists() {
             let json = load_jsonc_file(&vscode_settings_path);
-            json.get("mcp")
-                .and_then(|v| v.get("servers"))
-                .and_then(|v| v.get("tokensave"))
-                .is_some()
+            let servers = json.get("mcp").and_then(|v| v.get("servers"));
+            servers.and_then(|v| v.get("tracedecay")).is_some()
+                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
 
-        let insiders_has_tokensave = if insiders_settings_path.exists() {
+        let insiders_has_tracedecay = if insiders_settings_path.exists() {
             let json = load_jsonc_file(&insiders_settings_path);
-            json.get("mcp")
-                .and_then(|v| v.get("servers"))
-                .and_then(|v| v.get("tokensave"))
-                .is_some()
+            let servers = json.get("mcp").and_then(|v| v.get("servers"));
+            servers.and_then(|v| v.get("tracedecay")).is_some()
+                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
 
-        let cli_has_tokensave = if cli_settings_path.exists() {
+        let cli_has_tracedecay = if cli_settings_path.exists() {
             let json = load_json_file(&cli_settings_path);
-            json.get("mcpServers")
-                .and_then(|v| v.get("tokensave"))
-                .is_some()
+            let servers = json.get("mcpServers");
+            servers.and_then(|v| v.get("tracedecay")).is_some()
+                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
 
-        vscode_has_tokensave || insiders_has_tokensave || cli_has_tokensave
+        vscode_has_tracedecay || insiders_has_tracedecay || cli_has_tracedecay
     }
 }
 
 /// Register MCP server in VS Code settings.json.
-fn install_vscode_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_vscode_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -177,22 +178,22 @@ fn install_vscode_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Resul
             return Err(e);
         }
     };
-    settings["mcp"]["servers"]["tokensave"] = json!({
+    settings["mcp"]["servers"]["tracedecay"] = json!({
         "type": "stdio",
-        "command": tokensave_bin,
+        "command": tracedecay_bin,
         "args": ["serve"]
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
 }
 
 /// Register MCP server in Copilot CLI's ~/.copilot/mcp-config.json.
-fn install_cli_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_cli_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -207,22 +208,22 @@ fn install_cli_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<(
             return Err(e);
         }
     };
-    settings["mcpServers"]["tokensave"] = json!({
+    settings["mcpServers"]["tracedecay"] = json!({
         "type": "stdio",
-        "command": tokensave_bin,
+        "command": tracedecay_bin,
         "args": ["serve"]
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
 }
 
 /// Register MCP server in a project `.vscode/mcp.json` file.
-fn install_workspace_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_workspace_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -237,15 +238,15 @@ fn install_workspace_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Re
             return Err(e);
         }
     };
-    settings["servers"]["tokensave"] = json!({
+    settings["servers"]["tracedecay"] = json!({
         "type": "stdio",
-        "command": tokensave_bin,
+        "command": tracedecay_bin,
         "args": ["serve"]
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
@@ -266,17 +267,22 @@ fn uninstall_vscode_mcp_server(settings_path: &Path) {
 
     let mut settings = load_jsonc_file(settings_path);
 
-    // Remove mcpServers.tokensave
-    let removed = settings
+    // Remove both new and legacy server keys.
+    let removed = if let Some(map) = settings
         .get_mut("mcp")
         .and_then(|mcp| mcp.get_mut("servers"))
         .and_then(|servers| servers.as_object_mut())
-        .and_then(|map| map.remove("tokensave"))
-        .is_some();
+    {
+        let removed_new = map.remove("tracedecay").is_some();
+        let removed_legacy = map.remove("tokensave").is_some();
+        removed_new || removed_legacy
+    } else {
+        false
+    };
 
     if !removed {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -306,7 +312,7 @@ fn uninstall_vscode_mcp_server(settings_path: &Path) {
     // backup_and_write_json leaves a .bak so any mistake is recoverable (issue #63).
     if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             settings_path.display()
         );
     }
@@ -329,9 +335,11 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
     else {
         return;
     };
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -348,7 +356,7 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             settings_path.display()
         );
     }
@@ -361,15 +369,14 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
 /// Append prompt rules to a copilot-instructions.md file (idempotent).
 fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
     use std::io::Write;
-    let marker = "## Prefer tokensave MCP tools";
     let existing = if instructions_path.exists() {
         std::fs::read_to_string(instructions_path).unwrap_or_default()
     } else {
         String::new()
     };
-    if existing.contains(marker) {
+    if existing.contains(PROMPT_RULE_MARKER) {
         eprintln!(
-            "  {} already contains tokensave rules, skipping",
+            "  {} already contains tracedecay rules, skipping",
             instructions_path.display()
         );
         return Ok(());
@@ -381,42 +388,42 @@ fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
         .create(true)
         .append(true)
         .open(instructions_path)
-        .map_err(|e| crate::errors::TokenSaveError::Config {
+        .map_err(|e| crate::errors::TraceDecayError::Config {
             message: format!("failed to open {}: {e}", instructions_path.display()),
         })?;
     write!(
         f,
-        "\n{marker}\n\n\
-        Before reading source files or scanning the codebase, use the tokensave MCP tools \
-        (`tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, \
-        `tokensave_impact`, `tokensave_node`, `tokensave_files`, `tokensave_affected`). \
+        "\n{PROMPT_RULE_MARKER}\n\n\
+        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
+        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
+        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
         They provide instant semantic results from a pre-built knowledge graph and are \
         faster than file reads.\n\n\
-        If a code analysis question cannot be fully answered by tokensave MCP tools, \
-        try querying the SQLite database directly at `.tokensave/tokensave.db` \
+        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
+        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
         (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
         `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tokensave_fact_store`, \
-        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
-        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        For durable project/user facts, prefer `tracedecay_fact_store`, \
+        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
+        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
-        If you find a gap where tokensave could answer a question natively, propose opening \
+        If you find a gap where tracedecay could answer a question natively, propose opening \
         an issue at https://github.com/ScriptedAlchemy/tokensave. Remind the user to strip \
         sensitive or proprietary code from any issue text before submitting.\n"
     )
-    .map_err(|e| crate::errors::TokenSaveError::Config {
+    .map_err(|e| crate::errors::TraceDecayError::Config {
         message: format!("failed to write {}: {e}", instructions_path.display()),
     })?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave rules to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay rules to {}",
         instructions_path.display()
     );
     Ok(())
 }
 
-/// Remove tokensave rules from a copilot-instructions.md file.
+/// Remove tracedecay rules from a copilot-instructions.md file.
 fn uninstall_prompt_rules(instructions_path: &Path) {
     if !instructions_path.exists() {
         return;
@@ -424,10 +431,14 @@ fn uninstall_prompt_rules(instructions_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(instructions_path) else {
         return;
     };
-    if !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
         return;
     }
-    let marker = "## Prefer tokensave MCP tools";
+    let marker = if contents.contains(PROMPT_RULE_MARKER) {
+        PROMPT_RULE_MARKER
+    } else {
+        LEGACY_PROMPT_RULE_MARKER
+    };
     let Some(start) = contents.find(marker) else {
         return;
     };
@@ -452,7 +463,7 @@ fn uninstall_prompt_rules(instructions_path: &Path) {
     } else {
         std::fs::write(instructions_path, format!("{new_contents}\n")).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave rules from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
             instructions_path.display()
         );
     }
@@ -462,13 +473,13 @@ fn uninstall_prompt_rules(instructions_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check VS Code (or VS Code Insiders) settings.json has tokensave MCP server registered.
+/// Check VS Code (or VS Code Insiders) settings.json has tracedecay MCP server registered.
 fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, label: &str) {
     let settings_path = vscode_dir.join("User/settings.json");
 
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent copilot` if you use GitHub Copilot in {label}",
+            "{} not found — run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
             settings_path.display()
         ));
         return;
@@ -478,11 +489,11 @@ fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, labe
     let server = settings
         .get("mcp")
         .and_then(|v| v.get("servers"))
-        .and_then(|v| v.get("tokensave"));
+        .and_then(|v| v.get("tracedecay"));
 
     let Some(server) = server.and_then(|v| v.as_object()) else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent copilot`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
             settings_path.display()
         ));
         return;
@@ -500,28 +511,28 @@ fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, labe
     if has_serve {
         dc.pass("MCP server args include \"serve\"");
     } else {
-        dc.fail("MCP server args missing \"serve\" — run `tokensave install --agent copilot`");
+        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
     }
 }
 
-/// Check Copilot CLI mcp-config.json has tokensave MCP server registered.
+/// Check Copilot CLI mcp-config.json has tracedecay MCP server registered.
 fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = super::copilot_cli_dir(home).join("mcp-config.json");
 
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent copilot` if you use Copilot CLI",
+            "{} not found — run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     let Some(server) = server.and_then(|v| v.as_object()) else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent copilot`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
             settings_path.display()
         ));
         return;
@@ -538,6 +549,6 @@ fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
     if has_serve {
         dc.pass("MCP server args include \"serve\"");
     } else {
-        dc.fail("MCP server args missing \"serve\" — run `tokensave install --agent copilot`");
+        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
     }
 }

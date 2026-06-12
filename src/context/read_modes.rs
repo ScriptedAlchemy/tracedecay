@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-//! Mode-aware file reads for `tokensave_read`.
+//! Mode-aware file reads for `tracedecay_read`.
 //!
 //! Four modes are implemented in 5.0:
 //!
@@ -16,10 +16,10 @@
 use serde_json::{json, Value};
 
 use crate::db::Database;
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::types::{Node, NodeKind};
 
-/// Mode selector for `tokensave_read`. Parsed from the JSON `mode` argument.
+/// Mode selector for `tracedecay_read`. Parsed from the JSON `mode` argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadMode {
     Full,
@@ -87,7 +87,7 @@ pub fn render_full(source: &str) -> String {
 
 /// Approximates the token count of a UTF-8 string. Uses the ~4-chars-per-token
 /// rule of thumb that holds for English source code; it is not exact, but
-/// good enough for the metric tokensave reports back to the caller.
+/// good enough for the metric tracedecay reports back to the caller.
 pub fn estimate_tokens(s: &str) -> u32 {
     let chars = s.chars().count();
     chars.div_ceil(4).min(u32::MAX as usize) as u32
@@ -172,7 +172,7 @@ pub async fn render_signatures(db: &Database, file_path: &str) -> Result<Value> 
 async fn fetch_nodes(db: &Database, file_path: &str) -> Result<Vec<Node>> {
     db.get_nodes_by_file(file_path)
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("read_modes: failed to load nodes for {file_path}: {e}"),
             operation: "read_modes::fetch_nodes".to_string(),
         })

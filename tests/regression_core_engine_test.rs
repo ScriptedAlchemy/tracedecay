@@ -6,10 +6,10 @@
 
 use std::fs;
 use tempfile::TempDir;
-use tokensave::tokensave::TokenSave;
+use tracedecay::tracedecay::TraceDecay;
 
 /// Finds the node ID for a symbol by name, panicking if not found.
-async fn find_node_id(cg: &TokenSave, name: &str) -> String {
+async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
     let results = cg.search(name, 20).await.unwrap();
     results
         .iter()
@@ -21,7 +21,7 @@ async fn find_node_id(cg: &TokenSave, name: &str) -> String {
 }
 
 /// Returns true if `caller` is a (transitive) caller of `target`.
-async fn caller_present(cg: &TokenSave, target: &str, caller: &str) -> bool {
+async fn caller_present(cg: &TraceDecay, target: &str, caller: &str) -> bool {
     let target_id = find_node_id(cg, target).await;
     let callers = cg.get_callers(&target_id, 3).await.unwrap();
     callers.iter().any(|(node, _)| node.name == caller)
@@ -58,7 +58,7 @@ async fn sync_keeps_caller_edge_after_editing_target_indexed_by_index_all() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Baseline: the caller edge exists right after the full index.
@@ -110,7 +110,7 @@ async fn sync_keeps_all_caller_edges_after_editing_shared_target() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     assert!(caller_present(&cg, "shared", "a").await);
@@ -157,7 +157,7 @@ async fn sync_keeps_caller_edge_when_caller_indexed_by_sync() {
         "pub fn target_fn() -> u32 { 1 }\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Add the caller file and index it via incremental sync.
@@ -205,7 +205,7 @@ async fn sync_only_workflow_keeps_caller_edge_after_editing_target() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // No index_all: the first sync builds the entire index.
     cg.sync().await.unwrap();
     assert!(caller_present(&cg, "target_fn", "caller_fn").await);
@@ -245,7 +245,7 @@ async fn noop_sync_eagerly_heals_unstamped_index() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Simulate a pre-fix index: marker absent and ref set empty.
@@ -301,11 +301,11 @@ async fn add_branch_tracking_refuses_empty_sanitized_name() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // ".." sanitizes to "" — must be refused, never mapped to branches/.db.
-    let result = tokensave::branch::add_branch_tracking(project, "..").await;
+    let result = tracedecay::branch::add_branch_tracking(project, "..").await;
     assert!(
         result.is_err(),
         "a branch name that sanitizes to empty must be refused, got: {result:?}"
@@ -338,7 +338,7 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Edit the target body repeatedly; capture the ref count after the first
@@ -374,12 +374,12 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
 async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    fs::create_dir_all(project.join(".tokensave")).unwrap();
-    let lock_path = project.join(".tokensave/sync.lock");
+    fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    let lock_path = project.join(".tracedecay/sync.lock");
     // A PID well out of range can never be alive -> the lock is stale.
     fs::write(&lock_path, "4294967294").unwrap();
 
-    let guard = tokensave::tokensave::try_acquire_sync_lock(project)
+    let guard = tracedecay::tracedecay::try_acquire_sync_lock(project)
         .expect("a stale lock with a dead PID must be reclaimed");
     assert_eq!(
         fs::read_to_string(&lock_path).unwrap().trim(),
@@ -397,13 +397,13 @@ async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
 async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    fs::create_dir_all(project.join(".tokensave")).unwrap();
-    let lock_path = project.join(".tokensave/sync.lock");
+    fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    let lock_path = project.join(".tracedecay/sync.lock");
     // Our own PID is alive -> the lock must be treated as in-progress.
     fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
 
     assert!(
-        tokensave::tokensave::try_acquire_sync_lock(project).is_err(),
+        tracedecay::tracedecay::try_acquire_sync_lock(project).is_err(),
         "a live lock must not be reclaimed"
     );
 }

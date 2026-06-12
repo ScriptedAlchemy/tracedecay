@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::TempDir;
-use tokensave::tokensave::TokenSave;
+use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -26,9 +26,9 @@ fn commit_all(project: &Path, message: &str) {
         project,
         &[
             "-c",
-            "user.name=TokenSave Test",
+            "user.name=TraceDecay Test",
             "-c",
-            "user.email=tokensave-test@example.com",
+            "user.email=tracedecay-test@example.com",
             "commit",
             "-m",
             message,
@@ -36,7 +36,7 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
-async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TokenSave) {
+async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().to_path_buf();
 
@@ -45,7 +45,7 @@ async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TokenSave) {
     fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
     commit_all(&project, "initial commit");
 
-    let main = TokenSave::init(&project).await.unwrap();
+    let main = TraceDecay::init(&project).await.unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
@@ -56,7 +56,7 @@ async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TokenSave) {
     )
     .unwrap();
 
-    let fallback = TokenSave::open(&project).await.unwrap();
+    let fallback = TraceDecay::open(&project).await.unwrap();
     assert_eq!(fallback.active_branch(), Some("feature/untracked"));
     assert_eq!(fallback.serving_branch(), Some("main"));
     assert!(fallback.is_fallback());
@@ -66,7 +66,7 @@ async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TokenSave) {
 
 async fn assert_main_db_missing_untracked_only(project: &Path, message: &str) {
     git(project, &["checkout", "main"]);
-    let main = TokenSave::open(project).await.unwrap();
+    let main = TraceDecay::open(project).await.unwrap();
     let results = main.search("untracked_only", 10).await.unwrap();
     assert!(results.is_empty(), "{message}");
 }
@@ -74,7 +74,7 @@ async fn assert_main_db_missing_untracked_only(project: &Path, message: &str) {
 fn assert_fallback_write_refused(err: impl std::fmt::Display) {
     let message = err.to_string();
     assert!(
-        message.contains("fallback") && message.contains("tokensave branch add"),
+        message.contains("fallback") && message.contains("tracedecay branch add"),
         "unexpected error: {message}"
     );
 }

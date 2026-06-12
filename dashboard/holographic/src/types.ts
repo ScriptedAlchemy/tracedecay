@@ -8,8 +8,8 @@
 
 /**
  * Provider/engine discovery block embedded in `GET /api/plugins/holographic/`
- * responses. Mirrors the Hermes `providers` payload; the standalone tokensave
- * server fills it with a static "tokensave" stub.
+ * responses. Mirrors the Hermes `providers` payload; the standalone tracedecay
+ * server fills it with a static "tracedecay" stub.
  */
 export interface MemoryProviderStatus {
   memory_provider: string;

@@ -2,13 +2,13 @@
 //!
 //! Two data stores feed this tab:
 //!
-//! - **Global accounting DB** (`~/.tokensave/global.db`, the store behind
-//!   `tokensave gain` / `tokensave cost` / `tokensave monitor`): the
+//! - **Global accounting DB** (`~/.tracedecay/global.db`, the store behind
+//!   `tracedecay gain` / `tracedecay cost` / `tracedecay monitor`): the
 //!   `savings_ledger` event log, the legacy per-project `projects.tokens_saved`
 //!   lifetime counters, and the `turns` cost table (Claude Code transcripts,
 //!   cost computed from real usage data at ingest — labeled `actual`).
 //!   Ledger aggregation reuses [`GlobalDb::sum_savings`] /
-//!   [`GlobalDb::savings_history`], the same queries `tokensave gain` runs.
+//!   [`GlobalDb::savings_history`], the same queries `tracedecay gain` runs.
 //! - **Session store** (the LCM store the dashboard already serves —
 //!   project-local `sessions.db` by default): `sessions` +
 //!   `session_messages`, whose `model` and `metadata_json` columns drive
@@ -586,7 +586,7 @@ pub(crate) async fn sessions(
 /// Per-model token aggregates from the session store, per-day series for
 /// timestamped messages, plus the `turns` accounting (per-model cost and
 /// per-day cost — `actual`, computed from transcript usage at ingest by
-/// `tokensave cost`, reusing [`GlobalDb::cost_by_model_since`]).
+/// `tracedecay cost`, reusing [`GlobalDb::cost_by_model_since`]).
 pub(crate) async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,

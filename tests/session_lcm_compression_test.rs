@@ -1,12 +1,12 @@
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::{
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
     LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSourceRef,
     LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
 mod common;
 
@@ -705,7 +705,7 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
 
     let payload_ref = externalized_ref_from_placeholder(protected_args);
     let expanded = db
-        .lcm_store(tmp.path().join(".tokensave"))
+        .lcm_store(tmp.path().join(".tracedecay"))
         .lcm_expand_payload(
             "cursor",
             "session-tool-calls-protection",
@@ -795,7 +795,7 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = db
-        .lcm_store(tmp.path().join(".tokensave"))
+        .lcm_store(tmp.path().join(".tracedecay"))
         .lcm_expand_payload(
             "cursor",
             "session-media",
@@ -3781,7 +3781,7 @@ async fn compression_boundary_carry_over_requires_empty_target_session() {
         .await
         .expect_err("carry-over must fail when target session already has raw rows");
     assert!(
-        matches!(err, tokensave::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
+        matches!(err, tracedecay::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
     );
 }
 
@@ -3816,7 +3816,7 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
         &payload_body,
     );
     external_message.kind = Some("tool_result".to_string());
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     db.lcm_store(&storage_root)
         .ingest_raw_message(&external_message)
         .await
@@ -3867,10 +3867,10 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
     );
 
     let expansion = db
-        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-new".into(),
-            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
             content_slice: None,
@@ -3881,10 +3881,10 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
         .unwrap();
     assert!(expansion.content.starts_with("tool output"));
     assert!(db
-        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-old".into(),
-            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
             content_slice: None,
             source_offset: 0,
             source_limit: None,
@@ -3925,7 +3925,7 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
         &payload_body,
     );
     external_message.kind = Some("tool_result".to_string());
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     db.lcm_store(&storage_root)
         .ingest_raw_message(&external_message)
         .await
@@ -3967,7 +3967,7 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
         .await
         .expect_err("carry-over into a non-empty session must fail");
     assert!(
-        matches!(err, tokensave::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
+        matches!(err, tracedecay::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
     );
 
     // Source rows, payload ownership, and lifecycle state are untouched.
@@ -3997,10 +3997,10 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
     );
     assert_eq!(state_after.maintenance_debt, state_before.maintenance_debt);
     let payload_expansion = db
-        .lcm_expand(tokensave::sessions::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-old".into(),
-            target: tokensave::sessions::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
             content_slice: None,

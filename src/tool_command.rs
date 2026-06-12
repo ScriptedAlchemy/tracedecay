@@ -1,4 +1,4 @@
-//! `tokensave tool <name> [args...]` — invoke any MCP tool from the CLI.
+//! `tracedecay tool <name> [args...]` — invoke any MCP tool from the CLI.
 //!
 //! The CLI surface is **dynamic**: tool names and parameters come from the MCP
 //! tool definitions in [`crate::mcp::tools`]. Each MCP tool's JSON Schema is
@@ -16,7 +16,7 @@
 //!   that filters files within the project.
 //! - `--args <json>` — escape hatch. Treats the JSON value as the entire
 //!   argument object; mutually exclusive with `--key value` flags. Use for
-//!   complex shapes like `tokensave_multi_str_replace`'s array-of-pairs.
+//!   complex shapes like `tracedecay_multi_str_replace`'s array-of-pairs.
 //!
 //! Any value starting with `@` is read from the file at that path, which makes
 //! multi-line strings (replacements, ast-grep patterns, decision text) ergonomic.
@@ -26,8 +26,8 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use tokensave::errors::{Result, TokenSaveError};
-use tokensave::mcp::tools::{
+use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay::mcp::tools::{
     get_tool_definitions, handle_profile_scoped_lcm_tool_call, handle_tool_call, ToolDefinition,
 };
 
@@ -35,22 +35,22 @@ use crate::serve;
 
 /// Old CLI command names that don't match the MCP tool name. Keeps muscle
 /// memory working for the seven removed top-level commands. The right-hand
-/// side is the canonical MCP suffix (without the `tokensave_` prefix).
+/// side is the canonical MCP suffix (without the `tracedecay_` prefix).
 const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
 const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
-    "tokensave_lcm_status",
-    "tokensave_lcm_doctor",
-    "tokensave_lcm_load_session",
-    "tokensave_lcm_grep",
-    "tokensave_lcm_describe",
-    "tokensave_lcm_expand",
-    "tokensave_lcm_expand_query",
-    "tokensave_lcm_preflight",
-    "tokensave_lcm_compress",
-    "tokensave_lcm_session_boundary",
+    "tracedecay_lcm_status",
+    "tracedecay_lcm_doctor",
+    "tracedecay_lcm_load_session",
+    "tracedecay_lcm_grep",
+    "tracedecay_lcm_describe",
+    "tracedecay_lcm_expand",
+    "tracedecay_lcm_expand_query",
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_compress",
+    "tracedecay_lcm_session_boundary",
 ];
 
-/// Entry point for `tokensave tool ...`.
+/// Entry point for `tracedecay tool ...`.
 pub(crate) async fn run(
     project: Option<String>,
     name: Option<String>,
@@ -65,9 +65,9 @@ pub(crate) async fn run(
 
     let canonical = canonical_tool_name(&raw_name);
     let Some(def) = defs.iter().find(|d| d.name == canonical) else {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!(
-                "unknown tool: '{raw_name}'. Run `tokensave tool` to list available tools."
+                "unknown tool: '{raw_name}'. Run `tracedecay tool` to list available tools."
             ),
         });
     };
@@ -90,10 +90,10 @@ pub(crate) async fn run(
         return Ok(());
     }
 
-    // Same resolution as `tokensave sync`/`status`/`serve`: an explicit
+    // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
     // --project wins; otherwise walk up from cwd to the nearest initialised
     // project so the command works from subdirectories.
-    let project_path = tokensave::config::resolve_path_with_discovery(project.or(parsed_project));
+    let project_path = tracedecay::config::resolve_path_with_discovery(project.or(parsed_project));
     let cg = serve::ensure_initialized(&project_path).await?;
     let result = handle_tool_call(&cg, &def.name, tool_args, None, None).await?;
     print_tool_output(&result.value, raw_json);
@@ -110,18 +110,18 @@ struct ParsedInvocation {
     show_help: bool,
 }
 
-/// Normalize a user-supplied tool name to the canonical `tokensave_<suffix>`
+/// Normalize a user-supplied tool name to the canonical `tracedecay_<suffix>`
 /// form used by the MCP registry. Accepts aliases (e.g. `query` → `search`),
-/// strips a leading `tokensave_` if present, and converts dashes to
+/// strips a leading `tracedecay_` if present, and converts dashes to
 /// underscores so `dead-code` and `dead_code` both work.
 fn canonical_tool_name(raw: &str) -> String {
-    let trimmed = raw.strip_prefix("tokensave_").unwrap_or(raw);
+    let trimmed = raw.strip_prefix("tracedecay_").unwrap_or(raw);
     let normalized = trimmed.replace('-', "_");
     let mapped = NAME_ALIASES
         .iter()
         .find(|(k, _)| *k == normalized)
         .map_or(normalized.as_str(), |(_, v)| *v);
-    format!("tokensave_{mapped}")
+    format!("tracedecay_{mapped}")
 }
 
 fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
@@ -193,11 +193,11 @@ fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvoc
             "--args" => {
                 let json_str = take_value(&mut iter, "--args")?;
                 let value: Value =
-                    serde_json::from_str(&json_str).map_err(|e| TokenSaveError::Config {
+                    serde_json::from_str(&json_str).map_err(|e| TraceDecayError::Config {
                         message: format!("--args: invalid JSON: {e}"),
                     })?;
                 if !value.is_object() {
-                    return Err(TokenSaveError::Config {
+                    return Err(TraceDecayError::Config {
                         message: "--args must be a JSON object".to_string(),
                     });
                 }
@@ -217,7 +217,7 @@ fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvoc
 
     if let Some(value) = explicit_args {
         if !collected.is_empty() || !positionals.is_empty() {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: "--args cannot be combined with other tool flags or positionals"
                     .to_string(),
             });
@@ -246,12 +246,12 @@ fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvoc
         }
         let leftover: Vec<String> = positional_iter.collect();
         if !leftover.is_empty() {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
                     "unexpected positional argument(s): {} — use --key value flags or \
-                     run `tokensave tool {} --help`",
+                     run `tracedecay tool {} --help`",
                     leftover.join(" "),
-                    def.name.trim_start_matches("tokensave_")
+                    def.name.trim_start_matches("tracedecay_")
                 ),
             });
         }
@@ -259,11 +259,11 @@ fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvoc
 
     for req in &required {
         if !collected.contains_key(req) {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
                     "missing required parameter `--{}` for tool `{}`",
                     req.replace('_', "-"),
-                    def.name.trim_start_matches("tokensave_")
+                    def.name.trim_start_matches("tracedecay_")
                 ),
             });
         }
@@ -288,7 +288,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
         "boolean" => match raw {
             "true" | "1" | "yes" | "on" => Ok(Value::Bool(true)),
             "false" | "0" | "no" | "off" => Ok(Value::Bool(false)),
-            other => Err(TokenSaveError::Config {
+            other => Err(TraceDecayError::Config {
                 message: format!(
                     "--{}: expected a boolean (true/false), got `{other}`",
                     key.replace('_', "-")
@@ -298,7 +298,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
         "integer" => raw
             .parse::<i64>()
             .map(Value::from)
-            .map_err(|_| TokenSaveError::Config {
+            .map_err(|_| TraceDecayError::Config {
                 message: format!("--{}: expected integer, got `{raw}`", key.replace('_', "-")),
             }),
         // `serde_json::Number::from_f64(25.0).as_u64()` returns `None`, so MCP
@@ -312,7 +312,7 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
                     .ok()
                     .and_then(serde_json::Number::from_f64)
                     .map(Value::Number)
-                    .ok_or_else(|| TokenSaveError::Config {
+                    .ok_or_else(|| TraceDecayError::Config {
                         message: format!(
                             "--{}: expected a finite number, got `{raw}`",
                             key.replace('_', "-")
@@ -384,7 +384,7 @@ fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>) {
 
 /// Consume the next argument as a flag value or return a `missing value` error.
 fn take_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
-    iter.next().cloned().ok_or_else(|| TokenSaveError::Config {
+    iter.next().cloned().ok_or_else(|| TraceDecayError::Config {
         message: format!("flag `{flag}` requires a value"),
     })
 }
@@ -396,7 +396,7 @@ fn take_value(iter: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<Str
 fn resolve_at_file(raw: &str) -> Result<String> {
     if let Some(path) = raw.strip_prefix('@') {
         let buf = PathBuf::from(path);
-        std::fs::read_to_string(&buf).map_err(|e| TokenSaveError::Config {
+        std::fs::read_to_string(&buf).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read @{path}: {e}"),
         })
     } else {
@@ -425,7 +425,7 @@ fn print_tool_list(defs: &[ToolDefinition]) {
         groups.entry(group).or_default().push(def);
     }
 
-    println!("Available tools (run `tokensave tool <name> --help` for parameters):\n");
+    println!("Available tools (run `tracedecay tool <name> --help` for parameters):\n");
 
     if !always.is_empty() {
         println!("[always-loaded]");
@@ -453,9 +453,9 @@ fn print_tool_list(defs: &[ToolDefinition]) {
     }
 }
 
-/// Display name without the `tokensave_` prefix.
+/// Display name without the `tracedecay_` prefix.
 fn short_name(full: &str) -> &str {
-    full.trim_start_matches("tokensave_")
+    full.trim_start_matches("tracedecay_")
 }
 
 /// First line of a (possibly multi-line) description, truncated for layout.
@@ -473,78 +473,78 @@ fn first_line(s: &str) -> String {
 /// `edit`, `memory`). Tools that don't match any prefix fall under `other`.
 fn group_for(def: &ToolDefinition) -> &'static str {
     let n = def.name.as_str();
-    if n.starts_with("tokensave_branch_")
-        || n == "tokensave_commit_context"
-        || n == "tokensave_pr_context"
-        || n == "tokensave_changelog"
-        || n == "tokensave_diff_context"
-        || n == "tokensave_affected"
+    if n.starts_with("tracedecay_branch_")
+        || n == "tracedecay_commit_context"
+        || n == "tracedecay_pr_context"
+        || n == "tracedecay_changelog"
+        || n == "tracedecay_diff_context"
+        || n == "tracedecay_affected"
     {
         "git & history"
-    } else if n == "tokensave_str_replace"
-        || n == "tokensave_multi_str_replace"
-        || n == "tokensave_insert_at"
-        || n == "tokensave_ast_grep_rewrite"
-        || n == "tokensave_replace_symbol"
-        || n == "tokensave_insert_at_symbol"
+    } else if n == "tracedecay_str_replace"
+        || n == "tracedecay_multi_str_replace"
+        || n == "tracedecay_insert_at"
+        || n == "tracedecay_ast_grep_rewrite"
+        || n == "tracedecay_replace_symbol"
+        || n == "tracedecay_insert_at_symbol"
     {
         "edit"
-    } else if n == "tokensave_fact_store"
-        || n == "tokensave_fact_feedback"
-        || n == "tokensave_memory_status"
-        || n == "tokensave_session_start"
-        || n == "tokensave_session_end"
+    } else if n == "tracedecay_fact_store"
+        || n == "tracedecay_fact_feedback"
+        || n == "tracedecay_memory_status"
+        || n == "tracedecay_session_start"
+        || n == "tracedecay_session_end"
     {
         "memory & session"
-    } else if n == "tokensave_health"
-        || n == "tokensave_runtime"
-        || n == "tokensave_dsm"
-        || n == "tokensave_test_risk"
-        || n == "tokensave_test_map"
-        || n == "tokensave_gini"
-        || n == "tokensave_dependency_depth"
-        || n == "tokensave_redundancy"
+    } else if n == "tracedecay_health"
+        || n == "tracedecay_runtime"
+        || n == "tracedecay_dsm"
+        || n == "tracedecay_test_risk"
+        || n == "tracedecay_test_map"
+        || n == "tracedecay_gini"
+        || n == "tracedecay_dependency_depth"
+        || n == "tracedecay_redundancy"
     {
         "health"
-    } else if n == "tokensave_callers"
-        || n == "tokensave_callees"
-        || n == "tokensave_callers_for"
-        || n == "tokensave_call_chain"
-        || n == "tokensave_impact"
-        || n == "tokensave_file_dependents"
-        || n == "tokensave_by_qualified_name"
-        || n == "tokensave_signature"
-        || n == "tokensave_impls"
-        || n == "tokensave_implementations"
-        || n == "tokensave_derives"
-        || n == "tokensave_similar"
-        || n == "tokensave_rename_preview"
-        || n == "tokensave_find_exact_symbol"
-        || n == "tokensave_type_hierarchy"
+    } else if n == "tracedecay_callers"
+        || n == "tracedecay_callees"
+        || n == "tracedecay_callers_for"
+        || n == "tracedecay_call_chain"
+        || n == "tracedecay_impact"
+        || n == "tracedecay_file_dependents"
+        || n == "tracedecay_by_qualified_name"
+        || n == "tracedecay_signature"
+        || n == "tracedecay_impls"
+        || n == "tracedecay_implementations"
+        || n == "tracedecay_derives"
+        || n == "tracedecay_similar"
+        || n == "tracedecay_rename_preview"
+        || n == "tracedecay_find_exact_symbol"
+        || n == "tracedecay_type_hierarchy"
     {
         "graph"
-    } else if n == "tokensave_diagnose"
-        || n == "tokensave_diagnostics"
-        || n == "tokensave_run_affected_tests"
+    } else if n == "tracedecay_diagnose"
+        || n == "tracedecay_diagnostics"
+        || n == "tracedecay_run_affected_tests"
     {
         "workflow"
-    } else if n == "tokensave_dead_code"
-        || n == "tokensave_unused_imports"
-        || n == "tokensave_module_api"
-        || n == "tokensave_circular"
-        || n == "tokensave_hotspots"
-        || n == "tokensave_rank"
-        || n == "tokensave_largest"
-        || n == "tokensave_coupling"
-        || n == "tokensave_inheritance_depth"
-        || n == "tokensave_distribution"
-        || n == "tokensave_recursion"
-        || n == "tokensave_complexity"
-        || n == "tokensave_doc_coverage"
-        || n == "tokensave_god_class"
-        || n == "tokensave_unsafe_patterns"
-        || n == "tokensave_constructors"
-        || n == "tokensave_field_sites"
+    } else if n == "tracedecay_dead_code"
+        || n == "tracedecay_unused_imports"
+        || n == "tracedecay_module_api"
+        || n == "tracedecay_circular"
+        || n == "tracedecay_hotspots"
+        || n == "tracedecay_rank"
+        || n == "tracedecay_largest"
+        || n == "tracedecay_coupling"
+        || n == "tracedecay_inheritance_depth"
+        || n == "tracedecay_distribution"
+        || n == "tracedecay_recursion"
+        || n == "tracedecay_complexity"
+        || n == "tracedecay_doc_coverage"
+        || n == "tracedecay_god_class"
+        || n == "tracedecay_unsafe_patterns"
+        || n == "tracedecay_constructors"
+        || n == "tracedecay_field_sites"
     {
         "analysis"
     } else {
@@ -554,7 +554,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
 
 /// Print one tool's description and parameter table.
 fn print_tool_help(def: &ToolDefinition) {
-    println!("tokensave tool {}", short_name(&def.name));
+    println!("tracedecay tool {}", short_name(&def.name));
     println!();
     println!("{}", def.description);
     println!();
@@ -621,15 +621,18 @@ mod tests {
     fn def(name: &str) -> ToolDefinition {
         defs()
             .into_iter()
-            .find(|d| d.name == format!("tokensave_{name}"))
+            .find(|d| d.name == format!("tracedecay_{name}"))
             .unwrap()
     }
 
     #[test]
     fn canonicalizes_alias_and_strip_prefix() {
-        assert_eq!(canonical_tool_name("query"), "tokensave_search");
-        assert_eq!(canonical_tool_name("tokensave_search"), "tokensave_search");
-        assert_eq!(canonical_tool_name("dead-code"), "tokensave_dead_code");
+        assert_eq!(canonical_tool_name("query"), "tracedecay_search");
+        assert_eq!(
+            canonical_tool_name("tracedecay_search"),
+            "tracedecay_search"
+        );
+        assert_eq!(canonical_tool_name("dead-code"), "tracedecay_dead_code");
     }
 
     #[test]
@@ -773,7 +776,7 @@ mod tests {
     #[test]
     fn profile_scoped_lcm_dispatch_detects_allowlisted_tool_and_scope() {
         assert!(is_profile_scoped_lcm_dispatch(
-            "tokensave_lcm_status",
+            "tracedecay_lcm_status",
             &json!({"storage_scope": "hermes_profile"})
         ));
     }
@@ -781,11 +784,11 @@ mod tests {
     #[test]
     fn profile_scoped_lcm_dispatch_rejects_non_profile_or_non_lcm_calls() {
         assert!(!is_profile_scoped_lcm_dispatch(
-            "tokensave_lcm_status",
+            "tracedecay_lcm_status",
             &json!({"storage_scope": "project_local"})
         ));
         assert!(!is_profile_scoped_lcm_dispatch(
-            "tokensave_status",
+            "tracedecay_status",
             &json!({"storage_scope": "hermes_profile"})
         ));
     }

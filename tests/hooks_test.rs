@@ -1,4 +1,4 @@
-use tokensave::hooks::{
+use tracedecay::hooks::{
     build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
     codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
     cursor_session_start_json, cursor_shell_sync_plan, cursor_should_run_sync,
@@ -78,7 +78,7 @@ fn test_blocks_callees_of_prompt() {
 
 #[test]
 fn test_blocks_symbol_lookup_prompt() {
-    let input = r#"{"prompt": "do a symbol lookup for TokenSave"}"#;
+    let input = r#"{"prompt": "do a symbol lookup for TraceDecay"}"#;
     let result = evaluate_hook_decision(input);
     assert!(is_blocked(&result));
 }
@@ -135,8 +135,8 @@ fn test_block_response_has_reason() {
     let input = r#"{"subagent_type": "Explore"}"#;
     let result = evaluate_hook_decision(input);
     let reason = get_block_reason(&result);
-    assert!(reason.contains("tokensave MCP tools"));
-    assert!(reason.contains("tokensave hint:"));
+    assert!(reason.contains("tracedecay MCP tools"));
+    assert!(reason.contains("tracedecay hint:"));
 }
 
 #[test]
@@ -167,8 +167,8 @@ fn test_kiro_blocks_delegate_code_research_task() {
         }
     }"#;
     let reason = evaluate_kiro_pre_tool_use(input).unwrap();
-    assert!(reason.contains("tokensave MCP tools"));
-    assert!(reason.contains("tokensave hint:"));
+    assert!(reason.contains("tracedecay MCP tools"));
+    assert!(reason.contains("tracedecay hint:"));
 }
 
 #[test]
@@ -227,11 +227,11 @@ fn test_cursor_subagent_start_blocks_explore_research_task() {
     assert!(v["user_message"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave MCP tools"));
+        .contains("tracedecay MCP tools"));
     assert!(v["user_message"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave hint:"));
+        .contains("tracedecay hint:"));
     assert!(
         v.get("hookSpecificOutput").is_none(),
         "Cursor hook output must use Cursor's documented subagentStart fields"
@@ -250,14 +250,14 @@ fn test_cursor_subagent_start_allows_execution_task() {
 }
 
 #[test]
-fn test_cursor_subagent_start_allows_tokensave_plugin_agents() {
-    // The plugin's own agents are tokensave-first by construction and must
+fn test_cursor_subagent_start_allows_tracedecay_plugin_agents() {
+    // The plugin's own agents are tracedecay-first by construction and must
     // never be denied, even with a research-looking task.
     for subagent_type in [
         "code-explorer",
         "code-health-auditor",
         "session-historian",
-        "tokensave:code-explorer",
+        "tracedecay:code-explorer",
         "CodeExplorer",
     ] {
         let input = format!(
@@ -286,16 +286,16 @@ fn test_cursor_post_tool_use_hints_for_grep_search() {
         "session_id": "cursor-test"
     }"#;
 
-    let output = evaluate_cursor_post_tool_use(input).expect("Grep should get a tokensave hint");
+    let output = evaluate_cursor_post_tool_use(input).expect("Grep should get a tracedecay hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave hint:"));
+        .contains("tracedecay hint:"));
     assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave_search"));
+        .contains("tracedecay_search"));
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
 }
@@ -316,7 +316,7 @@ fn test_cursor_post_tool_use_hints_for_shell_rg() {
     assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave hint:"));
+        .contains("tracedecay hint:"));
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn test_cursor_post_tool_use_hints_for_semantic_search() {
     assert!(v["additional_context"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave_context"));
+        .contains("tracedecay_context"));
 }
 
 #[test]
@@ -352,15 +352,15 @@ fn test_cursor_post_tool_use_hints_for_single_file_read() {
     let output = evaluate_cursor_post_tool_use(input).expect("Read should get a soft hint");
     let v: serde_json::Value = serde_json::from_str(&output).unwrap();
     let context = v["additional_context"].as_str().unwrap_or_default();
-    assert!(context.contains("tokensave_outline"));
-    assert!(context.contains("tokensave_body"));
+    assert!(context.contains("tracedecay_outline"));
+    assert!(context.contains("tracedecay_body"));
 }
 
 #[test]
 fn test_cursor_post_tool_use_dedupes_hints_per_session() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
-    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
     let root = serde_json::to_string(dir.path().to_str().unwrap()).unwrap();
     let grep_event = format!(
         r#"{{
@@ -372,10 +372,10 @@ fn test_cursor_post_tool_use_dedupes_hints_per_session() {
         }}"#
     );
 
-    let first = tokensave::hooks::cursor_post_tool_use_decision(&grep_event);
+    let first = tracedecay::hooks::cursor_post_tool_use_decision(&grep_event);
     assert!(first.is_some(), "first hint in a session must be emitted");
     assert!(
-        tokensave::hooks::cursor_post_tool_use_decision(&grep_event).is_none(),
+        tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_none(),
         "an identical hint must be deduped within the session"
     );
 
@@ -390,20 +390,20 @@ fn test_cursor_post_tool_use_dedupes_hints_per_session() {
         }}"#
     );
     assert!(
-        tokensave::hooks::cursor_post_tool_use_decision(&read_event).is_some(),
+        tracedecay::hooks::cursor_post_tool_use_decision(&read_event).is_some(),
         "a different hint category must still be emitted once"
     );
 
     // A new session starts fresh.
     let other_session = grep_event.replace("session-a", "session-b");
     assert!(
-        tokensave::hooks::cursor_post_tool_use_decision(&other_session).is_some(),
+        tracedecay::hooks::cursor_post_tool_use_decision(&other_session).is_some(),
         "a new session must get the hint again"
     );
 
     assert!(
-        dir.path().join(".tokensave/tool_hints_seen.json").exists(),
-        "dedupe state must be persisted under .tokensave/"
+        dir.path().join(".tracedecay/tool_hints_seen.json").exists(),
+        "dedupe state must be persisted under .tracedecay/"
     );
 }
 
@@ -421,8 +421,8 @@ fn test_cursor_post_tool_use_decision_silent_without_index() {
         }}"#
     );
     assert!(
-        tokensave::hooks::cursor_post_tool_use_decision(&event).is_none(),
-        "hints must not fire in workspaces without a tokensave index"
+        tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none(),
+        "hints must not fire in workspaces without a tracedecay index"
     );
 }
 
@@ -443,8 +443,8 @@ fn test_cursor_post_tool_use_ignores_unrelated_tools() {
 #[test]
 fn test_cursor_project_root_uses_workspace_roots() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
-    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
     let input = format!(
         r#"{{
             "hook_event_name": "beforeSubmitPrompt",
@@ -463,9 +463,9 @@ fn test_cursor_project_root_uses_workspace_roots() {
 fn test_cursor_project_root_uses_file_path_parent() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
-    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
     let file = src.join("lib.rs");
     let input = format!(
         r#"{{
@@ -486,10 +486,10 @@ fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let root_a = dir.path().join("root-a");
     let root_b = dir.path().join("root-b");
-    std::fs::create_dir_all(root_a.join(".tokensave")).unwrap();
-    std::fs::create_dir_all(root_b.join(".tokensave")).unwrap();
-    std::fs::write(root_a.join(".tokensave/tokensave.db"), "").unwrap();
-    std::fs::write(root_b.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(root_a.join(".tracedecay")).unwrap();
+    std::fs::create_dir_all(root_b.join(".tracedecay")).unwrap();
+    std::fs::write(root_a.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::write(root_b.join(".tracedecay/tracedecay.db"), "").unwrap();
     let cwd_b = root_b.join("src");
     std::fs::create_dir_all(&cwd_b).unwrap();
 
@@ -565,7 +565,7 @@ fn test_cursor_after_file_edit_rel_paths_targets_edited_files() {
         serde_json::to_string(edited.to_str().unwrap()).unwrap()
     );
 
-    let rels = tokensave::hooks::cursor_after_file_edit_rel_paths(&input, &root);
+    let rels = tracedecay::hooks::cursor_after_file_edit_rel_paths(&input, &root);
     assert_eq!(rels, vec!["src/lib.rs".to_string()]);
 }
 
@@ -578,7 +578,7 @@ fn test_cursor_after_file_edit_rel_paths_skips_paths_outside_root() {
         "file_path": "/etc/passwd"
     }"#;
 
-    let rels = tokensave::hooks::cursor_after_file_edit_rel_paths(input, &root);
+    let rels = tracedecay::hooks::cursor_after_file_edit_rel_paths(input, &root);
     assert!(
         rels.is_empty(),
         "paths outside the project root must be ignored, got {rels:?}"
@@ -596,8 +596,8 @@ fn test_cursor_should_run_sync_respects_debounce_window() {
 #[test]
 fn test_build_cursor_session_context_uninitialized_suggests_init() {
     let context = build_cursor_session_context(false, None, None);
-    assert!(context.contains("tokensave init"));
-    assert!(context.contains("tokensave MCP tools"));
+    assert!(context.contains("tracedecay init"));
+    assert!(context.contains("tracedecay MCP tools"));
     assert!(
         !context.contains("Workflow skills:"),
         "uninitialized workspaces should not advertise skills: {context}"
@@ -609,33 +609,33 @@ fn test_build_cursor_session_context_initialized_includes_freshness() {
     let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
     assert!(context.contains("last indexed 2m ago"));
     assert!(
-        !context.contains("tokensave init"),
+        !context.contains("tracedecay init"),
         "initialized workspaces should not be told to run init: {context}"
     );
     // The always-applied plugin rule carries the tool-routing steering; the
     // session context must stay lean and not repeat the tool enumeration.
     assert!(
-        !context.contains("tokensave_callers"),
+        !context.contains("tracedecay_callers"),
         "session context should not duplicate the rule's tool list: {context}"
     );
 }
 
 #[test]
 fn test_build_codex_session_context_carries_full_steering() {
-    // Codex has no always-applied tokensave rule, so its session context must
+    // Codex has no always-applied tracedecay rule, so its session context must
     // keep the full tool-routing steering.
-    let context = tokensave::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
-    assert!(context.contains("tokensave_context"));
-    assert!(context.contains("tokensave_callers"));
+    let context = tracedecay::hooks::build_codex_session_context(true, Some("last indexed 2m ago"));
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay_callers"));
     assert!(context.contains("last indexed 2m ago"));
-    let uninit = tokensave::hooks::build_codex_session_context(false, None);
-    assert!(uninit.contains("tokensave init"));
+    let uninit = tracedecay::hooks::build_codex_session_context(false, None);
+    assert!(uninit.contains("tracedecay init"));
 }
 
 #[test]
 fn test_build_cursor_session_context_lists_skills_and_tokens_saved() {
     let context = build_cursor_session_context(true, None, Some(12_345));
-    assert!(context.contains("Workflow skills: tokensave:"));
+    assert!(context.contains("Workflow skills: tracedecay:"));
     assert!(context.contains("searching-for-code"));
     assert!(context.contains("recalling-session-context"));
     assert!(context.contains("12345"));
@@ -661,7 +661,7 @@ fn test_cursor_session_start_json_sets_context_and_env_root() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["additional_context"], "hello context");
     assert_eq!(
-        v["env"]["TOKENSAVE_PROJECT_ROOT"].as_str(),
+        v["env"]["TRACEDECAY_PROJECT_ROOT"].as_str(),
         Some(dir.path().to_string_lossy().as_ref())
     );
 }
@@ -671,7 +671,7 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
     let json = cursor_session_start_json(None, "ctx");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["additional_context"], "ctx");
-    assert!(v["env"].get("TOKENSAVE_PROJECT_ROOT").is_none());
+    assert!(v["env"].get("TRACEDECAY_PROJECT_ROOT").is_none());
 }
 
 #[test]
@@ -801,11 +801,11 @@ fn test_codex_subagent_start_redirects_explore_research_agent() {
     assert!(v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave MCP tools"));
+        .contains("tracedecay MCP tools"));
     assert!(v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap_or_default()
-        .contains("tokensave hint:"));
+        .contains("tracedecay hint:"));
     // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
     assert!(
         v.get("permission").is_none(),
@@ -881,8 +881,8 @@ fn test_codex_apply_patch_rel_paths_skips_paths_outside_root() {
 #[test]
 fn test_codex_project_root_uses_cwd() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tokensave")).unwrap();
-    std::fs::write(dir.path().join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
     let input = format!(
         r#"{{
             "hook_event_name": "PostToolUse",

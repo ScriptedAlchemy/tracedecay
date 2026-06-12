@@ -168,8 +168,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if is_explore_subagent(input) {
         return Some(hint(
             HintCategory::ExploreSubagent,
-            "For code research subagents, consider adding tokensave MCP context before broad exploration.",
-            "tokensave_context can gather focused code context, while tokensave_search, tokensave_callers, and tokensave_impact can answer common research questions without a broad scan.",
+            "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
+            "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
             true,
         ));
     }
@@ -177,8 +177,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if is_semantic_search_tool(input) {
         return Some(hint(
             HintCategory::SemanticSearch,
-            "For conceptual codebase questions, consider tokensave_context.",
-            "tokensave_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tokensave_search ranks symbols by name/keyword.",
+            "For conceptual codebase questions, consider tracedecay_context.",
+            "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword.",
             true,
         ));
     }
@@ -190,8 +190,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     {
         return Some(hint(
             HintCategory::Search,
-            "For codebase search, consider using tokensave_search or tokensave_context.",
-            "tokensave_search uses the existing index for code search; tokensave_context can gather focused surrounding context when a text search is only a starting point.",
+            "For codebase search, consider using tracedecay_search or tracedecay_context.",
+            "tracedecay_search uses the existing index for code search; tracedecay_context can gather focused surrounding context when a text search is only a starting point.",
             false,
         ));
     }
@@ -203,8 +203,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     {
         return Some(hint(
             HintCategory::Search,
-            "For codebase search, consider using tokensave_search or tokensave_context.",
-            "tokensave_search uses the existing index for code search; tokensave_context can gather focused surrounding context when a text search is only a starting point.",
+            "For codebase search, consider using tracedecay_search or tracedecay_context.",
+            "tracedecay_search uses the existing index for code search; tracedecay_context can gather focused surrounding context when a text search is only a starting point.",
             false,
         ));
     }
@@ -216,8 +216,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     {
         return Some(hint(
             HintCategory::FileLookup,
-            "For finding files by role or path, consider using tokensave_files.",
-            "tokensave_files can list indexed files and narrow file lookup before opening individual files.",
+            "For finding files by role or path, consider using tracedecay_files.",
+            "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
             false,
         ));
     }
@@ -225,8 +225,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if is_single_file_read(input) {
         return Some(hint(
             HintCategory::FileRead,
-            "Before reading whole files, consider tokensave_outline, tokensave_body, or tokensave_read.",
-            "tokensave_outline gives a file's table of contents, tokensave_body returns one symbol's source, and tokensave_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read.",
+            "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
+            "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read.",
             true,
         ));
     }
@@ -240,7 +240,7 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
         return Some(hint(
             HintCategory::CallGraph,
             "For caller or callee questions, consider using the indexed call graph.",
-            "tokensave_callers answers who calls a symbol; tokensave_callees answers what a symbol calls.",
+            "tracedecay_callers answers who calls a symbol; tracedecay_callees answers what a symbol calls.",
             false,
         ));
     }
@@ -248,8 +248,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if asks_for_impact(&text) {
         return Some(hint(
             HintCategory::Impact,
-            "For impact or change-risk questions, consider using tokensave impact tools.",
-            "tokensave_impact and tokensave_affected can identify related code and likely affected files from the index.",
+            "For impact or change-risk questions, consider using tracedecay impact tools.",
+            "tracedecay_impact and tracedecay_affected can identify related code and likely affected files from the index.",
             false,
         ));
     }
@@ -257,8 +257,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if asks_for_broad_read(&text) {
         return Some(hint(
             HintCategory::BroadRead,
-            "For broad codebase reading, consider starting with focused tokensave context.",
-            "tokensave_context can gather relevant code slices without reading entire directories or the whole repository.",
+            "For broad codebase reading, consider starting with focused tracedecay context.",
+            "tracedecay_context can gather relevant code slices without reading entire directories or the whole repository.",
             false,
         ));
     }
@@ -266,8 +266,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if asks_for_symbol_lookup(&text) {
         return Some(hint(
             HintCategory::SymbolLookup,
-            "For symbol lookup, consider using tokensave indexed symbol tools.",
-            "tokensave_context and tokensave_node can locate definitions and nearby relationships from the code graph.",
+            "For symbol lookup, consider using tracedecay indexed symbol tools.",
+            "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
             false,
         ));
     }
@@ -275,8 +275,8 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     if asks_for_file_lookup(&text) {
         return Some(hint(
             HintCategory::FileLookup,
-            "For finding files by role or path, consider using tokensave_files.",
-            "tokensave_files can list indexed files and narrow file lookup before opening individual files.",
+            "For finding files by role or path, consider using tracedecay_files.",
+            "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
             false,
         ));
     }
@@ -478,7 +478,7 @@ mod tests {
         for name in ["SemanticSearch", "codebase_search", "Codebase Search"] {
             let hint = decide_hint(&input_for_tool(name)).unwrap();
             assert_eq!(hint.category, HintCategory::SemanticSearch, "{name}");
-            assert!(hint.context.contains("tokensave_context"), "{name}");
+            assert!(hint.context.contains("tracedecay_context"), "{name}");
             assert!(hint.nonblocking, "semantic-search hints must stay soft");
         }
     }
@@ -489,7 +489,7 @@ mod tests {
         input.file_path = Some("src/lib.rs".to_string());
         let hint = decide_hint(&input).unwrap();
         assert_eq!(hint.category, HintCategory::FileRead);
-        assert!(hint.message.contains("tokensave_outline"));
+        assert!(hint.message.contains("tracedecay_outline"));
         assert!(hint.nonblocking, "read hints must stay soft");
     }
 

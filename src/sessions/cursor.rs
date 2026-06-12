@@ -19,7 +19,7 @@ pub struct CursorTranscriptIngestStats {
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
-    crate::config::get_tokensave_dir(project_root).join(PROJECT_SESSION_DB_FILENAME)
+    crate::config::get_tracedecay_dir(project_root).join(PROJECT_SESSION_DB_FILENAME)
 }
 
 pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
@@ -27,22 +27,33 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
-    hermes_home
-        .join(".tokensave")
-        .join(PROJECT_SESSION_DB_FILENAME)
+    // Prefer .tracedecay; fall back to an existing legacy .tokensave; default
+    // to .tracedecay for fresh profiles.
+    let primary = hermes_home.join(".tracedecay");
+    let base = if primary.is_dir() {
+        primary
+    } else {
+        let legacy = hermes_home.join(".tokensave");
+        if legacy.is_dir() {
+            legacy
+        } else {
+            primary
+        }
+    };
+    base.join(PROJECT_SESSION_DB_FILENAME)
 }
 
 pub fn resolve_hermes_profile_session_db_path(
     hermes_home: &Path,
 ) -> std::result::Result<PathBuf, String> {
-    Ok(resolve_hermes_profile_tokensave_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
+    Ok(resolve_hermes_profile_tracedecay_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
 }
 
 /// Typed outcome of [`resolve_hermes_profile_session_db_readonly`].
 pub enum HermesProfileDbReadOnly {
     /// sessions.db exists and is ready to open read-only.
     Exists(PathBuf),
-    /// The `.tokensave` dir and path are valid but sessions.db is absent —
+    /// The `.tracedecay` dir and path are valid but sessions.db is absent —
     /// nothing has been ingested yet. Carries the path the store would live
     /// at so callers can report it.
     NotIngested(PathBuf),
@@ -53,9 +64,9 @@ pub enum HermesProfileDbReadOnly {
 
 /// Resolves the path to the hermes profile session DB for read-only access,
 /// distinguishing "valid path but file not yet created" from security /
-/// configuration errors such as symlink escapes or non-directory `.tokensave`.
+/// configuration errors such as symlink escapes or non-directory `.tracedecay`.
 pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesProfileDbReadOnly {
-    let dir = match resolve_hermes_profile_tokensave_dir(hermes_home, false) {
+    let dir = match resolve_hermes_profile_tracedecay_dir(hermes_home, false) {
         Ok(dir) => dir,
         Err(msg) => return HermesProfileDbReadOnly::ConfigError(msg),
     };
@@ -67,52 +78,74 @@ pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesP
     }
 }
 
-fn resolve_hermes_profile_tokensave_dir(
+/// Resolves the brand data directory within a Hermes profile home.
+///
+/// Prefers `.tracedecay` when it already exists; falls back to the legacy
+/// `.tokensave` directory for existing installs (backward-compat dual-accept
+/// site — see rebrand notes). New directories are always created as
+/// `.tracedecay`.
+///
+/// LEGACY-COMPAT: hermes_home/.tokensave accepted alongside .tracedecay.
+fn resolve_hermes_profile_tracedecay_dir(
     hermes_home: &Path,
     create_missing: bool,
 ) -> std::result::Result<PathBuf, String> {
-    let tokensave_dir = hermes_home.join(".tokensave");
-    match std::fs::symlink_metadata(&tokensave_dir) {
+    let tracedecay_dir = hermes_home.join(".tracedecay");
+    let legacy_dir = hermes_home.join(".tokensave");
+
+    // Pick which directory to use: prefer .tracedecay if it already exists;
+    // accept legacy .tokensave for existing installs; default to .tracedecay
+    // for new ones so create_missing writes the new name.
+    let brand_dir = match (
+        std::fs::symlink_metadata(&tracedecay_dir),
+        std::fs::symlink_metadata(&legacy_dir),
+    ) {
+        (Ok(_), _) => tracedecay_dir.clone(),
+        (Err(e1), Ok(_)) if e1.kind() == std::io::ErrorKind::NotFound => legacy_dir.clone(),
+        _ => tracedecay_dir.clone(),
+    };
+
+    match std::fs::symlink_metadata(&brand_dir) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
                 return Err(format!(
-                    "hermes_profile LCM storage rejects symlinked .tokensave directory: {}",
-                    tokensave_dir.display()
+                    "hermes_profile LCM storage rejects symlinked .tracedecay directory: {}",
+                    brand_dir.display()
                 ));
             }
             if !metadata.is_dir() {
                 return Err(format!(
-                    "hermes_profile LCM storage requires .tokensave to be a directory: {}",
-                    tokensave_dir.display()
+                    "hermes_profile LCM storage requires .tracedecay to be a directory: {}",
+                    brand_dir.display()
                 ));
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_missing => {
-            std::fs::create_dir_all(&tokensave_dir).map_err(|err| {
+            std::fs::create_dir_all(&brand_dir).map_err(|err| {
                 format!(
-                    "could not create hermes_profile .tokensave directory {}: {err}",
-                    tokensave_dir.display()
+                    "could not create hermes_profile .tracedecay directory {}: {err}",
+                    brand_dir.display()
                 )
             })?;
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!(
-                "hermes_profile LCM storage requires an existing .tokensave directory: {}",
-                tokensave_dir.display()
+                "hermes_profile LCM storage requires an existing .tracedecay directory: {}",
+                brand_dir.display()
             ));
         }
         Err(err) => {
             return Err(format!(
-                "could not inspect hermes_profile .tokensave directory {}: {err}",
-                tokensave_dir.display()
+                "could not inspect hermes_profile .tracedecay directory {}: {err}",
+                brand_dir.display()
             ));
         }
     }
 
-    let canonical_parent = tokensave_dir.canonicalize().map_err(|err| {
+    let canonical_parent = brand_dir.canonicalize().map_err(|err| {
         format!(
-            "could not resolve hermes_profile .tokensave directory {}: {err}",
-            tokensave_dir.display()
+            "could not resolve hermes_profile .tracedecay directory {}: {err}",
+            brand_dir.display()
         )
     })?;
     if !canonical_parent.starts_with(hermes_home) {
@@ -312,7 +345,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// Startup catch-up source for Cursor transcripts.
 ///
 /// The live hook path ([`ingest_cursor_transcript_event`]) only sees turns
-/// that fire while the tokensave hooks are installed, so transcripts written
+/// that fire while the tracedecay hooks are installed, so transcripts written
 /// before a project was indexed could never ingest. This source sweeps
 /// `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` for the slug that
 /// encodes `project_root`, feeding every file through the same
@@ -346,8 +379,8 @@ impl TranscriptSource for CursorSweepSource {
 
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         // Only indexed projects keep a project-local session store; roots
-        // without `.tokensave` are skipped outright.
-        if !crate::config::get_tokensave_dir(project_root).is_dir() {
+        // without a tracedecay data dir are skipped outright.
+        if !crate::config::get_tracedecay_dir(project_root).is_dir() {
             return Vec::new();
         }
         let Some(slug) = cursor_project_slug(project_root) else {

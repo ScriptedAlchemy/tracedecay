@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 /// Window over which `cpu_percent` is sampled.
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
@@ -28,8 +28,8 @@ const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
 pub struct RuntimeSnapshot {
     /// Captured at (Unix epoch seconds).
     pub captured_at: u64,
-    /// `tokensave` build version (e.g. `6.0.0`).
-    pub tokensave_version: &'static str,
+    /// `tracedecay` build version (e.g. `6.0.0`).
+    pub tracedecay_version: &'static str,
     /// Host OS short name (`macos`, `linux`, `windows`, …).
     pub host_os: &'static str,
     pub process: ProcessSnapshot,
@@ -55,7 +55,7 @@ pub struct ProcessSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseSnapshot {
     pub project_root: PathBuf,
-    /// `<root>/.tokensave/<branch>.db` or whichever DB is being served.
+    /// `<root>/.tracedecay/<branch>.db` or whichever DB is being served.
     pub db_path: PathBuf,
     pub db_size_bytes: u64,
     /// Size of the WAL (`-wal`) file alongside the DB, when present.
@@ -80,7 +80,7 @@ pub struct DatabaseSnapshot {
 /// mode. Both are best-effort — failures degrade to zeroes / `None`
 /// rather than failing the whole snapshot, because the value of this
 /// tool is recording *what's available* during a spike.
-pub async fn collect(cg: &crate::tokensave::TokenSave) -> Result<RuntimeSnapshot> {
+pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
     let process = sample_process();
     let database = sample_database(cg).await?;
     let captured_at = std::time::SystemTime::now()
@@ -88,7 +88,7 @@ pub async fn collect(cg: &crate::tokensave::TokenSave) -> Result<RuntimeSnapshot
         .map_or(0, |d| d.as_secs());
     Ok(RuntimeSnapshot {
         captured_at,
-        tokensave_version: env!("CARGO_PKG_VERSION"),
+        tracedecay_version: env!("CARGO_PKG_VERSION"),
         host_os: std::env::consts::OS,
         process,
         database,
@@ -102,7 +102,7 @@ pub fn to_pretty_json(snap: &RuntimeSnapshot) -> String {
 }
 
 /// Render a `RuntimeSnapshot` as a human-readable status block for
-/// terminals. Mirrors the structure of `tokensave status` so it's
+/// terminals. Mirrors the structure of `tracedecay status` so it's
 /// familiar to users running the CLI manually.
 pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let p = &snap.process;
@@ -118,7 +118,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         0.0
     };
     format!(
-        "tokensave {ver} runtime snapshot ({os})\n\
+        "tracedecay {ver} runtime snapshot ({os})\n\
          ────────────────────────────────────────\n\
            pid              {pid}\n\
            rss              {rss}  ({rss_pct:.2}% of system)\n\
@@ -136,7 +136,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            db / source      {ratio:.1}×\n\
            nodes / edges    {nodes} / {edges}\n\
         ",
-        ver = snap.tokensave_version,
+        ver = snap.tracedecay_version,
         os = snap.host_os,
         pid = p.pid,
         rss = bytes_human(p.rss_bytes),
@@ -169,7 +169,7 @@ fn sample_process() -> ProcessSnapshot {
     // Refresh only *our own* process. The previous implementation passed
     // `.with_processes(..)` to `System::new_with_specifics`, which enumerates
     // and samples every process on the host — by far the heaviest part of the
-    // reported Windows `tokensave_runtime` crash (STATUS_STACK_OVERFLOW on a
+    // reported Windows `tracedecay_runtime` crash (STATUS_STACK_OVERFLOW on a
     // host with a large process table). The primary fix for that crash is the
     // explicit-stack entrypoint in `main.rs` (`ASYNC_STACK_BYTES`: Windows
     // gives the main thread only 1 MiB); scoping the refresh to our PID
@@ -209,7 +209,7 @@ fn sample_process() -> ProcessSnapshot {
 // Database sampling
 // ---------------------------------------------------------------------------
 
-async fn sample_database(cg: &crate::tokensave::TokenSave) -> Result<DatabaseSnapshot> {
+async fn sample_database(cg: &crate::tracedecay::TraceDecay) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
     let db_size_bytes = file_size(&db_path);
@@ -241,89 +241,89 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-async fn read_journal_mode(cg: &crate::tokensave::TokenSave) -> Result<String> {
+async fn read_journal_mode(cg: &crate::tracedecay::TraceDecay) -> Result<String> {
     let mut rows = cg
         .db()
         .conn()
         .query("PRAGMA journal_mode", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read journal_mode: {e}"),
             operation: "read_journal_mode".to_string(),
         })?;
     let row = rows
         .next()
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read journal_mode row: {e}"),
             operation: "read_journal_mode".to_string(),
         })?
-        .ok_or_else(|| TokenSaveError::Database {
+        .ok_or_else(|| TraceDecayError::Database {
             message: "no journal_mode row returned".to_string(),
             operation: "read_journal_mode".to_string(),
         })?;
-    row.get::<String>(0).map_err(|e| TokenSaveError::Database {
+    row.get::<String>(0).map_err(|e| TraceDecayError::Database {
         message: format!("failed to decode journal_mode: {e}"),
         operation: "read_journal_mode".to_string(),
     })
 }
 
-async fn read_source_total_bytes(cg: &crate::tokensave::TokenSave) -> Result<u64> {
+async fn read_source_total_bytes(cg: &crate::tracedecay::TraceDecay) -> Result<u64> {
     let mut rows = cg
         .db()
         .conn()
         .query("SELECT COALESCE(SUM(size), 0) FROM files", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to sum source bytes: {e}"),
             operation: "read_source_total_bytes".to_string(),
         })?;
     let row = rows
         .next()
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read source-sum row: {e}"),
             operation: "read_source_total_bytes".to_string(),
         })?
-        .ok_or_else(|| TokenSaveError::Database {
+        .ok_or_else(|| TraceDecayError::Database {
             message: "no source-sum row returned".to_string(),
             operation: "read_source_total_bytes".to_string(),
         })?;
-    let v: i64 = row.get(0).map_err(|e| TokenSaveError::Database {
+    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
         message: format!("failed to decode source-sum: {e}"),
         operation: "read_source_total_bytes".to_string(),
     })?;
     Ok(u64::try_from(v).unwrap_or(0))
 }
 
-async fn read_graph_counts(cg: &crate::tokensave::TokenSave) -> Result<(u64, u64)> {
+async fn read_graph_counts(cg: &crate::tracedecay::TraceDecay) -> Result<(u64, u64)> {
     let nodes = scalar_count(cg, "SELECT COUNT(*) FROM nodes").await?;
     let edges = scalar_count(cg, "SELECT COUNT(*) FROM edges").await?;
     Ok((nodes, edges))
 }
 
-async fn scalar_count(cg: &crate::tokensave::TokenSave, sql: &str) -> Result<u64> {
+async fn scalar_count(cg: &crate::tracedecay::TraceDecay, sql: &str) -> Result<u64> {
     let mut rows = cg
         .db()
         .conn()
         .query(sql, ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("scalar query failed: {e}"),
             operation: "scalar_count".to_string(),
         })?;
     let row = rows
         .next()
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("scalar row read failed: {e}"),
             operation: "scalar_count".to_string(),
         })?
-        .ok_or_else(|| TokenSaveError::Database {
+        .ok_or_else(|| TraceDecayError::Database {
             message: "no scalar row".to_string(),
             operation: "scalar_count".to_string(),
         })?;
-    let v: i64 = row.get(0).map_err(|e| TokenSaveError::Database {
+    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
         message: format!("scalar decode failed: {e}"),
         operation: "scalar_count".to_string(),
     })?;
@@ -372,7 +372,7 @@ mod tests {
     }
 
     /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against
-    /// `tokensave_runtime`: the process-sampling path must fit comfortably
+    /// `tracedecay_runtime`: the process-sampling path must fit comfortably
     /// inside a stack far smaller than Windows' 1 MiB main-thread default.
     #[test]
     fn sample_process_fits_in_a_small_stack() {

@@ -1,9 +1,10 @@
-//! User-level database that tracks all `TokenSave` projects and their saved tokens.
+//! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
-//! Stored at `~/.tokensave/global.db`, this DB holds one row per project with
-//! the project's DB path and its cumulative tokens-saved count. All operations
-//! are best-effort: failures are silently ignored so they never block the main
-//! MCP server loop.
+//! Stored at `~/.tracedecay/global.db` (or a legacy `~/.tokensave/global.db`
+//! when that dir already exists — see [`crate::config::user_data_dir`]), this
+//! DB holds one row per project with the project's DB path and its cumulative
+//! tokens-saved count. All operations are best-effort: failures are silently
+//! ignored so they never block the main MCP server loop.
 
 use std::path::{Path, PathBuf};
 
@@ -82,7 +83,7 @@ enum TranscriptWriteMode {
     ProjectionOnly,
 }
 
-/// User-level database tracking all `TokenSave` projects.
+/// User-level database tracking all `TraceDecay` projects.
 pub struct GlobalDb {
     conn: Connection,
     storage_root: PathBuf,
@@ -90,21 +91,32 @@ pub struct GlobalDb {
     _db: LibsqlDatabase,
 }
 
-const GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
+const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
+/// Legacy env-var spelling, still honored as a fallback.
+const LEGACY_GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
-/// Returns the path to the global database: `~/.tokensave/global.db`.
-pub fn global_db_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(GLOBAL_DB_PATH_ENV).filter(|path| !path.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-    dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
+fn global_db_path_override() -> Option<PathBuf> {
+    [GLOBAL_DB_PATH_ENV, LEGACY_GLOBAL_DB_PATH_ENV]
+        .iter()
+        .find_map(|name| std::env::var_os(name).filter(|path| !path.is_empty()))
+        .map(PathBuf::from)
 }
 
-/// True when `TOKENSAVE_GLOBAL_DB` pins the global DB to an explicit path.
-/// Consumers (the dashboard LCM store selection) treat the override as an
-/// operator decision that wins over project-local store discovery.
+/// Returns the path to the global database: `global.db` inside the user-level
+/// data dir (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present).
+pub fn global_db_path() -> Option<PathBuf> {
+    if let Some(path) = global_db_path_override() {
+        return Some(path);
+    }
+    crate::config::user_data_dir().map(|dir| dir.join("global.db"))
+}
+
+/// True when `TRACEDECAY_GLOBAL_DB` (or the legacy `TOKENSAVE_GLOBAL_DB`)
+/// pins the global DB to an explicit path. Consumers (the dashboard LCM
+/// store selection) treat the override as an operator decision that wins
+/// over project-local store discovery.
 pub fn global_db_path_is_overridden() -> bool {
-    std::env::var_os(GLOBAL_DB_PATH_ENV).is_some_and(|path| !path.is_empty())
+    global_db_path_override().is_some()
 }
 
 /// How [`global_accounting_enabled`] reached its decision; the dashboard
@@ -113,10 +125,12 @@ pub fn global_db_path_is_overridden() -> bool {
 pub enum AccountingMode {
     /// No env override — global accounting is on by default.
     Default,
-    /// `TOKENSAVE_ENABLE_GLOBAL_DB` explicitly enabled it.
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (or legacy `TOKENSAVE_ENABLE_GLOBAL_DB`)
+    /// explicitly enabled it.
     EnabledByEnv,
-    /// `TOKENSAVE_ENABLE_GLOBAL_DB` (falsy value) or
-    /// `TOKENSAVE_DISABLE_GLOBAL_DB` explicitly disabled it.
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
+    /// `TRACEDECAY_DISABLE_GLOBAL_DB` (or their legacy `TOKENSAVE_*`
+    /// spellings) explicitly disabled it.
     DisabledByEnv,
 }
 
@@ -136,7 +150,7 @@ impl AccountingMode {
 
 /// Canonical truthy-env-value test shared by every boolean env flag: trims,
 /// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
-/// coexist with diverging semantics — e.g. `TOKENSAVE_DISABLE_GLOBAL_DB=on`
+/// coexist with diverging semantics — e.g. `TRACEDECAY_DISABLE_GLOBAL_DB=on`
 /// was silently ignored while the LCM doctor flag honored it.)
 pub fn env_value_truthy(value: &str) -> bool {
     matches!(
@@ -153,25 +167,27 @@ pub fn env_flag(name: &str) -> bool {
 /// Whether user-level global accounting (the cross-project `savings_ledger`
 /// plus worldwide-counter flushes in the MCP server) is enabled.
 ///
-/// Enabled **by default**: every other writer of `~/.tokensave/global.db`
-/// (CLI sync, hooks, `tokensave cost`, the dashboard) is ungated, and the
+/// Enabled **by default**: every other writer of the user-level `global.db`
+/// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the
 /// Savings dashboard reads the ledger — an opt-in gate here silently left
 /// the ledger empty while lifetime counters kept growing. Precedence:
 ///
-/// 1. `TOKENSAVE_ENABLE_GLOBAL_DB` set → its truthiness decides (the
-///    spelling existing agent installers already write).
-/// 2. `TOKENSAVE_DISABLE_GLOBAL_DB` truthy → disabled (opt-out; set by
-///    `.cargo/config.toml` so `cargo test` runs stay hermetic).
+/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set (or legacy
+///    `TOKENSAVE_ENABLE_GLOBAL_DB`) → its truthiness decides (the spelling
+///    existing agent installers already write).
+/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` (or legacy spelling) truthy → disabled
+///    (opt-out; set by `.cargo/config.toml` so `cargo test` runs stay
+///    hermetic).
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
-    if let Ok(value) = std::env::var("TOKENSAVE_ENABLE_GLOBAL_DB") {
+    if let Some(value) = crate::config::brand_env("ENABLE_GLOBAL_DB") {
         return if env_value_truthy(&value) {
             AccountingMode::EnabledByEnv
         } else {
             AccountingMode::DisabledByEnv
         };
     }
-    if env_flag("TOKENSAVE_DISABLE_GLOBAL_DB") {
+    if crate::config::brand_env("DISABLE_GLOBAL_DB").is_some_and(|value| env_value_truthy(&value)) {
         return AccountingMode::DisabledByEnv;
     }
     AccountingMode::Default
@@ -559,7 +575,7 @@ impl GlobalDb {
     /// transcript size against the persisted parse offset. `pending_bytes` is
     /// the total un-ingested tail across transcripts; `last_ingest_unix` is
     /// the newest transcript mtime recorded at ingest time. Surfaced by
-    /// `tokensave_status` and `tokensave doctor --agent cursor` so a stalled
+    /// `tracedecay_status` and `tracedecay doctor --agent cursor` so a stalled
     /// ingest (e.g. a backlog larger than the hook ingest caps) is visible
     /// instead of silently eroding trust in session recall.
     pub async fn session_ingest_health(&self) -> SessionIngestHealth {
@@ -681,7 +697,7 @@ impl GlobalDb {
             )
             .await;
         if let Err(e) = result {
-            eprintln!("[tokensave] savings_ledger insert failed: {e}");
+            eprintln!("[tracedecay] savings_ledger insert failed: {e}");
         }
     }
 
@@ -806,7 +822,7 @@ impl GlobalDb {
     /// Upserts freshly computed token counts for one session store.
     /// Best-effort: the cache is an optimization, so errors are swallowed.
     pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
-        let now = crate::tokensave::current_timestamp();
+        let now = crate::tracedecay::current_timestamp();
         for row in rows {
             let _ = self
                 .conn

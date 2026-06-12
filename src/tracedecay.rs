@@ -9,12 +9,12 @@ use walkdir::WalkDir;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    get_tokensave_dir, is_excluded, is_excluded_dir, is_included, load_config, save_config,
-    TokenSaveConfig,
+    brand_env, db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
+    is_included, load_config, save_config, TraceDecayConfig,
 };
 use crate::context::ContextBuilder;
 use crate::db::Database;
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
 use crate::graph::{GraphQueryManager, GraphTraverser};
 use crate::memory::encoding::HolographicEncoder;
@@ -32,7 +32,7 @@ use crate::types::*;
 
 /// Convert any backslash in a *relative* project-root-relative path to a
 /// forward slash, matching the canonical form the walker
-/// ([`scan_files`](TokenSave::scan_files) → [`accept_file`](TokenSave::accept_file))
+/// ([`scan_files`](TraceDecay::scan_files) → [`accept_file`](TraceDecay::accept_file))
 /// uses when writing to the DB.
 ///
 /// Applied defensively at sync/staleness entry points so that callers
@@ -125,7 +125,7 @@ fn safe_extract(
         extractor.extract(file_path, source)
     }))
     .map_err(|_| {
-        eprintln!("[tokensave] extraction panicked for {file_path}, skipping");
+        eprintln!("[tracedecay] extraction panicked for {file_path}, skipping");
     })
     .ok()
 }
@@ -140,7 +140,7 @@ type ExtractTuple = (String, ExtractionResult, String, u64, i64);
 ///
 /// Falls back to in-process extraction with `safe_extract` if the worker
 /// pool cannot start (e.g. when running under `cargo test`, where
-/// `current_exe()` points at the test harness rather than the tokensave
+/// `current_exe()` points at the test harness rather than the tracedecay
 /// binary). Either way, returns one tuple per successfully-processed file
 /// plus a list of `(path, reason)` pairs for files that timed out or
 /// repeatedly crashed during extraction.
@@ -160,7 +160,7 @@ fn extract_files_isolated(
                 return (outcome.results, outcome.skipped);
             }
             Err(e) => eprintln!(
-                "[tokensave] could not spawn extraction worker pool ({e}), \
+                "[tracedecay] could not spawn extraction worker pool ({e}), \
                  falling back to in-process extraction"
             ),
         }
@@ -193,25 +193,28 @@ fn extract_files_in_process(
 }
 
 /// Subprocess extraction is the production path. Tests and any environment
-/// where `current_exe()` does not point at the real `tokensave` binary
+/// where `current_exe()` does not point at the real `tracedecay` binary
 /// transparently fall back to in-process extraction.
 fn should_use_subprocess() -> bool {
-    if std::env::var_os("TOKENSAVE_DISABLE_SUBPROCESS").is_some() {
+    if brand_env("DISABLE_SUBPROCESS").is_some() {
         return false;
     }
     let Ok(path) = std::env::current_exe() else {
         return false;
     };
-    matches!(path.file_stem().and_then(|s| s.to_str()), Some("tokensave"))
+    matches!(
+        path.file_stem().and_then(|s| s.to_str()),
+        Some("tracedecay")
+    )
 }
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
 /// Provides a high-level API for initializing, indexing, querying, and
 /// syncing a Rust codebase's semantic knowledge graph.
-pub struct TokenSave {
+pub struct TraceDecay {
     db: Database,
-    config: TokenSaveConfig,
+    config: TraceDecayConfig,
     project_root: PathBuf,
     registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
@@ -267,19 +270,19 @@ pub fn current_timestamp() -> i64 {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-impl TokenSave {
-    /// Initializes a new `TokenSave` project at the given root.
+impl TraceDecay {
+    /// Initializes a new `TraceDecay` project at the given root.
     ///
-    /// Creates the `.tokensave` directory, writes a default configuration,
+    /// Creates the `.tracedecay` directory, writes a default configuration,
     /// and initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
-        let config = TokenSaveConfig {
+        let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
-            ..TokenSaveConfig::default()
+            ..TraceDecayConfig::default()
         };
         save_config(project_root, &config)?;
 
-        let db_path = get_tokensave_dir(project_root).join("tokensave.db");
+        let db_path = get_project_db_path(project_root);
         let (db, _migrated) = Database::initialize(&db_path).await?;
 
         // Bootstrap branch metadata if we can detect a default branch
@@ -287,8 +290,9 @@ impl TokenSave {
         let default_branch =
             branch::detect_default_branch(project_root).or_else(|| active_branch.clone());
         if let Some(ref default) = default_branch {
-            let meta = BranchMeta::new(default);
-            let _ = branch_meta::save_branch_meta(&get_tokensave_dir(project_root), &meta);
+            let data_dir = get_tracedecay_dir(project_root);
+            let meta = BranchMeta::new_for_dir(&data_dir, default);
+            let _ = branch_meta::save_branch_meta(&data_dir, &meta);
         }
 
         Ok(Self {
@@ -307,7 +311,7 @@ impl TokenSave {
         &self.db
     }
 
-    /// Opens an existing `TokenSave` project at the given root.
+    /// Opens an existing `TraceDecay` project at the given root.
     ///
     /// If branch metadata exists, resolves the current git branch and opens
     /// the corresponding DB. Falls back to the nearest tracked ancestor DB
@@ -316,16 +320,16 @@ impl TokenSave {
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
         let config = load_config(project_root)?;
-        let tokensave_dir = get_tokensave_dir(project_root);
+        let tracedecay_dir = get_tracedecay_dir(project_root);
         let active_branch = branch::current_branch(project_root);
 
         let (db_path, serving_branch, fallback_warning) =
-            Self::resolve_db_for_branch(project_root, &tokensave_dir, active_branch.as_deref());
+            Self::resolve_db_for_branch(project_root, &tracedecay_dir, active_branch.as_deref());
 
         if !db_path.exists() {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
-                    "no TokenSave database found at '{}'; run 'tokensave init' first",
+                    "no TraceDecay database found at '{}'; run 'tracedecay init' first",
                     db_path.display()
                 ),
             });
@@ -336,7 +340,7 @@ impl TokenSave {
         let crashed = has_dirty_sentinel(project_root);
         if crashed {
             eprintln!(
-                "[tokensave] previous operation was interrupted — checking database integrity…"
+                "[tracedecay] previous operation was interrupted — checking database integrity…"
             );
         }
 
@@ -360,10 +364,10 @@ impl TokenSave {
                     fallback_warning: fallback_warning.clone(),
                 };
                 ts.index_all_with_progress(|c, t, f| {
-                    eprintln!("[tokensave] re-indexing [{c}/{t}] {f}");
+                    eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
                 })
                 .await?;
-                eprintln!("[tokensave] re-index complete.");
+                eprintln!("[tracedecay] re-index complete.");
                 return Ok(ts);
             }
             Err(e) => return Err(e),
@@ -389,10 +393,10 @@ impl TokenSave {
                     fallback_warning: fallback_warning.clone(),
                 };
                 ts.index_all_with_progress(|c, t, f| {
-                    eprintln!("[tokensave] re-indexing [{c}/{t}] {f}");
+                    eprintln!("[tracedecay] re-indexing [{c}/{t}] {f}");
                 })
                 .await?;
-                eprintln!("[tokensave] re-index complete.");
+                eprintln!("[tracedecay] re-index complete.");
                 return Ok(ts);
             }
             // DB is fine — clean up the stale sentinel.
@@ -410,12 +414,12 @@ impl TokenSave {
         };
 
         if migrated {
-            eprintln!("[tokensave] schema changed — performing full re-index…");
+            eprintln!("[tracedecay] schema changed — performing full re-index…");
             ts.index_all_with_progress(|current, total, file| {
-                eprintln!("[tokensave] re-indexing [{current}/{total}] {file}");
+                eprintln!("[tracedecay] re-indexing [{current}/{total}] {file}");
             })
             .await?;
-            eprintln!("[tokensave] re-index complete.");
+            eprintln!("[tracedecay] re-index complete.");
         }
 
         Ok(ts)
@@ -428,12 +432,12 @@ impl TokenSave {
     /// The warning is `Some` when falling back to an ancestor branch's DB.
     fn resolve_db_for_branch(
         project_root: &Path,
-        tokensave_dir: &Path,
+        tracedecay_dir: &Path,
         branch: Option<&str>,
     ) -> (PathBuf, Option<String>, Option<String>) {
-        let default_db = tokensave_dir.join("tokensave.db");
+        let default_db = tracedecay_dir.join(db_filename(tracedecay_dir));
 
-        let Some(meta) = branch_meta::load_branch_meta(tokensave_dir) else {
+        let Some(meta) = branch_meta::load_branch_meta(tracedecay_dir) else {
             // No branch metadata — single-DB mode (backward compat)
             return (default_db, None, None);
         };
@@ -448,7 +452,7 @@ impl TokenSave {
         };
 
         // Exact match: branch is tracked
-        if let Some(path) = branch::resolve_branch_db_path(tokensave_dir, branch, &meta) {
+        if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, branch, &meta) {
             if path.exists() {
                 return (path, Some(branch.to_string()), None);
             }
@@ -456,14 +460,14 @@ impl TokenSave {
 
         // Fallback: find nearest tracked ancestor
         if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta) {
-            if let Some(path) = branch::resolve_branch_db_path(tokensave_dir, &ancestor, &meta) {
+            if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, &ancestor, &meta) {
                 if path.exists() {
                     return (
                         path,
                         Some(ancestor.clone()),
                         Some(format!(
                             "branch '{branch}' is not tracked — serving from '{ancestor}'. \
-                             Run `tokensave branch add {branch}` to track it."
+                             Run `tracedecay branch add {branch}` to track it."
                         )),
                     );
                 }
@@ -477,7 +481,7 @@ impl TokenSave {
             Some(serving),
             Some(format!(
                 "branch '{branch}' is not tracked — serving from '{}'. \
-                 Run `tokensave branch add {branch}` to track it.",
+                 Run `tracedecay branch add {branch}` to track it.",
                 meta.default_branch
             )),
         )
@@ -488,22 +492,22 @@ impl TokenSave {
     /// Returns an error if the branch is not tracked or the DB doesn't exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
         let config = load_config(project_root)?;
-        let tokensave_dir = get_tokensave_dir(project_root);
+        let tracedecay_dir = get_tracedecay_dir(project_root);
 
-        let meta = branch_meta::load_branch_meta(&tokensave_dir).ok_or_else(|| {
-            TokenSaveError::Config {
-                message: "no branch tracking configured — run `tokensave branch add` first"
+        let meta = branch_meta::load_branch_meta(&tracedecay_dir).ok_or_else(|| {
+            TraceDecayError::Config {
+                message: "no branch tracking configured — run `tracedecay branch add` first"
                     .to_string(),
             }
         })?;
 
-        let db_path = branch::resolve_branch_db_path(&tokensave_dir, branch_name, &meta)
-            .ok_or_else(|| TokenSaveError::Config {
+        let db_path = branch::resolve_branch_db_path(&tracedecay_dir, branch_name, &meta)
+            .ok_or_else(|| TraceDecayError::Config {
                 message: format!("branch '{branch_name}' is not tracked"),
             })?;
 
         if !db_path.exists() {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
                     "DB for branch '{branch_name}' not found at '{}'",
                     db_path.display()
@@ -525,16 +529,14 @@ impl TokenSave {
 
     /// Lists tracked branches from metadata. Returns `None` if no branch tracking.
     pub fn list_tracked_branches(project_root: &Path) -> Option<Vec<String>> {
-        let tokensave_dir = get_tokensave_dir(project_root);
-        let meta = branch_meta::load_branch_meta(&tokensave_dir)?;
+        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let meta = branch_meta::load_branch_meta(&tracedecay_dir)?;
         Some(meta.branches.keys().cloned().collect())
     }
 
-    /// Returns `true` if a `TokenSave` project has been initialized at the given root.
+    /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
     pub fn is_initialized(project_root: &Path) -> bool {
-        get_tokensave_dir(project_root)
-            .join("tokensave.db")
-            .exists()
+        get_project_db_path(project_root).exists()
     }
 }
 
@@ -542,14 +544,14 @@ impl TokenSave {
 // Dirty sentinel — detects interrupted sync/index operations
 // ---------------------------------------------------------------------------
 
-/// Creates a `.tokensave/dirty` sentinel file before a sync or index begins.
+/// Creates a `.tracedecay/dirty` sentinel file before a sync or index begins.
 ///
 /// This file is intentionally NOT cleaned up by a Drop guard — it must be
 /// removed explicitly by `clear_dirty_sentinel` after the operation succeeds.
 /// If the process is killed (SIGKILL, OOM), the sentinel survives and signals
 /// a potential crash on the next open.
 fn write_dirty_sentinel(project_root: &Path) {
-    let path = get_tokensave_dir(project_root).join("dirty");
+    let path = get_tracedecay_dir(project_root).join("dirty");
     let _ = std::fs::write(
         &path,
         format!(
@@ -563,14 +565,14 @@ fn write_dirty_sentinel(project_root: &Path) {
 
 /// Removes the dirty sentinel after a successful sync/index.
 fn clear_dirty_sentinel(project_root: &Path) {
-    let path = get_tokensave_dir(project_root).join("dirty");
+    let path = get_tracedecay_dir(project_root).join("dirty");
     let _ = std::fs::remove_file(path);
 }
 
 /// Returns `true` if the dirty sentinel exists (previous operation was
 /// interrupted).
 fn has_dirty_sentinel(project_root: &Path) -> bool {
-    get_tokensave_dir(project_root).join("dirty").exists()
+    get_tracedecay_dir(project_root).join("dirty").exists()
 }
 
 /// Deletes the database and its WAL/SHM sidecars.
@@ -588,15 +590,15 @@ fn delete_db_files(db_path: &std::path::Path) {
 /// report the issue.
 fn print_corruption_warning() {
     let version = env!("CARGO_PKG_VERSION");
-    eprintln!("[tokensave] \x1b[33m⚠ database corruption detected — rebuilding index\x1b[0m");
-    eprintln!("[tokensave]");
-    eprintln!("[tokensave] This was likely caused by a crash or kill during indexing.");
-    eprintln!("[tokensave] Please report this at:");
-    eprintln!("[tokensave]   https://github.com/ScriptedAlchemy/tokensave/issues");
+    eprintln!("[tracedecay] \x1b[33m⚠ database corruption detected — rebuilding index\x1b[0m");
+    eprintln!("[tracedecay]");
+    eprintln!("[tracedecay] This was likely caused by a crash or kill during indexing.");
+    eprintln!("[tracedecay] Please report this at:");
+    eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tokensave/issues");
     eprintln!(
-        "[tokensave]   Include: tokensave version (v{version}), OS, and what happened before the crash."
+        "[tracedecay]   Include: tracedecay version (v{version}), OS, and what happened before the crash."
     );
-    eprintln!("[tokensave]");
+    eprintln!("[tracedecay]");
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +623,7 @@ impl Drop for SyncLockGuard {
 
 /// Try to acquire the sync lock for `project_root`.
 ///
-/// Creates `.tokensave/sync.lock` containing the current PID. If the file
+/// Creates `.tracedecay/sync.lock` containing the current PID. If the file
 /// already exists and the PID inside is still alive, returns a `SyncLock`
 /// error. Stale lockfiles (dead PID or unreadable content) are reclaimed
 /// automatically.
@@ -630,7 +632,7 @@ impl Drop for SyncLockGuard {
 #[doc(hidden)]
 pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     use std::io::Write;
-    let lock_path = get_tokensave_dir(project_root).join("sync.lock");
+    let lock_path = get_tracedecay_dir(project_root).join("sync.lock");
     let pid = std::process::id();
 
     // Fast path: try atomic create.
@@ -647,7 +649,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
             // Fall through to stale-check below.
         }
         Err(e) => {
-            return Err(TokenSaveError::SyncLock {
+            return Err(TraceDecayError::SyncLock {
                 message: format!("could not create lockfile: {e}"),
             });
         }
@@ -657,7 +659,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     let contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
     if let Ok(existing_pid) = contents.trim().parse::<u32>() {
         if is_pid_alive(existing_pid) {
-            return Err(TokenSaveError::SyncLock {
+            return Err(TraceDecayError::SyncLock {
                 message: format!(
                     "another sync is already in progress (PID {existing_pid}). \
                      If this is stale, remove {}",
@@ -685,7 +687,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
         let moved_is_live = moved.trim().parse::<u32>().is_ok_and(is_pid_alive);
         if moved_is_live {
             let _ = std::fs::rename(&reclaim_path, &lock_path);
-            return Err(TokenSaveError::SyncLock {
+            return Err(TraceDecayError::SyncLock {
                 message: "another sync is already in progress".to_string(),
             });
         }
@@ -704,10 +706,10 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
             let _ = write!(f, "{pid}");
             Ok(SyncLockGuard { path: lock_path })
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TokenSaveError::SyncLock {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TraceDecayError::SyncLock {
             message: "another sync is already in progress".to_string(),
         }),
-        Err(e) => Err(TokenSaveError::SyncLock {
+        Err(e) => Err(TraceDecayError::SyncLock {
             message: format!("could not reclaim lockfile: {e}"),
         }),
     }
@@ -749,7 +751,7 @@ fn is_pid_alive(pid: u32) -> bool {
 // Indexing
 // ---------------------------------------------------------------------------
 
-impl TokenSave {
+impl TraceDecay {
     /// Appends runtime skip-folder patterns to the exclude list.
     ///
     /// Each folder name is converted to a `folder/**` glob so that all
@@ -1449,7 +1451,7 @@ impl TokenSave {
         let (sync_extractions, sync_skipped): (Vec<_>, Vec<_>) =
             extract_files_isolated(project_root, registry, to_index.clone());
         // Surface extractor timeouts/crashes in `SyncResult.skipped_paths`
-        // so the user can see them in `tokensave sync --doctor`.
+        // so the user can see them in `tracedecay sync --doctor`.
         skipped.extend(sync_skipped);
 
         // Phase 1: insert all nodes (and metadata) so cross-file edges
@@ -1760,7 +1762,7 @@ impl TokenSave {
     /// Re-indexes a single file after an edit.
     async fn reindex_file(&self, file_path: &str) -> Result<()> {
         let abs_path = self.absolute_path(file_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read file {file_path}: {e}"),
         })?;
 
@@ -1769,7 +1771,7 @@ impl TokenSave {
         };
 
         let mut result =
-            safe_extract(extractor, file_path, &source).ok_or_else(|| TokenSaveError::Config {
+            safe_extract(extractor, file_path, &source).ok_or_else(|| TraceDecayError::Config {
                 message: format!("extraction panicked for {file_path}"),
             })?;
         result.sanitize();
@@ -1815,12 +1817,12 @@ impl TokenSave {
     ) -> Result<EditResult> {
         let rel_path = self
             .resolve_path(path)
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "path is not within the project".to_string(),
             })?;
 
         let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {path}: {e}"),
         })?;
 
@@ -1851,7 +1853,7 @@ impl TokenSave {
 
         tokio::fs::write(&abs_path, &modified)
             .await
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to write {path}: {e}"),
             })?;
 
@@ -1875,12 +1877,12 @@ impl TokenSave {
     ) -> Result<MultiEditResult> {
         let rel_path = self
             .resolve_path(path)
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "path is not within the project".to_string(),
             })?;
 
         let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {path}: {e}"),
         })?;
 
@@ -1907,7 +1909,7 @@ impl TokenSave {
 
         tokio::fs::write(&abs_path, &modified)
             .await
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to write {path}: {e}"),
             })?;
 
@@ -1932,19 +1934,19 @@ impl TokenSave {
     ) -> Result<InsertResult> {
         let rel_path = self
             .resolve_path(path)
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "path is not within the project".to_string(),
             })?;
 
         let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {path}: {e}"),
         })?;
 
         let lines: Vec<&str> = source.lines().collect();
 
         let anchor_line = if anchor.chars().all(|c| c.is_ascii_digit()) {
-            let line_num: usize = anchor.parse().map_err(|_| TokenSaveError::Config {
+            let line_num: usize = anchor.parse().map_err(|_| TraceDecayError::Config {
                 message: format!("invalid line number: {anchor}"),
             })?;
             if line_num == 0 || line_num > lines.len() {
@@ -2007,7 +2009,7 @@ impl TokenSave {
 
         tokio::fs::write(&abs_path, &modified)
             .await
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to write {path}: {e}"),
             })?;
 
@@ -2032,7 +2034,7 @@ impl TokenSave {
         let target = resolve_symbol_for_edit(self, symbol).await?;
         let rel_path = target.file_path.clone();
         let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {rel_path}: {e}"),
         })?;
         let lines: Vec<&str> = source.lines().collect();
@@ -2063,7 +2065,7 @@ impl TokenSave {
         }
         tokio::fs::write(&abs_path, &modified)
             .await
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to write {rel_path}: {e}"),
             })?;
         self.reindex_file(&rel_path).await?;
@@ -2094,7 +2096,7 @@ impl TokenSave {
             "before" => true,
             "after" => false,
             other => {
-                return Err(TokenSaveError::Config {
+                return Err(TraceDecayError::Config {
                     message: format!("position must be \"before\" or \"after\", got {other:?}"),
                 });
             }
@@ -2102,7 +2104,7 @@ impl TokenSave {
         let target = resolve_symbol_for_edit(self, symbol).await?;
         let rel_path = target.file_path.clone();
         let abs_path = self.absolute_path(&rel_path);
-        let source = std::fs::read_to_string(&abs_path).map_err(|e| TokenSaveError::Config {
+        let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {rel_path}: {e}"),
         })?;
         let lines: Vec<&str> = source.lines().collect();
@@ -2132,7 +2134,7 @@ impl TokenSave {
         }
         tokio::fs::write(&abs_path, &modified)
             .await
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to write {rel_path}: {e}"),
             })?;
         self.reindex_file(&rel_path).await?;
@@ -2163,7 +2165,7 @@ impl TokenSave {
 
         let rel_path = self
             .resolve_path(path)
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "path is not within the project".to_string(),
             })?;
 
@@ -2173,7 +2175,7 @@ impl TokenSave {
 
         if check_output.is_err() {
             if can_use_literal_rewrite_fallback(pattern) {
-                let mut source = std::fs::read_to_string(&abs_path).map_err(TokenSaveError::Io)?;
+                let mut source = std::fs::read_to_string(&abs_path).map_err(TraceDecayError::Io)?;
                 if !source.contains(pattern) {
                     return Ok(AstGrepResult {
                         success: false,
@@ -2184,7 +2186,7 @@ impl TokenSave {
                     });
                 }
                 source = source.replace(pattern, rewrite);
-                std::fs::write(&abs_path, source).map_err(TokenSaveError::Io)?;
+                std::fs::write(&abs_path, source).map_err(TraceDecayError::Io)?;
                 self.reindex_file(&rel_path).await?;
                 return Ok(AstGrepResult {
                     success: true,
@@ -2214,7 +2216,7 @@ impl TokenSave {
                 abs_path.to_string_lossy().as_ref(),
             ])
             .output()
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("failed to run ast-grep: {e}"),
             })?;
 
@@ -2273,7 +2275,7 @@ fn can_use_literal_rewrite_fallback(pattern: &str) -> bool {
 // Query delegation
 // ---------------------------------------------------------------------------
 
-impl TokenSave {
+impl TraceDecay {
     /// Searches for nodes matching the given query string.
     ///
     /// Over-fetches from the FTS layer and re-ranks results so that symbol
@@ -2748,7 +2750,7 @@ impl TokenSave {
     /// it across every `impl` block of the enclosing trait.
     ///
     /// Returns an empty vec when the input is not a method whose parent (via
-    /// `Contains`) is a trait. Used by `tokensave_callees` to surface concrete
+    /// `Contains`) is a trait. Used by `tracedecay_callees` to surface concrete
     /// dispatch targets in addition to the trait method itself.
     pub async fn get_trait_dispatch_targets(&self, method: &Node) -> Result<Vec<Node>> {
         use crate::types::EdgeKind;
@@ -2868,7 +2870,7 @@ impl TokenSave {
     }
 
     /// Returns a reference to the current configuration.
-    pub fn get_config(&self) -> &TokenSaveConfig {
+    pub fn get_config(&self) -> &TraceDecayConfig {
         &self.config
     }
 
@@ -2883,7 +2885,7 @@ impl TokenSave {
         self.db.conn().clone()
     }
 
-    /// Filesystem path of the project's tokensave directory, for display in
+    /// Filesystem path of the project's tracedecay directory, for display in
     /// dashboard payloads (mirrors the `path` field of the Hermes plugin API).
     pub(crate) fn dashboard_db_path(&self) -> std::path::PathBuf {
         self.db_path()
@@ -2895,10 +2897,10 @@ impl TokenSave {
             let serving = self.serving_branch.as_deref().unwrap_or("default branch");
             let hint = self.active_branch.as_deref().map_or_else(
                 || " Check out a tracked branch before writing.".to_string(),
-                |branch| format!(" Run `tokensave branch add {branch}` before writing."),
+                |branch| format!(" Run `tracedecay branch add {branch}` before writing."),
             );
 
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!(
                     "cannot {operation}: active branch '{active}' is served from fallback branch \
                      '{serving}'.{hint}"
@@ -2917,10 +2919,10 @@ impl TokenSave {
             let live = branch::current_branch(&self.project_root);
             if live.as_deref() != Some(serving) {
                 let live_name = live.as_deref().unwrap_or("detached HEAD");
-                return Err(TokenSaveError::Config {
+                return Err(TraceDecayError::Config {
                     message: format!(
                         "cannot {operation}: index is open for branch '{serving}' but the working \
-                         tree is now on '{live_name}'. Reopen tokensave so it serves '{live_name}' \
+                         tree is now on '{live_name}'. Reopen tracedecay so it serves '{live_name}' \
                          (e.g. restart the MCP server)."
                     ),
                 });
@@ -2960,10 +2962,10 @@ impl TokenSave {
     /// serving. Useful for diagnostics (e.g. WAL/SHM size sampling) —
     /// returns the same path that `Database::open` was called with.
     pub fn db_path(&self) -> PathBuf {
-        let tokensave_dir = get_tokensave_dir(&self.project_root);
+        let tracedecay_dir = get_tracedecay_dir(&self.project_root);
         let (path, _, _) = Self::resolve_db_for_branch(
             &self.project_root,
-            &tokensave_dir,
+            &tracedecay_dir,
             self.serving_branch.as_deref(),
         );
         path
@@ -2996,11 +2998,11 @@ impl TokenSave {
 /// callable kinds (function/method/etc.). If still more than one candidate
 /// remains the edit is refused — silently picking the wrong site is far
 /// worse than asking the caller to disambiguate.
-async fn resolve_symbol_for_edit(cg: &TokenSave, symbol: &str) -> Result<Node> {
+async fn resolve_symbol_for_edit(cg: &TraceDecay, symbol: &str) -> Result<Node> {
     let nodes = cg.get_nodes_by_qualified_name(symbol).await?;
     let mut iter = nodes.into_iter();
     let Some(first) = iter.next() else {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!("symbol '{symbol}' not found"),
         });
     };
@@ -3027,7 +3029,7 @@ async fn resolve_symbol_for_edit(cg: &TokenSave, symbol: &str) -> Result<Node> {
     if callables.len() == 1 {
         return Ok(callables.remove(0));
     }
-    Err(TokenSaveError::Config {
+    Err(TraceDecayError::Config {
         message: format!(
             "symbol '{symbol}' is ambiguous ({total} matches); pass a fully qualified name"
         ),
@@ -3038,7 +3040,7 @@ async fn resolve_symbol_for_edit(cg: &TokenSave, symbol: &str) -> Result<Node> {
 // Staleness detection
 // ---------------------------------------------------------------------------
 
-impl TokenSave {
+impl TraceDecay {
     /// Check whether the given files need (re-/un-)indexing to bring the DB
     /// into agreement with the filesystem.
     ///
@@ -3189,8 +3191,8 @@ impl TokenSave {
 const MAX_FACT_LIMIT: usize = 200;
 const DEFAULT_FACT_LIMIT: usize = 20;
 
-fn memory_database_error(operation: &str, message: impl std::fmt::Display) -> TokenSaveError {
-    TokenSaveError::Database {
+fn memory_database_error(operation: &str, message: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
         message: format!("{operation} failed: {message}"),
         operation: operation.to_string(),
     }
@@ -3204,7 +3206,7 @@ fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
     facts.iter().map(|fact| fact.fact_id).collect()
 }
 
-impl TokenSave {
+impl TraceDecay {
     /// Add or replace a fact in the holographic memory store.
     pub async fn add_fact(&self, request: AddFactRequest) -> Result<FactRecord> {
         MemoryStore::new(self.db.conn())
@@ -3730,7 +3732,7 @@ fn normalize_lookup_path(project_root: &std::path::Path, raw: &str) -> String {
 /// True when the user-supplied query matches either the node's short `name`
 /// or its `qualified_name`. Matching is exact on the short name and substring
 /// on the qualified name, so callers can pass either form for the impl/trait
-/// filter on `tokensave_impls`.
+/// filter on `tracedecay_impls`.
 fn node_name_matches(node: &Node, query: &str) -> bool {
     if query.is_empty() {
         return true;

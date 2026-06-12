@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::ObjcExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::ObjcExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_objc_extract_imports() {

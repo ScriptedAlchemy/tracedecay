@@ -4470,58 +4470,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tokensave"
-version = "6.1.3"
-dependencies = [
- "amari-holographic",
- "axum 0.8.9",
- "bincode",
- "cc",
- "clap",
- "criterion",
- "crossterm",
- "dirs",
- "flate2",
- "fs2",
- "getrandom 0.2.17",
- "gix",
- "glob",
- "hex",
- "ignore",
- "libsql",
- "logo-art",
- "memmap2",
- "ndarray",
- "open",
- "ort",
- "rayon",
- "regex",
- "self-replace",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tiktoken-rs",
- "tokensave-large-treesitters",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-dart",
- "tree-sitter-hlsl",
- "tree-sitter-language",
- "ureq",
- "walkdir",
- "windows-sys 0.61.2",
- "zip",
-]
-
-[[package]]
 name = "tokensave-large-treesitters"
 version = "0.5.0"
 source = "git+https://github.com/aovestdipaperino/tokensave-large-treesitters#0fc87352c7aed190a43e7eaf70f146e8830371e3"
@@ -4821,6 +4769,58 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "tracedecay"
+version = "6.1.3"
+dependencies = [
+ "amari-holographic",
+ "axum 0.8.9",
+ "bincode",
+ "cc",
+ "clap",
+ "criterion",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "fs2",
+ "getrandom 0.2.17",
+ "gix",
+ "glob",
+ "hex",
+ "ignore",
+ "libsql",
+ "logo-art",
+ "memmap2",
+ "ndarray",
+ "open",
+ "ort",
+ "rayon",
+ "regex",
+ "self-replace",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tiktoken-rs",
+ "tokensave-large-treesitters",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-dart",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
+ "ureq",
+ "walkdir",
+ "windows-sys 0.61.2",
+ "zip",
+]
 
 [[package]]
 name = "tracing"

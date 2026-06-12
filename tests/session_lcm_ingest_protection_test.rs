@@ -1,6 +1,6 @@
-use tokensave::sessions::lcm::security::should_externalize;
-use tokensave::sessions::lcm::security::{heartbeat_noise_reason, quarantine_reason};
-use tokensave::sessions::lcm::security::{ignore_message_reason, pattern_matches};
+use tracedecay::sessions::lcm::security::should_externalize;
+use tracedecay::sessions::lcm::security::{heartbeat_noise_reason, quarantine_reason};
+use tracedecay::sessions::lcm::security::{ignore_message_reason, pattern_matches};
 
 #[test]
 fn classifies_data_uri_and_long_base64_for_externalization() {

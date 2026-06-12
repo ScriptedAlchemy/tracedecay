@@ -2,9 +2,9 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tokensave::config::{load_config, save_config};
-use tokensave::tokensave::TokenSave;
-use tokensave::types::EdgeKind;
+use tracedecay::config::{load_config, save_config};
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::EdgeKind;
 
 /// Directly test that the ignore crate with add_custom_ignore_filename reads
 /// nested .gitignore files, regardless of git repo presence.
@@ -84,7 +84,7 @@ fn format_greeting(name: &str) -> String {
     .unwrap();
 
     // Init
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
 
     // Index
     let index_result = cg.index_all().await.unwrap();
@@ -114,7 +114,7 @@ async fn test_incremental_sync() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn original() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Verify original function exists
@@ -147,12 +147,12 @@ async fn test_init_and_open() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    assert!(!TokenSave::is_initialized(project));
-    TokenSave::init(project).await.unwrap();
-    assert!(TokenSave::is_initialized(project));
+    assert!(!TraceDecay::is_initialized(project));
+    TraceDecay::init(project).await.unwrap();
+    assert!(TraceDecay::is_initialized(project));
 
     // Open existing project
-    let cg = TokenSave::open(project).await;
+    let cg = TraceDecay::open(project).await;
     assert!(cg.is_ok());
 }
 
@@ -161,7 +161,7 @@ async fn test_search_empty_index() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let results = cg.search("anything", 10).await.unwrap();
     assert!(results.is_empty());
 }
@@ -171,7 +171,7 @@ async fn test_stats_empty_index() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let stats = cg.get_stats().await.unwrap();
     assert_eq!(stats.node_count, 0);
     assert_eq!(stats.edge_count, 0);
@@ -195,10 +195,10 @@ pub fn process_data(input: &str) -> String {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let options = tokensave::types::BuildContextOptions::default();
+    let options = tracedecay::types::BuildContextOptions::default();
     let context = cg
         .build_context("process_data function", &options)
         .await
@@ -236,7 +236,7 @@ impl Point {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let result = cg.index_all().await.unwrap();
     // File node + Point struct + x field + y field + impl Point + new method + distance method = 7+
     assert!(
@@ -263,7 +263,7 @@ async fn test_file_removal_sync() {
     fs::write(project.join("src/lib.rs"), "pub fn keep() {}\n").unwrap();
     fs::write(project.join("src/remove_me.rs"), "pub fn gone() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Verify both exist
@@ -297,7 +297,7 @@ async fn test_index_all_is_idempotent() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
 
     let result1 = cg.index_all().await.unwrap();
     let stats1 = cg.get_stats().await.unwrap();
@@ -323,7 +323,7 @@ async fn test_sync_no_changes() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn stable() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Sync without any changes
@@ -350,7 +350,7 @@ pub fn fibonacci(n: u64) -> u64 {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Search by the docstring content
@@ -399,7 +399,7 @@ pub fn create_user(name: &str, email: &str) -> String {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let result = cg.index_all().await.unwrap();
     assert_eq!(result.file_count, 3, "should index all 3 files");
 
@@ -427,7 +427,7 @@ async fn test_index_follows_symlinked_directories() {
     .unwrap();
     symlink(external.path(), project.join("src")).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let result = cg.index_all().await.unwrap();
 
     assert_eq!(
@@ -450,13 +450,13 @@ async fn test_index_follows_symlinked_directories() {
 // Nested .gitignore tests
 // ---------------------------------------------------------------------------
 
-/// Helper: init a project with git_ignore enabled and return the TokenSave.
-async fn setup_gitignore_project(project: &std::path::Path) -> TokenSave {
-    TokenSave::init(project).await.unwrap();
+/// Helper: init a project with git_ignore enabled and return the TraceDecay.
+async fn setup_gitignore_project(project: &std::path::Path) -> TraceDecay {
+    TraceDecay::init(project).await.unwrap();
     let mut config = load_config(project).unwrap();
     config.git_ignore = true;
     save_config(project, &config).unwrap();
-    TokenSave::open(project).await.unwrap()
+    TraceDecay::open(project).await.unwrap()
 }
 
 /// A nested `.gitignore` in a subdirectory must exclude files inside that
@@ -610,13 +610,13 @@ async fn test_gitignore_scan_follows_symlinked_directories() {
     .unwrap();
     symlink(external.path(), project.join("src")).unwrap();
 
-    TokenSave::init(project).await.unwrap();
+    TraceDecay::init(project).await.unwrap();
 
     let mut config = load_config(project).unwrap();
     config.git_ignore = true;
     save_config(project, &config).unwrap();
 
-    let cg = TokenSave::open(project).await.unwrap();
+    let cg = TraceDecay::open(project).await.unwrap();
     let result = cg.index_all().await.unwrap();
 
     assert_eq!(
@@ -635,9 +635,9 @@ async fn test_gitignore_scan_follows_symlinked_directories() {
 // Call edge regression tests
 // ---------------------------------------------------------------------------
 
-/// Helper: create a temp project with the given source files, init TokenSave,
-/// and return the (TempDir, TokenSave) pair. TempDir must be held alive.
-async fn setup_call_edge_project() -> (TempDir, TokenSave) {
+/// Helper: create a temp project with the given source files, init TraceDecay,
+/// and return the (TempDir, TraceDecay) pair. TempDir must be held alive.
+async fn setup_call_edge_project() -> (TempDir, TraceDecay) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
@@ -675,12 +675,12 @@ pub fn caller_fn() -> u32 {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     (dir, cg)
 }
 
 /// Finds the node ID for a function by name, panicking if not found.
-async fn find_node_id(cg: &TokenSave, name: &str) -> String {
+async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
     let results = cg.search(name, 10).await.unwrap();
     results
         .iter()
@@ -742,7 +742,7 @@ pub fn consumer() -> u32 { base_fn() }
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Modify the file to add a new call chain.
@@ -805,7 +805,7 @@ pub fn entry_point() -> u32 { 0 }
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     // Add a new file that calls the existing function.
@@ -859,7 +859,7 @@ async fn test_sync_does_not_duplicate_edges() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let stats_before = cg.get_stats().await.unwrap();
@@ -902,10 +902,10 @@ async fn test_concurrent_sync_is_rejected() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
 
     // Simulate an in-progress sync by placing a lockfile with our own PID.
-    let lock_path = project.join(".tokensave/sync.lock");
+    let lock_path = project.join(".tracedecay/sync.lock");
     fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
 
     let err = cg.sync().await.unwrap_err();

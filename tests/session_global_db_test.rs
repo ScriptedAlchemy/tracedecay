@@ -1,8 +1,8 @@
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokensave::global_db::GlobalDb;
-use tokensave::sessions::lcm::LcmStorageKind;
-use tokensave::sessions::{SessionRecord, SessionSearchScope};
+use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::LcmStorageKind;
+use tracedecay::sessions::{SessionRecord, SessionSearchScope};
 
 mod common;
 use common::{
@@ -120,10 +120,10 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert!(db.upsert_session_message(&message).await);
     let updated = format!(
         "Updated answer about parsing transcripts.\n{}::updated-tail",
-        "x".repeat(tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 2)
+        "x".repeat(tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 2)
     );
     message.text = updated.clone();
-    message.tool_names = Some("tokensave_context".to_string());
+    message.tool_names = Some("tracedecay_context".to_string());
     message.source_offset = Some(99);
     assert!(db.upsert_session_message(&message).await);
 
@@ -135,11 +135,11 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert!(fetched
         .text
         .starts_with("Updated answer about parsing transcripts."));
-    assert!(fetched.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(fetched
         .text
-        .contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
-    assert_eq!(fetched.tool_names.as_deref(), Some("tokensave_context"));
+        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
 
     assert_eq!(raw_message_count(&db_path, "cursor", "message-1").await, 1);
@@ -151,10 +151,10 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert_eq!(raw.content_hash, sha256_hex(&updated));
 
     let (snippet_text, index_text) = raw_snippet_and_index(&db_path, "cursor", "message-1").await;
-    assert!(snippet_text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_SNIPPET_CHARS);
-    assert!(snippet_text.contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
-    assert!(index_text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(index_text.contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(snippet_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_SNIPPET_CHARS);
+    assert!(snippet_text.contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(index_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(index_text.contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
 }
 
 #[tokio::test]
@@ -232,10 +232,12 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .get_session_message("cursor", "message-1")
         .await
         .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(
+        compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+    );
     assert!(compatibility
         .text
-        .contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
 
     let raw = db
         .lcm_load_raw_message("cursor", "message-1")
@@ -251,7 +253,7 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
 async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_or_metadata() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tokensave");
+    let storage_root = tmp.path().join(".tracedecay");
     let db = open_isolated_db(&tmp).await;
     let session = sample_session("cursor", "session-1", "project-a");
     assert!(db.upsert_session(&session).await);
@@ -283,7 +285,7 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .get_session_message("cursor", "tool-large")
         .await
         .expect("projection should exist");
-    assert!(fetched.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!fetched.text.contains(body_secret));
     assert!(fetched
         .text
@@ -365,7 +367,7 @@ async fn search_session_messages_uses_fts_and_filters_provider_project() {
 #[tokio::test]
 async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tokensave").join("global.db");
+    let db_path = tmp.path().join(".tracedecay").join("global.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
     let old_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
@@ -497,7 +499,7 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
 /// `session_ingest_health` must report the un-ingested tail per transcript:
 /// fully-ingested transcripts contribute nothing, partially-ingested ones
 /// contribute their pending bytes, and the per-transcript maximum drives the
-/// stalled-ingest detection in `tokensave_status` / doctor.
+/// stalled-ingest detection in `tracedecay_status` / doctor.
 #[tokio::test]
 async fn session_ingest_health_reports_pending_transcript_backlog() {
     let tmp = TempDir::new().unwrap();
@@ -520,7 +522,7 @@ async fn session_ingest_health_reports_pending_transcript_backlog() {
     }
 
     // drained: offset == file size; backlogged: 200 of 500 bytes ingested.
-    let cursor = |byte_offset, mtime| tokensave::global_db::ParseOffset {
+    let cursor = |byte_offset, mtime| tracedecay::global_db::ParseOffset {
         byte_offset,
         mtime,
         file_id: 0,

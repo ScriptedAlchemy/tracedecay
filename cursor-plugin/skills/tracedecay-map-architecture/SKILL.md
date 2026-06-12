@@ -1,12 +1,12 @@
 ---
-name: tokensave-map-architecture
+name: tracedecay-map-architecture
 description: Map the architecture of the repo or a directory — layered module map, dependency hotspots, and structural risks.
 disable-model-invocation: true
 ---
 
-# /tokensave-map-architecture
+# /tracedecay-map-architecture
 
-Apply the `tokensave:architecture-overview` skill.
+Apply the `tracedecay:architecture-overview` skill.
 
 - **Scope:** the whole repo, or the directory named after the command if one was given.
 - Follow that skill's read-only workflow and guardrails; don't restate the tool ladder here.

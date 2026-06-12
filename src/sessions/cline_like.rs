@@ -13,7 +13,7 @@
 //! the shared `ContentHash` reader and deterministic `<task-id>:<index>` message
 //! ids. To avoid mixing global VS Code extension history across projects, a task
 //! is ingested only when its metadata contains a project/workspace/cwd path that
-//! resolves to the current tokensave project root.
+//! resolves to the current tracedecay project root.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;

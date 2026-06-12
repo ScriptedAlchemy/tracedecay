@@ -1,5 +1,7 @@
 # Daemon Mode Design Spec
 
+> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated design artifact keeps the TokenSave-era names it was written with.
+
 ## Goal
 
 A background daemon that watches all tracked tokensave projects for file changes and automatically runs incremental syncs, keeping the code graph up-to-date without manual `tokensave sync` invocations.

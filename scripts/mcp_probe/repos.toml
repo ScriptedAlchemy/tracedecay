@@ -1,34 +1,34 @@
 # Repos exercised by scripts/mcp_probe/probe.py.
 #
-# Each entry needs a .tokensave/tokensave.db already indexed. The driver
-# spawns `tokensave serve` with cwd=path and talks JSON-RPC over stdio.
+# Each entry needs a .tracedecay/tracedecay.db already indexed. The driver
+# spawns `tracedecay serve` with cwd=path and talks JSON-RPC over stdio.
 #
 # Edit paths to match your machine. CI / shared setups should override via
-# the TOKENSAVE_PROBE_REPOS env var (path to an alternative repos.toml).
+# the TRACEDECAY_PROBE_REPOS env var (path to an alternative repos.toml).
 
 [[repos]]
 name = "chromium"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/chromium"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/chromium"
 languages = ["cpp"]
 
 [[repos]]
 name = "elasticsearch"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/elasticsearch"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/elasticsearch"
 languages = ["java"]
 
 [[repos]]
 name = "emacs"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/emacs"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/emacs"
 languages = ["c"]
 
 [[repos]]
 name = "linux"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/linux"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/linux"
 languages = ["c"]
 
 [[repos]]
 name = "node"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/node"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/node"
 languages = ["javascript"]
 
 [[repos]]
@@ -38,7 +38,7 @@ languages = ["rust"]
 
 [[repos]]
 name = "scipy"
-path = "/Volumes/home_ext1/tmp/tokensave-bench-dir/scipy"
+path = "/Volumes/home_ext1/tmp/tracedecay-bench-dir/scipy"
 languages = ["python"]
 [[repos]]
 name = "scirs"

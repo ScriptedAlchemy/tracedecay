@@ -9,9 +9,9 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::dashboard;
-use tokensave::tokensave::TokenSave;
-use tokensave::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
+use tracedecay::dashboard;
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -65,19 +65,19 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
     }
 }
 
-async fn setup_project(project_root: &Path) -> TokenSave {
+async fn setup_project(project_root: &Path) -> TraceDecay {
     write_file(
         &project_root.join("src/dashboard/mod.rs"),
         "pub fn dashboard() {}\npub fn route_graph() {}\npub fn render_graph() {}\n",
     );
-    match TokenSave::init(project_root).await {
+    match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tokensave fixture project: {err}"),
+        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
     }
 }
 
 /// Extra node with no edges, for exercising the default-mode prune/fill rules.
-async fn seed_orphan_node(cg: &TokenSave) {
+async fn seed_orphan_node(cg: &TraceDecay) {
     let db = cg.db();
     let orphan = make_node(
         "n-orphan",
@@ -91,7 +91,7 @@ async fn seed_orphan_node(cg: &TokenSave) {
     }
 }
 
-async fn seed_graph_fixture(cg: &TokenSave) {
+async fn seed_graph_fixture(cg: &TraceDecay) {
     let db = cg.db();
     let nodes = [
         make_node(

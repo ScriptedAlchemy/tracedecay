@@ -10,13 +10,13 @@ use common::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
-use tokensave::branch;
-use tokensave::dashboard;
-use tokensave::global_db::GlobalDb;
-use tokensave::memory::encoding::HolographicEncoder;
-use tokensave::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
-use tokensave::tokensave::TokenSave;
+use tracedecay::branch;
+use tracedecay::dashboard;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::memory::encoding::HolographicEncoder;
+use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate
 /// `content` at 200, so this fact proves the `/fact/{id}` detail endpoint
@@ -51,14 +51,14 @@ fn write_file(path: &Path, content: &str) {
     }
 }
 
-async fn setup_project(project_root: &Path) -> TokenSave {
+async fn setup_project(project_root: &Path) -> TraceDecay {
     write_file(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
     );
-    match TokenSave::init(project_root).await {
+    match TraceDecay::init(project_root).await {
         Ok(cg) => cg,
-        Err(err) => panic!("failed to initialize tokensave fixture project: {err}"),
+        Err(err) => panic!("failed to initialize tracedecay fixture project: {err}"),
     }
 }
 
@@ -66,7 +66,7 @@ fn blob_param(bytes: Vec<u8>) -> libsql::Value {
     libsql::Value::Blob(bytes)
 }
 
-async fn seed_memory_fixture(cg: &TokenSave) {
+async fn seed_memory_fixture(cg: &TraceDecay) {
     let conn = cg.db().conn();
     let vec_a = match HolographicEncoder::serialize(&[0.20, 0.35, 0.50]) {
         Ok(value) => value,
@@ -233,7 +233,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
-        project_key: "tokensave-fixture".to_string(),
+        project_key: "tracedecay-fixture".to_string(),
         project_path: project_path.display().to_string(),
         title: Some("Dashboard fixture session".to_string()),
         started_at: Some(1_700_001_000),
@@ -275,7 +275,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
             text: "Similarity pair detected for cache policy facts.".to_string(),
             kind: Some("chat".to_string()),
             model: Some("gpt".to_string()),
-            tool_names: Some("tokensave_search".to_string()),
+            tool_names: Some("tracedecay_search".to_string()),
             source_path: None,
             source_offset: None,
             metadata_json: None,
@@ -290,7 +290,7 @@ async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
             text: "LCM tab should render non-empty overview cards.".to_string(),
             kind: Some("chat".to_string()),
             model: Some("gpt".to_string()),
-            tool_names: Some("tokensave_lcm_status".to_string()),
+            tool_names: Some("tracedecay_lcm_status".to_string()),
             source_path: None,
             source_offset: None,
             metadata_json: None,
@@ -379,7 +379,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let project_db_path = project_root.join(".tokensave").join("tokensave.db");
+    let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
     let server = tokio::spawn(async move {
         let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
     });
@@ -399,7 +399,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 /// Counts rows in the fixture's project DB matching `sql` (a SELECT COUNT query
 /// with one `?1` bind), via a fresh read connection. Used to prove hard deletes
 /// actually removed rows (and their entity links) from the store that
-/// `tokensave_fact_store` recall reads.
+/// `tracedecay_fact_store` recall reads.
 async fn count_in_project_db(fixture: &DashboardFixture, sql: &str, fact_id: i64) -> i64 {
     let db = match libsql::Builder::new_local(&fixture.project_db_path)
         .build()
@@ -507,9 +507,9 @@ fn commit_all(project: &Path, message: &str) {
         project,
         &[
             "-c",
-            "user.name=TokenSave Test",
+            "user.name=TraceDecay Test",
             "-c",
-            "user.email=tokensave-test@example.com",
+            "user.email=tracedecay-test@example.com",
             "commit",
             "-m",
             message,
@@ -562,9 +562,9 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             .project_db_path
             .parent()
             .and_then(Path::parent)
-            .unwrap_or_else(|| panic!("fixture DB path should be under .tokensave"))
+            .unwrap_or_else(|| panic!("fixture DB path should be under .tracedecay"))
             .to_path_buf();
-        let cg = match TokenSave::open(&project_root).await {
+        let cg = match TraceDecay::open(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to reopen fixture project: {err}"),
         };
@@ -610,7 +610,7 @@ fn dashboard_reports_resolved_branch_db_path() {
         .unwrap_or_else(|err| panic!("failed to write fixture lib.rs: {err}"));
         commit_all(&project_root, "initial commit");
 
-        let main = match TokenSave::init(&project_root).await {
+        let main = match TraceDecay::init(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to initialize fixture project: {err}"),
         };
@@ -629,13 +629,15 @@ fn dashboard_reports_resolved_branch_db_path() {
         {
             panic!("failed to track feature branch: {err}");
         }
-        let cg = match TokenSave::open(&project_root).await {
+        let cg = match TraceDecay::open(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to open feature branch fixture: {err}"),
         };
         let expected = cg.db_path().display().to_string();
         assert!(
-            expected.replace('\\', "/").contains(".tokensave/branches/"),
+            expected
+                .replace('\\', "/")
+                .contains(".tracedecay/branches/"),
             "fixture should serve a branch DB path, got {expected}"
         );
 
@@ -716,7 +718,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["providers"]["memory_provider"], "tokensave");
+        assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 2);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
@@ -1118,7 +1120,7 @@ fn curation_delete_lifecycle() {
         );
 
         // --- The row and its entity links must be gone from the store that
-        //     tokensave_fact_store recall reads (hard delete, not soft). ---
+        //     tracedecay_fact_store recall reads (hard delete, not soft). ---
         let remaining = count_in_project_db(
             &fixture,
             "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
@@ -1316,7 +1318,7 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         assert_eq!(overview["exists"], true);
         assert_eq!(
             overview["storage_scope"], "global",
-            "TOKENSAVE_GLOBAL_DB override fixtures serve the global scope"
+            "TRACEDECAY_GLOBAL_DB override fixtures serve the global scope"
         );
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
@@ -1429,9 +1431,9 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
 }
 
 /// Opens (creating if needed) the project-local session store at
-/// `<project>/.tokensave/sessions.db` — the DB transcript ingest writes to.
+/// `<project>/.tracedecay/sessions.db` — the DB transcript ingest writes to.
 async fn open_project_session_store(project_root: &Path) -> GlobalDb {
-    let db_path = tokensave::sessions::cursor::project_session_db_path(project_root);
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
     match GlobalDb::open_at(&db_path).await {
         Some(db) => db,
         None => panic!(
@@ -1441,8 +1443,8 @@ async fn open_project_session_store(project_root: &Path) -> GlobalDb {
     }
 }
 
-/// Without a `TOKENSAVE_GLOBAL_DB` override the dashboard must serve the
-/// project-local `.tokensave/sessions.db` (where Cursor hooks and the
+/// Without a `TRACEDECAY_GLOBAL_DB` override the dashboard must serve the
+/// project-local `.tracedecay/sessions.db` (where Cursor hooks and the
 /// catch-up sweep ingest transcripts), and report it via the additive
 /// `storage_scope` payload field.
 #[test]
@@ -1480,7 +1482,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         assert!(
             lcm_db
                 .replace('\\', "/")
-                .ends_with(".tokensave/sessions.db"),
+                .ends_with(".tracedecay/sessions.db"),
             "capabilities.lcm_db should be the project session store, got {lcm_db}"
         );
 
@@ -1498,7 +1500,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            path.replace('\\', "/").ends_with(".tokensave/sessions.db"),
+            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
             "overview.path should be the project session store, got {path}"
         );
 
@@ -1520,7 +1522,7 @@ fn lcm_serves_project_session_store_without_global_override() {
     });
 }
 
-/// An explicit `TOKENSAVE_GLOBAL_DB` override pins the dashboard to that
+/// An explicit `TRACEDECAY_GLOBAL_DB` override pins the dashboard to that
 /// store even when the project-local session store exists and has rows —
 /// the contract the smoke harness and the Hermes wrapper rely on.
 #[test]
@@ -1575,7 +1577,7 @@ fn lcm_global_override_wins_over_project_store() {
 }
 
 /// The dry-run curation preview must survive a dashboard restart: it is
-/// mirrored to `.tokensave/dashboard/curation_preview.json` and re-hydrated
+/// mirrored to `.tracedecay/dashboard/curation_preview.json` and re-hydrated
 /// by `build_state`, and applying curation clears both the memory copy and
 /// the sidecar.
 #[test]
@@ -1594,11 +1596,11 @@ fn curation_preview_persists_across_dashboard_restarts() {
         seed_memory_fixture(&cg).await;
         let agent = http_agent();
         let sidecar = project_root
-            .join(".tokensave")
+            .join(".tracedecay")
             .join("dashboard")
             .join("curation_preview.json");
 
-        async fn start_server(cg: TokenSave) -> (String, tokio::task::JoinHandle<()>) {
+        async fn start_server(cg: TraceDecay) -> (String, tokio::task::JoinHandle<()>) {
             let port = pick_free_port();
             let base_url = format!("http://127.0.0.1:{port}");
             let server = tokio::spawn(async move {
@@ -1612,8 +1614,8 @@ fn curation_preview_persists_across_dashboard_restarts() {
             let _ = server.await;
         }
 
-        async fn reopen_project(project_root: &Path) -> TokenSave {
-            match TokenSave::open(project_root).await {
+        async fn reopen_project(project_root: &Path) -> TraceDecay {
+            match TraceDecay::open(project_root).await {
                 Ok(cg) => cg,
                 Err(err) => panic!("failed to reopen fixture project: {err}"),
             }

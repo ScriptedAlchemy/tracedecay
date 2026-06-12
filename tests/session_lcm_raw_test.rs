@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::sessions::lcm::LcmPreflightRequest;
-use tokensave::sessions::source::{
+use tracedecay::sessions::lcm::LcmPreflightRequest;
+use tracedecay::sessions::source::{
     ingest_source, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
-use tokensave::sessions::SessionMessageRecord;
+use tracedecay::sessions::SessionMessageRecord;
 
 mod common;
 use common::{
@@ -161,10 +161,12 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
         .get_session_message("fake", "fake-message-1")
         .await
         .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(
+        compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+    );
     assert!(compatibility
         .text
-        .contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
 
     let raw = db
         .lcm_load_raw_message("fake", "fake-message-1")
@@ -185,7 +187,7 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
 
     let oversized = format!(
         "unique-search-token\n{}::lossless-tail",
-        "x".repeat(tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 5)
+        "x".repeat(tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 5)
     );
     let message = sample_message("cursor", "message-1", "session-1", &oversized);
     assert!(db.upsert_session_message(&message).await);
@@ -196,12 +198,13 @@ async fn search_uses_bounded_projection_but_load_recovers_raw() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].message.message_id, "message-1");
     assert!(
-        results[0].message.text.chars().count() <= tokensave::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+        results[0].message.text.chars().count()
+            <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
     );
     assert!(results[0]
         .message
         .text
-        .contains(tokensave::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+        .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
 
     let raw = db
         .lcm_load_raw_message("cursor", "message-1")

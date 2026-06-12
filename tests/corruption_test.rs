@@ -10,8 +10,8 @@
 
 use std::io::{Seek, Write};
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::types::*;
+use tracedecay::db::Database;
+use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir, db_path).
 async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
@@ -219,7 +219,7 @@ async fn bulk_load_round_trip_preserves_data() {
 
 #[test]
 fn is_corruption_error_matches_malformed() {
-    let e = tokensave::errors::TokenSaveError::Database {
+    let e = tracedecay::errors::TraceDecayError::Database {
         message: "failed to read search result: SQLite failure: `database disk image is malformed`"
             .to_string(),
         operation: "search_nodes".to_string(),
@@ -229,7 +229,7 @@ fn is_corruption_error_matches_malformed() {
 
 #[test]
 fn is_corruption_error_matches_corrupt() {
-    let e = tokensave::errors::TokenSaveError::Database {
+    let e = tracedecay::errors::TraceDecayError::Database {
         message: "database is corrupt".to_string(),
         operation: "test".to_string(),
     };
@@ -238,13 +238,13 @@ fn is_corruption_error_matches_corrupt() {
 
 #[test]
 fn is_corruption_error_rejects_normal_errors() {
-    let e = tokensave::errors::TokenSaveError::Database {
+    let e = tracedecay::errors::TraceDecayError::Database {
         message: "no such table: foobar".to_string(),
         operation: "test".to_string(),
     };
     assert!(!Database::is_corruption_error(&e));
 
-    let e2 = tokensave::errors::TokenSaveError::Config {
+    let e2 = tracedecay::errors::TraceDecayError::Config {
         message: "some config error".to_string(),
     };
     assert!(!Database::is_corruption_error(&e2));
@@ -255,7 +255,7 @@ fn is_corruption_error_rejects_normal_errors() {
 #[test]
 fn dirty_sentinel_lifecycle() {
     let dir = TempDir::new().unwrap();
-    let ts_dir = dir.path().join(".tokensave");
+    let ts_dir = dir.path().join(".tracedecay");
     std::fs::create_dir_all(&ts_dir).unwrap();
 
     let dirty_path = ts_dir.join("dirty");
@@ -286,7 +286,7 @@ fn dirty_sentinel_survives_drop() {
     // The sentinel is a plain file, not tied to a Drop guard.
     // Simulates: process writes sentinel, then gets killed.
     let dir = TempDir::new().unwrap();
-    let ts_dir = dir.path().join(".tokensave");
+    let ts_dir = dir.path().join(".tracedecay");
     std::fs::create_dir_all(&ts_dir).unwrap();
     let dirty_path = ts_dir.join("dirty");
 

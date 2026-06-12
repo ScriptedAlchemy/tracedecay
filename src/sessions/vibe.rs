@@ -8,7 +8,7 @@
 //! * `messages.jsonl` - append-only line-delimited LLM messages.
 //!
 //! This source uses the shared **`ByteOffset`** reader for `messages.jsonl` and
-//! scopes sessions to a tokensave project by matching the working directory in
+//! scopes sessions to a tracedecay project by matching the working directory in
 //! `meta.json` to `project_root`.
 
 use std::path::{Path, PathBuf};

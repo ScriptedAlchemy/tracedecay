@@ -1,18 +1,18 @@
-//! Tests for the `TokenSave` orchestrator methods that aren't fully exercised
+//! Tests for the `TraceDecay` orchestrator methods that aren't fully exercised
 //! by the MCP handler tests.
 
 use std::{fs, process::Command};
 use tempfile::TempDir;
-use tokensave::tokensave::{is_test_file, TokenSave};
-use tokensave::types::{EdgeKind, NodeKind};
+use tracedecay::tracedecay::{is_test_file, TraceDecay};
+use tracedecay::types::{EdgeKind, NodeKind};
 
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
 
 /// Creates a temporary Rust project with cross-file calls, then initializes
-/// and indexes a `TokenSave`.
-async fn setup() -> (TokenSave, TempDir) {
+/// and indexes a `TraceDecay`.
+async fn setup() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -36,7 +36,7 @@ pub fn helper() { foo(); }
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -111,7 +111,7 @@ fn test_is_test_file_case_insensitive() {
 }
 
 // ---------------------------------------------------------------------------
-// get_all_files / get_all_nodes / get_all_edges through TokenSave
+// get_all_files / get_all_nodes / get_all_edges through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn test_find_dead_code_functions() {
         );
         assert_ne!(
             node.visibility,
-            tokensave::types::Visibility::Pub,
+            tracedecay::types::Visibility::Pub,
             "pub items should be excluded from dead code",
         );
     }
@@ -278,7 +278,7 @@ async fn test_check_file_staleness_new_file_not_in_db() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
     // Now add a new file but DON'T sync. b.rs is on disk but not in the DB.
@@ -298,7 +298,7 @@ async fn test_check_file_staleness_deleted_indexed_file() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
     // Delete the file. It's indexed but no longer on disk.
@@ -325,7 +325,7 @@ async fn sync_refuses_to_mutate_fallback_branch_db() {
     run_git(project, &["add", "."]);
     run_git(project, &["commit", "-m", "initial"]);
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     run_git(project, &["checkout", "-b", "feature/sync-safety"]);
@@ -337,7 +337,7 @@ async fn sync_refuses_to_mutate_fallback_branch_db() {
     run_git(project, &["add", "."]);
     run_git(project, &["commit", "-m", "feature"]);
 
-    let feature_cg = TokenSave::open(project).await.unwrap();
+    let feature_cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
     assert_eq!(feature_cg.serving_branch(), Some("main"));
     assert!(feature_cg.is_fallback());
@@ -348,11 +348,11 @@ async fn sync_refuses_to_mutate_fallback_branch_db() {
         .expect_err("syncing a fallback DB should be refused");
     let message = err.to_string();
     assert!(
-        message.contains("feature/sync-safety") && message.contains("tokensave branch add"),
+        message.contains("feature/sync-safety") && message.contains("tracedecay branch add"),
         "error should explain how to track the branch, got: {message}",
     );
 
-    let main_cg = TokenSave::open_branch(project, "main").await.unwrap();
+    let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
     let main_files = main_cg.get_all_files().await.unwrap();
     assert!(
         !main_files.iter().any(|file| file.path == "src/feature.rs"),
@@ -381,7 +381,7 @@ async fn check_file_staleness_normalizes_backslash_paths() {
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
     // The DB row is stored under `src/a.rs`. A caller handing us the
@@ -401,7 +401,7 @@ async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path()
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
     // Sleep past the indexed_at second boundary so the mtime check in
@@ -458,7 +458,7 @@ async fn test_tokens_saved_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// get_complexity_ranked through TokenSave
+// get_complexity_ranked through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -478,7 +478,7 @@ async fn test_get_complexity_ranked() {
 }
 
 // ---------------------------------------------------------------------------
-// get_undocumented_public_symbols through TokenSave
+// get_undocumented_public_symbols through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -512,7 +512,7 @@ async fn test_get_undocumented_public_symbols_with_prefix() {
 }
 
 // ---------------------------------------------------------------------------
-// get_node_distribution through TokenSave
+// get_node_distribution through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -537,20 +537,20 @@ async fn test_is_initialized() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     assert!(
-        !TokenSave::is_initialized(project),
+        !TraceDecay::is_initialized(project),
         "should not be initialized before init"
     );
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "fn main() {}\n").unwrap();
-    let _cg = TokenSave::init(project).await.unwrap();
+    let _cg = TraceDecay::init(project).await.unwrap();
     assert!(
-        TokenSave::is_initialized(project),
+        TraceDecay::is_initialized(project),
         "should be initialized after init"
     );
 }
 
 // ---------------------------------------------------------------------------
-// get_god_classes through TokenSave (empty for Rust-only project)
+// get_god_classes through TraceDecay (empty for Rust-only project)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -565,7 +565,7 @@ async fn test_get_god_classes_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// get_inheritance_depth through TokenSave (empty for Rust-only project)
+// get_inheritance_depth through TraceDecay (empty for Rust-only project)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -579,7 +579,7 @@ async fn test_get_inheritance_depth_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// search through TokenSave
+// search through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -591,7 +591,7 @@ async fn test_search() {
 }
 
 // ---------------------------------------------------------------------------
-// get_stats through TokenSave
+// get_stats through TraceDecay
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -618,7 +618,7 @@ async fn sync_if_stale_removes_deleted_indexed_file() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
     fs::remove_file(project.join("src/remove_me.rs")).unwrap();
 
@@ -653,7 +653,7 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
     fs::write(project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
     fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
     let edit = cg
@@ -691,7 +691,7 @@ async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
     let project = tmp.path().to_path_buf();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(&project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(&project)
         .await
         .unwrap();
     cg.sync().await.unwrap();
@@ -699,7 +699,7 @@ async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
     // Hold the sync lock to simulate a peer MCP syncing, then release it
     // from a background task so the silent variant's bounded wait can make
     // progress.
-    let lock = tokensave::tokensave::try_acquire_sync_lock(&project).expect("lock");
+    let lock = tracedecay::tracedecay::try_acquire_sync_lock(&project).expect("lock");
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         drop(lock);
@@ -739,7 +739,7 @@ async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
         .unwrap();
 
     // Have the metadata reflect a recent sync.
-    let fresh = tokensave::tokensave::current_timestamp();
+    let fresh = tracedecay::tracedecay::current_timestamp();
     cg.db()
         .set_metadata("last_sync_at", &fresh.to_string())
         .await

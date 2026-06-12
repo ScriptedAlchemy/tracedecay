@@ -1,6 +1,6 @@
 //! Integration tests for MCP tool handlers (`handle_tool_call`).
 //!
-//! Each test exercises a real `TokenSave` instance with indexed test data,
+//! Each test exercises a real `TraceDecay` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
 use std::fs;
@@ -10,23 +10,23 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::global_db::GlobalDb;
-use tokensave::mcp::{get_tool_definitions, handle_tool_call};
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::lcm::{
+use tracedecay::db::Database;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
-use tokensave::sessions::{SessionMessageRecord, SessionRecord};
-use tokensave::tokensave::TokenSave;
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
-/// test files, and doc comments, then initialises and indexes a `TokenSave`.
-async fn setup_project() -> (TokenSave, TempDir) {
+/// test files, and doc comments, then initialises and indexes a `TraceDecay`.
+async fn setup_project() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -73,7 +73,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -86,7 +86,7 @@ fn extract_text(value: &Value) -> &str {
         .unwrap_or("<missing text>")
 }
 
-fn expect_tool_error<T>(result: tokensave::errors::Result<T>) -> String {
+fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
     match result {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),
@@ -102,27 +102,27 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .collect::<std::collections::BTreeSet<_>>();
 
     for expected in [
-        "tokensave_lcm_status",
-        "tokensave_lcm_load_session",
-        "tokensave_lcm_grep",
-        "tokensave_lcm_describe",
-        "tokensave_lcm_expand",
-        "tokensave_lcm_expand_query",
-        "tokensave_lcm_preflight",
-        "tokensave_lcm_compress",
-        "tokensave_lcm_session_boundary",
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
     }
 
     for read_only in [
-        "tokensave_lcm_status",
-        "tokensave_lcm_load_session",
-        "tokensave_lcm_grep",
-        "tokensave_lcm_describe",
-        "tokensave_lcm_expand",
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
     ] {
         let tool = tools
             .iter()
@@ -133,10 +133,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     }
 
     for mutating in [
-        "tokensave_lcm_preflight",
-        "tokensave_lcm_compress",
-        "tokensave_lcm_session_boundary",
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -147,16 +147,16 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     }
 
     for scoped in [
-        "tokensave_lcm_status",
-        "tokensave_lcm_load_session",
-        "tokensave_lcm_grep",
-        "tokensave_lcm_describe",
-        "tokensave_lcm_expand",
-        "tokensave_lcm_expand_query",
-        "tokensave_lcm_preflight",
-        "tokensave_lcm_compress",
-        "tokensave_lcm_session_boundary",
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -192,8 +192,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
     let load = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_lcm_load_session")
-        .expect("tokensave_lcm_load_session definition");
+        .find(|tool| tool.name == "tracedecay_lcm_load_session")
+        .expect("tracedecay_lcm_load_session definition");
     assert_eq!(load.input_schema["required"], json!(["session_id"]));
     assert!(load.input_schema["properties"]
         .get("content_limit")
@@ -209,8 +209,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
     let grep = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_lcm_grep")
-        .expect("tokensave_lcm_grep definition");
+        .find(|tool| tool.name == "tracedecay_lcm_grep")
+        .expect("tracedecay_lcm_grep definition");
     assert_eq!(
         grep.input_schema["properties"]["limit"]["type"],
         json!("integer")
@@ -218,8 +218,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
     let expand = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_lcm_expand")
-        .expect("tokensave_lcm_expand definition");
+        .find(|tool| tool.name == "tracedecay_lcm_expand")
+        .expect("tracedecay_lcm_expand definition");
     assert_eq!(
         expand.input_schema["required"],
         json!(["session_id", "target"])
@@ -240,8 +240,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
     let doctor = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_lcm_doctor")
-        .expect("tokensave_lcm_doctor definition");
+        .find(|tool| tool.name == "tracedecay_lcm_doctor")
+        .expect("tracedecay_lcm_doctor definition");
     assert_eq!(
         doctor.input_schema["properties"]["mode"]["enum"],
         json!(["diagnose", "repair", "retention", "clean"])
@@ -258,8 +258,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
 /// Searches for `name` via the search handler and returns the first matching
 /// node id whose name field equals `name`.
-async fn find_node_id(cg: &TokenSave, name: &str) -> String {
-    let result = handle_tool_call(cg, "tokensave_search", json!({"query": name}), None, None)
+async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
+    let result = handle_tool_call(cg, "tracedecay_search", json!({"query": name}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -274,7 +274,7 @@ async fn find_node_id(cg: &TokenSave, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tokensave_search
+// 1. tracedecay_search
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -282,7 +282,7 @@ async fn test_search() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper", "limit": 5}),
         None,
         None,
@@ -298,7 +298,7 @@ async fn test_search() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. tokensave_context
+// 2. tracedecay_context
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn test_context() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_context",
+        "tracedecay_context",
         json!({"task": "understand the helper function"}),
         None,
         None,
@@ -318,7 +318,7 @@ async fn test_context() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. tokensave_callers
+// 3. tracedecay_callers
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -327,7 +327,7 @@ async fn test_callers() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers",
+        "tracedecay_callers",
         json!({"node_id": node_id}),
         None,
         None,
@@ -339,7 +339,7 @@ async fn test_callers() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. tokensave_callees
+// 4. tracedecay_callees
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn test_callees() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callees",
+        "tracedecay_callees",
         json!({"node_id": node_id}),
         None,
         None,
@@ -360,7 +360,7 @@ async fn test_callees() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. tokensave_impact
+// 5. tracedecay_impact
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -369,7 +369,7 @@ async fn test_impact() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_impact",
+        "tracedecay_impact",
         json!({"node_id": node_id}),
         None,
         None,
@@ -381,7 +381,7 @@ async fn test_impact() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. tokensave_node — existing node
+// 6. tracedecay_node — existing node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -390,7 +390,7 @@ async fn test_node_existing() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_node",
+        "tracedecay_node",
         json!({"node_id": node_id}),
         None,
         None,
@@ -417,7 +417,7 @@ async fn test_node_existing() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. tokensave_node — nonexistent node
+// 7. tracedecay_node — nonexistent node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -425,7 +425,7 @@ async fn test_node_not_found() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_node",
+        "tracedecay_node",
         json!({"node_id": "nonexistent_id_12345"}),
         None,
         None,
@@ -441,7 +441,7 @@ async fn test_node_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. tokensave_status
+// 8. tracedecay_status
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -449,7 +449,7 @@ async fn test_status() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_status",
+        "tracedecay_status",
         json!({}),
         Some(json!({"uptime": 100})),
         None,
@@ -468,13 +468,13 @@ async fn test_status() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. tokensave_files — no filter
+// 9. tracedecay_files — no filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_no_filter() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_files", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -486,13 +486,13 @@ async fn test_files_no_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. tokensave_files — path filter
+// 10. tracedecay_files — path filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_path_filter() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_files", json!({"path": "src"}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({"path": "src"}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -506,7 +506,7 @@ async fn test_files_path_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. tokensave_files — pattern filter
+// 11. tracedecay_files — pattern filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -514,7 +514,7 @@ async fn test_files_pattern_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"pattern": "*.rs"}),
         None,
         None,
@@ -526,7 +526,7 @@ async fn test_files_pattern_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. tokensave_files — flat format
+// 12. tracedecay_files — flat format
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -534,7 +534,7 @@ async fn test_files_flat_format() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"format": "flat"}),
         None,
         None,
@@ -548,7 +548,7 @@ async fn test_files_flat_format() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. tokensave_affected
+// 13. tracedecay_affected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -556,7 +556,7 @@ async fn test_affected() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_affected",
+        "tracedecay_affected",
         json!({"files": ["src/utils.rs"]}),
         None,
         None,
@@ -572,13 +572,13 @@ async fn test_affected() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. tokensave_dead_code
+// 14. tracedecay_dead_code
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_dead_code() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -589,7 +589,7 @@ async fn test_dead_code() {
 }
 
 // ---------------------------------------------------------------------------
-// 15. tokensave_diff_context
+// 15. tracedecay_diff_context
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -597,7 +597,7 @@ async fn test_diff_context() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/utils.rs"]}),
         None,
         None,
@@ -616,7 +616,7 @@ async fn test_diff_context() {
 }
 
 // ---------------------------------------------------------------------------
-// 16. tokensave_module_api
+// 16. tracedecay_module_api
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -624,7 +624,7 @@ async fn test_module_api() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_module_api",
+        "tracedecay_module_api",
         json!({"path": "src"}),
         None,
         None,
@@ -644,13 +644,13 @@ async fn test_module_api() {
 }
 
 // ---------------------------------------------------------------------------
-// 17. tokensave_circular
+// 17. tracedecay_circular
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_circular() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -658,13 +658,13 @@ async fn test_circular() {
 }
 
 // ---------------------------------------------------------------------------
-// 18. tokensave_hotspots
+// 18. tracedecay_hotspots
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_hotspots() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_hotspots", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_hotspots", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -675,7 +675,7 @@ async fn test_hotspots() {
 }
 
 // ---------------------------------------------------------------------------
-// 19. tokensave_similar
+// 19. tracedecay_similar
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -683,7 +683,7 @@ async fn test_similar() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_similar",
+        "tracedecay_similar",
         json!({"symbol": "helper"}),
         None,
         None,
@@ -699,7 +699,7 @@ async fn test_similar() {
 }
 
 // ---------------------------------------------------------------------------
-// 20. tokensave_rename_preview
+// 20. tracedecay_rename_preview
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn test_rename_preview() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rename_preview",
+        "tracedecay_rename_preview",
         json!({"node_id": node_id}),
         None,
         None,
@@ -724,13 +724,13 @@ async fn test_rename_preview() {
 }
 
 // ---------------------------------------------------------------------------
-// 21. tokensave_unused_imports
+// 21. tracedecay_unused_imports
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_unused_imports() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -741,7 +741,7 @@ async fn test_unused_imports() {
 }
 
 // ---------------------------------------------------------------------------
-// 22. tokensave_rank
+// 22. tracedecay_rank
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -749,7 +749,7 @@ async fn test_rank() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "incoming"}),
         None,
         None,
@@ -765,7 +765,7 @@ async fn test_rank() {
 }
 
 // ---------------------------------------------------------------------------
-// 23. tokensave_rank — invalid direction
+// 23. tracedecay_rank — invalid direction
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -773,7 +773,7 @@ async fn test_rank_invalid_direction() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "sideways"}),
         None,
         None,
@@ -793,13 +793,13 @@ async fn test_rank_invalid_direction() {
 }
 
 // ---------------------------------------------------------------------------
-// 24. tokensave_largest
+// 24. tracedecay_largest
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_largest() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_largest", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_largest", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -811,7 +811,7 @@ async fn test_largest() {
 }
 
 // ---------------------------------------------------------------------------
-// 25. tokensave_coupling
+// 25. tracedecay_coupling
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -819,7 +819,7 @@ async fn test_coupling() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_coupling",
+        "tracedecay_coupling",
         json!({"direction": "fan_in"}),
         None,
         None,
@@ -831,7 +831,7 @@ async fn test_coupling() {
 }
 
 // ---------------------------------------------------------------------------
-// 26. tokensave_inheritance_depth
+// 26. tracedecay_inheritance_depth
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -839,7 +839,7 @@ async fn test_inheritance_depth() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_inheritance_depth",
+        "tracedecay_inheritance_depth",
         json!({"limit": 5}),
         None,
         None,
@@ -854,13 +854,13 @@ async fn test_inheritance_depth() {
 }
 
 // ---------------------------------------------------------------------------
-// 27. tokensave_distribution — default and summary mode
+// 27. tracedecay_distribution — default and summary mode
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_distribution_default() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_distribution", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_distribution", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -872,7 +872,7 @@ async fn test_distribution_summary() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_distribution",
+        "tracedecay_distribution",
         json!({"summary": true}),
         None,
         None,
@@ -891,13 +891,13 @@ async fn test_distribution_summary() {
 }
 
 // ---------------------------------------------------------------------------
-// 28. tokensave_recursion
+// 28. tracedecay_recursion
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_recursion() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -905,13 +905,13 @@ async fn test_recursion() {
 }
 
 // ---------------------------------------------------------------------------
-// 29. tokensave_complexity
+// 29. tracedecay_complexity
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_complexity() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_complexity", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_complexity", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -920,13 +920,13 @@ async fn test_complexity() {
 }
 
 // ---------------------------------------------------------------------------
-// 30. tokensave_doc_coverage
+// 30. tracedecay_doc_coverage
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_doc_coverage() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_doc_coverage", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_doc_coverage", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -937,13 +937,13 @@ async fn test_doc_coverage() {
 }
 
 // ---------------------------------------------------------------------------
-// 31. tokensave_god_class
+// 31. tracedecay_god_class
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_god_class() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_god_class", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_god_class", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -954,7 +954,7 @@ async fn test_god_class() {
 }
 
 // ---------------------------------------------------------------------------
-// 32. tokensave_changelog — requires git refs, expect graceful error
+// 32. tracedecay_changelog — requires git refs, expect graceful error
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -964,7 +964,7 @@ async fn test_changelog_no_git() {
     // message rather than a hard error.
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -980,7 +980,7 @@ async fn test_changelog_no_git() {
 }
 
 // ---------------------------------------------------------------------------
-// 33. tokensave_port_status — no matching dirs expected
+// 33. tracedecay_port_status — no matching dirs expected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -988,7 +988,7 @@ async fn test_port_status() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({"source_dir": "src", "target_dir": "tests"}),
         None,
         None,
@@ -1028,12 +1028,12 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({
             "source_dir": "src_a",
             "target_dir": "src_b",
@@ -1086,12 +1086,12 @@ async fn port_status_matches_methods_with_same_parent_type() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({
             "source_dir": "src_a",
             "target_dir": "src_b",
@@ -1113,7 +1113,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
 }
 
 // ---------------------------------------------------------------------------
-// 34. tokensave_port_order
+// 34. tracedecay_port_order
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1121,7 +1121,7 @@ async fn test_port_order() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -1143,7 +1143,7 @@ async fn test_port_order() {
 #[tokio::test]
 async fn test_unknown_tool() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_unknown", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_unknown", json!({}), None, None).await;
     match result {
         Err(err) => {
             let err_msg = format!("{}", err);
@@ -1164,7 +1164,7 @@ async fn test_unknown_tool() {
 #[tokio::test]
 async fn test_missing_required_params() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_search", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_search", json!({}), None, None).await;
     let err_msg = match result {
         Err(err) => format!("{}", err),
         Ok(_) => panic!("missing query should produce an error"),
@@ -1185,7 +1185,7 @@ async fn test_node_id_alias() {
     let (cg, _dir) = setup_project().await;
     let node_id = find_node_id(&cg, "helper").await;
     // Use "id" instead of "node_id"
-    let result = handle_tool_call(&cg, "tokensave_node", json!({"id": node_id}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_node", json!({"id": node_id}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1196,13 +1196,13 @@ async fn test_node_id_alias() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_status without server_stats
+// Extra: tracedecay_status without server_stats
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_status_without_server_stats() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1226,7 +1226,7 @@ async fn test_search_populates_touched_files() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper"}),
         None,
         None,
@@ -1248,7 +1248,7 @@ async fn test_rename_preview_not_found() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rename_preview",
+        "tracedecay_rename_preview",
         json!({"node_id": "nonexistent_id_12345"}),
         None,
         None,
@@ -1272,7 +1272,7 @@ async fn test_coupling_fan_out() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_coupling",
+        "tracedecay_coupling",
         json!({"direction": "fan_out"}),
         None,
         None,
@@ -1292,7 +1292,7 @@ async fn test_rank_outgoing() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "outgoing"}),
         None,
         None,
@@ -1313,28 +1313,28 @@ async fn test_rank_outgoing() {
 #[tokio::test]
 async fn test_context_missing_task() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_context", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_context", json!({}), None, None).await;
     assert!(result.is_err(), "context without task should error");
 }
 
 #[tokio::test]
 async fn test_callers_missing_node_id() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_callers", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_callers", json!({}), None, None).await;
     assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]
 async fn test_affected_missing_files() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_affected", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_affected", json!({}), None, None).await;
     assert!(result.is_err(), "affected without files should error");
 }
 
 #[tokio::test]
 async fn test_module_api_missing_path() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_module_api", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_module_api", json!({}), None, None).await;
     assert!(result.is_err(), "module_api without path should error");
 }
 
@@ -1343,7 +1343,7 @@ async fn test_rank_missing_edge_kind() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"direction": "incoming"}),
         None,
         None,
@@ -1355,28 +1355,28 @@ async fn test_rank_missing_edge_kind() {
 #[tokio::test]
 async fn test_similar_missing_symbol() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_similar", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_similar", json!({}), None, None).await;
     assert!(result.is_err(), "similar without symbol should error");
 }
 
 #[tokio::test]
 async fn test_diff_context_missing_files() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_diff_context", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
     assert!(result.is_err(), "diff_context without files should error");
 }
 
 #[tokio::test]
 async fn test_changelog_missing_refs() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_changelog", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
     assert!(result.is_err(), "changelog without from_ref should error");
 }
 
 #[tokio::test]
 async fn test_port_status_missing_dirs() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_port_status", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
     assert!(
         result.is_err(),
         "port_status without source_dir should error"
@@ -1386,7 +1386,7 @@ async fn test_port_status_missing_dirs() {
 #[tokio::test]
 async fn test_port_order_missing_source_dir() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_port_order", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
     assert!(
         result.is_err(),
         "port_order without source_dir should error"
@@ -1394,7 +1394,7 @@ async fn test_port_order_missing_source_dir() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_changelog with a real git repo
+// Extra: tracedecay_changelog with a real git repo
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1449,12 +1449,12 @@ async fn test_changelog_with_real_git() {
         .output()
         .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -1477,7 +1477,7 @@ async fn test_changelog_with_real_git() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_distribution with path prefix filter
+// Extra: tracedecay_distribution with path prefix filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1485,7 +1485,7 @@ async fn test_distribution_with_path_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_distribution",
+        "tracedecay_distribution",
         json!({"path": "src/"}),
         None,
         None,
@@ -1502,7 +1502,7 @@ async fn test_distribution_with_path_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_files — grouped format
+// Extra: tracedecay_files — grouped format
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1510,7 +1510,7 @@ async fn test_files_grouped_format() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"format": "grouped"}),
         None,
         None,
@@ -1531,7 +1531,7 @@ async fn test_files_grouped_format() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_dead_code with custom kinds parameter
+// Extra: tracedecay_dead_code with custom kinds parameter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1540,7 +1540,7 @@ async fn test_dead_code_custom_kinds() {
     // Ask only for struct dead code
     let result = handle_tool_call(
         &cg,
-        "tokensave_dead_code",
+        "tracedecay_dead_code",
         json!({"kinds": ["struct"]}),
         None,
         None,
@@ -1566,7 +1566,7 @@ async fn test_dead_code_custom_kinds() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_affected with custom filter glob
+// Extra: tracedecay_affected with custom filter glob
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1574,7 +1574,7 @@ async fn test_affected_with_custom_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_affected",
+        "tracedecay_affected",
         json!({"files": ["src/utils.rs"], "filter": "**/*test*"}),
         None,
         None,
@@ -1590,13 +1590,13 @@ async fn test_affected_with_custom_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_complexity — verify response structure
+// Extra: tracedecay_complexity — verify response structure
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_complexity_response_fields() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_complexity", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_complexity", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1631,13 +1631,13 @@ async fn test_complexity_response_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_doc_coverage — verify response structure
+// Extra: tracedecay_doc_coverage — verify response structure
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_doc_coverage_response_structure() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_doc_coverage", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_doc_coverage", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1668,7 +1668,7 @@ async fn test_doc_coverage_response_structure() {
 async fn test_files_scope_prefix_filters() {
     let (cg, _dir) = setup_project().await;
     // With scope_prefix "src", should only return files under src/
-    let result = handle_tool_call(&cg, "tokensave_files", json!({}), None, Some("src"))
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({}), None, Some("src"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1685,7 +1685,7 @@ async fn test_search_scope_prefix_filters() {
     // Search for "helper" but scoped to "tests" — should only return test file results
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper", "limit": 20}),
         None,
         Some("tests"),
@@ -1710,7 +1710,7 @@ async fn test_files_explicit_path_overrides_scope() {
     // Explicit path "tests" should override scope_prefix "src"
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"path": "tests"}),
         None,
         Some("src"),
@@ -1730,7 +1730,7 @@ async fn test_context_scope_prefix_filters() {
     // Context scoped to "tests" should return results (even if limited to test files)
     let result = handle_tool_call(
         &cg,
-        "tokensave_context",
+        "tracedecay_context",
         json!({"task": "understand helper"}),
         None,
         Some("tests"),
@@ -1747,7 +1747,7 @@ async fn test_context_scope_prefix_filters() {
 #[tokio::test]
 async fn test_status_reports_scope_prefix() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, Some("src/mcp"))
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, Some("src/mcp"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1764,7 +1764,7 @@ async fn test_status_reports_scope_prefix() {
 #[tokio::test]
 async fn test_status_no_scope_prefix() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1776,7 +1776,7 @@ async fn test_status_no_scope_prefix() {
 }
 
 // ---------------------------------------------------------------------------
-// Edit tools: tokensave_str_replace, tokensave_multi_str_replace, tokensave_insert_at
+// Edit tools: tracedecay_str_replace, tracedecay_multi_str_replace, tracedecay_insert_at
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1791,12 +1791,12 @@ async fn test_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn hello() {}",
@@ -1827,12 +1827,12 @@ async fn test_str_replace_not_found() {
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn not_exists() {}",
@@ -1858,12 +1858,12 @@ async fn test_str_replace_multiple_matches_fails() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn foo() {}",
@@ -1896,12 +1896,12 @@ async fn test_multi_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -1934,12 +1934,12 @@ async fn test_multi_str_replace_atomic_failure() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -1976,13 +1976,13 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let missing_old = format!("{}é", "a".repeat(19));
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -2015,12 +2015,12 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
     fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "style.css",
             "old_str": "\tfont-size: 14px;",
@@ -2043,7 +2043,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
-    if tokensave::mcp::tools::ast_grep_available() {
+    if tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -2051,11 +2051,11 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name", "rewrite": "new_name"}),
         None,
         None,
@@ -2076,7 +2076,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_uses_current_cli_update_flag() {
-    if !tokensave::mcp::tools::ast_grep_available() {
+    if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -2088,11 +2088,11 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name()", "rewrite": "new_name()"}),
         None,
         None,
@@ -2126,13 +2126,13 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     let (cg, _dir) = setup_project().await;
 
     // branch_diff requires branch tracking metadata to be present.
-    let tokensave_dir = tokensave::config::get_tokensave_dir(cg.project_root());
-    let meta = tokensave::branch_meta::BranchMeta::new("master");
-    tokensave::branch_meta::save_branch_meta(&tokensave_dir, &meta).unwrap();
+    let tracedecay_dir = tracedecay::config::get_tracedecay_dir(cg.project_root());
+    let meta = tracedecay::branch_meta::BranchMeta::new("master");
+    tracedecay::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_branch_diff",
+        "tracedecay_branch_diff",
         json!({"base": "master", "head": "master"}),
         None,
         None,
@@ -2156,7 +2156,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
 /// message must instead explain the likely cause so the caller can act on it.
 #[tokio::test]
 async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
-    if !tokensave::mcp::tools::ast_grep_available() {
+    if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -2164,11 +2164,11 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({
             "path": "src/lib.rs",
             "pattern": "__NONEXISTENT_PATTERN__",
@@ -2205,12 +2205,12 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "style.css",
             "replacements": [
@@ -2248,12 +2248,12 @@ async fn test_insert_at_string_anchor_before() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "line two",
@@ -2294,12 +2294,12 @@ async fn test_insert_at_line_number() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "2",
@@ -2337,12 +2337,12 @@ async fn test_insert_at_anchor_not_found() {
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "nonexistent",
@@ -2370,13 +2370,13 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let long_anchor = format!("{}é", "a".repeat(99));
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": long_anchor,
@@ -2410,12 +2410,12 @@ async fn test_insert_at_ambiguous_anchor() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "foo",
@@ -2447,12 +2447,12 @@ async fn test_insert_at_preserves_trailing_newline() {
     let original = "fn hello() {}\n\nfn world() {}\n";
     fs::write(project.join("src/lib.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/lib.rs",
             "anchor": "fn world",
@@ -2479,7 +2479,7 @@ async fn test_insert_at_preserves_trailing_newline() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_gini
+// tracedecay_gini
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2487,7 +2487,7 @@ async fn test_gini() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_gini",
+        "tracedecay_gini",
         json!({ "metric": "lines" }),
         None,
         None,
@@ -2510,7 +2510,7 @@ async fn test_gini() {
 #[tokio::test]
 async fn test_gini_default_metric() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_gini", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_gini", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2523,7 +2523,7 @@ async fn test_gini_default_metric() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_dependency_depth
+// tracedecay_dependency_depth
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2531,7 +2531,7 @@ async fn test_dependency_depth() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dependency_depth",
+        "tracedecay_dependency_depth",
         json!({ "limit": 5 }),
         None,
         None,
@@ -2552,13 +2552,13 @@ async fn test_dependency_depth() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_health
+// tracedecay_health
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_health_summary() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_health", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_health", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2579,7 +2579,7 @@ async fn test_health_detailed() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_health",
+        "tracedecay_health",
         json!({ "details": true }),
         None,
         None,
@@ -2601,7 +2601,7 @@ async fn test_health_detailed() {
     assert!(dims.get("modularity").is_some(), "modularity score missing");
 }
 
-/// Issue #83: tokensave_redundancy must surface AST-isomorphic duplicate
+/// Issue #83: tracedecay_redundancy must surface AST-isomorphic duplicate
 /// pairs and rank them by composite similarity. Plant two structurally
 /// identical functions in a fixture and assert the pair surfaces in the
 /// top hit with the `definite` severity bucket.
@@ -2646,11 +2646,11 @@ pub fn unrelated(x: i32) -> i32 {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_redundancy",
+        "tracedecay_redundancy",
         json!({ "min_lines": 5, "similarity_threshold": 0.5 }),
         None,
         None,
@@ -2690,7 +2690,7 @@ pub fn unrelated(x: i32) -> i32 {
     // Calling again should be a cache hit (no panic, same result).
     let result2 = handle_tool_call(
         &cg,
-        "tokensave_redundancy",
+        "tracedecay_redundancy",
         json!({ "min_lines": 5, "similarity_threshold": 0.5 }),
         None,
         None,
@@ -2701,13 +2701,13 @@ pub fn unrelated(x: i32) -> i32 {
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
 }
 
-/// Issue #80: `tokensave_runtime` must surface process + DB telemetry so
+/// Issue #80: `tracedecay_runtime` must surface process + DB telemetry so
 /// users hitting unexpected CPU/RAM can capture a structured snapshot
 /// without leaving the chat session.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_runtime", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2715,7 +2715,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
 
     // Top-level envelope.
     assert!(parsed.get("captured_at").is_some());
-    assert!(parsed["tokensave_version"].is_string());
+    assert!(parsed["tracedecay_version"].is_string());
     assert!(parsed["host_os"].is_string());
 
     // Process block — PID must match our own.
@@ -2755,7 +2755,7 @@ async fn test_health_detailed_includes_raw_signals() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_health",
+        "tracedecay_health",
         json!({ "details": true }),
         None,
         None,
@@ -2796,7 +2796,7 @@ async fn test_health_detailed_includes_raw_signals() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_dsm
+// tracedecay_dsm
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2804,7 +2804,7 @@ async fn test_dsm_stats() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dsm",
+        "tracedecay_dsm",
         json!({ "format": "stats" }),
         None,
         None,
@@ -2829,7 +2829,7 @@ async fn test_dsm_clusters() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dsm",
+        "tracedecay_dsm",
         json!({ "format": "clusters" }),
         None,
         None,
@@ -2846,7 +2846,7 @@ async fn test_dsm_clusters() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_test_risk
+// tracedecay_test_risk
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2854,7 +2854,7 @@ async fn test_test_risk() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_test_risk",
+        "tracedecay_test_risk",
         json!({ "limit": 10 }),
         None,
         None,
@@ -2882,24 +2882,24 @@ async fn test_test_risk() {
 #[tokio::test]
 async fn test_session_start() {
     let (cg, dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_session_start", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
     let output: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(output["quality_signal"].as_u64().is_some());
     assert_eq!(output["status"].as_str().unwrap(), "baseline_saved");
-    let baseline_path = dir.path().join(".tokensave/session_baseline.json");
+    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
     assert!(baseline_path.exists(), "baseline file should exist");
 }
 
 #[tokio::test]
 async fn test_session_end() {
     let (cg, dir) = setup_project().await;
-    handle_tool_call(&cg, "tokensave_session_start", json!({}), None, None)
+    handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
-    let result = handle_tool_call(&cg, "tokensave_session_end", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_end", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2907,7 +2907,7 @@ async fn test_session_end() {
     assert!(output["signal_before"].as_u64().is_some());
     assert!(output["signal_after"].as_u64().is_some());
     assert!(output["delta"].is_number());
-    let baseline_path = dir.path().join(".tokensave/session_baseline.json");
+    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
     assert!(
         !baseline_path.exists(),
         "baseline should be removed after session_end"
@@ -2917,7 +2917,7 @@ async fn test_session_end() {
 #[tokio::test]
 async fn test_session_end_no_baseline() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_session_end", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_end", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2926,7 +2926,7 @@ async fn test_session_end_no_baseline() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_body
+// tracedecay_body
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2934,7 +2934,7 @@ async fn test_body_returns_full_function_source() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "format_greeting"}),
         None,
         None,
@@ -2988,7 +2988,7 @@ async fn test_body_unknown_symbol() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "no_such_symbol_anywhere"}),
         None,
         None,
@@ -3005,12 +3005,12 @@ async fn test_body_unknown_symbol() {
 #[tokio::test]
 async fn test_body_missing_symbol_param() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_body", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_body", json!({}), None, None).await;
     assert!(result.is_err(), "should error when symbol is missing");
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_todos
+// tracedecay_todos
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -3036,10 +3036,10 @@ fn helper() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_todos", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3083,12 +3083,12 @@ fn main() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_todos",
+        "tracedecay_todos",
         json!({"kinds": ["FIXME"]}),
         None,
         None,
@@ -3104,7 +3104,7 @@ fn main() {
 #[tokio::test]
 async fn test_todos_empty_when_clean() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_todos", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3113,7 +3113,7 @@ async fn test_todos_empty_when_clean() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_callers_for — bulk caller lookup
+// tracedecay_callers_for — bulk caller lookup
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -3126,7 +3126,7 @@ async fn test_callers_for_returns_caller_set_per_id() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone(), format_id.clone()]}),
         None,
         None,
@@ -3163,7 +3163,7 @@ async fn test_callers_for_includes_unmatched_ids_as_empty() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone(), bogus_id.clone()]}),
         None,
         None,
@@ -3183,7 +3183,7 @@ async fn test_callers_for_respects_max_per_item() {
     // Cap at 0 — every caller should be marked truncated.
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone()], "max_per_item": 0}),
         None,
         None,
@@ -3200,7 +3200,7 @@ async fn test_callers_for_rejects_empty_input() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": []}),
         None,
         None,
@@ -3218,7 +3218,7 @@ async fn test_callers_for_rejects_unknown_kind() {
     let helper_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id], "kind": "not_a_real_kind"}),
         None,
         None,
@@ -3231,7 +3231,7 @@ async fn test_callers_for_rejects_unknown_kind() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_by_qualified_name — cross-run lookup
+// tracedecay_by_qualified_name — cross-run lookup
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -3246,7 +3246,7 @@ async fn test_by_qualified_name_finds_indexed_node() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_by_qualified_name",
+        "tracedecay_by_qualified_name",
         json!({"qualified_name": helper.qualified_name}),
         None,
         None,
@@ -3268,7 +3268,7 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_by_qualified_name",
+        "tracedecay_by_qualified_name",
         json!({"qualified_name": "crate::does::not::exist"}),
         None,
         None,
@@ -3282,7 +3282,7 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
 #[tokio::test]
 async fn test_by_qualified_name_requires_param() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_by_qualified_name", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_by_qualified_name", json!({}), None, None).await;
     let Err(err) = result else {
         panic!("expected error when qualified_name is missing");
     };
@@ -3295,7 +3295,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 
     let added = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "add",
             "content": "Project Phoenix uses Amari Memory in src/memory/types.rs",
@@ -3324,7 +3324,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 
     let search = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "search",
             "query": "Amari Memory",
@@ -3365,7 +3365,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     ] {
         let mut args = payload;
         args["action"] = json!(action);
-        let result = handle_tool_call(&cg, "tokensave_fact_store", args, None, None)
+        let result = handle_tool_call(&cg, "tracedecay_fact_store", args, None, None)
             .await
             .unwrap();
         let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
@@ -3388,7 +3388,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 
     let updated = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "update",
             "fact_id": fact_id,
@@ -3410,7 +3410,7 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
 
     let removed = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({"action": "remove", "fact_id": fact_id.to_string()}),
         None,
         None,
@@ -3426,7 +3426,7 @@ async fn memory_recall_updates_retrieval_count() {
     let (cg, _dir) = setup_project().await;
     let added = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "add",
             "content": "Retrieval counters move after search",
@@ -3442,7 +3442,7 @@ async fn memory_recall_updates_retrieval_count() {
 
     handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({"action": "search", "query": "Retrieval counters", "limit": 5}),
         None,
         None,
@@ -3452,7 +3452,7 @@ async fn memory_recall_updates_retrieval_count() {
 
     let status = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({"action": "list", "min_trust": 0.0, "limit": 10}),
         None,
         None,
@@ -3477,7 +3477,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     let (cg, _dir) = setup_project().await;
     let first = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "add",
             "content": "First fact should remain updateable after many later facts",
@@ -3494,7 +3494,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     for i in 0..205 {
         handle_tool_call(
             &cg,
-            "tokensave_fact_store",
+            "tracedecay_fact_store",
             json!({
                 "action": "add",
                 "content": format!("Later fact {i} should not hide the first fact"),
@@ -3508,7 +3508,7 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
 
     let updated = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "update",
             "fact_id": first_id,
@@ -3532,7 +3532,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     let (cg, _dir) = setup_project().await;
     let added = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "add",
             "content": "Helpful memory fact for feedback",
@@ -3551,7 +3551,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
 
     let helpful = handle_tool_call(
         &cg,
-        "tokensave_fact_feedback",
+        "tracedecay_fact_feedback",
         json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "matched"}),
         None,
         None,
@@ -3570,7 +3570,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
 
     let unhelpful = handle_tool_call(
         &cg,
-        "tokensave_fact_feedback",
+        "tracedecay_fact_feedback",
         json!({"fact_id": fact_id, "unhelpful": true}),
         None,
         None,
@@ -3586,7 +3586,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert_eq!(unhelpful["feedback"]["helpful_count"], 1);
     assert_eq!(unhelpful["feedback"]["unhelpful_count"], 1);
 
-    let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
+    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
         .unwrap();
     let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
@@ -3605,12 +3605,13 @@ async fn memory_feedback_and_status_include_trust_fields() {
 async fn memory_tools_validate_malformed_inputs() {
     let (cg, _dir) = setup_project().await;
 
-    let missing_action = handle_tool_call(&cg, "tokensave_fact_store", json!({}), None, None).await;
+    let missing_action =
+        handle_tool_call(&cg, "tracedecay_fact_store", json!({}), None, None).await;
     assert!(expect_tool_error(missing_action).contains("action"));
 
     let bad_action = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({"action": "teleport"}),
         None,
         None,
@@ -3620,7 +3621,7 @@ async fn memory_tools_validate_malformed_inputs() {
 
     let bad_category = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({"action": "list", "category": "definitely-not-a-category"}),
         None,
         None,
@@ -3630,7 +3631,7 @@ async fn memory_tools_validate_malformed_inputs() {
 
     let missing_feedback_action = handle_tool_call(
         &cg,
-        "tokensave_fact_feedback",
+        "tracedecay_fact_feedback",
         json!({"fact_id": 123}),
         None,
         None,
@@ -3716,7 +3717,7 @@ async fn message_search_reads_project_local_session_db() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_message_search",
+        "tracedecay_message_search",
         json!({"query": "transcript search", "provider": "cursor", "limit": 5}),
         None,
         None,
@@ -3737,7 +3738,7 @@ async fn message_search_reads_project_local_session_db() {
 
     let subagent_result = handle_tool_call(
         &cg,
-        "tokensave_message_search",
+        "tracedecay_message_search",
         json!({
             "query": "citrus evidence",
             "provider": "cursor",
@@ -3766,7 +3767,7 @@ async fn message_search_reads_project_local_session_db() {
 }
 
 async fn seed_lcm_session_message(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     session_id: &str,
     message_id: &str,
     text: impl Into<String>,
@@ -3814,7 +3815,7 @@ async fn seed_lcm_session_message(
 }
 
 async fn seed_lcm_tool_result_message(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     session_id: &str,
     message_id: &str,
     text: impl Into<String>,
@@ -3863,7 +3864,7 @@ async fn seed_lcm_tool_result_message(
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_lcm_session_message_with_role_source_timestamp(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     session_id: &str,
     message_id: &str,
     text: impl Into<String>,
@@ -3914,7 +3915,7 @@ async fn seed_lcm_session_message_with_role_source_timestamp(
 }
 
 async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
-    GlobalDb::open_at(&hermes_home.join(".tokensave/sessions.db"))
+    GlobalDb::open_at(&hermes_home.join(".tracedecay/sessions.db"))
         .await
         .expect("profile-local session db should open")
 }
@@ -3965,15 +3966,15 @@ async fn seed_lcm_session_message_in_db(
     );
 }
 
-async fn project_lcm_conn(cg: &TokenSave) -> libsql::Connection {
-    let db = libsql::Builder::new_local(cg.project_root().join(".tokensave/sessions.db"))
+async fn project_lcm_conn(cg: &TraceDecay) -> libsql::Connection {
+    let db = libsql::Builder::new_local(cg.project_root().join(".tracedecay/sessions.db"))
         .build()
         .await
         .unwrap();
     db.connect().unwrap()
 }
 
-async fn lcm_fts_match_count(cg: &TokenSave, query: &str) -> i64 {
+async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
@@ -3985,7 +3986,7 @@ async fn lcm_fts_match_count(cg: &TokenSave, query: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn lcm_raw_store_id(cg: &TokenSave, message_id: &str) -> i64 {
+async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
@@ -3997,7 +3998,7 @@ async fn lcm_raw_store_id(cg: &TokenSave, message_id: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn lcm_raw_message_count(cg: &TokenSave, session_id: &str) -> i64 {
+async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
@@ -4022,7 +4023,7 @@ async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn lcm_summary_node_count(cg: &TokenSave, session_id: &str) -> i64 {
+async fn lcm_summary_node_count(cg: &TraceDecay, session_id: &str) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
@@ -4034,7 +4035,7 @@ async fn lcm_summary_node_count(cg: &TokenSave, session_id: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn lcm_schema_migration_count(cg: &TokenSave) -> i64 {
+async fn lcm_schema_migration_count(cg: &TraceDecay) -> i64 {
     let conn = project_lcm_conn(cg).await;
     let mut rows = conn
         .query(
@@ -4046,7 +4047,7 @@ async fn lcm_schema_migration_count(cg: &TokenSave) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn wipe_lcm_raw_fts(cg: &TokenSave) {
+async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
     project_lcm_conn(cg)
         .await
         .execute_batch("DELETE FROM lcm_raw_messages_fts;")
@@ -4054,7 +4055,7 @@ async fn wipe_lcm_raw_fts(cg: &TokenSave) {
         .unwrap();
 }
 
-async fn wipe_lcm_raw_fts_for_message(cg: &TokenSave, message_id: &str) {
+async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
     let store_id = lcm_raw_store_id(cg, message_id).await;
     project_lcm_conn(cg)
         .await
@@ -4104,7 +4105,7 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "mode": "clean",
@@ -4176,7 +4177,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "mode": "clean",
@@ -4253,7 +4254,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "mode": "clean",
@@ -4316,7 +4317,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "mode": "clean",
@@ -4378,20 +4379,20 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
     let payload_ref = raw.payload_ref.expect("external payload ref");
     fs::remove_file(
         cg.project_root()
-            .join(".tokensave/lcm-payloads")
+            .join(".tracedecay/lcm-payloads")
             .join(&payload_ref),
     )
     .unwrap();
     fs::write(
         cg.project_root()
-            .join(".tokensave/lcm-payloads/payload_unreferenced_test.payload"),
+            .join(".tracedecay/lcm-payloads/payload_unreferenced_test.payload"),
         "orphan body that must not be returned",
     )
     .unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "diagnose"}),
         None,
         None,
@@ -4424,7 +4425,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
     )
     .await;
 
-    let payload_dir = cg.project_root().join(".tokensave/lcm-payloads");
+    let payload_dir = cg.project_root().join(".tracedecay/lcm-payloads");
     fs::create_dir_all(&payload_dir).unwrap();
     fs::write(
         payload_dir.join("payload_gc_candidate_test.payload"),
@@ -4434,7 +4435,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-placeholder",
@@ -4504,7 +4505,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-nested-payload",
@@ -4550,7 +4551,7 @@ async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-plain-ref",
@@ -4615,7 +4616,7 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-payload-target",
@@ -4663,7 +4664,7 @@ async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-fts-target",
@@ -4704,7 +4705,7 @@ async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-orphan-owner",
@@ -4746,7 +4747,7 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "session_id": "lcm-doctor-debt-target",
@@ -4766,14 +4767,14 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
 #[tokio::test]
 async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
     let (cg, _dir) = setup_project().await;
-    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
     if db_path.exists() {
         fs::remove_file(&db_path).unwrap();
     }
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "diagnose"}),
         None,
         None,
@@ -4812,7 +4813,7 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "repair", "apply": false}),
         None,
         None,
@@ -4844,7 +4845,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "repair", "apply": false}),
         None,
         None,
@@ -4880,7 +4881,7 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "repair", "apply": true}),
         None,
         None,
@@ -4918,7 +4919,7 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "retention"}),
         None,
         None,
@@ -4963,7 +4964,7 @@ async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_doctor",
+        "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "storage_scope": "hermes_profile",
@@ -4996,7 +4997,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let status = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({"provider": "cursor"}),
         None,
         None,
@@ -5009,7 +5010,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let loaded = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -5037,7 +5038,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let grep = handle_tool_call(
         &cg,
-        "tokensave_lcm_grep",
+        "tracedecay_lcm_grep",
         json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
         None,
         None,
@@ -5059,7 +5060,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let described = handle_tool_call(
         &cg,
-        "tokensave_lcm_describe",
+        "tracedecay_lcm_describe",
         json!({"provider": "cursor", "session_id": "lcm-session"}),
         None,
         None,
@@ -5081,7 +5082,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let expanded = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand",
+        "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -5111,7 +5112,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -5142,7 +5143,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let preflight = handle_tool_call(
         &cg,
-        "tokensave_lcm_preflight",
+        "tracedecay_lcm_preflight",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -5159,7 +5160,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let compress = handle_tool_call(
         &cg,
-        "tokensave_lcm_compress",
+        "tracedecay_lcm_compress",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -5207,7 +5208,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
     let critical_compress = handle_tool_call(
         &cg,
-        "tokensave_lcm_compress",
+        "tracedecay_lcm_compress",
         json!({
             "provider": "cursor",
             "session_id": "lcm-critical-session",
@@ -5255,7 +5256,7 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
 
     let boundary = handle_tool_call(
         &cg,
-        "tokensave_lcm_session_boundary",
+        "tracedecay_lcm_session_boundary",
         json!({
             "provider": "cursor",
             "session_id": "lcm-boundary-session",
@@ -5278,7 +5279,7 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
 
     let preflight = handle_tool_call(
         &cg,
-        "tokensave_lcm_preflight",
+        "tracedecay_lcm_preflight",
         json!({
             "provider": "cursor",
             "session_id": "lcm-boundary-session",
@@ -5323,7 +5324,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     );
 
     let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
-    db.lcm_store(cg.project_root().join(".tokensave"))
+    db.lcm_store(cg.project_root().join(".tracedecay"))
         .ingest_raw_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
             message_id: "lcm-status-secret-message".to_string(),
@@ -5344,7 +5345,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "session_id": "lcm-status-session",
@@ -5414,7 +5415,7 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "session_id": "lcm-status-frontier",
@@ -5450,7 +5451,7 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
 
     let profile_result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "session_id": "lcm-status-frontier",
@@ -5523,7 +5524,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 
     let node_result = handle_tool_call(
         &cg,
-        "tokensave_lcm_describe",
+        "tracedecay_lcm_describe",
         json!({
             "provider": "cursor",
             "session_id": "lcm-describe-targets",
@@ -5548,7 +5549,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 
     let payload_result = handle_tool_call(
         &cg,
-        "tokensave_lcm_describe",
+        "tracedecay_lcm_describe",
         json!({
             "provider": "cursor",
             "session_id": "lcm-describe-targets",
@@ -5622,7 +5623,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 
     let grep = handle_tool_call(
         &cg,
-        "tokensave_lcm_grep",
+        "tracedecay_lcm_grep",
         json!({
             "provider": "cursor",
             "query": "orchard native",
@@ -5651,7 +5652,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 
     let loaded = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-native-filters",
@@ -5720,7 +5721,7 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
 
     let grep = handle_tool_call(
         &cg,
-        "tokensave_lcm_grep",
+        "tracedecay_lcm_grep",
         json!({
             "provider": "cursor",
             "query": "orchard string timestamp",
@@ -5779,7 +5780,7 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "session_id": "lcm-profile-status",
@@ -5796,7 +5797,7 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
     assert_eq!(payload["lcm"]["raw_message_count"], 2);
-    assert!(hermes_home.path().join(".tokensave/sessions.db").exists());
+    assert!(hermes_home.path().join(".tracedecay/sessions.db").exists());
 }
 
 #[tokio::test]
@@ -5825,7 +5826,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
 
     let loaded = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-profile-read",
@@ -5847,7 +5848,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
 
     let grep = handle_tool_call(
         &cg,
-        "tokensave_lcm_grep",
+        "tracedecay_lcm_grep",
         json!({
             "provider": "cursor",
             "query": "profile-local pear",
@@ -5872,7 +5873,7 @@ async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
 
     let expanded = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
             "prompt": "Explain profile pear evidence",
@@ -5912,7 +5913,7 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 
     let status = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "session_id": "lcm-profile-missing-home",
@@ -5934,7 +5935,7 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 
     let loaded = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-profile-missing-home",
@@ -5958,15 +5959,15 @@ async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn lcm_hermes_profile_rejects_symlinked_tokensave_dir_escape() {
+async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
     let (cg, _dir) = setup_project().await;
     let hermes_home = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
-    unix_fs::symlink(outside.path(), hermes_home.path().join(".tokensave")).unwrap();
+    unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "storage_scope": "hermes_profile",
@@ -5982,7 +5983,7 @@ async fn lcm_hermes_profile_rejects_symlinked_tokensave_dir_escape() {
     assert_eq!(payload["status"], "unavailable");
     assert_eq!(payload["storage_scope"], "hermes_profile");
     assert!(
-        payload["message"].as_str().unwrap().contains(".tokensave"),
+        payload["message"].as_str().unwrap().contains(".tracedecay"),
         "rejection should identify the unsafe profile storage component: {payload}"
     );
     assert!(
@@ -6000,7 +6001,7 @@ async fn lcm_hermes_profile_rejects_non_directory_home() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
             "storage_scope": "hermes_profile",
@@ -6048,7 +6049,7 @@ async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
     let err = expect_tool_error(
         handle_tool_call(
             &cg,
-            "tokensave_lcm_grep",
+            "tracedecay_lcm_grep",
             json!({
                 "provider": "cursor",
                 "query": "unique-cross-session-token",
@@ -6093,7 +6094,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
         ),
     ] {
         let err = expect_tool_error(
-            handle_tool_call(&cg, "tokensave_lcm_load_session", args, None, None).await,
+            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None).await,
         );
         assert!(
             err.contains("limit"),
@@ -6116,7 +6117,7 @@ async fn lcm_load_session_accepts_valid_integer_args() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-valid-integers",
@@ -6156,7 +6157,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_load_session",
+        "tracedecay_lcm_load_session",
         json!({
             "provider": "cursor",
             "session_id": "lcm-large-json",
@@ -6191,7 +6192,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
             "session_id": "lcm-large-expand-query",
@@ -6285,7 +6286,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
             "session_id": "lcm-huge-prompt-expand-query",
@@ -6386,7 +6387,7 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_message_search",
+        "tracedecay_message_search",
         json!({
             "query": "orchard dispatch",
             "provider": "cursor",
@@ -6416,13 +6417,13 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
     let outside_cwd = TempDir::new().unwrap();
     let project_arg = cg.project_root().display().to_string();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(outside_cwd.path())
         .args([
             "tool",
             "--project",
             &project_arg,
-            "tokensave_lcm_status",
+            "tracedecay_lcm_status",
             "--json",
             "--args",
             r#"{"provider":"cursor"}"#,
@@ -6432,7 +6433,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
 
     assert!(
         output.status.success(),
-        "tokensave tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -6471,11 +6472,11 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
         "hermes_home": hermes_home.path(),
     })
     .to_string();
-    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(outside_cwd.path())
         .args([
             "tool",
-            "tokensave_lcm_status",
+            "tracedecay_lcm_status",
             "--json",
             "--args",
             profile_args.as_str(),
@@ -6485,7 +6486,7 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
 
     assert!(
         profile_output.status.success(),
-        "profile-scoped tokensave tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
+        "profile-scoped tracedecay tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&profile_output.stdout),
         String::from_utf8_lossy(&profile_output.stderr)
     );
@@ -6496,11 +6497,11 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
     assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
 
-    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(outside_cwd.path())
         .args([
             "tool",
-            "tokensave_lcm_status",
+            "tracedecay_lcm_status",
             "--json",
             "--args",
             r#"{"provider":"cursor","storage_scope":"project_local"}"#,
@@ -6515,7 +6516,7 @@ async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
     );
     let stderr = String::from_utf8_lossy(&project_output.stderr);
     assert!(
-        stderr.contains("run 'tokensave init' first"),
+        stderr.contains("run 'tracedecay init' first"),
         "project-local failure should continue to require initialization:\n{stderr}"
     );
 }
@@ -6527,16 +6528,16 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
         tools.iter().map(|tool| tool.name.as_str()).collect();
     let fact_store = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_fact_store")
-        .expect("tokensave_fact_store definition");
+        .find(|tool| tool.name == "tracedecay_fact_store")
+        .expect("tracedecay_fact_store definition");
     let feedback = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_fact_feedback")
-        .expect("tokensave_fact_feedback definition");
+        .find(|tool| tool.name == "tracedecay_fact_feedback")
+        .expect("tracedecay_fact_feedback definition");
     let status = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_memory_status")
-        .expect("tokensave_memory_status definition");
+        .find(|tool| tool.name == "tracedecay_memory_status")
+        .expect("tracedecay_memory_status definition");
 
     assert_eq!(
         fact_store.annotations.as_ref().unwrap()["readOnlyHint"],
@@ -6583,15 +6584,15 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
     assert_eq!(fact_store.input_schema["properties"]["trust"]["maximum"], 1);
 
     assert!(
-        !tool_names.contains("tokensave_record_decision"),
+        !tool_names.contains("tracedecay_record_decision"),
         "unshipped legacy decision tool should not be exposed"
     );
     assert!(
-        !tool_names.contains("tokensave_record_code_area"),
+        !tool_names.contains("tracedecay_record_code_area"),
         "unshipped legacy code-area tool should not be exposed"
     );
     assert!(
-        !tool_names.contains("tokensave_session_recall"),
+        !tool_names.contains("tracedecay_session_recall"),
         "unshipped legacy recall tool should not be exposed"
     );
 }
@@ -6601,8 +6602,8 @@ fn message_search_provider_schema_matches_ingested_providers() {
     let tools = get_tool_definitions();
     let message_search = tools
         .iter()
-        .find(|tool| tool.name == "tokensave_message_search")
-        .expect("tokensave_message_search definition");
+        .find(|tool| tool.name == "tracedecay_message_search")
+        .expect("tracedecay_message_search definition");
 
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
@@ -6625,7 +6626,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     let (cg, _dir) = setup_project().await;
     let added = handle_tool_call(
         &cg,
-        "tokensave_fact_store",
+        "tracedecay_fact_store",
         json!({
             "action": "add",
             "content": "Status should repair dirty holographic banks",
@@ -6639,7 +6640,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
-    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
     let (db, _) = Database::open(&db_path).await.unwrap();
     db.conn()
         .execute(
@@ -6652,7 +6653,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
         .unwrap();
     db.close();
 
-    let status = handle_tool_call(&cg, "tokensave_memory_status", json!({}), None, None)
+    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
         .unwrap();
     let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
@@ -6684,12 +6685,12 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
 // Bug-report regressions: sonium-codebase issues
 // ---------------------------------------------------------------------------
 
-/// Regression for bug #1: `tokensave_body` should prefer the `fn foo()` over
+/// Regression for bug #1: `tracedecay_body` should prefer the `fn foo()` over
 /// a field/variant also named `foo`. Setup mirrors what sonium hit when
 /// searching for `gmres`: the codebase has both a `pub fn gmres(...)` and a
 /// struct field literally named `gmres`. The function — the body the user
 /// actually wants — must outrank the field.
-async fn setup_function_vs_field_collision() -> (TokenSave, TempDir) {
+async fn setup_function_vs_field_collision() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -6706,7 +6707,7 @@ pub fn gmres(x: u32) -> u32 {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -6716,7 +6717,7 @@ async fn body_prefers_function_over_field_with_same_name() {
     let (cg, _dir) = setup_function_vs_field_collision().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "gmres"}),
         None,
         None,
@@ -6739,7 +6740,7 @@ async fn body_prefers_function_over_field_with_same_name() {
     );
 }
 
-/// Regression for bug #5: `tokensave_diff_context.impacted_symbols` must not
+/// Regression for bug #5: `tracedecay_diff_context.impacted_symbols` must not
 /// list the same downstream node more than once. The sonium report showed
 /// the same id appearing 6+ times consecutively when several modified
 /// symbols all reached the same dependent.
@@ -6760,12 +6761,12 @@ pub fn second() { dep::shared(); }
     )
     .unwrap();
     fs::write(project.join("src/dep.rs"), "pub fn shared() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/lib.rs"], "depth": 3}),
         None,
         None,
@@ -6786,7 +6787,7 @@ pub fn second() { dep::shared(); }
     );
 }
 
-/// Regression for bug #6 / review P1: `tokensave_recursion` must preserve
+/// Regression for bug #6 / review P1: `tracedecay_recursion` must preserve
 /// genuine direct recursion while filtering length-1 self-edge artifacts.
 #[tokio::test]
 async fn recursion_keeps_direct_recursion() {
@@ -6804,9 +6805,9 @@ pub fn nonrecursive() -> u32 { 42 }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -6848,9 +6849,9 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -6881,9 +6882,9 @@ pub fn c() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -6906,7 +6907,7 @@ pub fn c() { a(); }
     }
 }
 
-/// Regression for bug #4: `tokensave_changelog`'s response must not list
+/// Regression for bug #4: `tracedecay_changelog`'s response must not list
 /// directories under `files_not_indexed`. We construct a small git repo
 /// with a real commit history that touches both a real file and a
 /// (synthesised) directory path then verify the handler filters out the
@@ -6958,14 +6959,14 @@ async fn changelog_filters_directory_paths() {
         .current_dir(project)
         .output()
         .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly, not the index, and including the index sync subjects
     // this test to a pre-existing SyncLock contention flake.
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -6989,7 +6990,7 @@ async fn changelog_filters_directory_paths() {
     }
 }
 
-/// Regression for bug #8b: `tokensave_unused_imports` must actually flag
+/// Regression for bug #8b: `tracedecay_unused_imports` must actually flag
 /// unused imports. The previous implementation tested `incoming.is_empty()`
 /// for every Use node, but Use nodes always have at least one incoming
 /// edge (from their containing module/file via Contains), so the
@@ -7011,10 +7012,10 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     )
     .unwrap();
     fs::write(project.join("src/inner.rs"), "pub fn inner_fn() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7028,7 +7029,7 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for bug #8a: `tokensave_dead_code` must support `include_public`
+/// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
 /// so agents can audit pub items with no callers in the indexed scope. The
 /// previous SQL hard-coded `visibility != 'public'`, so on a codebase that
 /// is mostly `pub` the tool reported 0 dead symbols.
@@ -7046,10 +7047,10 @@ pub fn caller() { called(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let default_result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let default_text = extract_text(&default_result.value);
@@ -7062,7 +7063,7 @@ pub fn caller() { called(); }
 
     let with_pub = handle_tool_call(
         &cg,
-        "tokensave_dead_code",
+        "tracedecay_dead_code",
         json!({"include_public": true}),
         None,
         None,
@@ -7090,7 +7091,7 @@ pub fn caller() { called(); }
 #[tokio::test]
 async fn dependency_depth_excludes_implements_and_extends() {
     // Public helper exposed from the lib for unit-test inspection.
-    use tokensave::graph::queries::GraphQueryManager;
+    use tracedecay::graph::queries::GraphQueryManager;
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -7119,7 +7120,7 @@ pub trait T {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let qm = GraphQueryManager::new(cg.db());
@@ -7139,7 +7140,7 @@ pub trait T {}
     );
 }
 
-/// Regression: `tokensave_run_affected_tests` must dispatch the test
+/// Regression: `tracedecay_run_affected_tests` must dispatch the test
 /// functions that are themselves in `changed_paths`. Previously the
 /// handler walked callers of every node in the changed file — but
 /// `#[test]` functions are leaves with no callers, so a PR that only
@@ -7171,12 +7172,12 @@ fn edited_only_test() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_run_affected_tests",
+        "tracedecay_run_affected_tests",
         json!({
             "changed_paths": ["tests/edited_only.rs"],
             "timeout_secs": 60,
@@ -7208,7 +7209,7 @@ fn edited_only_test() {
     );
 }
 
-/// Regression: `tokensave_diagnose` must normalize span paths before
+/// Regression: `tracedecay_diagnose` must normalize span paths before
 /// looking them up in the graph. cargo emits absolute and (on Windows)
 /// backslash-separated paths; the graph stores project-relative,
 /// forward-slash paths. Without normalization a diagnostic with span
@@ -7220,7 +7221,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let abs_path = project.join("src/lib.rs");
@@ -7232,7 +7233,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diagnose",
+        "tracedecay_diagnose",
         json!({"cargo_output": cargo_output, "include_callers": false}),
         None,
         None,
@@ -7277,13 +7278,13 @@ pub fn helper() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let caller_id = find_node_id(&cg, "caller").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callees",
+        "tracedecay_callees",
         json!({"node_id": caller_id, "max_depth": 1, "resolve_dispatch": false}),
         None,
         None,
@@ -7313,7 +7314,7 @@ pub fn helper() {}
 /// kind. The sonium codebase had a parser `Token` enum whose `Default`
 /// variant became the target of 150 stray `implements` edges from
 /// manual `impl Default for X` blocks, completely poisoning
-/// `tokensave_rank --edge-kind implements`. Implements/Extends/derives
+/// `tracedecay_rank --edge-kind implements`. Implements/Extends/derives
 /// references must only resolve to trait-shaped targets.
 #[tokio::test]
 async fn implements_refs_dont_resolve_to_enum_variants() {
@@ -7333,12 +7334,12 @@ impl Default for B { fn default() -> Self { B } }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "implements", "direction": "incoming"}),
         None,
         None,
@@ -7358,7 +7359,7 @@ impl Default for B { fn default() -> Self { B } }
     }
 }
 
-/// Regression for bug #10: `tokensave_circular` must report one entry per
+/// Regression for bug #10: `tracedecay_circular` must report one entry per
 /// strongly-connected component, not every walk through the cycle. The
 /// sonium codebase had 73 "cycles" that were all different DFS paths
 /// through the same SCC. After the SCC refactor, the same data yields
@@ -7387,9 +7388,9 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
         "use crate::a::a_fn;\npub fn c_fn() { a_fn(); }\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7407,7 +7408,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     );
 }
 
-/// Regression for bug #12: `tokensave_port_order`'s `cycles` output must
+/// Regression for bug #12: `tracedecay_port_order`'s `cycles` output must
 /// expose the SCCs forming each cycle separately, instead of collapsing
 /// all unsorted nodes into a single mega-blob. Without this, on a real
 /// codebase the cycle entry contained 200+ unrelated symbols and the
@@ -7433,11 +7434,11 @@ pub fn leaf() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -7471,7 +7472,7 @@ pub fn leaf() {}
     }
 }
 
-/// Regression for new bug-report batch (#25): `tokensave_port_order` must
+/// Regression for new bug-report batch (#25): `tracedecay_port_order` must
 /// expose intra-cycle ordering signals so an agent can pick a starting
 /// point inside a 200-symbol SCC instead of staring at an undifferentiated
 /// blob. We expect each cycle entry to carry per-symbol in-cycle degree
@@ -7495,11 +7496,11 @@ pub fn h() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -7573,11 +7574,11 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -7593,7 +7594,7 @@ impl Triplet {
     );
 }
 
-/// Regression for bug #9: `tokensave_inheritance_depth` must surface Rust
+/// Regression for bug #9: `tracedecay_inheritance_depth` must surface Rust
 /// supertrait chains (`trait T: U`) as `Extends` edges.
 #[tokio::test]
 async fn inheritance_depth_walks_rust_supertraits() {
@@ -7609,9 +7610,9 @@ pub trait Leaf: Middle {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_inheritance_depth", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7630,7 +7631,7 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
-/// Regression for new bug-report batch (#26): `tokensave_circular` must
+/// Regression for new bug-report batch (#26): `tracedecay_circular` must
 /// emit *disjoint* SCCs — no file should appear in more than one cycle
 /// entry. The sonium run reported 216 cycles "sharing long tails", which
 /// would only be possible if the SCC condensation step were broken. This
@@ -7670,9 +7671,9 @@ async fn circular_emits_disjoint_sccs_under_load() {
         )
         .unwrap();
     }
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7694,7 +7695,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
     }
 }
 
-/// Regression for new bug-report batch (#24): `tokensave_diff_context`'s
+/// Regression for new bug-report batch (#24): `tracedecay_diff_context`'s
 /// `modified_symbols` must dedup by node id, even when callers pass the
 /// same path multiple times in `files`. The sonium run showed an
 /// `hmatrix.rs` file node listed 7× in a row because the caller had the
@@ -7709,12 +7710,12 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
         "pub struct S; pub fn one() {} pub fn two() {}\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/lib.rs", "src/lib.rs", "src/lib.rs"], "depth": 1}),
         None,
         None,
@@ -7736,7 +7737,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
 }
 
 /// Regression for new bug-report batch (#23): when a whole subtree is
-/// removed in a diff, `tokensave_changelog` must not report the deleted
+/// removed in a diff, `tracedecay_changelog` must not report the deleted
 /// directory under `files_not_indexed`. The previous `is_dir()` filter
 /// missed this case because the path was gone from disk by the time we
 /// checked. The fix uses gix's `entry_mode` flag to skip tree entries
@@ -7765,12 +7766,12 @@ async fn changelog_filters_deleted_directory_entries() {
     fs::remove_dir_all(project.join("crates")).unwrap();
     git(project, &["add", "-A"]);
     git(project, &["commit", "-m", "drop crates"]);
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly and the sync lock has a pre-existing parallel-test flake.
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -7792,7 +7793,7 @@ async fn changelog_filters_deleted_directory_entries() {
     );
 }
 
-/// Regression for new bug-report batch (#22): `tokensave_pr_context` must
+/// Regression for new bug-report batch (#22): `tracedecay_pr_context` must
 /// NOT explode Cargo.toml (or any .toml/.yaml/.json config file) into one
 /// symbol per `[name]`, `[version]`, `[dependencies]` key. On real PRs a
 /// Cargo.toml change with ~30 dependency lines produced ~70 entries that
@@ -7832,7 +7833,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "deps"]);
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all()` — pr_context reads the diff
     // from git directly and classifies Cargo.toml as `config` before any
     // index lookup, so we don't need the index to verify the collapse
@@ -7841,7 +7842,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_pr_context",
+        "tracedecay_pr_context",
         json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
         None,
         None,
@@ -7877,7 +7878,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
-/// Regression for new bug-report batch (#21): `tokensave_unused_imports`
+/// Regression for new bug-report batch (#21): `tracedecay_unused_imports`
 /// must flag genuinely unused identifiers inside grouped `use foo::{A, B}`
 /// imports. Real-world Rust style is dominated by grouped imports
 /// (`use std::collections::{HashMap, HashSet, BTreeMap};`); without
@@ -7898,9 +7899,9 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7936,7 +7937,7 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for new bug-report batch (#20): `tokensave_dead_code` must not
+/// Regression for new bug-report batch (#20): `tracedecay_dead_code` must not
 /// consider non-reference edges like `annotates` or `derives_macro` as
 /// "this function is alive" evidence. Previously, a private helper with no
 /// callers but an `#[inline]` (or any other attribute) on it had an
@@ -7965,10 +7966,10 @@ fn dead_helper_with_attr() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -7985,7 +7986,7 @@ fn dead_helper_with_attr() {}
     );
 }
 
-/// Regression for new bug-report batch (#19): `tokensave_search` must rank
+/// Regression for new bug-report batch (#19): `tracedecay_search` must rank
 /// trait/struct/function definitions above `use` re-exports of the same name.
 /// Previously, several `use foo::LinearOperator;` lines could outrank the
 /// `pub trait LinearOperator { … }` definition because BM25 scored short
@@ -8024,11 +8025,11 @@ pub mod e;
         )
         .unwrap();
     }
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "LinearOperator", "limit": 10}),
         None,
         None,
@@ -8055,18 +8056,18 @@ async fn refresh_file_token_map_picks_up_new_files() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.sync().await.unwrap();
 
-    let server = tokensave::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
     let initial_map = server.file_token_map_snapshot();
     let initial_keys: std::collections::HashSet<_> = initial_map.keys().cloned().collect();
 
     // Add a new file, sync it, then refresh.
     std::fs::write(project.join("b.rs"), "fn b() { let y = 2; }").unwrap();
-    let cg2 = tokensave::tokensave::TokenSave::open(project)
+    let cg2 = tracedecay::tracedecay::TraceDecay::open(project)
         .await
         .unwrap();
     cg2.sync().await.unwrap();
@@ -8091,12 +8092,12 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.sync().await.unwrap();
 
-    let server = tokensave::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(2))
@@ -8180,7 +8181,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand",
+        "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-page-session",
@@ -8233,7 +8234,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand",
+        "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-active-session",
@@ -8283,7 +8284,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
     let raw_result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand",
+        "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-active-session",
@@ -8309,7 +8310,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
     let payload_result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand",
+        "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": owner_session,
@@ -8386,7 +8387,7 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_compress",
+        "tracedecay_lcm_compress",
         json!({
             "provider": "cursor",
             "session_id": "lcm-depth-session",
@@ -8442,7 +8443,7 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_status",
+        "tracedecay_lcm_status",
         json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
         None,
         None,
@@ -8490,17 +8491,17 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     )
     .await;
 
-    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
         .await
         .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(
         payload["lcm"]["schema_version"],
-        json!(tokensave::sessions::lcm::LCM_SCHEMA_VERSION)
+        json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
     );
 
-    let db_path = tokensave::sessions::cursor::project_session_db_path(cg.project_root());
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
     {
         let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
         let conn = db.connect().unwrap();
@@ -8512,7 +8513,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
         .unwrap();
     }
 
-    let result = handle_tool_call(&cg, "tokensave_lcm_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
         .await
         .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
@@ -8552,7 +8553,7 @@ async fn lcm_grep_rejects_invalid_scope() {
     let err = expect_tool_error(
         handle_tool_call(
             &cg,
-            "tokensave_lcm_grep",
+            "tracedecay_lcm_grep",
             json!({"query": "anything", "scope": "everything"}),
             None,
             None,
@@ -8565,7 +8566,7 @@ async fn lcm_grep_rejects_invalid_scope() {
     );
 }
 
-/// Same contract for `tokensave_message_search`: invalid scope values fail
+/// Same contract for `tracedecay_message_search`: invalid scope values fail
 /// closed instead of broadening the search to every session.
 #[tokio::test]
 async fn message_search_rejects_invalid_scope() {
@@ -8574,7 +8575,7 @@ async fn message_search_rejects_invalid_scope() {
         let err = expect_tool_error(
             handle_tool_call(
                 &cg,
-                "tokensave_message_search",
+                "tracedecay_message_search",
                 json!({"query": "anything", "scope": invalid}),
                 None,
                 None,
@@ -8603,12 +8604,12 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.index_all().await.unwrap();
 
-    let db_path = tokensave::sessions::cursor::project_session_db_path(project);
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project);
 
     // Confirm no DB exists before calling any tool.
     assert!(
@@ -8618,22 +8619,22 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
 
     // Exercise all six pure-read LCM tools.
     for (tool, args) in [
-        ("tokensave_lcm_status", json!({})),
-        ("tokensave_lcm_grep", json!({"query": "anything"})),
+        ("tracedecay_lcm_status", json!({})),
+        ("tracedecay_lcm_grep", json!({"query": "anything"})),
         (
-            "tokensave_lcm_load_session",
+            "tracedecay_lcm_load_session",
             json!({"session_id": "ghost-session"}),
         ),
         (
-            "tokensave_lcm_describe",
+            "tracedecay_lcm_describe",
             json!({"session_id": "ghost-session"}),
         ),
         (
-            "tokensave_lcm_expand",
+            "tracedecay_lcm_expand",
             json!({"session_id": "ghost-session", "target": {"kind": "raw_message", "store_id": 1}}),
         ),
         (
-            "tokensave_lcm_expand_query",
+            "tracedecay_lcm_expand_query",
             json!({"session_id": "ghost-session", "prompt": "anything"}),
         ),
     ] {
@@ -8677,7 +8678,7 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.index_all().await.unwrap();
@@ -8686,7 +8687,7 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     // we just verify the argument parsing does not panic or error.
     let result = handle_tool_call(
         &cg,
-        "tokensave_lcm_expand_query",
+        "tracedecay_lcm_expand_query",
         json!({
             "session_id": "test-session",
             "prompt": "what did we discuss?",
@@ -8726,12 +8727,12 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.index_all().await.unwrap();
 
-    let server = tokensave::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
     server.run_startup_catch_up_sync().await;
 
     let completed = server
@@ -8763,7 +8764,7 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
 
 /// Renames the `edges` table so every edge query on the open connection
 /// fails while node and file queries keep working.
-async fn break_edges_table(cg: &TokenSave) {
+async fn break_edges_table(cg: &TraceDecay) {
     cg.db()
         .conn()
         .execute("ALTER TABLE edges RENAME TO edges_broken", ())
@@ -8777,7 +8778,7 @@ async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
     break_edges_table(&cg).await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_simplify_scan",
+        "tracedecay_simplify_scan",
         json!({"files": ["src/utils.rs"]}),
         None,
         None,
@@ -8796,7 +8797,7 @@ async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
     break_edges_table(&cg).await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_type_hierarchy",
+        "tracedecay_type_hierarchy",
         json!({"node_id": node_id}),
         None,
         None,

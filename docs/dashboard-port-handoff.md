@@ -5,7 +5,7 @@ at the end of this doc. Phase 3 complete (curation implemented; hard-delete
 semantics, no archive). Nothing committed; everything is in the working trees
 of `/home/zack/projects/tokensave` and `/home/zack/hermes-agent`.
 
-Hermes integration (2026-06-10): boot failure fixed, the tokensave-backed
+Hermes integration (2026-06-10): boot failure fixed, the tracedecay-backed
 dashboard is render-verified inside a live `hermes dashboard`, and the old
 holographic_plus dashboard tab is retired. See "Hermes live render +
 holographic_plus retirement" below.
@@ -16,7 +16,7 @@ Phase 3 TODOs.
 
 ## What was copied from where
 
-| Destination (tokensave repo) | Source | Notes |
+| Destination (tracedecay repo) | Source | Notes |
 |---|---|---|
 | `dashboard/holographic/src/` (14 files) | `/home/zack/hermes-agent/plugins/memory/holographic_plus/dashboard/src/` | Full buildable TS/React source, unmodified |
 | `dashboard/holographic/dist/style.css` | generated from `dashboard/holographic/src/styles.css` | Phase 2 replaced the frozen Tailwind artifact with a hand-rolled token stylesheet rebuilt by `dashboard/build.mjs` |
@@ -42,7 +42,7 @@ the old Python implementation — see TODOs) and every other Hermes plugin.
 
 ## Architecture
 
-Layering requirement: the tokensave dashboard (Rust server + UI bundles) is
+Layering requirement: the tracedecay dashboard (Rust server + UI bundles) is
 the **canonical** implementation; the Hermes plugin is a **thin wrapper**
 that reuses it, never a fork.
 
@@ -62,15 +62,15 @@ that reuses it, never a fork.
 └──────────┬─────────────┘                 │  Proxy w/ rewritten fetchJSON│
            │ same-origin fetch             └────────────┬─────────────────┘
 ┌──────────▼─────────────────────┐         ┌────────────▼─────────────────┐
-│ `tokensave dashboard` (axum)   │◄────────│ plugin_api.py reverse proxy  │
+│ `tracedecay dashboard` (axum)   │◄────────│ plugin_api.py reverse proxy  │
 │ src/dashboard/{mod,assets,     │  spawns │ /api/plugins/                │
 │  memory_api,lcm_api,util}.rs   │ + HTTP  │   hermes-intelligence/*      │
 └──────────┬─────────────────────┘         └──────────────────────────────┘
            │ SQL (libsql)
    ┌───────┴──────────────┬───────────────────────────┐
    │ project DB           │ global DB                 │
-   │ .tokensave/          │ ~/.tokensave/global.db    │
-   │   tokensave.db       │  lcm_raw_messages,        │
+   │ .tracedecay/          │ ~/.tracedecay/global.db    │
+   │   tracedecay.db       │  lcm_raw_messages,        │
    │  memory_facts,       │  lcm_summary_nodes,       │
    │  memory_entities,    │  lcm_summary_sources (+   │
    │  memory_banks, ...   │  FTS mirrors)             │
@@ -104,13 +104,13 @@ Key decisions:
 ### Standalone command
 
 ```
-tokensave dashboard [--path <project>] [--host 127.0.0.1] [--port 7341]
+tracedecay dashboard [--path <project>] [--host 127.0.0.1] [--port 7341]
 ```
 
 - Registered in `src/cli.rs` (`Commands::Dashboard`), dispatched in
   `src/main.rs`, implemented in `src/dashboard/` (axum 0.8, new dep).
 - `--port 0` binds a free port. First stdout line is stable and parseable:
-  `tokensave dashboard listening on http://127.0.0.1:PORT/` (the Hermes
+  `tracedecay dashboard listening on http://127.0.0.1:PORT/` (the Hermes
   wrapper parses it).
 - Static assets are **embedded at compile time** (`src/dashboard/assets.rs`
   uses `include_bytes!` of `dashboard/*/dist/*`), so run
@@ -123,11 +123,12 @@ tokensave dashboard [--path <project>] [--host 127.0.0.1] [--port 7341]
   (`package.include` whitelist), so `cargo package`/`publish`/crates.io builds
   need no Node toolchain.
 
-## Endpoint mapping (old API → tokensave-backed API)
+## Endpoint mapping (old API → tracedecay-backed API)
 
 ### Holographic memory (`/api/plugins/holographic`, `src/dashboard/memory_api.rs`)
 
-Backed by the **project DB** (`.tokensave/tokensave.db`). Old backend was
+Backed by the **project DB** (`.tracedecay/tracedecay.db`; a legacy
+`.tokensave/` directory is still honored as a fallback). Old backend was
 Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 
 | Route | Old source | New source | Status |
@@ -135,23 +136,24 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /` (overview+facts+entities+graph) | `facts`, `entities`, `fact_entities`, `memory_banks` | `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks` | working |
 | `GET /projection` | numpy PCA over `hrr_vector` blobs (float64) | Rust dual-PCA (Gram matrix power iteration) over bincode-encoded `Vec<f64>` phase vectors | working |
 | `GET /similarity` | pure-python `mean(cos(p_i−p_j))` + lexical overlap + classification | same math in Rust (`SIMILARITY_FACT_CAP` 500, identical thresholds) | working |
-| `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tokensave curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
+| `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tracedecay curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
 | `GET /curation/status` | hermes curator state files | Returns `enabled:true`, `mode: similarity_dedup`, last preview timestamp | **working** |
 | `GET /curation/activity` | curator activity events | Always empty (no LLM/agent event stream) | working |
-| `GET /curation/preview` | saved dry-run file | Last `dry_run=true` result, persisted to a `.tokensave/dashboard/curation_preview.json` sidecar (survives restarts); stale when fact count changes | **working** |
+| `GET /curation/preview` | saved dry-run file | Last `dry_run=true` result, persisted to a `.tracedecay/dashboard/curation_preview.json` sidecar (survives restarts); stale when fact count changes | **working** |
 | `POST /curate` | `agent.memory_curator.run_memory_curation` | Similarity-based dedup: proposes/applies `delete` actions for `likely_duplicate` pairs; `dry_run=true` returns plan, `dry_run=false` hard-deletes losers via `MemoryStore::remove_fact` | **working** |
 | `POST /curate/apply` | (new, no Hermes equivalent) | Generic curation-ops apply API: `{"ops": [{"op":"delete",...} \| {"op":"merge",...}]}` with per-op results; the contract for external (LLM) planners | **working** |
-| `providers` block in `GET /` | hermes provider discovery | static tokensave stub | stubbed |
+| `providers` block in `GET /` | hermes provider discovery | static tracedecay stub | stubbed |
 
-Mapping notes: bank names are the category itself in tokensave (old store
+Mapping notes: bank names are the category itself in tracedecay (old store
 used `cat:<category>`); `dim` ← `hrr_dim`; timestamps are unix epoch seconds
 (shell `timeAgo` handles them); FTS search for facts falls back to LIKE
-(tokensave has no `facts_fts`).
+(tracedecay has no `facts_fts`).
 
 ### LCM (`/api/plugins/hermes-lcm`, `src/dashboard/lcm_api.rs`)
 
-Backed by the **global DB** (`~/.tokensave/global.db`; overridable via
-`TOKENSAVE_GLOBAL_DB`). Old backend was `$HERMES_HOME/lcm.db`
+Backed by the **global DB** (`~/.tracedecay/global.db`; overridable via
+`TRACEDECAY_GLOBAL_DB` — legacy `TOKENSAVE_*` variable names are still honored
+as fallbacks). Old backend was `$HERMES_HOME/lcm.db`
 (`messages`/`summary_nodes` + FTS).
 
 | Route | Status | Mapping notes |
@@ -171,17 +173,17 @@ Backed by the **global DB** (`~/.tokensave/global.db`; overridable via
 - `cd dashboard && npm install && npm run build` — builds shell (React 19 +
   esbuild), **rebuilds the holographic bundle from src** (proves the source
   port is buildable), copies LCM, assembles the hermes-wrapper dist.
-- `cargo check`, `cargo clippy --bin tokensave` (repo denies
+- `cargo check`, `cargo clippy --bin tracedecay` (repo denies
   `unwrap`/`expect`), `cargo test --lib dashboard` — clean.
-- `tokensave dashboard --port 7341` against this repo's own index: verified
+- `tracedecay dashboard --port 7341` against this repo's own index: verified
   via curl + headless browser — overview (133 facts/685 entities/6 banks),
   trust histogram, growth, graph (23 nodes/29 edges), projection (PCA, dim
   2048), similarity (real `likely_duplicate` pairs), curation stubs, LCM tab
   renders with correct empty-state (local global.db has no LCM rows yet);
   LCM search exercises the FTS path (`engine: "fts"`).
 - Hermes wrapper `plugin_api.py` tested with FastAPI `TestClient` in the
-  hermes venv, both modes: external server (`TOKENSAVE_DASHBOARD_URL`) and
-  subprocess spawn (`TOKENSAVE_BIN` + `--port 0` + stdout URL parse +
+  hermes venv, both modes: external server (`TRACEDECAY_DASHBOARD_URL`) and
+  subprocess spawn (`TRACEDECAY_BIN` + `--port 0` + stdout URL parse +
   shutdown). All proxied routes returned correct payloads.
 
 ## Phase 2 UI/design changes
@@ -226,7 +228,7 @@ Backed by the **global DB** (`~/.tokensave/global.db`; overridable via
   desktop and ~420px width.
 - Hermes wrapper external-URL mode verified via FastAPI `TestClient` under
   `/home/zack/hermes-agent` with `uv run python` and
-  `TOKENSAVE_DASHBOARD_URL` pointed at the local dashboard server:
+  `TRACEDECAY_DASHBOARD_URL` pointed at the local dashboard server:
   `/capabilities`, `/holographic/`, `/holographic/projection`,
   `/holographic/similarity`, `/lcm/overview`, and `/lcm/search` all returned
   200. Capability payload reported `mode: "hermes"`; holographic overview
@@ -254,7 +256,7 @@ Curation deletes go through the canonical store path
 `memory_facts` row, FK `ON DELETE CASCADE` removes `memory_fact_entities`
 links, the FTS delete trigger removes the `memory_facts_fts` row, and the
 fact's memory banks are marked dirty for rebuild. Because rows are physically
-gone, deleted facts immediately disappear from `tokensave_fact_store` recall,
+gone, deleted facts immediately disappear from `tracedecay_fact_store` recall,
 FTS/entity candidate queries, and every dashboard view — no recall-path
 filtering is needed (the earlier `state`-column filters were reverted).
 
@@ -269,7 +271,7 @@ touching anything.
 
 The Hermes implementation delegates to `agent.memory_curator.run_memory_curation`
 (LLM-backed agent with `archive`, `merge`, `supersede`, `retag`, `entity_*`, etc.).
-The tokensave backend does not have an LLM integration, so built-in curation is
+The tracedecay backend does not have an LLM integration, so built-in curation is
 **similarity-based deduplication**:
 
 1. Runs the same pairwise phase-cosine similarity analysis as `GET /similarity`.
@@ -286,7 +288,7 @@ The tokensave backend does not have an LLM integration, so built-in curation is
    `MemoryStore::remove_fact`. Clears the saved preview afterwards.
 5. The response shape is a valid `MemoryCurateResponse` (`ran`, `dry_run`,
    `actions`, `counts: {delete: n}`, `applied_counts`, `llm_calls: 0`,
-   `coverage`, `provider: tokensave`, `mode: similarity_dedup`).
+   `coverage`, `provider: tracedecay`, `mode: similarity_dedup`).
 
 ### Generic curation-ops apply API (contract for external planners)
 
@@ -314,7 +316,7 @@ with a permanent-deletion warning).
 ### Hermes live render + holographic_plus retirement (2026-06-10)
 
 (Hermes-side follow-up to the Phase 3 TODOs below; separate from the
-tokensave-side curation/archive Phase 3 work.) All work here is confined to
+tracedecay-side curation/archive Phase 3 work.) All work here is confined to
 `/home/zack/hermes-agent` (plus this doc). Nothing committed.
 
 ### Boot fix (`ModuleNotFoundError: No module named 'hermes_cli.middleware'`)
@@ -338,6 +340,10 @@ tokensave-side curation/archive Phase 3 work.) All work here is confined to
   passes (73), as does `test_plugin_config_defaults.py` (9).
 
 ### How the dashboard was launched
+
+Commands below are reproduced verbatim as run on 2026-06-10, pre-rebrand
+(old `tokensave` binary and `TOKENSAVE_*` variable names; both are still
+honored as legacy fallbacks):
 
 ```bash
 # Build the working tokensave binary used by the wrapper (see note below).
@@ -363,22 +369,23 @@ uv run --no-sync hermes dashboard --port 9215 --host 127.0.0.1 --no-open --skip-
 - The combined **"Hermes Intelligence"** tab registers and renders (the
   `new Function` + window-`Proxy` bundle evaluation works under the real host;
   no CSP interference).
-- **Memory** internal tab shows real tokensave data: **133 facts / 685
+- **Memory** internal tab shows real tracedecay data: **133 facts / 685
   entities / 6 banks**, category bars (general 83 / tool 19 / code_area 14 /
   project 10 / decision 7), HRR coverage rings (100%), trust distribution,
   facts/day chart, and fact/entity/bank lists.
 - **LCM** internal tab renders the first-class empty state ("No LCM sessions
-  indexed yet") for the local `~/.tokensave/global.db` (zero LCM rows), with
-  the `Database detected` badge.
-- Spawn confirmed: with no `TOKENSAVE_DASHBOARD_URL` set, the wrapper spawned
+  indexed yet") for the local `~/.tokensave/global.db` (zero LCM rows at the
+  time; pre-rebrand path), with the `Database detected` badge.
+- Spawn confirmed: with no `TOKENSAVE_DASHBOARD_URL` set (pre-rebrand variable
+  name), the wrapper spawned
   `tokensave dashboard --host 127.0.0.1 --port 0 --path
   /home/zack/projects/tokensave` as a **child of the hermes python process**
   (verified via PPID), and `/api/plugins/hermes-intelligence/capabilities`
   returned `mode: "hermes"`.
 
-Note on the tokensave binary: a concurrent effort in the tokensave repo is
-mid-flight on a curation/archive **v13 schema migration**. After it rebuilt
-`target/debug/tokensave` (09:03), fresh spawns fail while opening the v12
+Note on the binary (then named `tokensave`): a concurrent effort in this repo
+was mid-flight on a curation/archive **v13 schema migration**. After it rebuilt
+`target/debug/tokensave` (09:03), fresh spawns failed while opening the v12
 project DB (`v13: failed to add archive columns to memory_facts: SQLite
 failure: near "EXISTS": syntax error`) — its WIP, not the wrapper's. The live
 post-retirement screenshots were therefore taken with the wrapper pointed at a
@@ -445,7 +452,7 @@ curator's one-shot LLM review tier (`_call_llm_oneshot` +
 - `POST /api/plugins/hermes-intelligence/curation/llm-plan`
   (`{dry_run=true, limit, threshold, max_clusters, min_confidence}`):
   fetches `/similarity` pairs (likely_duplicate + merge_candidate) from the
-  tokensave server, union-find clusters them, sends ONE
+  tracedecay server, union-find clusters them, sends ONE
   `agent.auxiliary_client.call_llm(task="memory_curator", temperature=0)`
   call (same task key as the original curator, so provider/model resolution
   matches), validates proposed ops (op vocabulary {merge, delete, keep},
@@ -456,8 +463,8 @@ curator's one-shot LLM review tier (`_call_llm_oneshot` +
   reflect→merge+merged_content; recategorize/retag have no contract op.
 - `/capabilities` override now also sets `llm_curation: true` (top-level and
   `features.`) when the Hermes auxiliary client is importable — standalone
-  tokensave reports `false`, so UIs can feature-detect.
-- Contract verified live against the rebuilt tokensave binary (no
+  tracedecay reports `false`, so UIs can feature-detect.
+- Contract verified live against the rebuilt tracedecay binary (no
   mismatches): dry-run plan over real similarity clusters, then real apply
   against a **copy** of the project DB — `counts: {merged: 1}`, 63 losers
   hard-deleted, facts 133→70. A live in-hermes dry-run with the REAL
@@ -486,7 +493,7 @@ curator's one-shot LLM review tier (`_call_llm_oneshot` +
 
 - `tests/plugins/test_hermes_intelligence_llm_curation.py` (6): full
   op-generation → apply pipeline via FastAPI TestClient against an
-  in-process contract-shaped tokensave stub with seeded facts; LLM stubbed
+  in-process contract-shaped tracedecay stub with seeded facts; LLM stubbed
   at the `call_llm` seam. Covers capabilities flag, dry-run validation
   (hallucinated ids + low-confidence rejected, keep filtered), apply posting
   contract-shaped ops only, no-clusters short-circuit, non-JSON LLM → 502,
@@ -515,7 +522,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
    implemented; an LLM planner (Hermes wrapper, `llm_curation` flag) is expected
    to supply richer plans via `/curate/apply` later.
 3. **Preview persistence**: RESOLVED — the dry-run preview is mirrored to a
-   sidecar (`.tokensave/dashboard/curation_preview.json`) and re-hydrated on
+   sidecar (`.tracedecay/dashboard/curation_preview.json`) and re-hydrated on
    server start; applying curation clears both copies. API shape unchanged.
 4. **Similarity floor**: RESOLVED — the cached pair set keeps every finite
    phase-cosine pair (`SIMILARITY_PAIR_FLOOR = -1.0`), and the API accepts a
@@ -525,11 +532,11 @@ conservatism backstop, and callers can pass a higher `threshold` /
 ## Remaining stubbed / known gaps (post Phase 3)
 
 1. LCM data scope: MOSTLY RESOLVED — the standalone dashboard now serves the
-   project-local `.tokensave/sessions.db` (where transcript ingest writes),
-   with `TOKENSAVE_GLOBAL_DB` pinning an explicit store (also the path for
-   hermes-profile stores: point it at `<hermes_home>/.tokensave/sessions.db`).
+   project-local `.tracedecay/sessions.db` (where transcript ingest writes),
+   with `TRACEDECAY_GLOBAL_DB` pinning an explicit store (also the path for
+   hermes-profile stores: point it at `<hermes_home>/.tracedecay/sessions.db`).
    Remaining: an in-UI store *switcher* for browsing multiple stores.
-2. The wrapper picks the project root from `TOKENSAVE_DASHBOARD_PROJECT` or
+2. The wrapper picks the project root from `TRACEDECAY_DASHBOARD_PROJECT` or
    Hermes' cwd — no per-request/workspace project selection.
 3. The wrapper UI is now also rendered + verified inside a live
    `hermes dashboard` session (Hermes live-render section below), in addition
@@ -537,7 +544,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
 4. The old holographic_plus dashboard tab is **retired** (Phase 3). The
    plugin's memory provider/tools/curator remain active; only its dashboard
    UI registration was disabled, since the `hermes-intelligence` wrapper now
-   provides that UI backed by tokensave.
+   provides that UI backed by tracedecay.
 
 ## TODOs for Phase 3 testing/hardening
 
@@ -553,7 +560,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
         (`ModuleNotFoundError: No module named 'hermes_cli.middleware'`) was
         root-caused and fixed (new `hermes_cli/middleware.py`).
 - [x] Decide the fate of `plugins/memory/holographic_plus/dashboard` in
-      hermes (retire or point it at the tokensave backend too).
+      hermes (retire or point it at the tracedecay backend too).
       - 2026-06-10 DONE — retired. The holographic_plus dashboard *registration*
         is disabled (its `dashboard/manifest.json` renamed to
         `manifest.json.disabled`, the sole discovery key). The "Holographic
@@ -566,19 +573,19 @@ conservatism backstop, and callers can pass a higher `threshold` /
       `tool_name`, `pinned` in `lcm_raw_messages` so the session drawer
       stops approximating.
       - 2026-06-10 PARTIAL — project-local vs global selection shipped. The
-        dashboard now serves the project's `.tokensave/sessions.db` (where
+        dashboard now serves the project's `.tracedecay/sessions.db` (where
         Cursor hooks + the hookless-agent catch-up sweep actually ingest)
-        instead of the always-empty `~/.tokensave/global.db`; a
-        `TOKENSAVE_GLOBAL_DB` override still pins the store (smoke harness /
+        instead of the always-empty `~/.tracedecay/global.db`; a
+        `TRACEDECAY_GLOBAL_DB` override still pins the store (smoke harness /
         Hermes wrapper contract, which is also the path for hermes-profile
-        stores: point the override at `<hermes_home>/.tokensave/sessions.db`).
+        stores: point the override at `<hermes_home>/.tracedecay/sessions.db`).
         Additive `storage_scope` field on every LCM payload + `lcm_scope` in
         capabilities; LCM header shows "Project store"/"Global store".
-        `tokensave dashboard` startup now spawns the same detached catch-up
-        ingest sweep as `tokensave serve`. Remaining: an in-UI store
+        `tracedecay dashboard` startup now spawns the same detached catch-up
+        ingest sweep as `tracedecay serve`. Remaining: an in-UI store
         *switcher* (multi-store browsing) and real `token_estimate` /
         `tool_name` / `pinned` columns.
-- [x] Wire curation: tokensave-side fact maintenance (dedupe via the
+- [x] Wire curation: tracedecay-side fact maintenance (dedupe via the
       existing similarity classification, trust decay) behind the
       `features.curation` capability flag; then enable the CurationPanel.
       - Implemented as similarity-based dedup with hard-delete semantics:
@@ -587,7 +594,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
         contract for external planners. No schema change shipped (v13 only
         cleans up a never-committed archive-column experiment). See the
         Phase 3 section above for full details.
-- [x] Add `--open` (launch browser). Done: `tokensave dashboard --open` opens
+- [x] Add `--open` (launch browser). Done: `tracedecay dashboard --open` opens
       the URL in the default browser after the server starts. Auth for
       non-loopback binds remains future work.
 - [x] Tests: Rust integration tests for the two API modules against a seeded
@@ -601,20 +608,20 @@ conservatism backstop, and callers can pass a higher `threshold` /
         `npm run smoke` (`--expect-lcm=empty|non-empty`) covering tab render,
         tab switching, holographic search interaction, Similarity view, and
         desktop + ~420px narrow viewports.
-- [x] Ingestion: local `~/.tokensave/global.db` has zero LCM rows — verify
+- [x] Ingestion: local `~/.tracedecay/global.db` has zero LCM rows — verify
       end-to-end with a session ingest before polishing the LCM charts.
       - Verified via a seeded temporary global DB mounted through
-        `TOKENSAVE_GLOBAL_DB`; live `/api/plugins/hermes-lcm/overview` returned
+        `TRACEDECAY_GLOBAL_DB`; live `/api/plugins/hermes-lcm/overview` returned
         non-empty totals (`messages_total: 2`, `summary_nodes_total: 1`) and
         smoke coverage passed in `--expect-lcm=non-empty` mode.
 - [x] Add a build-system guard so frontend dist changes always force
       re-embedding in local Rust builds, instead of requiring a manual touch or
       clean rebuild.
       - `build.rs` now emits `cargo::rerun-if-changed` for all embedded
-        dashboard dist assets and exports `TOKENSAVE_DASHBOARD_ASSET_STAMP`.
+        dashboard dist assets and exports `TRACEDECAY_DASHBOARD_ASSET_STAMP`.
       - `src/dashboard/assets.rs` threads that stamp into
-        `x-tokensave-asset-stamp` responses. After touching
-        `dashboard/lcm/dist/style.css`, Cargo marked `tokensave` dirty and
+        `x-tracedecay-asset-stamp` responses. After touching
+        `dashboard/lcm/dist/style.css`, Cargo marked `tracedecay` dirty and
         reran the build script + recompilation path.
 
 ## How to run
@@ -625,19 +632,19 @@ cd /home/zack/projects/tokensave/dashboard && npm install && npm run build
 
 # Optional smoke checks (browser automation)
 # Empty-state LCM:
-TOKENSAVE_GLOBAL_DB=/tmp/tokensave-dashboard-lcm-empty.db npm run smoke -- --expect-lcm=empty
+TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-empty.db npm run smoke -- --expect-lcm=empty
 # Seeded/non-empty LCM:
-TOKENSAVE_GLOBAL_DB=/tmp/tokensave-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
+TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
 
 # 2. Build + run standalone
 cd /home/zack/projects/tokensave
-cargo build --bin tokensave
-./target/debug/tokensave dashboard            # http://127.0.0.1:7341/
+cargo build --bin tracedecay
+./target/debug/tracedecay dashboard            # http://127.0.0.1:7341/
 
 # 3. Hermes-hosted (wrapper spawns the server automatically)
-TOKENSAVE_BIN=/home/zack/projects/tokensave/target/debug/tokensave \
-TOKENSAVE_DASHBOARD_PROJECT=/home/zack/projects/tokensave \
-hermes dashboard   # → "Hermes Intelligence" tab
+TRACEDECAY_BIN=/home/zack/projects/tokensave/target/debug/tracedecay \
+TRACEDECAY_DASHBOARD_PROJECT=/home/zack/projects/tokensave \
+hermes dashboard   # → "TraceDecay" tab (named "Hermes Intelligence" at port time)
 ```
 
 ## Final integration gate (2026-06-10)
@@ -673,11 +680,11 @@ committed.
   existing `test_hermes_intelligence_llm_curation.py` +
   `test_hermes_intelligence_wrapper_lifecycle.py` suites (9 passed).
 - **Docs**: README + `docs/dashboard.md` updated for the Code Graph tab, the
-  `tokensave_dashboard` MCP tool, `--open`, hard-delete curation, JSON error
+  `tracedecay_dashboard` MCP tool, `--open`, hard-delete curation, JSON error
   contracts (400/404/422 with `{"detail"}`), `storage_scope` badges, and the full
-  environment variable matrix (TOKENSAVE_GLOBAL_DB, TOKENSAVE_BIN,
-  TOKENSAVE_DASHBOARD_PROJECT, TOKENSAVE_DASHBOARD_URL, HERMES_HOME,
-  TOKENSAVE_OFFLINE, DISABLE_TOKENSAVE). CHANGELOG `[Unreleased]` covers the
+  environment variable matrix (TRACEDECAY_GLOBAL_DB, TRACEDECAY_BIN,
+  TRACEDECAY_DASHBOARD_PROJECT, TRACEDECAY_DASHBOARD_URL, HERMES_HOME,
+  TRACEDECAY_OFFLINE, DISABLE_TRACEDECAY). CHANGELOG `[Unreleased]` covers the
   dashboard feature set.
 
 **Documentation coordination note:** The **Savings & Cost** dashboard tab is

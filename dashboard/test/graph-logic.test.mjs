@@ -25,10 +25,10 @@ test("default view limits stay within the canvas budget", () => {
 
 test("empty index is the only state that asks the user to index", () => {
   const message = view.canvasEmptyMessage({ indexedNodes: 0, loadedNodes: 0, loading: false });
-  // Real CLI flow: `tokensave init` creates the index, `tokensave sync` refreshes it.
-  assert.match(message, /tokensave init/);
-  assert.match(message, /tokensave sync/);
-  assert.doesNotMatch(message, /tokensave index/);
+  // Real CLI flow: `tracedecay init` creates the index, `tracedecay sync` refreshes it.
+  assert.match(message, /tracedecay init/);
+  assert.match(message, /tracedecay sync/);
+  assert.doesNotMatch(message, /tracedecay index/);
   // Even while a request is in flight, a 0-node index reports itself as empty.
   assert.equal(
     view.canvasEmptyMessage({ indexedNodes: 0, loadedNodes: 0, loading: true }),

@@ -1,9 +1,11 @@
 //! Sidecar persistence for the dashboard's last dry-run curation preview.
 //!
 //! The preview lives in memory (`DashboardState::curate_preview`) and is
-//! mirrored to `.tokensave/dashboard/curation_preview.json` so a server
+//! mirrored to `.tracedecay/dashboard/curation_preview.json` so a server
 //! restart does not lose it (the original `holographic_plus` backend also
-//! persisted previews to a JSON file). The sidecar is a best-effort cache:
+//! persisted previews to a JSON file). If only the legacy `.tokensave/`
+//! directory exists, the sidecar stays there for backward compatibility.
+//! The sidecar is a best-effort cache:
 //! load/save/clear failures are logged and never fail an API request, and
 //! the API shape of `GET /curation/preview` is unchanged — staleness is
 //! still recomputed against the live fact count on every read.
@@ -15,10 +17,16 @@ use serde_json::{json, Value};
 use super::CuratePreviewEntry;
 
 pub(crate) fn sidecar_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".tokensave")
-        .join("dashboard")
-        .join("curation_preview.json")
+    let preferred = project_root.join(".tracedecay");
+    let legacy = project_root.join(".tokensave");
+    // Mirror the repo-wide ".tracedecay primary, .tokensave fallback"
+    // convention; later this should delegate to the central data-dir helper.
+    let data_dir = if preferred.exists() || !legacy.exists() {
+        preferred
+    } else {
+        legacy
+    };
+    data_dir.join("dashboard").join("curation_preview.json")
 }
 
 /// Loads the persisted preview, or `None` when absent/unreadable/malformed.

@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::LeanExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::LeanExtractor;
+use tracedecay::types::*;
 
 fn extract(source: &str) -> ExtractionResult {
     LeanExtractor.extract("Demo.lean", source)

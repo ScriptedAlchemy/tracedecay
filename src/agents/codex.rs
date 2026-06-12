@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 //! `OpenAI` Codex CLI agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Codex's config
+//! Handles registration of the tracedecay MCP server in Codex's config
 //! file (`~/.codex/config.toml`), per-tool auto-approval settings, prompt
 //! rules via `AGENTS.md`, and lifecycle hooks via `hooks.json`.
 //!
@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
     backup_config_file, load_json_file_strict, load_toml_file, safe_write_json_file, tool_names,
@@ -41,17 +41,17 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         let config_path = codex_dir.join("config.toml");
 
-        install_mcp_server(&config_path, &ctx.tokensave_bin, InstallScope::Global)?;
+        install_mcp_server(&config_path, &ctx.tracedecay_bin, InstallScope::Global)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
 
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+        install_hooks(&codex_dir.join("hooks.json"), &ctx.tracedecay_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Start a new Codex session — tokensave tools are now available");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Start a new Codex session — tracedecay tools are now available");
         print_hook_trust_guidance();
         Ok(())
     }
@@ -72,11 +72,11 @@ impl AgentIntegration for CodexIntegration {
         std::fs::create_dir_all(&codex_dir).ok();
         install_mcp_server(
             &codex_dir.join("config.toml"),
-            &ctx.tokensave_bin,
+            &ctx.tracedecay_bin,
             InstallScope::ProjectLocal,
         )?;
         install_prompt_rules(&project_path.join("AGENTS.md"))?;
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tokensave_bin)?;
+        install_hooks(&codex_dir.join("hooks.json"), &ctx.tracedecay_bin)?;
         print_hook_trust_guidance();
         Ok(())
     }
@@ -93,7 +93,7 @@ impl AgentIntegration for CodexIntegration {
         uninstall_hooks(&codex_dir.join("hooks.json"));
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Codex CLI.");
+        eprintln!("Uninstall complete. TraceDecay has been removed from Codex CLI.");
         eprintln!("Start a new Codex session for changes to take effect.");
         Ok(())
     }
@@ -103,7 +103,7 @@ impl AgentIntegration for CodexIntegration {
         let local_codex_dir = ctx.project_path.join(".codex");
         if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || local_agents_md_has_tokensave(&ctx.project_path.join("AGENTS.md"))
+            || local_agents_md_has_tracedecay(&ctx.project_path.join("AGENTS.md"))
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
@@ -125,7 +125,7 @@ impl AgentIntegration for CodexIntegration {
         Some(home.join(".codex/config.toml"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let config = home.join(".codex").join("config.toml");
         if !config.exists() {
             return false;
@@ -134,17 +134,17 @@ impl AgentIntegration for CodexIntegration {
         // so the caller treats it like a fresh install path.
         super::load_toml_file(&config).is_ok_and(|toml| {
             toml.get("mcp_servers")
-                .and_then(|v| v.get("tokensave"))
+                .and_then(|v| v.get("tracedecay"))
                 .is_some()
         })
     }
 }
 
-fn local_agents_md_has_tokensave(path: &Path) -> bool {
+fn local_agents_md_has_tracedecay(path: &Path) -> bool {
     path.exists()
         && std::fs::read_to_string(path)
             .unwrap_or_default()
-            .contains("## Prefer tokensave MCP tools")
+            .contains("## Prefer tracedecay MCP tools")
 }
 
 // ---------------------------------------------------------------------------
@@ -152,13 +152,13 @@ fn local_agents_md_has_tokensave(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Register MCP server and auto-approve tools in ~/.codex/config.toml.
-fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallScope) -> Result<()> {
+fn install_mcp_server(config_path: &Path, tracedecay_bin: &str, scope: InstallScope) -> Result<()> {
     let mut config = load_toml_file(config_path)?;
 
-    // Ensure [mcp_servers.tokensave] exists
+    // Ensure [mcp_servers.tracedecay] exists
     let table = config
         .as_table_mut()
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "config.toml is not a TOML table".to_string(),
         })?;
 
@@ -166,14 +166,14 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallSco
         .entry("mcp_servers")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "mcp_servers is not a table in config.toml".to_string(),
         })?;
 
     let mut server_table = toml::map::Map::new();
     server_table.insert(
         "command".to_string(),
-        toml::Value::String(tokensave_bin.to_string()),
+        toml::Value::String(tracedecay_bin.to_string()),
     );
     let args = match scope {
         InstallScope::Global => vec![toml::Value::String("serve".to_string())],
@@ -187,13 +187,13 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallSco
     if scope == InstallScope::Global {
         let mut env_table = toml::map::Map::new();
         env_table.insert(
-            "TOKENSAVE_ENABLE_GLOBAL_DB".to_string(),
+            "TRACEDECAY_ENABLE_GLOBAL_DB".to_string(),
             toml::Value::String("1".to_string()),
         );
         server_table.insert("env".to_string(), toml::Value::Table(env_table));
     }
 
-    // Auto-approve all tokensave tools so Codex doesn't prompt for each one
+    // Auto-approve all tracedecay tools so Codex doesn't prompt for each one
     let mut tools_table = toml::map::Map::new();
     for tool_name in tool_names() {
         let mut tool_config = toml::map::Map::new();
@@ -205,11 +205,11 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallSco
     }
     server_table.insert("tools".to_string(), toml::Value::Table(tools_table));
 
-    servers.insert("tokensave".to_string(), toml::Value::Table(server_table));
+    servers.insert("tracedecay".to_string(), toml::Value::Table(server_table));
 
     write_toml_file(config_path, &config)?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         config_path.display()
     );
     Ok(())
@@ -217,42 +217,42 @@ fn install_mcp_server(config_path: &Path, tokensave_bin: &str, scope: InstallSco
 
 /// Append prompt rules to AGENTS.md (idempotent).
 fn install_prompt_rules(agents_md: &Path) -> Result<()> {
-    let marker = "## Prefer tokensave MCP tools";
+    let marker = "## Prefer tracedecay MCP tools";
     let existing = if agents_md.exists() {
         std::fs::read_to_string(agents_md).unwrap_or_default()
     } else {
         String::new()
     };
     if existing.contains(marker) {
-        eprintln!("  AGENTS.md already contains tokensave rules, skipping");
+        eprintln!("  AGENTS.md already contains tracedecay rules, skipping");
         return Ok(());
     }
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(agents_md)
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("failed to open AGENTS.md: {e}"),
         })?;
     write!(
         f,
         "\n{marker}\n\n\
-        Before reading source files or scanning the codebase, use the tokensave MCP tools \
-        (`tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, \
-        `tokensave_impact`, `tokensave_node`, `tokensave_files`, `tokensave_affected`). \
+        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
+        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
+        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
         They provide instant semantic results from a pre-built knowledge graph and are \
         faster than file reads.\n\n\
-        If a code analysis question cannot be fully answered by tokensave MCP tools, \
-        try querying the SQLite database directly at `.tokensave/tokensave.db` \
+        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
+        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
         (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
         `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tokensave_fact_store`, \
-        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
-        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        For durable project/user facts, prefer `tracedecay_fact_store`, \
+        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
+        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
-        If you discover a gap where an extractor, schema, or tokensave tool could be \
+        If you discover a gap where an extractor, schema, or tracedecay tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/ScriptedAlchemy/tokensave describing the limitation. \
         **Remind the user to strip any sensitive or proprietary code from the bug description \
@@ -260,19 +260,19 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     )
     .ok();
     eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tokensave rules to {}",
+        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
         agents_md.display()
     );
     Ok(())
 }
 
-/// Register tokensave lifecycle hooks in a Codex `hooks.json` (idempotent).
+/// Register tracedecay lifecycle hooks in a Codex `hooks.json` (idempotent).
 ///
 /// Codex organizes hooks as `hooks[event][] -> { matcher?, hooks: [handler] }`
 /// where only `type: "command"` handlers run today and `timeout` is in seconds.
-/// We register the tokensave-owned group for each event, preserving any foreign
+/// We register the tracedecay-owned group for each event, preserving any foreign
 /// groups, so reinstalls reconcile in place. Backs up an existing file first.
-fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let backup = backup_config_file(hooks_path)?;
     let mut hooks = match load_json_file_strict(hooks_path) {
         Ok(v) => v,
@@ -284,11 +284,11 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
         }
     };
 
-    // Steer the agent toward tokensave MCP tools + report index freshness.
+    // Steer the agent toward tracedecay MCP tools + report index freshness.
     install_codex_hook_event(
         &mut hooks,
         "SessionStart",
-        tokensave_bin,
+        tracedecay_bin,
         "hook-codex-session-start",
         5,
         None,
@@ -296,7 +296,7 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     install_codex_hook_event(
         &mut hooks,
         "UserPromptSubmit",
-        tokensave_bin,
+        tracedecay_bin,
         "hook-codex-user-prompt-submit",
         5,
         None,
@@ -304,7 +304,7 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     install_codex_hook_event(
         &mut hooks,
         "SubagentStart",
-        tokensave_bin,
+        tracedecay_bin,
         "hook-codex-subagent-start",
         5,
         None,
@@ -314,7 +314,7 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     install_codex_hook_event(
         &mut hooks,
         "PostToolUse",
-        tokensave_bin,
+        tracedecay_bin,
         "hook-codex-post-tool-use",
         60,
         Some("Bash|apply_patch"),
@@ -328,15 +328,15 @@ fn install_hooks(hooks_path: &Path, tokensave_bin: &str) -> Result<()> {
     Ok(())
 }
 
-/// Insert (or reconcile) the tokensave-owned matcher group for `event`.
+/// Insert (or reconcile) the tracedecay-owned matcher group for `event`.
 ///
 /// Drops any pre-existing group that already contains our `subcommand` handler
 /// (so refinements to matcher/timeout reach old configs) while preserving every
-/// foreign group. Idempotent: exactly one tokensave group per event.
+/// foreign group. Idempotent: exactly one tracedecay group per event.
 fn install_codex_hook_event(
     hooks: &mut serde_json::Value,
     event: &str,
-    tokensave_bin: &str,
+    tracedecay_bin: &str,
     subcommand: &str,
     timeout: u64,
     matcher: Option<&str>,
@@ -352,7 +352,7 @@ fn install_codex_hook_event(
 
     let handler = json!({
         "type": "command",
-        "command": super::hook_command(tokensave_bin, subcommand),
+        "command": super::hook_command(tracedecay_bin, subcommand),
         "timeout": timeout,
     });
     let mut group = json!({ "hooks": [handler] });
@@ -382,7 +382,7 @@ fn print_hook_trust_guidance() {
     eprintln!(
         "\x1b[1mAction required:\x1b[0m Codex skips new/changed command hooks until you trust them."
     );
-    eprintln!("  Run \x1b[1m/hooks\x1b[0m inside Codex to review and trust the tokensave hooks.");
+    eprintln!("  Run \x1b[1m/hooks\x1b[0m inside Codex to review and trust the tracedecay hooks.");
     eprintln!(
         "  (For one-off non-interactive runs you can pass --dangerously-bypass-hook-trust, \
          but trusting via /hooks is recommended.)"
@@ -393,7 +393,7 @@ fn print_hook_trust_guidance() {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-/// Remove tokensave-owned hook groups from a Codex `hooks.json`.
+/// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
     const SUBCOMMANDS: [&str; 4] = [
         "hook-codex-session-start",
@@ -431,7 +431,7 @@ fn uninstall_hooks(hooks_path: &Path) {
         );
     } else if safe_write_json_file(hooks_path, &hooks, None).is_ok() {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave hooks from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay hooks from {}",
             hooks_path.display()
         );
     }
@@ -449,9 +449,11 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     let Some(servers) = table.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) else {
         return Ok(());
     };
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
         return Ok(());
@@ -468,14 +470,14 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     } else {
         write_toml_file(config_path, &config)?;
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             config_path.display()
         );
     }
     Ok(())
 }
 
-/// Remove tokensave rules from AGENTS.md.
+/// Remove tracedecay rules from AGENTS.md.
 fn uninstall_prompt_rules(agents_md: &Path) {
     if !agents_md.exists() {
         return;
@@ -483,12 +485,17 @@ fn uninstall_prompt_rules(agents_md: &Path) {
     let Ok(contents) = std::fs::read_to_string(agents_md) else {
         return;
     };
-    if !contents.contains("tokensave") {
-        eprintln!("  AGENTS.md does not contain tokensave rules, skipping");
+    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+        eprintln!("  AGENTS.md does not contain tracedecay rules, skipping");
         return;
     }
-    let marker = "## Prefer tokensave MCP tools";
-    let Some(start) = contents.find(marker) else {
+    let marker_new = "## Prefer tracedecay MCP tools";
+    let marker_legacy = "## Prefer tokensave MCP tools";
+    let (marker, start) = if let Some(start) = contents.find(marker_new) {
+        (marker_new, start)
+    } else if let Some(start) = contents.find(marker_legacy) {
+        (marker_legacy, start)
+    } else {
         return;
     };
     let after_marker = start + marker.len();
@@ -512,7 +519,7 @@ fn uninstall_prompt_rules(agents_md: &Path) {
     } else {
         std::fs::write(agents_md, format!("{new_contents}\n")).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave rules from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
             agents_md.display()
         );
     }
@@ -522,11 +529,11 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check config.toml has tokensave registered.
+/// Check config.toml has tracedecay registered.
 fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
     if !config_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent codex` if you use Codex CLI",
+            "{} not found — run `tracedecay install --agent codex` if you use Codex CLI",
             config_path.display()
         ));
         return;
@@ -541,13 +548,13 @@ fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
     };
     let has_server = config
         .get("mcp_servers")
-        .and_then(|v| v.get("tokensave"))
+        .and_then(|v| v.get("tracedecay"))
         .and_then(|v| v.as_table())
         .is_some();
 
     if !has_server {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent codex`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent codex`",
             config_path.display()
         ));
         return;
@@ -560,7 +567,7 @@ fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
     // Check tool auto-approval
     let tools = config
         .get("mcp_servers")
-        .and_then(|v| v.get("tokensave"))
+        .and_then(|v| v.get("tracedecay"))
         .and_then(|v| v.get("tools"))
         .and_then(|v| v.as_table());
 
@@ -576,27 +583,27 @@ fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {
         dc.pass(&format!("All {tools_len} tools set to auto-approve"));
     } else if auto_count > 0 {
         dc.warn(&format!(
-            "{auto_count}/{tools_len} tools auto-approved — run `tokensave install --agent codex` to update"
+            "{auto_count}/{tools_len} tools auto-approved — run `tracedecay install --agent codex` to update"
         ));
     } else {
         dc.warn("No tools auto-approved — Codex will prompt for each tool call");
     }
 }
 
-/// Check AGENTS.md contains tokensave rules.
+/// Check AGENTS.md contains tracedecay rules.
 fn doctor_check_prompt_file(dc: &mut DoctorCounters, agents_md: &Path) {
     if agents_md.exists() {
         let has_rules = std::fs::read_to_string(agents_md)
             .unwrap_or_default()
-            .contains("tokensave");
+            .contains("tracedecay");
         if has_rules {
             dc.pass(&format!(
-                "AGENTS.md contains tokensave rules in {}",
+                "AGENTS.md contains tracedecay rules in {}",
                 agents_md.display()
             ));
         } else {
             dc.fail(&format!(
-                "AGENTS.md missing tokensave rules in {} — run `tokensave install --local --agent codex` or `tokensave install --agent codex`",
+                "AGENTS.md missing tracedecay rules in {} — run `tracedecay install --local --agent codex` or `tracedecay install --agent codex`",
                 agents_md.display()
             ));
         }
@@ -605,12 +612,12 @@ fn doctor_check_prompt_file(dc: &mut DoctorCounters, agents_md: &Path) {
     }
 }
 
-/// Check hooks.json registers the tokensave lifecycle hooks, and remind the
+/// Check hooks.json registers the tracedecay lifecycle hooks, and remind the
 /// user that Codex requires trusting them via `/hooks` before they run.
 fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     if !hooks_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent codex` to add lifecycle hooks",
+            "{} not found — run `tracedecay install --agent codex` to add lifecycle hooks",
             hooks_path.display()
         ));
         return;
@@ -635,11 +642,11 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
             hooks_path.display()
         ));
         dc.info(
-            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tokensave hooks",
+            "Codex skips new/changed command hooks until trusted — run `/hooks` in Codex to trust the tracedecay hooks",
         );
     } else {
         dc.warn(&format!(
-            "tokensave hook(s) missing for {} in {} — run `tokensave install --local --agent codex` or `tokensave install --agent codex`",
+            "tracedecay hook(s) missing for {} in {} — run `tracedecay install --local --agent codex` or `tracedecay install --agent codex`",
             missing.join(", "),
             hooks_path.display(),
         ));

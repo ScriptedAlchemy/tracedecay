@@ -12,8 +12,8 @@ use super::trust::DEFAULT_MIN_TRUST;
 use super::types::{
     ContradictionResult, EntityRecord, FactRecord, FactSearchResult, MemoryCategory,
 };
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::current_timestamp;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::current_timestamp;
 
 const DEFAULT_LIMIT: usize = 10;
 const FTS_SCORE_WEIGHT: f64 = 0.40;
@@ -733,8 +733,8 @@ fn normalized_limit(limit: usize) -> usize {
     }
 }
 
-fn db_error(operation: &str, error: impl fmt::Display) -> TokenSaveError {
-    TokenSaveError::Database {
+fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
         message: error.to_string(),
         operation: operation.to_string(),
     }

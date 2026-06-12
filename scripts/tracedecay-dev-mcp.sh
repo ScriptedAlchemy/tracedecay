@@ -12,6 +12,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 MANIFEST="$REPO_ROOT/Cargo.toml"
-PROJECT_ROOT="${TOKENSAVE_DEV_PROJECT_ROOT:-$REPO_ROOT}"
+PROJECT_ROOT="${TRACEDECAY_DEV_PROJECT_ROOT:-$REPO_ROOT}"
 
 exec cargo run --quiet --manifest-path "$MANIFEST" -- serve --path "$PROJECT_ROOT" "$@"

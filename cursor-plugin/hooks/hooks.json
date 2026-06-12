@@ -3,55 +3,55 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "tokensave hook-cursor-session-start",
+        "command": "tracedecay hook-cursor-session-start",
         "timeout": 5
       }
     ],
     "sessionEnd": [
       {
-        "command": "tokensave hook-cursor-session-end",
+        "command": "tracedecay hook-cursor-session-end",
         "timeout": 30
       }
     ],
     "subagentStart": [
       {
-        "command": "tokensave hook-cursor-subagent-start",
+        "command": "tracedecay hook-cursor-subagent-start",
         "timeout": 5
       }
     ],
     "postToolUse": [
       {
-        "command": "tokensave hook-cursor-post-tool-use",
+        "command": "tracedecay hook-cursor-post-tool-use",
         "timeout": 5
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "tokensave hook-cursor-before-submit-prompt",
+        "command": "tracedecay hook-cursor-before-submit-prompt",
         "timeout": 5
       }
     ],
     "afterFileEdit": [
       {
-        "command": "tokensave hook-cursor-after-file-edit",
+        "command": "tracedecay hook-cursor-after-file-edit",
         "timeout": 30
       }
     ],
     "afterShellExecution": [
       {
-        "command": "tokensave hook-cursor-after-shell",
+        "command": "tracedecay hook-cursor-after-shell",
         "timeout": 60
       }
     ],
     "workspaceOpen": [
       {
-        "command": "tokensave hook-cursor-workspace-open",
+        "command": "tracedecay hook-cursor-workspace-open",
         "timeout": 60
       }
     ],
     "stop": [
       {
-        "command": "tokensave hook-cursor-stop",
+        "command": "tracedecay hook-cursor-stop",
         "timeout": 30
       }
     ]

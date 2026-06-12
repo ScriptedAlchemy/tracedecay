@@ -1,10 +1,10 @@
 //! Google Antigravity (formerly Windsurf) agent integration.
 //!
-//! Handles registration of the tokensave MCP server in:
+//! Handles registration of the tracedecay MCP server in:
 //!
 //! - `~/.gemini/antigravity/mcp_config.json` — the Antigravity IDE config,
-//!   shape `{"mcpServers": {"tokensave": {...}}}`.
-//! - `~/.gemini/antigravity-cli/plugins/tokensave.json` — the Antigravity
+//!   shape `{"mcpServers": {"tracedecay": {...}}}`.
+//! - `~/.gemini/antigravity-cli/plugins/tracedecay.json` — the Antigravity
 //!   CLI (`agy`) plugin file, same shape. Required because the IDE config
 //!   is not picked up by the CLI (#85).
 //!
@@ -32,6 +32,10 @@ fn mcp_config_path(home: &Path) -> std::path::PathBuf {
 /// Per-plugin file used by the Antigravity CLI. Holds the same shape as
 /// the IDE config so a future shared loader can read either location.
 fn cli_plugin_path(home: &Path) -> std::path::PathBuf {
+    home.join(".gemini/antigravity-cli/plugins/tracedecay.json")
+}
+
+fn legacy_cli_plugin_path(home: &Path) -> std::path::PathBuf {
     home.join(".gemini/antigravity-cli/plugins/tokensave.json")
 }
 
@@ -60,17 +64,17 @@ impl AgentIntegration for AntigravityIntegration {
                 return Err(e);
             }
         };
-        settings["mcpServers"]["tokensave"] = json!({
-            "command": ctx.tokensave_bin,
+        settings["mcpServers"]["tracedecay"] = json!({
+            "command": ctx.tracedecay_bin,
             "args": ["serve"]
         });
         safe_write_json_file(&mcp_path, &settings, backup.as_deref())?;
         eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+            "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
             mcp_path.display()
         );
 
-        // 2. Antigravity CLI plugin (~/.gemini/antigravity-cli/plugins/tokensave.json).
+        // 2. Antigravity CLI plugin (~/.gemini/antigravity-cli/plugins/tracedecay.json).
         //    Same shape as the IDE config; required because the IDE config is
         //    not picked up by the CLI (#85).
         let plugin_path = cli_plugin_path(&ctx.home);
@@ -80,23 +84,23 @@ impl AgentIntegration for AntigravityIntegration {
         let plugin_backup = backup_config_file(&plugin_path)?;
         let plugin_settings = json!({
             "mcpServers": {
-                "tokensave": {
-                    "command": ctx.tokensave_bin,
+                "tracedecay": {
+                    "command": ctx.tracedecay_bin,
                     "args": ["serve"],
                 }
             }
         });
         safe_write_json_file(&plugin_path, &plugin_settings, plugin_backup.as_deref())?;
         eprintln!(
-            "\x1b[32m✔\x1b[0m Added tokensave CLI plugin to {}",
+            "\x1b[32m✔\x1b[0m Added tracedecay CLI plugin to {}",
             plugin_path.display()
         );
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
+        eprintln!("  1. cd into your project and run: tracedecay init");
         eprintln!(
-            "  2. Restart Antigravity (IDE or `agy` CLI) — tokensave tools are now available"
+            "  2. Restart Antigravity (IDE or `agy` CLI) — tracedecay tools are now available"
         );
         Ok(())
     }
@@ -105,9 +109,10 @@ impl AgentIntegration for AntigravityIntegration {
         let mcp_path = mcp_config_path(&ctx.home);
         uninstall_mcp_server(&mcp_path);
         uninstall_cli_plugin(&cli_plugin_path(&ctx.home));
+        uninstall_cli_plugin(&legacy_cli_plugin_path(&ctx.home));
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Antigravity.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Antigravity.");
         eprintln!("Restart Antigravity (IDE or `agy` CLI) for changes to take effect.");
         Ok(())
     }
@@ -126,22 +131,29 @@ impl AgentIntegration for AntigravityIntegration {
         Some(mcp_config_path(home))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let ide_ok = {
             let mcp_path = mcp_config_path(home);
-            mcp_path.exists()
-                && load_json_file(&mcp_path)
-                    .get("mcpServers")
-                    .and_then(|v| v.get("tokensave"))
-                    .is_some()
+            if !mcp_path.exists() {
+                false
+            } else {
+                let servers = load_json_file(&mcp_path).get("mcpServers").cloned();
+                servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
+                    || servers.as_ref().and_then(|v| v.get("tokensave")).is_some()
+            }
         };
         let cli_ok = {
             let plugin_path = cli_plugin_path(home);
-            plugin_path.exists()
-                && load_json_file(&plugin_path)
-                    .get("mcpServers")
-                    .and_then(|v| v.get("tokensave"))
-                    .is_some()
+            let legacy_path = legacy_cli_plugin_path(home);
+            let has_entry = |path: &std::path::Path| {
+                if !path.exists() {
+                    return false;
+                }
+                let servers = load_json_file(path).get("mcpServers").cloned();
+                servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
+                    || servers.as_ref().and_then(|v| v.get("tokensave")).is_some()
+            };
+            has_entry(&plugin_path) || has_entry(&legacy_path)
         };
         ide_ok || cli_ok
     }
@@ -169,15 +181,17 @@ fn uninstall_mcp_server(mcp_path: &Path) {
         .and_then(|v| v.as_object_mut())
     else {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             mcp_path.display()
         );
         return;
     };
 
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             mcp_path.display()
         );
         return;
@@ -198,7 +212,7 @@ fn uninstall_mcp_server(mcp_path: &Path) {
         let pretty = serde_json::to_string_pretty(&settings).unwrap_or_default();
         std::fs::write(mcp_path, format!("{pretty}\n")).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             mcp_path.display()
         );
     }
@@ -206,7 +220,7 @@ fn uninstall_mcp_server(mcp_path: &Path) {
 
 /// Remove the per-plugin file the CLI loader picks up. Unlike the IDE config
 /// — which is shared across other tools — the plugin file belongs exclusively
-/// to tokensave, so we just delete it.
+/// to tracedecay, so we just delete it.
 fn uninstall_cli_plugin(plugin_path: &Path) {
     if !plugin_path.exists() {
         eprintln!("  {} not found, skipping", plugin_path.display());
@@ -226,14 +240,14 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
 
     if !mcp_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent antigravity` if you use the Antigravity IDE",
+            "{} not found — run `tracedecay install --agent antigravity` if you use the Antigravity IDE",
             mcp_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&mcp_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     if server.and_then(|v| v.as_object()).is_some() {
         dc.pass(&format!(
@@ -242,7 +256,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent antigravity`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent antigravity`",
             mcp_path.display()
         ));
     }
@@ -253,14 +267,14 @@ fn doctor_check_cli_plugin(dc: &mut DoctorCounters, home: &Path) {
 
     if !plugin_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent antigravity` if you use the Antigravity CLI (#85)",
+            "{} not found — run `tracedecay install --agent antigravity` if you use the Antigravity CLI (#85)",
             plugin_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&plugin_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     if server.and_then(|v| v.as_object()).is_some() {
         dc.pass(&format!(
@@ -269,7 +283,7 @@ fn doctor_check_cli_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "CLI plugin file exists but lacks `mcpServers.tokensave` in {} — run `tokensave install --agent antigravity`",
+            "CLI plugin file exists but lacks `mcpServers.tracedecay` in {} — run `tracedecay install --agent antigravity`",
             plugin_path.display()
         ));
     }

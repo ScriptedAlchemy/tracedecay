@@ -1,6 +1,6 @@
 //! Gemini CLI agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Gemini CLI's config
+//! Handles registration of the tracedecay MCP server in Gemini CLI's config
 //! file (`~/.gemini/settings.json`), and prompt rules via `~/.gemini/GEMINI.md`.
 //! Gemini CLI has no hook system. Tool auto-approval is handled via the
 //! `trust: true` flag on the MCP server entry.
@@ -10,12 +10,15 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
     backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
     safe_write_json_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
+
+const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
+const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 /// Gemini CLI agent.
 pub struct GeminiIntegration;
@@ -34,15 +37,15 @@ impl AgentIntegration for GeminiIntegration {
         std::fs::create_dir_all(&gemini_dir).ok();
         let settings_path = gemini_dir.join("settings.json");
 
-        install_mcp_server(&settings_path, &ctx.tokensave_bin)?;
+        install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
 
         let gemini_md = gemini_dir.join("GEMINI.md");
         install_prompt_rules(&gemini_md)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Start a new Gemini CLI session — tokensave tools are now available");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Start a new Gemini CLI session — tracedecay tools are now available");
         Ok(())
     }
 
@@ -53,7 +56,7 @@ impl AgentIntegration for GeminiIntegration {
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
         let gemini_dir = project_path.join(".gemini");
         std::fs::create_dir_all(&gemini_dir).ok();
-        install_mcp_server(&gemini_dir.join("settings.json"), &ctx.tokensave_bin)?;
+        install_mcp_server(&gemini_dir.join("settings.json"), &ctx.tracedecay_bin)?;
         install_prompt_rules(&project_path.join("GEMINI.md"))
     }
 
@@ -67,7 +70,7 @@ impl AgentIntegration for GeminiIntegration {
         uninstall_prompt_rules(&gemini_md);
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Gemini CLI.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Gemini CLI.");
         eprintln!("Start a new Gemini CLI session for changes to take effect.");
         Ok(())
     }
@@ -86,15 +89,15 @@ impl AgentIntegration for GeminiIntegration {
         Some(home.join(".gemini/settings.json"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let settings = home.join(".gemini").join("settings.json");
         if !settings.exists() {
             return false;
         }
         let json = super::load_json_file(&settings);
-        json.get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some()
+        let servers = json.get("mcpServers");
+        servers.and_then(|v| v.get("tracedecay")).is_some()
+            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -103,7 +106,7 @@ impl AgentIntegration for GeminiIntegration {
 // ---------------------------------------------------------------------------
 
 /// Register MCP server in ~/.gemini/settings.json.
-fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let backup = backup_config_file(settings_path)?;
     let mut settings = match load_json_file_strict(settings_path) {
         Ok(v) => v,
@@ -115,15 +118,15 @@ fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
         }
     };
 
-    settings["mcpServers"]["tokensave"] = json!({
-        "command": tokensave_bin,
+    settings["mcpServers"]["tracedecay"] = json!({
+        "command": tracedecay_bin,
         "args": ["serve"],
         "trust": true
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave MCP server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         settings_path.display()
     );
     Ok(())
@@ -131,42 +134,41 @@ fn install_mcp_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
 
 /// Append prompt rules to GEMINI.md (idempotent).
 fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
-    let marker = "## Prefer tokensave MCP tools";
     let existing = if gemini_md.exists() {
         std::fs::read_to_string(gemini_md).unwrap_or_default()
     } else {
         String::new()
     };
-    if existing.contains(marker) {
-        eprintln!("  GEMINI.md already contains tokensave rules, skipping");
+    if existing.contains(PROMPT_RULE_MARKER) {
+        eprintln!("  GEMINI.md already contains tracedecay rules, skipping");
         return Ok(());
     }
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(gemini_md)
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("failed to open GEMINI.md: {e}"),
         })?;
     write!(
         f,
-        "\n{marker}\n\n\
-        Before reading source files or scanning the codebase, use the tokensave MCP tools \
-        (`tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, \
-        `tokensave_impact`, `tokensave_node`, `tokensave_files`, `tokensave_affected`). \
+        "\n{PROMPT_RULE_MARKER}\n\n\
+        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
+        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
+        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
         They provide instant semantic results from a pre-built knowledge graph and are \
         faster than file reads.\n\n\
-        If a code analysis question cannot be fully answered by tokensave MCP tools, \
-        try querying the SQLite database directly at `.tokensave/tokensave.db` \
+        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
+        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
         (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
         `memory_feedback_events`). Use SQL to answer complex structural queries \
         that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tokensave_fact_store`, \
-        `tokensave_fact_feedback`, and `tokensave_memory_status` over ad-hoc notes. \
-        Use `tokensave_message_search` for project-local Cursor transcript recall when \
+        For durable project/user facts, prefer `tracedecay_fact_store`, \
+        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
+        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
-        If you discover a gap where an extractor, schema, or tokensave tool could be \
+        If you discover a gap where an extractor, schema, or tracedecay tool could be \
         improved to answer a question natively, propose to the user that they open an issue \
         at https://github.com/ScriptedAlchemy/tokensave describing the limitation. \
         **Remind the user to strip any sensitive or proprietary code from the bug description \
@@ -174,7 +176,7 @@ fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
     )
     .ok();
     eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tokensave rules to {}",
+        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
         gemini_md.display()
     );
     Ok(())
@@ -201,9 +203,11 @@ fn uninstall_mcp_server(settings_path: &Path) {
     else {
         return;
     };
-    if servers.remove("tokensave").is_none() {
+    let removed_new = servers.remove("tracedecay").is_some();
+    let removed_legacy = servers.remove("tokensave").is_some();
+    if !removed_new && !removed_legacy {
         eprintln!(
-            "  No tokensave MCP server in {}, skipping",
+            "  No tracedecay/tokensave MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -220,13 +224,13 @@ fn uninstall_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
             settings_path.display()
         );
     }
 }
 
-/// Remove tokensave rules from GEMINI.md.
+/// Remove tracedecay rules from GEMINI.md.
 fn uninstall_prompt_rules(gemini_md: &Path) {
     if !gemini_md.exists() {
         return;
@@ -234,11 +238,15 @@ fn uninstall_prompt_rules(gemini_md: &Path) {
     let Ok(contents) = std::fs::read_to_string(gemini_md) else {
         return;
     };
-    if !contents.contains("tokensave") {
-        eprintln!("  GEMINI.md does not contain tokensave rules, skipping");
+    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+        eprintln!("  GEMINI.md does not contain tracedecay/tokensave rules, skipping");
         return;
     }
-    let marker = "## Prefer tokensave MCP tools";
+    let marker = if contents.contains(PROMPT_RULE_MARKER) {
+        PROMPT_RULE_MARKER
+    } else {
+        LEGACY_PROMPT_RULE_MARKER
+    };
     let Some(start) = contents.find(marker) else {
         return;
     };
@@ -263,7 +271,7 @@ fn uninstall_prompt_rules(gemini_md: &Path) {
     } else {
         std::fs::write(gemini_md, format!("{new_contents}\n")).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave rules from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
             gemini_md.display()
         );
     }
@@ -273,23 +281,23 @@ fn uninstall_prompt_rules(gemini_md: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check settings.json has tokensave registered.
+/// Check settings.json has tracedecay registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = home.join(".gemini").join("settings.json");
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent gemini` if you use Gemini CLI",
+            "{} not found — run `tracedecay install --agent gemini` if you use Gemini CLI",
             settings_path.display()
         ));
         return;
     }
 
     let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tokensave"));
+    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
 
     let Some(server) = server.and_then(|v| v.as_object()) else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tokensave install --agent gemini`",
+            "MCP server NOT registered in {} — run `tracedecay install --agent gemini`",
             settings_path.display()
         ));
         return;
@@ -307,7 +315,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     if has_serve {
         dc.pass("MCP server args include \"serve\"");
     } else {
-        dc.fail("MCP server args missing \"serve\" — run `tokensave install --agent gemini`");
+        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent gemini`");
     }
 
     // Check trust flag
@@ -322,17 +330,17 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     }
 }
 
-/// Check GEMINI.md contains tokensave rules.
+/// Check GEMINI.md contains tracedecay rules.
 fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
     let gemini_md = home.join(".gemini").join("GEMINI.md");
     if gemini_md.exists() {
         let has_rules = std::fs::read_to_string(&gemini_md)
             .unwrap_or_default()
-            .contains("tokensave");
+            .contains("tracedecay");
         if has_rules {
-            dc.pass("GEMINI.md contains tokensave rules");
+            dc.pass("GEMINI.md contains tracedecay rules");
         } else {
-            dc.fail("GEMINI.md missing tokensave rules — run `tokensave install --agent gemini`");
+            dc.fail("GEMINI.md missing tracedecay rules — run `tracedecay install --agent gemini`");
         }
     } else {
         dc.warn("~/.gemini/GEMINI.md does not exist");

@@ -1,8 +1,8 @@
 #![cfg(feature = "lang-glsl")]
 
-use tokensave::extraction::GlslExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::GlslExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_glsl_file_node_is_root() {

@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 
 const wrapperPath = path.resolve(process.cwd(), "hermes-wrapper/src/entry.js");
-const assetBase = "/dashboard-plugins/tokensave/dist";
+const assetBase = "/dashboard-plugins/tracedecay/dist";
 
 function createReactStub() {
   return {
@@ -131,13 +131,13 @@ window.__HERMES_PLUGINS__.register("savings", function Savings(){ return null; }
   };
 
   const loaded = await loadWrapper({ scriptsByUrl: scripts });
-  const page = loaded.registeredPlugins.get("tokensave");
+  const page = loaded.registeredPlugins.get("tracedecay");
   assert.equal(typeof page, "function");
 
   page();
   await flushAsync();
 
-  assert.deepEqual(loaded.registryCalls, ["tokensave"]);
+  assert.deepEqual(loaded.registryCalls, ["tracedecay"]);
   assert.equal(loaded.realWindow.__boundResult, "bound");
   assert.deepEqual(
     loaded.fetchCalls.sort(),
@@ -152,19 +152,19 @@ window.__HERMES_PLUGINS__.register("savings", function Savings(){ return null; }
   assert.deepEqual(
     loaded.fetchJsonCalls.map(([url]) => url).sort(),
     [
-      "/api/plugins/tokensave/holographic",
-      "/api/plugins/tokensave/holographic/similarity?limit=2",
+      "/api/plugins/tracedecay/holographic",
+      "/api/plugins/tracedecay/holographic/similarity?limit=2",
       "/api/plugins/other",
-      "/api/plugins/tokensave/lcm/overview",
-      "/api/plugins/tokensave/graph",
-      "/api/plugins/tokensave/graph/nodes?limit=5",
-      "/api/plugins/tokensave/savings/overview",
-      "/api/plugins/tokensave/savings/ledger?range=30d",
+      "/api/plugins/tracedecay/lcm/overview",
+      "/api/plugins/tracedecay/graph",
+      "/api/plugins/tracedecay/graph/nodes?limit=5",
+      "/api/plugins/tracedecay/savings/overview",
+      "/api/plugins/tracedecay/savings/ledger?range=30d",
     ].sort(),
   );
   assert.deepEqual(loaded.authedFetchCalls.map(([url]) => url).sort(), [
-    "/api/plugins/tokensave/graph/search?q=fn",
-    "/api/plugins/tokensave/lcm/search?q=abc",
+    "/api/plugins/tracedecay/graph/search?q=fn",
+    "/api/plugins/tracedecay/lcm/search?q=abc",
   ].sort());
 });
 

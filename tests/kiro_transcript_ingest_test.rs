@@ -1,14 +1,14 @@
 use tempfile::TempDir;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::kiro::KiroSource;
-use tokensave::sessions::source::ingest_source;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::kiro::KiroSource;
+use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 
@@ -42,7 +42,7 @@ fn write_legacy_chat(
     workspace_hash: &str,
     execution_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tokensave::agents::kiro_data_dir(home);
+    let data_dir = tracedecay::agents::kiro_data_dir(home);
     let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
     std::fs::create_dir_all(&ws_storage).unwrap();
     std::fs::write(
@@ -84,7 +84,7 @@ fn write_workspace_session_json(
     project: &std::path::Path,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let data_dir = tokensave::agents::kiro_data_dir(home);
+    let data_dir = tracedecay::agents::kiro_data_dir(home);
     let encoded = encode_workspace_path(project);
     let session_dir = data_dir
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")

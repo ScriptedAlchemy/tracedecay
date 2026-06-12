@@ -1,7 +1,7 @@
 //! MCP tool call handlers.
 //!
 //! Each `handle_*` function implements one MCP tool: it deserializes
-//! the JSON arguments, calls the appropriate `TokenSave` method, and
+//! the JSON arguments, calls the appropriate `TraceDecay` method, and
 //! formats the result.
 
 pub mod analysis;
@@ -20,8 +20,8 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
 use super::{ToolResult, MAX_RESPONSE_CHARS};
 
@@ -32,7 +32,7 @@ pub(crate) fn require_node_id(args: &Value) -> Result<&str> {
     args.get("node_id")
         .or_else(|| args.get("id"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: node_id".to_string(),
         })
 }
@@ -139,9 +139,9 @@ pub(crate) fn truncated_json_envelope(formatted: &str) -> String {
 ///
 /// Returns the tool result and touched file paths, or an error if the tool
 /// name is unknown or the handler fails. The optional `server_stats` value
-/// is included in `tokensave_status` responses when provided.
+/// is included in `tracedecay_status` responses when provided.
 pub async fn handle_tool_call(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     tool_name: &str,
     args: Value,
     server_stats: Option<Value>,
@@ -152,119 +152,123 @@ pub async fn handle_tool_call(
         "handle_tool_call called with empty tool_name"
     );
     debug_assert!(
-        tool_name.starts_with("tokensave_"),
-        "tool_name must start with 'tokensave_' prefix"
+        tool_name.starts_with("tracedecay_"),
+        "tool_name must start with 'tracedecay_' prefix"
     );
     match tool_name {
-        "tokensave_search" => graph::handle_search(cg, args, scope_prefix).await,
-        "tokensave_context" => graph::handle_context(cg, args, scope_prefix).await,
-        "tokensave_callers" => graph::handle_callers(cg, args).await,
-        "tokensave_callees" => graph::handle_callees(cg, args).await,
-        "tokensave_impact" => graph::handle_impact(cg, args).await,
-        "tokensave_node" => graph::handle_node(cg, args).await,
-        "tokensave_status" => info::handle_status(cg, server_stats, scope_prefix).await,
-        "tokensave_files" => info::handle_files(cg, args, scope_prefix).await,
-        "tokensave_affected" => git::handle_affected(cg, args).await,
-        "tokensave_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
-        "tokensave_diff_context" => git::handle_diff_context(cg, args).await,
-        "tokensave_module_api" => analysis::handle_module_api(cg, args, scope_prefix).await,
-        "tokensave_circular" => analysis::handle_circular(cg, args).await,
-        "tokensave_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
-        "tokensave_similar" => graph::handle_similar(cg, args).await,
-        "tokensave_rename_preview" => graph::handle_rename_preview(cg, args).await,
-        "tokensave_unused_imports" => analysis::handle_unused_imports(cg, args, scope_prefix).await,
-        "tokensave_rank" => analysis::handle_rank(cg, args, scope_prefix).await,
-        "tokensave_largest" => analysis::handle_largest(cg, args, scope_prefix).await,
-        "tokensave_coupling" => analysis::handle_coupling(cg, args, scope_prefix).await,
-        "tokensave_inheritance_depth" => {
+        "tracedecay_search" => graph::handle_search(cg, args, scope_prefix).await,
+        "tracedecay_context" => graph::handle_context(cg, args, scope_prefix).await,
+        "tracedecay_callers" => graph::handle_callers(cg, args).await,
+        "tracedecay_callees" => graph::handle_callees(cg, args).await,
+        "tracedecay_impact" => graph::handle_impact(cg, args).await,
+        "tracedecay_node" => graph::handle_node(cg, args).await,
+        "tracedecay_status" => info::handle_status(cg, server_stats, scope_prefix).await,
+        "tracedecay_files" => info::handle_files(cg, args, scope_prefix).await,
+        "tracedecay_affected" => git::handle_affected(cg, args).await,
+        "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
+        "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
+        "tracedecay_module_api" => analysis::handle_module_api(cg, args, scope_prefix).await,
+        "tracedecay_circular" => analysis::handle_circular(cg, args).await,
+        "tracedecay_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
+        "tracedecay_similar" => graph::handle_similar(cg, args).await,
+        "tracedecay_rename_preview" => graph::handle_rename_preview(cg, args).await,
+        "tracedecay_unused_imports" => {
+            analysis::handle_unused_imports(cg, args, scope_prefix).await
+        }
+        "tracedecay_rank" => analysis::handle_rank(cg, args, scope_prefix).await,
+        "tracedecay_largest" => analysis::handle_largest(cg, args, scope_prefix).await,
+        "tracedecay_coupling" => analysis::handle_coupling(cg, args, scope_prefix).await,
+        "tracedecay_inheritance_depth" => {
             analysis::handle_inheritance_depth(cg, args, scope_prefix).await
         }
-        "tokensave_distribution" => analysis::handle_distribution(cg, args, scope_prefix).await,
-        "tokensave_recursion" => analysis::handle_recursion(cg, args, scope_prefix).await,
-        "tokensave_complexity" => analysis::handle_complexity(cg, args, scope_prefix).await,
-        "tokensave_doc_coverage" => analysis::handle_doc_coverage(cg, args, scope_prefix).await,
-        "tokensave_god_class" => analysis::handle_god_class(cg, args, scope_prefix).await,
-        "tokensave_changelog" => git::handle_changelog(cg, args).await,
-        "tokensave_port_status" => info::handle_port_status(cg, args).await,
-        "tokensave_port_order" => info::handle_port_order(cg, args).await,
-        "tokensave_commit_context" => git::handle_commit_context(cg, args).await,
-        "tokensave_pr_context" => git::handle_pr_context(cg, args).await,
-        "tokensave_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
-        "tokensave_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
-        "tokensave_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
-        "tokensave_branch_search" => git::handle_branch_search(cg, args).await,
-        "tokensave_branch_diff" => git::handle_branch_diff(cg, args).await,
-        "tokensave_branch_list" => Ok(git::handle_branch_list(cg)),
-        "tokensave_str_replace" => edit::handle_str_replace(cg, args).await,
-        "tokensave_multi_str_replace" => edit::handle_multi_str_replace(cg, args).await,
-        "tokensave_insert_at" => edit::handle_insert_at(cg, args).await,
-        "tokensave_ast_grep_rewrite" => edit::handle_ast_grep_rewrite(cg, args).await,
-        "tokensave_gini" => health::handle_gini(cg, args, scope_prefix).await,
-        "tokensave_dependency_depth" => {
+        "tracedecay_distribution" => analysis::handle_distribution(cg, args, scope_prefix).await,
+        "tracedecay_recursion" => analysis::handle_recursion(cg, args, scope_prefix).await,
+        "tracedecay_complexity" => analysis::handle_complexity(cg, args, scope_prefix).await,
+        "tracedecay_doc_coverage" => analysis::handle_doc_coverage(cg, args, scope_prefix).await,
+        "tracedecay_god_class" => analysis::handle_god_class(cg, args, scope_prefix).await,
+        "tracedecay_changelog" => git::handle_changelog(cg, args).await,
+        "tracedecay_port_status" => info::handle_port_status(cg, args).await,
+        "tracedecay_port_order" => info::handle_port_order(cg, args).await,
+        "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
+        "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
+        "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
+        "tracedecay_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
+        "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
+        "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
+        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
+        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg)),
+        "tracedecay_str_replace" => edit::handle_str_replace(cg, args).await,
+        "tracedecay_multi_str_replace" => edit::handle_multi_str_replace(cg, args).await,
+        "tracedecay_insert_at" => edit::handle_insert_at(cg, args).await,
+        "tracedecay_ast_grep_rewrite" => edit::handle_ast_grep_rewrite(cg, args).await,
+        "tracedecay_gini" => health::handle_gini(cg, args, scope_prefix).await,
+        "tracedecay_dependency_depth" => {
             health::handle_dependency_depth(cg, args, scope_prefix).await
         }
-        "tokensave_health" => health::handle_health(cg, args, scope_prefix).await,
-        "tokensave_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
-        "tokensave_runtime" => health::handle_runtime(cg, args).await,
-        "tokensave_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
-        "tokensave_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
-        "tokensave_session_start" => health::handle_session_start(cg, args, scope_prefix).await,
-        "tokensave_session_end" => health::handle_session_end(cg, args, scope_prefix).await,
-        "tokensave_body" => info::handle_body(cg, args, scope_prefix).await,
-        "tokensave_todos" => info::handle_todos(cg, args, scope_prefix).await,
-        "tokensave_read" => info::handle_read(cg, args).await,
-        "tokensave_outline" => info::handle_outline(cg, args).await,
-        "tokensave_config" => info::handle_config(cg, &args),
-        "tokensave_signature_search" => info::handle_signature_search(cg, args, scope_prefix).await,
-        "tokensave_implementations" => graph::handle_implementations(cg, args, scope_prefix).await,
-        "tokensave_unsafe_patterns" => {
+        "tracedecay_health" => health::handle_health(cg, args, scope_prefix).await,
+        "tracedecay_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
+        "tracedecay_runtime" => health::handle_runtime(cg, args).await,
+        "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
+        "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
+        "tracedecay_session_start" => health::handle_session_start(cg, args, scope_prefix).await,
+        "tracedecay_session_end" => health::handle_session_end(cg, args, scope_prefix).await,
+        "tracedecay_body" => info::handle_body(cg, args, scope_prefix).await,
+        "tracedecay_todos" => info::handle_todos(cg, args, scope_prefix).await,
+        "tracedecay_read" => info::handle_read(cg, args).await,
+        "tracedecay_outline" => info::handle_outline(cg, args).await,
+        "tracedecay_config" => info::handle_config(cg, &args),
+        "tracedecay_signature_search" => {
+            info::handle_signature_search(cg, args, scope_prefix).await
+        }
+        "tracedecay_implementations" => graph::handle_implementations(cg, args, scope_prefix).await,
+        "tracedecay_unsafe_patterns" => {
             analysis::handle_unsafe_patterns(cg, args, scope_prefix).await
         }
-        "tokensave_diagnostics" => analysis::handle_diagnostics(cg, args).await,
-        "tokensave_constructors" => analysis::handle_constructors(cg, args, scope_prefix).await,
-        "tokensave_field_sites" => analysis::handle_field_sites(cg, args, scope_prefix).await,
-        "tokensave_callers_for" => graph::handle_callers_for(cg, args).await,
-        "tokensave_call_chain" => graph::handle_call_chain(cg, args).await,
-        "tokensave_file_dependents" => graph::handle_file_dependents(cg, args).await,
-        "tokensave_replace_symbol" => edit::handle_replace_symbol(cg, args).await,
-        "tokensave_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args).await,
-        "tokensave_find_exact_symbol" => {
+        "tracedecay_diagnostics" => analysis::handle_diagnostics(cg, args).await,
+        "tracedecay_constructors" => analysis::handle_constructors(cg, args, scope_prefix).await,
+        "tracedecay_field_sites" => analysis::handle_field_sites(cg, args, scope_prefix).await,
+        "tracedecay_callers_for" => graph::handle_callers_for(cg, args).await,
+        "tracedecay_call_chain" => graph::handle_call_chain(cg, args).await,
+        "tracedecay_file_dependents" => graph::handle_file_dependents(cg, args).await,
+        "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args).await,
+        "tracedecay_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args).await,
+        "tracedecay_find_exact_symbol" => {
             graph::handle_find_exact_symbol(cg, args, scope_prefix).await
         }
-        "tokensave_by_qualified_name" => graph::handle_by_qualified_name(cg, args).await,
-        "tokensave_signature" => graph::handle_signature(cg, args).await,
-        "tokensave_impls" => graph::handle_impls(cg, args).await,
-        "tokensave_diagnose" => workflow::handle_diagnose(cg, args).await,
-        "tokensave_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
-        "tokensave_derives" => graph::handle_derives(cg, args).await,
-        "tokensave_fact_store" => memory::handle_fact_store(cg, args).await,
-        "tokensave_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
-        "tokensave_memory_status" => memory::handle_memory_status(cg).await,
-        "tokensave_dashboard" => dashboard::handle_dashboard(cg, args).await,
-        "tokensave_message_search" => session::handle_message_search(cg, args).await,
-        "tokensave_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
-        "tokensave_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
-        "tokensave_lcm_load_session" => {
+        "tracedecay_by_qualified_name" => graph::handle_by_qualified_name(cg, args).await,
+        "tracedecay_signature" => graph::handle_signature(cg, args).await,
+        "tracedecay_impls" => graph::handle_impls(cg, args).await,
+        "tracedecay_diagnose" => workflow::handle_diagnose(cg, args).await,
+        "tracedecay_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
+        "tracedecay_derives" => graph::handle_derives(cg, args).await,
+        "tracedecay_fact_store" => memory::handle_fact_store(cg, args).await,
+        "tracedecay_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
+        "tracedecay_memory_status" => memory::handle_memory_status(cg).await,
+        "tracedecay_dashboard" => dashboard::handle_dashboard(cg, args).await,
+        "tracedecay_message_search" => session::handle_message_search(cg, args).await,
+        "tracedecay_lcm_status" => session::handle_lcm_status(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_load_session" => {
             session::handle_lcm_load_session(Some(cg.project_root()), args).await
         }
-        "tokensave_lcm_grep" => session::handle_lcm_grep(Some(cg.project_root()), args).await,
-        "tokensave_lcm_describe" => {
+        "tracedecay_lcm_grep" => session::handle_lcm_grep(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_describe" => {
             session::handle_lcm_describe(Some(cg.project_root()), args).await
         }
-        "tokensave_lcm_expand" => session::handle_lcm_expand(Some(cg.project_root()), args).await,
-        "tokensave_lcm_expand_query" => {
+        "tracedecay_lcm_expand" => session::handle_lcm_expand(Some(cg.project_root()), args).await,
+        "tracedecay_lcm_expand_query" => {
             session::handle_lcm_expand_query(Some(cg.project_root()), args).await
         }
-        "tokensave_lcm_preflight" => {
+        "tracedecay_lcm_preflight" => {
             session::handle_lcm_preflight(Some(cg.project_root()), args).await
         }
-        "tokensave_lcm_compress" => {
+        "tracedecay_lcm_compress" => {
             session::handle_lcm_compress(Some(cg.project_root()), args).await
         }
-        "tokensave_lcm_session_boundary" => {
+        "tracedecay_lcm_session_boundary" => {
             session::handle_lcm_session_boundary(Some(cg.project_root()), args).await
         }
-        _ => Err(TokenSaveError::Config {
+        _ => Err(TraceDecayError::Config {
             message: format!("unknown tool: {tool_name}"),
         }),
     }
@@ -277,17 +281,17 @@ pub async fn handle_profile_scoped_lcm_tool_call(
     args: Value,
 ) -> Result<ToolResult> {
     match tool_name {
-        "tokensave_lcm_status" => session::handle_lcm_status(None, args).await,
-        "tokensave_lcm_doctor" => session::handle_lcm_doctor(None, args).await,
-        "tokensave_lcm_load_session" => session::handle_lcm_load_session(None, args).await,
-        "tokensave_lcm_grep" => session::handle_lcm_grep(None, args).await,
-        "tokensave_lcm_describe" => session::handle_lcm_describe(None, args).await,
-        "tokensave_lcm_expand" => session::handle_lcm_expand(None, args).await,
-        "tokensave_lcm_expand_query" => session::handle_lcm_expand_query(None, args).await,
-        "tokensave_lcm_preflight" => session::handle_lcm_preflight(None, args).await,
-        "tokensave_lcm_compress" => session::handle_lcm_compress(None, args).await,
-        "tokensave_lcm_session_boundary" => session::handle_lcm_session_boundary(None, args).await,
-        _ => Err(TokenSaveError::Config {
+        "tracedecay_lcm_status" => session::handle_lcm_status(None, args).await,
+        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(None, args).await,
+        "tracedecay_lcm_load_session" => session::handle_lcm_load_session(None, args).await,
+        "tracedecay_lcm_grep" => session::handle_lcm_grep(None, args).await,
+        "tracedecay_lcm_describe" => session::handle_lcm_describe(None, args).await,
+        "tracedecay_lcm_expand" => session::handle_lcm_expand(None, args).await,
+        "tracedecay_lcm_expand_query" => session::handle_lcm_expand_query(None, args).await,
+        "tracedecay_lcm_preflight" => session::handle_lcm_preflight(None, args).await,
+        "tracedecay_lcm_compress" => session::handle_lcm_compress(None, args).await,
+        "tracedecay_lcm_session_boundary" => session::handle_lcm_session_boundary(None, args).await,
+        _ => Err(TraceDecayError::Config {
             message: format!("tool `{tool_name}` does not support profile-scoped dispatch"),
         }),
     }
@@ -321,102 +325,102 @@ mod tests {
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(tool_names.contains(&"tokensave_search"));
-        assert!(tool_names.contains(&"tokensave_context"));
-        assert!(tool_names.contains(&"tokensave_callers"));
-        assert!(tool_names.contains(&"tokensave_callees"));
-        assert!(tool_names.contains(&"tokensave_callers_for"));
-        assert!(tool_names.contains(&"tokensave_by_qualified_name"));
-        assert!(tool_names.contains(&"tokensave_signature"));
-        assert!(tool_names.contains(&"tokensave_impls"));
-        assert!(tool_names.contains(&"tokensave_diagnose"));
-        assert!(tool_names.contains(&"tokensave_run_affected_tests"));
-        assert!(tool_names.contains(&"tokensave_derives"));
-        assert!(tool_names.contains(&"tokensave_fact_store"));
-        assert!(tool_names.contains(&"tokensave_fact_feedback"));
-        assert!(tool_names.contains(&"tokensave_memory_status"));
-        assert!(tool_names.contains(&"tokensave_message_search"));
-        assert!(tool_names.contains(&"tokensave_impact"));
-        assert!(tool_names.contains(&"tokensave_node"));
-        assert!(tool_names.contains(&"tokensave_status"));
-        assert!(tool_names.contains(&"tokensave_files"));
-        assert!(tool_names.contains(&"tokensave_affected"));
-        assert!(tool_names.contains(&"tokensave_dead_code"));
-        assert!(tool_names.contains(&"tokensave_diff_context"));
-        assert!(tool_names.contains(&"tokensave_module_api"));
-        assert!(tool_names.contains(&"tokensave_circular"));
-        assert!(tool_names.contains(&"tokensave_hotspots"));
-        assert!(tool_names.contains(&"tokensave_similar"));
-        assert!(tool_names.contains(&"tokensave_rename_preview"));
-        assert!(tool_names.contains(&"tokensave_unused_imports"));
-        assert!(tool_names.contains(&"tokensave_changelog"));
-        assert!(tool_names.contains(&"tokensave_rank"));
-        assert!(tool_names.contains(&"tokensave_largest"));
-        assert!(tool_names.contains(&"tokensave_coupling"));
-        assert!(tool_names.contains(&"tokensave_inheritance_depth"));
-        assert!(tool_names.contains(&"tokensave_distribution"));
-        assert!(tool_names.contains(&"tokensave_recursion"));
-        assert!(tool_names.contains(&"tokensave_complexity"));
-        assert!(tool_names.contains(&"tokensave_doc_coverage"));
-        assert!(tool_names.contains(&"tokensave_god_class"));
-        assert!(tool_names.contains(&"tokensave_port_status"));
-        assert!(tool_names.contains(&"tokensave_port_order"));
-        assert!(tool_names.contains(&"tokensave_commit_context"));
-        assert!(tool_names.contains(&"tokensave_pr_context"));
-        assert!(tool_names.contains(&"tokensave_simplify_scan"));
-        assert!(tool_names.contains(&"tokensave_test_map"));
-        assert!(tool_names.contains(&"tokensave_type_hierarchy"));
-        assert!(tool_names.contains(&"tokensave_branch_search"));
-        assert!(tool_names.contains(&"tokensave_branch_diff"));
-        assert!(tool_names.contains(&"tokensave_branch_list"));
-        assert!(tool_names.contains(&"tokensave_str_replace"));
-        assert!(tool_names.contains(&"tokensave_multi_str_replace"));
-        assert!(tool_names.contains(&"tokensave_insert_at"));
+        assert!(tool_names.contains(&"tracedecay_search"));
+        assert!(tool_names.contains(&"tracedecay_context"));
+        assert!(tool_names.contains(&"tracedecay_callers"));
+        assert!(tool_names.contains(&"tracedecay_callees"));
+        assert!(tool_names.contains(&"tracedecay_callers_for"));
+        assert!(tool_names.contains(&"tracedecay_by_qualified_name"));
+        assert!(tool_names.contains(&"tracedecay_signature"));
+        assert!(tool_names.contains(&"tracedecay_impls"));
+        assert!(tool_names.contains(&"tracedecay_diagnose"));
+        assert!(tool_names.contains(&"tracedecay_run_affected_tests"));
+        assert!(tool_names.contains(&"tracedecay_derives"));
+        assert!(tool_names.contains(&"tracedecay_fact_store"));
+        assert!(tool_names.contains(&"tracedecay_fact_feedback"));
+        assert!(tool_names.contains(&"tracedecay_memory_status"));
+        assert!(tool_names.contains(&"tracedecay_message_search"));
+        assert!(tool_names.contains(&"tracedecay_impact"));
+        assert!(tool_names.contains(&"tracedecay_node"));
+        assert!(tool_names.contains(&"tracedecay_status"));
+        assert!(tool_names.contains(&"tracedecay_files"));
+        assert!(tool_names.contains(&"tracedecay_affected"));
+        assert!(tool_names.contains(&"tracedecay_dead_code"));
+        assert!(tool_names.contains(&"tracedecay_diff_context"));
+        assert!(tool_names.contains(&"tracedecay_module_api"));
+        assert!(tool_names.contains(&"tracedecay_circular"));
+        assert!(tool_names.contains(&"tracedecay_hotspots"));
+        assert!(tool_names.contains(&"tracedecay_similar"));
+        assert!(tool_names.contains(&"tracedecay_rename_preview"));
+        assert!(tool_names.contains(&"tracedecay_unused_imports"));
+        assert!(tool_names.contains(&"tracedecay_changelog"));
+        assert!(tool_names.contains(&"tracedecay_rank"));
+        assert!(tool_names.contains(&"tracedecay_largest"));
+        assert!(tool_names.contains(&"tracedecay_coupling"));
+        assert!(tool_names.contains(&"tracedecay_inheritance_depth"));
+        assert!(tool_names.contains(&"tracedecay_distribution"));
+        assert!(tool_names.contains(&"tracedecay_recursion"));
+        assert!(tool_names.contains(&"tracedecay_complexity"));
+        assert!(tool_names.contains(&"tracedecay_doc_coverage"));
+        assert!(tool_names.contains(&"tracedecay_god_class"));
+        assert!(tool_names.contains(&"tracedecay_port_status"));
+        assert!(tool_names.contains(&"tracedecay_port_order"));
+        assert!(tool_names.contains(&"tracedecay_commit_context"));
+        assert!(tool_names.contains(&"tracedecay_pr_context"));
+        assert!(tool_names.contains(&"tracedecay_simplify_scan"));
+        assert!(tool_names.contains(&"tracedecay_test_map"));
+        assert!(tool_names.contains(&"tracedecay_type_hierarchy"));
+        assert!(tool_names.contains(&"tracedecay_branch_search"));
+        assert!(tool_names.contains(&"tracedecay_branch_diff"));
+        assert!(tool_names.contains(&"tracedecay_branch_list"));
+        assert!(tool_names.contains(&"tracedecay_str_replace"));
+        assert!(tool_names.contains(&"tracedecay_multi_str_replace"));
+        assert!(tool_names.contains(&"tracedecay_insert_at"));
         if super::super::definitions::ast_grep_available() {
-            assert!(tool_names.contains(&"tokensave_ast_grep_rewrite"));
+            assert!(tool_names.contains(&"tracedecay_ast_grep_rewrite"));
         } else {
-            assert!(!tool_names.contains(&"tokensave_ast_grep_rewrite"));
+            assert!(!tool_names.contains(&"tracedecay_ast_grep_rewrite"));
         }
-        assert!(tool_names.contains(&"tokensave_gini"));
-        assert!(tool_names.contains(&"tokensave_dependency_depth"));
-        assert!(tool_names.contains(&"tokensave_health"));
-        assert!(tool_names.contains(&"tokensave_redundancy"));
-        assert!(tool_names.contains(&"tokensave_runtime"));
-        assert!(tool_names.contains(&"tokensave_dsm"));
-        assert!(tool_names.contains(&"tokensave_test_risk"));
-        assert!(tool_names.contains(&"tokensave_session_start"));
-        assert!(tool_names.contains(&"tokensave_session_end"));
-        assert!(tool_names.contains(&"tokensave_body"));
-        assert!(tool_names.contains(&"tokensave_todos"));
-        assert!(tool_names.contains(&"tokensave_fact_store"));
-        assert!(tool_names.contains(&"tokensave_fact_feedback"));
-        assert!(tool_names.contains(&"tokensave_memory_status"));
-        assert!(tool_names.contains(&"tokensave_dashboard"));
-        assert!(tool_names.contains(&"tokensave_message_search"));
-        assert!(tool_names.contains(&"tokensave_lcm_status"));
-        assert!(tool_names.contains(&"tokensave_lcm_doctor"));
-        assert!(tool_names.contains(&"tokensave_lcm_load_session"));
-        assert!(tool_names.contains(&"tokensave_lcm_grep"));
-        assert!(tool_names.contains(&"tokensave_lcm_describe"));
-        assert!(tool_names.contains(&"tokensave_lcm_expand"));
-        assert!(tool_names.contains(&"tokensave_lcm_expand_query"));
-        assert!(tool_names.contains(&"tokensave_lcm_preflight"));
-        assert!(tool_names.contains(&"tokensave_lcm_compress"));
-        assert!(tool_names.contains(&"tokensave_lcm_session_boundary"));
-        assert!(tool_names.contains(&"tokensave_read"));
-        assert!(tool_names.contains(&"tokensave_outline"));
-        assert!(tool_names.contains(&"tokensave_implementations"));
-        assert!(tool_names.contains(&"tokensave_unsafe_patterns"));
-        assert!(tool_names.contains(&"tokensave_diagnostics"));
-        assert!(tool_names.contains(&"tokensave_config"));
-        assert!(tool_names.contains(&"tokensave_signature_search"));
-        assert!(tool_names.contains(&"tokensave_constructors"));
-        assert!(tool_names.contains(&"tokensave_field_sites"));
-        assert!(tool_names.contains(&"tokensave_call_chain"));
-        assert!(tool_names.contains(&"tokensave_file_dependents"));
-        assert!(tool_names.contains(&"tokensave_replace_symbol"));
-        assert!(tool_names.contains(&"tokensave_insert_at_symbol"));
-        assert!(tool_names.contains(&"tokensave_find_exact_symbol"));
+        assert!(tool_names.contains(&"tracedecay_gini"));
+        assert!(tool_names.contains(&"tracedecay_dependency_depth"));
+        assert!(tool_names.contains(&"tracedecay_health"));
+        assert!(tool_names.contains(&"tracedecay_redundancy"));
+        assert!(tool_names.contains(&"tracedecay_runtime"));
+        assert!(tool_names.contains(&"tracedecay_dsm"));
+        assert!(tool_names.contains(&"tracedecay_test_risk"));
+        assert!(tool_names.contains(&"tracedecay_session_start"));
+        assert!(tool_names.contains(&"tracedecay_session_end"));
+        assert!(tool_names.contains(&"tracedecay_body"));
+        assert!(tool_names.contains(&"tracedecay_todos"));
+        assert!(tool_names.contains(&"tracedecay_fact_store"));
+        assert!(tool_names.contains(&"tracedecay_fact_feedback"));
+        assert!(tool_names.contains(&"tracedecay_memory_status"));
+        assert!(tool_names.contains(&"tracedecay_dashboard"));
+        assert!(tool_names.contains(&"tracedecay_message_search"));
+        assert!(tool_names.contains(&"tracedecay_lcm_status"));
+        assert!(tool_names.contains(&"tracedecay_lcm_doctor"));
+        assert!(tool_names.contains(&"tracedecay_lcm_load_session"));
+        assert!(tool_names.contains(&"tracedecay_lcm_grep"));
+        assert!(tool_names.contains(&"tracedecay_lcm_describe"));
+        assert!(tool_names.contains(&"tracedecay_lcm_expand"));
+        assert!(tool_names.contains(&"tracedecay_lcm_expand_query"));
+        assert!(tool_names.contains(&"tracedecay_lcm_preflight"));
+        assert!(tool_names.contains(&"tracedecay_lcm_compress"));
+        assert!(tool_names.contains(&"tracedecay_lcm_session_boundary"));
+        assert!(tool_names.contains(&"tracedecay_read"));
+        assert!(tool_names.contains(&"tracedecay_outline"));
+        assert!(tool_names.contains(&"tracedecay_implementations"));
+        assert!(tool_names.contains(&"tracedecay_unsafe_patterns"));
+        assert!(tool_names.contains(&"tracedecay_diagnostics"));
+        assert!(tool_names.contains(&"tracedecay_config"));
+        assert!(tool_names.contains(&"tracedecay_signature_search"));
+        assert!(tool_names.contains(&"tracedecay_constructors"));
+        assert!(tool_names.contains(&"tracedecay_field_sites"));
+        assert!(tool_names.contains(&"tracedecay_call_chain"));
+        assert!(tool_names.contains(&"tracedecay_file_dependents"));
+        assert!(tool_names.contains(&"tracedecay_replace_symbol"));
+        assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
+        assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
     }
 
     #[test]
@@ -434,22 +438,22 @@ mod tests {
     fn test_tool_definitions_have_annotations() {
         let tools = get_tool_definitions();
         let write_tools = [
-            "tokensave_str_replace",
-            "tokensave_multi_str_replace",
-            "tokensave_insert_at",
-            "tokensave_replace_symbol",
-            "tokensave_insert_at_symbol",
-            "tokensave_ast_grep_rewrite",
-            "tokensave_run_affected_tests",
-            "tokensave_session_start",
-            "tokensave_session_end",
-            "tokensave_fact_store",
-            "tokensave_fact_feedback",
-            "tokensave_memory_status",
-            "tokensave_lcm_doctor",
-            "tokensave_lcm_preflight",
-            "tokensave_lcm_compress",
-            "tokensave_lcm_session_boundary",
+            "tracedecay_str_replace",
+            "tracedecay_multi_str_replace",
+            "tracedecay_insert_at",
+            "tracedecay_replace_symbol",
+            "tracedecay_insert_at_symbol",
+            "tracedecay_ast_grep_rewrite",
+            "tracedecay_run_affected_tests",
+            "tracedecay_session_start",
+            "tracedecay_session_end",
+            "tracedecay_fact_store",
+            "tracedecay_fact_feedback",
+            "tracedecay_memory_status",
+            "tracedecay_lcm_doctor",
+            "tracedecay_lcm_preflight",
+            "tracedecay_lcm_compress",
+            "tracedecay_lcm_session_boundary",
         ];
         for tool in &tools {
             let ann = tool
@@ -492,16 +496,16 @@ mod tests {
             .map(|t| t.name.as_str())
             .collect();
         assert!(
-            always_load.contains(&"tokensave_context"),
-            "tokensave_context must be alwaysLoad"
+            always_load.contains(&"tracedecay_context"),
+            "tracedecay_context must be alwaysLoad"
         );
         assert!(
-            always_load.contains(&"tokensave_search"),
-            "tokensave_search must be alwaysLoad"
+            always_load.contains(&"tracedecay_search"),
+            "tracedecay_search must be alwaysLoad"
         );
         assert!(
-            always_load.contains(&"tokensave_status"),
-            "tokensave_status must be alwaysLoad"
+            always_load.contains(&"tracedecay_status"),
+            "tracedecay_status must be alwaysLoad"
         );
         assert_eq!(
             always_load.len(),
@@ -529,8 +533,8 @@ mod tests {
     fn test_tool_definitions_serializable() {
         let tools = get_tool_definitions();
         let json = serde_json::to_string(&tools).unwrap();
-        assert!(json.contains("tokensave_search"));
-        assert!(json.contains("tokensave_status"));
+        assert!(json.contains("tracedecay_search"));
+        assert!(json.contains("tracedecay_status"));
     }
 
     #[test]

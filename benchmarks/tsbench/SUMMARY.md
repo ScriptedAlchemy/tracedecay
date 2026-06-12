@@ -1,4 +1,10 @@
-# tsbench — tokensave results
+# tsbench — TraceDecay results
+
+> Historical run, recorded before the project was renamed from tokensave to
+> TraceDecay. Tool names (`mcp__tokensave__*`, `tokensave_*`), the fork
+> filename `bench_tokensave.py`, and result paths below are preserved exactly
+> as measured at run time. The live patch to reproduce this setup is now
+> [`bench_tracedecay.patch`](bench_tracedecay.patch) (rebranded; see README).
 
 Run date: 2026-05-25
 Bench: `Mibayy/tsbench` — 96 synthetic tasks across 12 categories

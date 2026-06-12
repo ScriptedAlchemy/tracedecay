@@ -1,4 +1,4 @@
-//! Handler for the `tokensave_dashboard` MCP tool.
+//! Handler for the `tracedecay_dashboard` MCP tool.
 //!
 //! Starts (or stops) the project dashboard HTTP server as a managed background
 //! tokio task inside the running MCP server process. Idempotent: returns the
@@ -7,8 +7,8 @@
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::truncated_json_envelope;
@@ -30,8 +30,8 @@ fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
-/// Handles `tokensave_dashboard` tool calls.
-pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_dashboard` tool calls.
+pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = args
         .get("action")
         .and_then(|v| v.as_str())
@@ -125,9 +125,9 @@ pub(super) async fn handle_dashboard(cg: &TokenSave, args: Value) -> Result<Tool
                 touched_files: vec![],
             })
         }
-        other => Err(TokenSaveError::Config {
+        other => Err(TraceDecayError::Config {
             message: format!(
-                "unknown action for tokensave_dashboard: {other} (use 'start' or 'stop')"
+                "unknown action for tracedecay_dashboard: {other} (use 'start' or 'stop')"
             ),
         }),
     }

@@ -2,12 +2,12 @@
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{
     AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory, SearchFactsRequest,
     UpdateFactRequest,
 };
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::truncate_response;
@@ -20,8 +20,8 @@ fn tool_json(value: &Value) -> ToolResult {
     }
 }
 
-fn config_error(message: impl Into<String>) -> TokenSaveError {
-    TokenSaveError::Config {
+fn config_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Config {
         message: message.into(),
     }
 }
@@ -132,7 +132,7 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
-async fn update_trust(args: &Value, cg: &TokenSave, fact_id: i64) -> Result<Option<f64>> {
+async fn update_trust(args: &Value, cg: &TraceDecay, fact_id: i64) -> Result<Option<f64>> {
     if let Some(trust) = optional_f64(args, "trust") {
         return Ok(Some(trust));
     }
@@ -146,7 +146,7 @@ async fn update_trust(args: &Value, cg: &TokenSave, fact_id: i64) -> Result<Opti
     Ok(Some((existing.trust_score + delta).clamp(0.0, 1.0)))
 }
 
-pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let out = match action {
         "add" => {
@@ -269,7 +269,7 @@ pub(super) async fn handle_fact_store(cg: &TokenSave, args: Value) -> Result<Too
     Ok(tool_json(&out))
 }
 
-pub(super) async fn handle_fact_feedback(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let note = args
         .get("note")
         .or_else(|| args.get("reason"))
@@ -291,7 +291,7 @@ pub(super) async fn handle_fact_feedback(cg: &TokenSave, args: Value) -> Result<
     ))
 }
 
-pub(super) async fn handle_memory_status(cg: &TokenSave) -> Result<ToolResult> {
+pub(super) async fn handle_memory_status(cg: &TraceDecay) -> Result<ToolResult> {
     let status = cg.memory_status().await?;
     Ok(tool_json(&json!({ "status": "ok", "memory": status })))
 }

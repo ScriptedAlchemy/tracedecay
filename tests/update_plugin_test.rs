@@ -1,6 +1,6 @@
-//! `tokensave update-plugin` contract tests.
+//! `tracedecay update-plugin` contract tests.
 //!
-//! The command refreshes tokensave-generated artifacts (plugin code, baked
+//! The command refreshes tracedecay-generated artifacts (plugin code, baked
 //! binary paths, embedded assets) for detected installs and must leave every
 //! agent config file byte-for-byte intact — pins, user keys, MCP entries,
 //! settings. These tests hash configs before/after `update_plugin` per agent
@@ -11,16 +11,16 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tokensave::agents::{get_integration, InstallContext, UpdatePluginOutcome};
+use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
-const OLD_BIN: &str = "/old/bin/tokensave";
-const NEW_BIN: &str = "/new/bin/tokensave";
+const OLD_BIN: &str = "/old/bin/tracedecay";
+const NEW_BIN: &str = "/new/bin/tracedecay";
 
-fn ctx(home: &Path, tokensave_bin: &str) -> InstallContext {
+fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: tokensave_bin.to_string(),
-        tool_permissions: tokensave::agents::expected_tool_perms(),
+        tracedecay_bin: tracedecay_bin.to_string(),
+        tool_permissions: tracedecay::agents::expected_tool_perms(),
         profile: None,
         project_root: None,
         dashboard: true,
@@ -92,8 +92,8 @@ fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
     let UpdatePluginOutcome::Refreshed(paths) = outcome else {
         panic!("expected hermes update_plugin to refresh detected installs");
     };
-    let default_plugin = home.path().join(".hermes/plugins/tokensave");
-    let work_plugin = home.path().join(".hermes/profiles/work/plugins/tokensave");
+    let default_plugin = home.path().join(".hermes/plugins/tracedecay");
+    let work_plugin = home.path().join(".hermes/profiles/work/plugins/tracedecay");
     assert!(paths.contains(&default_plugin), "missing default profile");
     assert!(paths.contains(&work_plugin), "missing named profile");
 
@@ -136,7 +136,7 @@ fn hermes_update_plugin_succeeds_where_a_config_rewrite_would_refuse() {
     // Flow-style `plugins:` mapping — the refuse-don't-rewrite YAML guard
     // makes install/reinstall error on this shape.
     let config = home.path().join(".hermes/config.yaml");
-    std::fs::write(&config, "plugins: {enabled: [tokensave]}\n").unwrap();
+    std::fs::write(&config, "plugins: {enabled: [tracedecay]}\n").unwrap();
     let config_before = bytes(&config);
     assert!(
         hermes.install(&ctx(home.path(), NEW_BIN)).is_err(),
@@ -148,7 +148,7 @@ fn hermes_update_plugin_succeeds_where_a_config_rewrite_would_refuse() {
     let outcome = hermes.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(_)));
     assert_eq!(bytes(&config), config_before);
-    assert!(text(&home.path().join(".hermes/plugins/tokensave/tools.py")).contains(NEW_BIN));
+    assert!(text(&home.path().join(".hermes/plugins/tracedecay/tools.py")).contains(NEW_BIN));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     .unwrap();
 
     cursor.install(&ctx(home.path(), OLD_BIN)).unwrap();
-    let plugin_dir = home.path().join(".cursor/plugins/local/tokensave");
+    let plugin_dir = home.path().join(".cursor/plugins/local/tracedecay");
 
     // An unmanaged user file inside the plugin dir must survive the refresh.
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
@@ -230,8 +230,8 @@ fn kiro_update_plugin_rebakes_managed_agent_and_preserves_configs() {
     let kiro_home = home.path().join(".kiro");
     let mcp_config = kiro_home.join("settings/mcp.json");
     let cli_config = kiro_home.join("settings/cli.json");
-    let steering = kiro_home.join("steering/tokensave.md");
-    let agent_file = kiro_home.join("agents/tokensave.json");
+    let steering = kiro_home.join("steering/tracedecay.md");
+    let agent_file = kiro_home.join("agents/tracedecay.json");
 
     let mcp_before = bytes(&mcp_config);
     let steering_before = bytes(&steering);
@@ -261,11 +261,11 @@ fn kiro_update_plugin_leaves_user_managed_agent_files_alone() {
     let home = TempDir::new().unwrap();
     let kiro = get_integration("kiro").unwrap();
 
-    let agent_file = home.path().join(".kiro/agents/tokensave.json");
+    let agent_file = home.path().join(".kiro/agents/tracedecay.json");
     std::fs::create_dir_all(agent_file.parent().unwrap()).unwrap();
     std::fs::write(
         &agent_file,
-        "{\n  \"name\": \"tokensave\",\n  \"description\": \"my own agent\"\n}\n",
+        "{\n  \"name\": \"tracedecay\",\n  \"description\": \"my own agent\"\n}\n",
     )
     .unwrap();
     let before = bytes(&agent_file);
@@ -281,7 +281,7 @@ fn kiro_update_plugin_leaves_user_managed_agent_files_alone() {
 
 #[test]
 fn config_only_integrations_report_config_only_and_write_nothing() {
-    // These agents keep their entire tokensave integration inside shared
+    // These agents keep their entire tracedecay integration inside shared
     // config files (MCP entries, hook blocks, prompt rules); update-plugin
     // must not create or modify a single file for them.
     let config_only = [

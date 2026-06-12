@@ -1,9 +1,9 @@
 {
-  "name": "tokensave-dashboard",
+  "name": "tracedecay-dashboard",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "TokenSave dashboard UI: standalone shell + ported Hermes plugin dashboards (holographic memory, LCM).",
+  "description": "TraceDecay dashboard UI: standalone shell + ported Hermes plugin dashboards (holographic memory, LCM).",
   "scripts": {
     "build": "node build.mjs",
     "smoke": "node smoke.mjs"

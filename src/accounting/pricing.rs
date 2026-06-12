@@ -1,7 +1,8 @@
 //! Model pricing lookup for Claude models.
 //!
 //! Pricing lifecycle:
-//! 1. **Cached file** at `~/.tokensave/pricing.json` -- checked first.
+//! 1. **Cached file** at `pricing.json` in the user data dir
+//!    (`~/.tracedecay/`, or legacy `~/.tokensave/`) -- checked first.
 //! 2. **Embedded fallback** baked into the binary -- used when no cache exists.
 //! 3. **Remote refresh** from `LiteLLM`'s public pricing JSON -- fetched at most
 //!    once every 24 hours, stored to the cache file.
@@ -12,16 +13,17 @@
 //!
 //! This module is the **authoritative USD source for server-side cost
 //! accounting**: `cost_of_turn` prices Claude transcript turns at ingest
-//! (`tokensave cost` / `tokensave gain` / the `turns` table). It is
+//! (`tracedecay cost` / `tracedecay gain` / the `turns` table). It is
 //! Claude-only, keyed by bare model ids with prefix matching, sourced from
-//! `LiteLLM`, and cached at `~/.tokensave/pricing.json`.
+//! `LiteLLM`, and cached at `pricing.json` in the user data dir.
 //!
 //! `dashboard/savings_pricing.rs` is a **separate** table for the Savings &
 //! Cost tab: all-vendor, keyed by `OpenRouter` slugs, served raw to the UI
 //! (which does its own fuzzy model-id resolution and prices client-side),
-//! cached at `~/.tokensave/model-prices.json`. The two sources can quote
-//! different USD for the same model; dollar figures from the dashboard and
-//! from `tokensave gain` are therefore not guaranteed to match to the cent.
+//! cached at `model-prices.json` in the user data dir. The two sources can
+//! quote different USD for the same model; dollar figures from the dashboard
+//! and from `tracedecay gain` are therefore not guaranteed to match to the
+//! cent.
 //! Turn costs stored in the `turns` table always come from *this* table —
 //! the dashboard reports them as `cost_basis: "actual"` without re-pricing.
 
@@ -49,9 +51,10 @@ pub struct ModelPricing {
     pub cache_read_per_mtok: f64,
 }
 
-/// Path to the cached pricing file: `~/.tokensave/pricing.json`.
+/// Path to the cached pricing file: `pricing.json` in the user data dir
+/// (`~/.tracedecay/`, or legacy `~/.tokensave/`).
 fn cache_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".tokensave").join("pricing.json"))
+    crate::config::user_data_dir().map(|dir| dir.join("pricing.json"))
 }
 
 /// The embedded pricing table -- compiled into the binary as a fallback.

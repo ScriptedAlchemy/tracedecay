@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::NixExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::NixExtractor;
+use tracedecay::types::*;
 
 fn extract_sample() -> ExtractionResult {
     let source =

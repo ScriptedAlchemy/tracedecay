@@ -118,7 +118,7 @@
   function friendlyError(err) {
     const raw = String((err && err.message) || err || "Request failed");
     if (/failed to fetch|networkerror|load failed|network request/i.test(raw)) {
-      return "Can't reach the tokensave server";
+      return "Can't reach the tracedecay server";
     }
     return raw;
   }
@@ -1828,7 +1828,7 @@
         h("div", { className: "hermes-lcm-empty-orb hermes-lcm-offline-orb", "aria-hidden": "true" }),
         h("div", { className: "hermes-lcm-empty-copy" }, [
           h("div", { className: "hermes-lcm-empty-kicker" }, "Connection problem"),
-          h("h2", null, "Can't reach the tokensave server"),
+          h("h2", null, "Can't reach the tracedecay server"),
           h("p", null, "The LCM overview request failed, so no counts or timelines can be shown. Your data is not gone — the dashboard just can't talk to the server right now."),
           h("div", { className: "hermes-lcm-offline-actions" }, [
             h("button", {
@@ -1868,7 +1868,7 @@
           h("div", { className: "hermes-lcm-empty-kicker" }, "Lossless Context Store"),
           h("h2", null, "No LCM sessions indexed yet"),
           h("p", null, data.storage_scope === "project_local"
-            ? "This project's session store (.tokensave/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh."
+            ? "This project's session store (.tracedecay/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh."
             : "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns."),
         ]),
       ]) : null,

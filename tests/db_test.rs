@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::types::*;
+use tracedecay::db::Database;
+use tracedecay::types::*;
 
 /// Helper: create an in-memory-style temp database and return (Database, TempDir).
 /// The TempDir is returned so that it stays alive for the duration of the test.
@@ -450,7 +450,7 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
     .expect("insert row b");
 
     // Run pending migrations — should apply v7.
-    let migrated = tokensave::db::migrations::migrate(&conn)
+    let migrated = tracedecay::db::migrations::migrate(&conn)
         .await
         .expect("migrate failed");
     assert!(migrated, "expected v7 migration to run");
@@ -522,7 +522,7 @@ async fn test_migrate_is_idempotent_at_latest() {
         .expect("build db");
     let conn = lib_db.connect().expect("connect");
 
-    let migrated = tokensave::db::migrations::migrate(&conn)
+    let migrated = tracedecay::db::migrations::migrate(&conn)
         .await
         .expect("migrate");
     assert!(!migrated, "second migrate should be a no-op");

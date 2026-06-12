@@ -1,28 +1,28 @@
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::memory::encoding::HolographicEncoder;
-use tokensave::memory::entities::{extract_entities, normalize_entity};
-use tokensave::memory::retrieval::FactRetriever;
-use tokensave::memory::store::MemoryStore;
-use tokensave::memory::trust::{
+use tracedecay::db::Database;
+use tracedecay::memory::encoding::HolographicEncoder;
+use tracedecay::memory::entities::{extract_entities, normalize_entity};
+use tracedecay::memory::retrieval::FactRetriever;
+use tracedecay::memory::store::MemoryStore;
+use tracedecay::memory::trust::{
     apply_feedback, clamp_trust, temporal_decay, trust_bucket, trust_distribution, DEFAULT_TRUST,
 };
-use tokensave::memory::types::{
+use tracedecay::memory::types::{
     AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
     SearchFactsRequest, UpdateFactRequest,
 };
-use tokensave::tokensave::TokenSave;
+use tracedecay::tracedecay::TraceDecay;
 
-async fn make_project() -> (TempDir, TokenSave) {
+async fn make_project() -> (TempDir, TraceDecay) {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn hello() {}").unwrap();
-    let cg = TokenSave::init(tmp.path()).await.unwrap();
+    let cg = TraceDecay::init(tmp.path()).await.unwrap();
     (tmp, cg)
 }
 
 async fn make_memory_store() -> (Database, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("tokensave.db");
+    let db_path = tmp.path().join("tracedecay.db");
     let (db, _) = Database::initialize(&db_path).await.unwrap();
     (db, tmp)
 }
@@ -96,8 +96,8 @@ async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
         .map(|row| row.get::<i64>(0).unwrap())
 }
 
-async fn clear_fact_vector(cg: &TokenSave, fact_id: i64) {
-    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
+    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
     let (db, _) = Database::open(&db_path).await.unwrap();
     db.conn()
         .execute(
@@ -111,8 +111,8 @@ async fn clear_fact_vector(cg: &TokenSave, fact_id: i64) {
     db.close();
 }
 
-async fn set_fact_updated_at(cg: &TokenSave, fact_id: i64, updated_at: i64) {
-    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
+    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
     let (db, _) = Database::open(&db_path).await.unwrap();
     db.conn()
         .execute(
@@ -124,8 +124,8 @@ async fn set_fact_updated_at(cg: &TokenSave, fact_id: i64, updated_at: i64) {
     db.close();
 }
 
-async fn fact_updated_at(cg: &TokenSave, fact_id: i64) -> i64 {
-    let db_path = cg.project_root().join(".tokensave").join("tokensave.db");
+async fn fact_updated_at(cg: &TraceDecay, fact_id: i64) -> i64 {
+    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
     let (db, _) = Database::open(&db_path).await.unwrap();
     let mut rows = db
         .conn()
@@ -264,7 +264,7 @@ fn trust_feedback_clamps_buckets_and_decays() {
 #[test]
 fn entity_extraction_finds_expected_patterns_and_dedupes() {
     let entities = extract_entities(
-        r#"Project Phoenix uses "holographic memory" aka Amari Memory, also known as Fact Lens in src/memory/types.rs via HolographicEncoder::encode_fact and tokensave_search. Project Phoenix keeps RustNative::Memory nearby."#,
+        r#"Project Phoenix uses "holographic memory" aka Amari Memory, also known as Fact Lens in src/memory/types.rs via HolographicEncoder::encode_fact and tracedecay_search. Project Phoenix keeps RustNative::Memory nearby."#,
     );
 
     assert_eq!(
@@ -276,7 +276,7 @@ fn entity_extraction_finds_expected_patterns_and_dedupes() {
             "Fact Lens",
             "src/memory/types.rs",
             "HolographicEncoder::encode_fact",
-            "tokensave_search",
+            "tracedecay_search",
             "RustNative::Memory",
         ]
     );
@@ -290,7 +290,7 @@ fn entity_extraction_handles_alias_paths_tools_and_whitespace_edges() {
     );
 
     let entities = extract_entities(
-        r#"Implement Project Phoenix AKA Firebird via src\memory\mod.rs and /etc/config. Then use TOKENSAVE-SEARCH with .gitignore. Project Phoenix appears again."#,
+        r#"Implement Project Phoenix AKA Firebird via src\memory\mod.rs and /etc/config. Then use TRACEDECAY-SEARCH with .gitignore. Project Phoenix appears again."#,
     );
 
     assert!(entities.contains(&"Project Phoenix".to_string()));
@@ -298,7 +298,7 @@ fn entity_extraction_handles_alias_paths_tools_and_whitespace_edges() {
     assert!(entities.contains(&"src\\memory\\mod.rs".to_string()));
     assert!(entities.contains(&"/etc/config".to_string()));
     assert!(entities.contains(&".gitignore".to_string()));
-    assert!(entities.contains(&"tokensave_search".to_string()));
+    assert!(entities.contains(&"tracedecay_search".to_string()));
     assert_eq!(
         entities
             .iter()

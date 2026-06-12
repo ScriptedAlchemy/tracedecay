@@ -151,10 +151,11 @@ fn main() {
         }
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
-    println!(
-        "cargo::rustc-env=TOKENSAVE_DASHBOARD_ASSET_STAMP={}",
-        emit_dashboard_asset_inputs()
-    );
+    let asset_stamp = emit_dashboard_asset_inputs();
+    println!("cargo::rustc-env=TRACEDECAY_DASHBOARD_ASSET_STAMP={asset_stamp}");
+    // Legacy compatibility for any older embedded consumers still checking the
+    // pre-rename stamp name. The runtime dashboard reads TRACEDECAY_*.
+    println!("cargo::rustc-env=TOKENSAVE_DASHBOARD_ASSET_STAMP={asset_stamp}");
 
     // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
     // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was

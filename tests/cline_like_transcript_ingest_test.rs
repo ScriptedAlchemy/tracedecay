@@ -1,19 +1,19 @@
 use tempfile::TempDir;
-use tokensave::sessions::cline_like::ClineLikeSource;
-use tokensave::sessions::cursor::open_project_session_db;
-use tokensave::sessions::source::ingest_source;
+use tracedecay::sessions::cline_like::ClineLikeSource;
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tokensave")).unwrap();
-    std::fs::write(project.join(".tokensave/tokensave.db"), "").unwrap();
+    std::fs::create_dir(project.join(".tracedecay")).unwrap();
+    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     (home, project)
 }
 
 fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path::PathBuf {
-    tokensave::agents::vscode_data_dir(home)
+    tracedecay::agents::vscode_data_dir(home)
         .join("User/globalStorage")
         .join(extension_id)
         .join("tasks")
@@ -82,7 +82,7 @@ fn write_task(
 async fn assert_provider_ingests(
     provider: &str,
     source: ClineLikeSource,
-    db: &tokensave::global_db::GlobalDb,
+    db: &tracedecay::global_db::GlobalDb,
     project: &std::path::Path,
 ) {
     let stats = ingest_source(db, &source, project, None).await;

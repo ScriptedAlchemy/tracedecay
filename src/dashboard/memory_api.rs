@@ -1,4 +1,4 @@
-//! Holographic-memory dashboard API, backed by tokensave's memory store.
+//! Holographic-memory dashboard API, backed by tracedecay's memory store.
 //!
 //! Port of `plugins/memory/holographic_plus/dashboard/plugin_api.py` (Hermes)
 //! onto the project database tables `memory_facts`, `memory_entities`,
@@ -13,7 +13,7 @@
 //!   `merge`) that external planners (e.g. an LLM-backed Hermes wrapper)
 //!   can call with their own proposed operations.
 //! - There is no fact archive: deletion is permanent (the original
-//!   `holographic_plus` soft-archived facts; tokensave does not).
+//!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
 
 use std::collections::HashMap;
@@ -69,14 +69,14 @@ const PROJECTION_POINT_CAP: i64 = 2000;
 
 fn providers_stub() -> Value {
     json!({
-        "memory_provider": "tokensave",
+        "memory_provider": "tracedecay",
         "memory_options": [
             {
-                "name": "tokensave",
-                "description": "TokenSave holographic memory store (project-local memory_facts)."
+                "name": "tracedecay",
+                "description": "TraceDecay holographic memory store (project-local memory_facts)."
             }
         ],
-        "context_engine": "tokensave",
+        "context_engine": "tracedecay",
         "context_options": [],
         "plugin_context_engine": null,
         "curator_tools": { "enabled": false, "count": 0, "available": 0, "tools": [] },
@@ -220,7 +220,7 @@ async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
         })
         .collect();
 
-    // Per-category HRR coverage: tokensave names category banks after the
+    // Per-category HRR coverage: tracedecay names category banks after the
     // category itself (the Hermes store used a `cat:` prefix).
     let mut hrr_coverage = Vec::new();
     for row in &category_rows {
@@ -1020,7 +1020,7 @@ pub(crate) async fn curation_status(State(state): State<DashboardState>) -> Json
         None => (Value::Null, Value::Null),
     };
     Json(json!({
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "state": {
             "paused": false,
             "last_run_at": null,
@@ -1166,7 +1166,7 @@ pub(crate) async fn curate(
             "active_total": total,
             "due_remaining": 0,
         },
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "mode": "similarity_dedup",
     });
 
@@ -1215,7 +1215,7 @@ pub(crate) async fn curate(
         "skipped_actions": skipped,
         "llm_calls": 0,
         "coverage": report["coverage"],
-        "provider": "tokensave",
+        "provider": "tracedecay",
         "mode": "similarity_dedup",
     });
 

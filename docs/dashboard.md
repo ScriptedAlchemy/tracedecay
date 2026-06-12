@@ -1,6 +1,6 @@
-# tokensave Dashboard
+# tracedecay Dashboard
 
-The tokensave dashboard is a local web interface for exploring your project's holographic memory, LCM (Lossless Context Management) session data, indexed code graph, and token savings / session cost accounting. It runs entirely on your machine — no external services or API keys required (the Savings & Cost tab optionally refreshes public model prices in the background; everything else is fully offline).
+The tracedecay dashboard is a local web interface for exploring your project's holographic memory, LCM (Lossless Context Management) session data, indexed code graph, and token savings / session cost accounting. It runs entirely on your machine — no external services or API keys required (the Savings & Cost tab optionally refreshes public model prices in the background; everything else is fully offline).
 
 ---
 
@@ -29,10 +29,10 @@ The tokensave dashboard is a local web interface for exploring your project's ho
 
 ```bash
 # Start the dashboard on the default port (7341)
-tokensave dashboard
+tracedecay dashboard
 
 # Output:
-# tokensave dashboard listening on http://127.0.0.1:7341/
+# tracedecay dashboard listening on http://127.0.0.1:7341/
 # Serving project /home/user/my-project
 # Press Ctrl+C to stop.
 
@@ -46,7 +46,7 @@ tokensave dashboard
 ### Command-Line Flags
 
 ```bash
-tokensave dashboard [OPTIONS]
+tracedecay dashboard [OPTIONS]
 
 Options:
   -p, --path <PATH>  Project path (default: current directory, with discovery)
@@ -59,7 +59,7 @@ Options:
 ### MCP Tool
 
 MCP-connected agents can manage the dashboard without a terminal via the
-`tokensave_dashboard` tool. It starts the server for the current project as a
+`tracedecay_dashboard` tool. It starts the server for the current project as a
 background task inside the MCP server and returns the listening URL.
 Idempotent: if a dashboard is already running, the existing URL is returned.
 Pass `action: "stop"` to shut it down; optional `host`/`port` arguments match
@@ -70,8 +70,8 @@ the CLI defaults.
 When `--port 0` is specified, the OS assigns a free port. The server prints a parseable URL on stdout as the first line:
 
 ```bash
-tokensave dashboard --port 0
-# tokensave dashboard listening on http://127.0.0.1:45678/
+tracedecay dashboard --port 0
+# tracedecay dashboard listening on http://127.0.0.1:45678/
 ```
 
 This format is stable and used by wrapper tools (like the Hermes plugin) to discover the server URL.
@@ -80,14 +80,20 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 | Variable | Description |
 |----------|-------------|
-| `TOKENSAVE_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over project-local store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the project's `.tokensave/sessions.db` and only falls back to `~/.tokensave/global.db` if the project store cannot be opened |
-| `TOKENSAVE_BIN` | Path to the tokensave binary (used by Hermes wrapper for spawn mode) |
-| `TOKENSAVE_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
-| `TOKENSAVE_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
+| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over project-local store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the project's `.tracedecay/sessions.db` and only falls back to `~/.tracedecay/global.db` if the project store cannot be opened |
+| `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode) |
+| `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
+| `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
 | `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation |
-| `TOKENSAVE_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback) |
-| `TOKENSAVE_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tokensave/model-prices.json`; mainly for tests) |
-| `DISABLE_TOKENSAVE` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
+| `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback) |
+| `TRACEDECAY_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tracedecay/model-prices.json`; mainly for tests) |
+| `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
+
+All `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) also accept their
+legacy `TOKENSAVE_*` / `DISABLE_TOKENSAVE` spellings as fallbacks; the
+`TRACEDECAY_*` name wins when both are set. Likewise, projects indexed before
+the rebrand with a `.tokensave/` data directory are still honored as a
+fallback wherever `.tracedecay/` paths are mentioned below.
 
 ---
 
@@ -97,26 +103,26 @@ The dashboard is the canonical implementation; the Hermes plugin is a thin wrapp
 
 ### Installation
 
-`tokensave install --agent hermes` deploys the wrapper as a Hermes dashboard
+`tracedecay install --agent hermes` deploys the wrapper as a Hermes dashboard
 plugin alongside the agent plugin, into
-`<hermes_home>/plugins/tokensave/dashboard/` (`manifest.json`,
-`plugin_api.py`, and the UI bundles — all embedded in the tokensave binary,
+`<hermes_home>/plugins/tracedecay/dashboard/` (`manifest.json`,
+`plugin_api.py`, and the UI bundles — all embedded in the tracedecay binary,
 no source checkout needed). Hermes' dashboard plugin discovery scans
 `plugins/*/dashboard/manifest.json` in both stock and forked Hermes, so a
-"TokenSave" tab (Memory / LCM / Code Graph / Savings) appears in
+"TraceDecay" tab (Memory / LCM / Code Graph / Savings) appears in
 `hermes dashboard` after install. With `--profile <p>` the deploy lands in
-`~/.hermes/profiles/<p>/plugins/tokensave/dashboard/` and is picked up when
+`~/.hermes/profiles/<p>/plugins/tracedecay/dashboard/` and is picked up when
 Hermes runs with `HERMES_HOME` pointing at that profile.
 
 The deployed `plugin_api.py` is pinned at install time: the installing
-binary's path becomes the default `TOKENSAVE_BIN`, and the profile's pinned
-`project_root` (from `plugins.tokensave.project_root` in `config.yaml`)
-becomes the default `TOKENSAVE_DASHBOARD_PROJECT`. The environment variables
+binary's path becomes the default `TRACEDECAY_BIN`, and the profile's pinned
+`project_root` (from `plugins.tracedecay.project_root` in `config.yaml`)
+becomes the default `TRACEDECAY_DASHBOARD_PROJECT`. The environment variables
 below still win at runtime. Reinstalls preserve the pin; pass
 `--no-dashboard` to skip the dashboard deploy (and remove a previous one).
 
-To refresh the deployed page after upgrading tokensave without touching any
-Hermes configuration, run `tokensave update-plugin`: it rewrites the
+To refresh the deployed page after upgrading tracedecay without touching any
+Hermes configuration, run `tracedecay update-plugin`: it rewrites the
 generated plugin files and the dashboard page (re-baking the binary path and
 re-reading the existing pin from `config.yaml`) for every detected install —
 default profile, every `~/.hermes/profiles/*`, a `HERMES_HOME` override, and
@@ -138,13 +144,13 @@ Hermes automatically launches the dashboard server and proxies requests to it. T
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOKENSAVE_BIN` | No | Path to the tokensave binary (defaults to the install-time binary baked into `plugin_api.py`, then `PATH`) |
-| `TOKENSAVE_DASHBOARD_PROJECT` | No | Project root path (defaults to the install-time pinned project root, then Hermes' current working directory) |
+| `TRACEDECAY_BIN` | No | Path to the tracedecay binary (defaults to the install-time binary baked into `plugin_api.py`, then `PATH`) |
+| `TRACEDECAY_DASHBOARD_PROJECT` | No | Project root path (defaults to the install-time pinned project root, then Hermes' current working directory) |
 
 **Example:**
 ```bash
-export TOKENSAVE_BIN=/usr/local/bin/tokensave
-export TOKENSAVE_DASHBOARD_PROJECT=/home/user/my-project
+export TRACEDECAY_BIN=/usr/local/bin/tracedecay
+export TRACEDECAY_DASHBOARD_PROJECT=/home/user/my-project
 hermes dashboard
 ```
 
@@ -156,19 +162,19 @@ Point Hermes at an already-running dashboard instance.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOKENSAVE_DASHBOARD_URL` | Yes | Full URL to a running tokensave dashboard (e.g., `http://127.0.0.1:7341/`) |
+| `TRACEDECAY_DASHBOARD_URL` | Yes | Full URL to a running tracedecay dashboard (e.g., `http://127.0.0.1:7341/`) |
 
 **Example:**
 ```bash
 # Terminal 1: Start dashboard
-tokensave dashboard --port 7341
+tracedecay dashboard --port 7341
 
 # Terminal 2: Tell Hermes to use it
-export TOKENSAVE_DASHBOARD_URL=http://127.0.0.1:7341/
+export TRACEDECAY_DASHBOARD_URL=http://127.0.0.1:7341/
 hermes dashboard
 ```
 
-When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/tokensave/*` to the tokensave dashboard's native paths (`/holographic`, `/lcm`, `/graph`, and `/savings` map to `/api/plugins/holographic`, `/api/plugins/hermes-lcm`, `/api/plugins/graph`, and `/api/plugins/savings` respectively).
+When using external URL mode, the Hermes plugin acts as a reverse proxy, rewriting request paths from `/api/plugins/tracedecay/*` to the tracedecay dashboard's native paths (`/holographic`, `/lcm`, `/graph`, and `/savings` map to `/api/plugins/holographic`, `/api/plugins/hermes-lcm`, `/api/plugins/graph`, and `/api/plugins/savings` respectively).
 
 ---
 
@@ -227,12 +233,12 @@ Detects duplicate and related facts using phase-vector cosine similarity:
 Memory maintenance tools:
 - **Status**: Current curation configuration and last run summary
 - **Activity**: Event log of curation actions
-- **Preview**: Dry-run analysis showing proposed actions (persisted to `.tokensave/dashboard/curation_preview.json` so it survives server restarts)
+- **Preview**: Dry-run analysis showing proposed actions (persisted to `.tracedecay/dashboard/curation_preview.json` so it survives server restarts)
 - **Run Curation**: Execute deduplication (**permanently hard-DELETES** the lower-trust fact in each duplicate pair)
 
 Curation is implemented as similarity-based deduplication (no LLM calls). It proposes hard-deleting the lower-trust fact in each `likely_duplicate` pair (similarity ≥ 0.95 with lexical overlap).
 
-**Deletion is permanent — there is no archive, no restore, and no soft-delete state.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tokensave_fact_store` recall. The winner fact in a merge operation may have its content rewritten and HRR vector re-encoded.
+**Deletion is permanent — there is no archive, no restore, and no soft-delete state.** Deleted facts are removed from `memory_facts` along with their entity links (FK cascade) and FTS rows (trigger), so they immediately disappear from `tracedecay_fact_store` recall. The winner fact in a merge operation may have its content rewritten and HRR vector re-encoded.
 
 External planners (such as an LLM-backed Hermes wrapper, gated behind the `features.llm_curation` flag) can apply their own delete/merge operations through `POST /curate/apply` (see API reference).
 
@@ -248,13 +254,13 @@ Transcript ingest is **per project**, not global:
 
 | Store | Path | Written by | `storage_scope` |
 |-------|------|------------|-----------------|
-| Project-local (default) | `<project>/.tokensave/sessions.db` | All transcript ingest for sessions belonging to that project root | `"project_local"` |
-| Hermes profile | `<hermes_home>/.tokensave/sessions.db` | Hermes-side ingest | `"hermes_profile"` |
-| Global | `~/.tokensave/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
+| Project-local (default) | `<project>/.tracedecay/sessions.db` | All transcript ingest for sessions belonging to that project root | `"project_local"` |
+| Hermes profile | `<hermes_home>/.tracedecay/sessions.db` | Hermes-side ingest | `"hermes_profile"` |
+| Global | `~/.tracedecay/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
 
 The dashboard serves the **project-local store** by default (where Cursor hooks and hookless-agent catch-up sweeps actually ingest). The LCM header shows a **"Project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
 
-Setting `TOKENSAVE_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests, the smoke harness, and the Hermes wrapper, which points it at a Hermes profile's `sessions.db`). When this override is active, `storage_scope` becomes `"global"`.
+Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests, the smoke harness, and the Hermes wrapper, which points it at a Hermes profile's `sessions.db`). When this override is active, `storage_scope` becomes `"global"`.
 
 #### How Ingest Works Per Tool
 
@@ -265,7 +271,7 @@ Setting `TOKENSAVE_GLOBAL_DB` pins the dashboard to an explicit store instead (u
 | Hermes | Hermes-side ingest into the Hermes profile store (not the project store) |
 
 The catch-up sweep runs automatically when the MCP server starts
-(`tokensave serve`) and when `tokensave dashboard` starts with project-local
+(`tracedecay serve`) and when `tracedecay dashboard` starts with project-local
 scope. Ingest is incremental (per-file byte offsets in `parse_offsets`), so
 repeat sweeps are cheap no-ops.
 
@@ -330,7 +336,7 @@ Analyze LCM compression efficiency:
 ### Code Graph
 
 The Code Graph tab is an interactive explorer over the project's indexed code
-graph (`nodes`, `edges`, `files` in `.tokensave/tokensave.db`).
+graph (`nodes`, `edges`, `files` in `.tracedecay/tracedecay.db`).
 
 - **Overview**: orientation analytics — symbols by kind family, files by
   language, most-connected symbols, largest files, and an edge-kind strip.
@@ -341,23 +347,23 @@ graph (`nodes`, `edges`, `files` in `.tokensave/tokensave.db`).
   **Find path** mode that highlights the shortest path between two symbols.
 
 The backend routes live under `/api/plugins/graph/*` (proxied by the Hermes
-wrapper at `/api/plugins/tokensave/graph/*`). See
+wrapper at `/api/plugins/tracedecay/graph/*`). See
 [graph-explorer.md](graph-explorer.md) for the full API table, frontend
 design, and performance notes.
 
 ### Savings & Cost
 
-The Savings & Cost tab is the accounting surface: how many tokens tokensave
+The Savings & Cost tab is the accounting surface: how many tokens tracedecay
 saved you, and what your agent sessions cost. Three views behind a shared
 time-range selector (All time / Today / 7 days / 30 days):
 
 - **Savings**: the `savings_ledger` event log from the global accounting DB
-  (`~/.tokensave/global.db`, the same data `tokensave gain` reports) —
+  (`~/.tracedecay/global.db`, the same data `tracedecay gain` reports) —
   totals, per-tool and per-project breakdowns, a daily series, and the legacy
   per-project lifetime counters (`projects.tokens_saved`), which predate the
   ledger and usually carry the big historical numbers. Saved tokens are
   valued in dollars at the Claude Sonnet *input* rate (same convention as
-  `tokensave gain`), labeled as estimated. The view discloses the
+  `tracedecay gain`), labeled as estimated. The view discloses the
   methodology inline: per call, `before` = indexed bytes/4 of every file the
   response references (full-read counterfactual), `after` = response
   chars/4, saved = `max(0, before - after)` — an estimated upper bound,
@@ -370,7 +376,7 @@ time-range selector (All time / Today / 7 days / 30 days):
   cost, and a **cost basis** badge. Rows expand to a per-model breakdown
   with the resolved OpenRouter slug.
 - **Models & Pricing**: aggregate cost per model and per day, the `turns`
-  accounting imported by `tokensave cost` from Claude Code transcripts
+  accounting imported by `tracedecay cost` from Claude Code transcripts
   (always `actual` — costs were computed from real usage data at ingest),
   and a panel showing where prices came from.
 
@@ -422,16 +428,16 @@ their tokens are counted but never priced.
 
 MCP servers append a `savings_ledger` row after every tool call **by
 default** whenever the global accounting DB is available. Opt out with
-`TOKENSAVE_DISABLE_GLOBAL_DB=1` (or `TOKENSAVE_ENABLE_GLOBAL_DB=0`); an
-explicit `TOKENSAVE_ENABLE_GLOBAL_DB=1` always wins (it is what
-`tokensave install` writes for user-global agent configs, and what tests
+`TRACEDECAY_DISABLE_GLOBAL_DB=1` (or `TRACEDECAY_ENABLE_GLOBAL_DB=0`); an
+explicit `TRACEDECAY_ENABLE_GLOBAL_DB=1` always wins (it is what
+`tracedecay install` writes for user-global agent configs, and what tests
 use to opt back in past the repo's cargo-test opt-out). The Savings view
 surfaces the gate verdict (`recording: on/off` badge plus an explanatory
 note when the ledger is empty), and the overview API reports it under
 `savings.recording` (`{"enabled": bool, "mode": "default" |
 "enabled_by_env" | "disabled_by_env"}`). Note that a long-running MCP
 server evaluates the gate at startup — restart/reload your agent's
-tokensave server after changing the environment (or after upgrading from a
+tracedecay server after changing the environment (or after upgrading from a
 build that defaulted the ledger off).
 
 #### Model pricing
@@ -439,15 +445,15 @@ build that defaulted the ledger off).
 Prices come from [OpenRouter's public model list](https://openrouter.ai/api/v1/models)
 (no auth needed for pricing metadata):
 
-1. **Disk cache** at `~/.tokensave/model-prices.json` (override:
-   `TOKENSAVE_MODEL_PRICES_PATH`) — served immediately, even when stale.
+1. **Disk cache** at `~/.tracedecay/model-prices.json` (override:
+   `TRACEDECAY_MODEL_PRICES_PATH`) — served immediately, even when stale.
 2. **Background refresh** at most once per process when the cache is older
    than 24h. The fetch never blocks a request and never fails the dashboard.
 3. **Bundled snapshot** (`src/dashboard/model_prices_fallback.json`, a
    curated ~157-model subset) — used when there is no usable cache, so the
    tab works offline and on first run.
 
-`TOKENSAVE_OFFLINE=1` disables the network entirely (cache/snapshot only).
+`TRACEDECAY_OFFLINE=1` disables the network entirely (cache/snapshot only).
 Transcript model ids are fuzzy-mapped to OpenRouter slugs client-side
 (`dashboard/savings/src/pricing.ts`): manual alias table, effort/thinking
 suffix stripping (`claude-fable-5-thinking-xhigh` → `anthropic/claude-fable-5`),
@@ -488,12 +494,12 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 **Response:**
 ```json
 {
-  "name": "tokensave-dashboard",
+  "name": "tracedecay-dashboard",
   "version": "6.1.3",
   "mode": "standalone",
   "project_root": "/home/user/my-project",
-  "memory_db": "/home/user/my-project/.tokensave/tokensave.db",
-  "lcm_db": "/home/user/my-project/.tokensave/sessions.db",
+  "memory_db": "/home/user/my-project/.tracedecay/tracedecay.db",
+  "lcm_db": "/home/user/my-project/.tracedecay/sessions.db",
   "lcm_scope": "project_local",
   "features": {
     "memory": true,
@@ -536,7 +542,7 @@ Main overview endpoint returning facts, entities, and graph data.
   "query": "",
   "limit": 25,
   "holographic": {
-    "path": "/path/to/tokensave.db",
+    "path": "/path/to/tracedecay.db",
     "exists": true,
     "overview": {
       "facts": 133,
@@ -663,7 +669,7 @@ Recent curation activity log.
 #### `GET /api/plugins/holographic/curation/preview`
 
 Last saved dry-run preview. Persisted to
-`.tokensave/dashboard/curation_preview.json`, so it survives server restarts;
+`.tracedecay/dashboard/curation_preview.json`, so it survives server restarts;
 applying curation (or any `/curate/apply` mutation) clears it. Staleness is
 recomputed against the live fact count on every read.
 
@@ -714,7 +720,7 @@ memory-bank dirty marking).
     "active_total": 500,
     "due_remaining": 0
   },
-  "provider": "tokensave",
+  "provider": "tracedecay",
   "mode": "similarity_dedup"
 }
 ```
@@ -789,7 +795,7 @@ Summary statistics and recent sessions/nodes.
 **Response Structure:**
 ```json
 {
-  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "path": "/home/user/my-project/.tracedecay/sessions.db",
   "storage_scope": "project_local",
   "exists": true,
   "overview": {
@@ -832,7 +838,7 @@ Full-text search with facets.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "path": "/home/user/my-project/.tracedecay/sessions.db",
   "storage_scope": "project_local",
   "exists": true,
   "query": "authentication",
@@ -879,7 +885,7 @@ Get a summary node with its source items.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tokensave/sessions.db",
+  "path": "/home/user/my-project/.tracedecay/sessions.db",
   "storage_scope": "project_local",
   "exists": true,
   "node_id": "node-abc",
@@ -913,7 +919,7 @@ Compression statistics.
 ### Savings & Cost API
 
 Routes under `/api/plugins/savings/*` (proxied by the Hermes wrapper at
-`/api/plugins/tokensave/savings/*`). All endpoints degrade
+`/api/plugins/tracedecay/savings/*`). All endpoints degrade
 gracefully: when a backing store is unavailable they return `200` with
 `"available": false` instead of failing. `range` accepts `today`, `7d`,
 `30d`, `all` (default `all`; sessions without any timestamp — e.g. Cursor
@@ -931,7 +937,7 @@ totals, and pricing provenance (`source`, `fetched_at`, `offline`).
 #### `GET /api/plugins/savings/ledger`
 
 Savings-ledger detail for a range: `total`, `by_day`, `by_tool`,
-`by_project`. Reuses the same aggregation as `tokensave gain` / `--history`.
+`by_project`. Reuses the same aggregation as `tracedecay gain` / `--history`.
 
 **Query Parameters:** `range`
 
@@ -955,7 +961,7 @@ table.
 Per-model aggregates (same token-block shape as session model entries, plus
 `sessions`), a `daily` series for timestamped messages, and the `turns`
 block: `by_model` (`model`, `cost_usd`, `total_tokens`, `cost_basis:
-"actual"`) and `by_day` — reusing the `tokensave cost` queries.
+"actual"`) and `by_day` — reusing the `tracedecay cost` queries.
 
 **Query Parameters:** `range`
 
@@ -967,7 +973,7 @@ The merged model price table: `source` (`"cache"` or `"fallback"`),
 `completion_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok` (USD
 per million tokens). Requesting this endpoint (or `/overview`) kicks off the
 at-most-once background refresh when the cache is stale and
-`TOKENSAVE_OFFLINE` is unset.
+`TRACEDECAY_OFFLINE` is unset.
 
 ---
 
@@ -1038,14 +1044,14 @@ This command:
 
 ### Smoke Testing
 
-Playwright-based smoke tests verify tab rendering, search interaction, and viewport responsiveness. Unless `--url=` points at an already-running server, the smoke script is hermetic: it creates a throwaway temp project, runs `tokensave init` on it, and serves the dashboard from there — so it works on fresh checkouts (and CI) with no pre-existing `.tokensave/` index:
+Playwright-based smoke tests verify tab rendering, search interaction, and viewport responsiveness. Unless `--url=` points at an already-running server, the smoke script is hermetic: it creates a throwaway temp project, runs `tracedecay init` on it, and serves the dashboard from there — so it works on fresh checkouts (and CI) with no pre-existing `.tracedecay/` index:
 
 ```bash
 # Empty-state LCM (default global.db has no LCM data)
-TOKENSAVE_GLOBAL_DB=/tmp/tokensave-dashboard-lcm-empty.db npm run smoke -- --expect-lcm=empty
+TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-empty.db npm run smoke -- --expect-lcm=empty
 
 # Non-empty LCM (requires seeded database)
-TOKENSAVE_GLOBAL_DB=/tmp/tokensave-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
+TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
 ```
 
 ### Asset Embedding
@@ -1054,7 +1060,7 @@ Static assets are embedded at compile time via `include_bytes!` in `src/dashboar
 
 ```bash
 cd dashboard && npm run build
-cd .. && cargo build --bin tokensave
+cd .. && cargo build --bin tracedecay
 ```
 
 The `build.rs` script emits `cargo::rerun-if-changed` directives for all embedded assets, so the binary automatically rebuilds when dist files change.
@@ -1072,7 +1078,7 @@ result. If npm is not on PATH, the build fails fast with instructions instead.
 - `cargo package` / `cargo publish` must be run after `cd dashboard && npm ci
   && npm run build` (the release workflow does this); the package verify step
   then compiles without touching npm.
-- Crates.io consumers (`cargo install tokensave`) and docs.rs need **no**
+- Crates.io consumers (`cargo install tracedecay`) and docs.rs need **no**
   Node.js toolchain — the embedded assets come straight from the package.
 
 ### Development Workflow
@@ -1101,10 +1107,10 @@ cargo run -- dashboard
 # Error: failed to bind 127.0.0.1:7341: Address already in use
 
 # Option 1: Use a different port
-tokensave dashboard --port 8080
+tracedecay dashboard --port 8080
 
 # Option 2: Let the OS pick a free port
-tokensave dashboard --port 0
+tracedecay dashboard --port 0
 
 # Option 3: Find and stop the existing process
 lsof -i :7341
@@ -1116,13 +1122,13 @@ kill <PID>
 ```bash
 # Dashboard starts but Holographic Memory tab shows empty/error
 
-# Ensure you've initialized tokensave in your project
+# Ensure you've initialized tracedecay in your project
 cd /path/to/project
-tokensave init
-tokensave sync
+tracedecay init
+tracedecay sync
 
 # Then restart the dashboard
-tokensave dashboard
+tracedecay dashboard
 ```
 
 ### Missing LCM Data
@@ -1134,21 +1140,21 @@ tokensave dashboard
 # The project store is populated by:
 # - Cursor transcript ingestion (via end-of-turn hooks)
 # - The catch-up sweep for Claude/Codex/Vibe/Cline transcripts, which runs
-#   when `tokensave serve` or `tokensave dashboard` starts
+#   when `tracedecay serve` or `tracedecay dashboard` starts
 # - Explicit LCM tool calls
 
 # Check the project session store for rows
-ls -la .tokensave/sessions.db
-sqlite3 .tokensave/sessions.db 'SELECT COUNT(*) FROM lcm_raw_messages'
+ls -la .tracedecay/sessions.db
+sqlite3 .tracedecay/sessions.db 'SELECT COUNT(*) FROM lcm_raw_messages'
 
 # The LCM header shows which store is being served ("Project store" /
 # "Global store") and its path. If it shows the global DB unexpectedly,
-# check whether TOKENSAVE_GLOBAL_DB is set — it pins the store:
-echo "$TOKENSAVE_GLOBAL_DB"
+# check whether TRACEDECAY_GLOBAL_DB is set — it pins the store:
+echo "$TRACEDECAY_GLOBAL_DB"
 
 # Pin to an explicit store if needed
-export TOKENSAVE_GLOBAL_DB=/path/to/sessions.db
-tokensave dashboard
+export TRACEDECAY_GLOBAL_DB=/path/to/sessions.db
+tracedecay dashboard
 ```
 
 ### Frontend Assets Not Updating
@@ -1160,7 +1166,7 @@ tokensave dashboard
 # You must rebuild both frontend and Rust:
 
 cd dashboard && npm run build
-cd .. && cargo build --bin tokensave
+cd .. && cargo build --bin tracedecay
 
 # Or touch the assets file to force re-embedding:
 touch src/dashboard/assets.rs && cargo build
@@ -1175,7 +1181,7 @@ touch src/dashboard/assets.rs && cargo build
 # This error means npm is not installed; install Node.js 22+, or build
 # the frontend manually before the Rust binary:
 cd dashboard && npm install && npm run build
-cd .. && cargo build --bin tokensave
+cd .. && cargo build --bin tracedecay
 ```
 
 ### Hermes Wrapper Connection Failed
@@ -1183,8 +1189,8 @@ cd .. && cargo build --bin tokensave
 ```bash
 # Hermes shows "Connection refused" or timeout
 
-# Check that TOKENSAVE_BIN is correct
-export TOKENSAVE_BIN=$(which tokensave)
+# Check that TRACEDECAY_BIN is correct
+export TRACEDECAY_BIN=$(which tracedecay)
 
 # For external URL mode, verify the server is running
 curl http://127.0.0.1:7341/api/capabilities
@@ -1199,8 +1205,8 @@ The dashboard may be slow on first load if:
 - The global database is on a network filesystem
 
 Mitigations:
-- Run `tokensave sync` before starting the dashboard
-- Ensure `~/.tokensave/global.db` is on local storage
+- Run `tracedecay sync` before starting the dashboard
+- Ensure `~/.tracedecay/global.db` is on local storage
 - Use `--port 0` to avoid port scanning delays
 
 ### Stale HRR Coverage Data
@@ -1219,7 +1225,7 @@ If the Semantic Map shows "stale_bank" status for categories:
 
 The dashboard architecture follows these principles:
 
-1. **Canonical Implementation**: The tokensave dashboard is the source of truth. The Hermes wrapper is a thin reverse proxy, never a fork.
+1. **Canonical Implementation**: The tracedecay dashboard is the source of truth. The Hermes wrapper is a thin reverse proxy, never a fork.
 
 2. **UI Bundle Portability**: Both the standalone shell and the Hermes wrapper provide a compatible SDK so the same plugin bundles work in both hosts.
 
