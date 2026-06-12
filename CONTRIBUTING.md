@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ## Getting Started
 
 ```bash
-git clone https://github.com/ScriptedAlchemy/tokensave.git
+git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
 cargo build
 cargo test
@@ -105,7 +105,7 @@ Keep the first line under 72 characters. Add a body explaining *why* if the chan
 
 ## Reporting Issues
 
-Open an issue at https://github.com/ScriptedAlchemy/tokensave/issues with:
+Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 
 - tracedecay version (`tracedecay --version`)
 - OS and architecture

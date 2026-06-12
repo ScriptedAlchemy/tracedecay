@@ -17,7 +17,7 @@
 - In Hermes, tracedecay is both the memory provider and the context-engine provider for every profile; the provider name is "tracedecay" (not "lcm"), replacing the legacy hermes-lcm and holographic_plus plugins.
 - Hermes profiles bound to a project use that project's repo-level `.tracedecay` databases (legacy `.tokensave` directories are still honored as a fallback); only the default profile stores tracedecay data at the profile level under `~/.hermes`.
 - The Hermes tracedecay plugin must keep working against stock, uncustomized Hermes — verified by a CI job that installs stock Hermes; the user's Hermes fork only adds optional extras.
-- The canonical repo is the ScriptedAlchemy/tokensave fork until the GitHub repository is renamed: never push or open PRs to the aovestdipaperino upstream; only the tokensave-large-treesitters dependency intentionally stays pointed at upstream.
+- The canonical repo is ScriptedAlchemy/tracedecay (renamed from ScriptedAlchemy/tokensave; GitHub redirects the old URL): never push or open PRs to the aovestdipaperino upstream; only the tokensave-large-treesitters dependency intentionally stays pointed at upstream.
 - The standalone `tracedecay dashboard` server is the canonical dashboard implementation; the Hermes plugin wraps and reuses it, layering Hermes-only extras (e.g. LLM-based curation) on top.
 - `tracedecay install --local` scopes the database to the repo's `.tracedecay/`; otherwise storage lives at the user/profile level.
 
@@ -32,4 +32,4 @@ Before reading source files or scanning the codebase, use the tracedecay MCP too
 
 If a code analysis question cannot be fully answered by tracedecay MCP tools, try querying the SQLite database directly at `.tracedecay/tracedecay.db` (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries that go beyond what the built-in tools expose.
 
-If you discover a gap where an extractor, schema, or tracedecay tool could be improved to answer a question natively, propose to the user that they open an issue at https://github.com/ScriptedAlchemy/tokensave describing the limitation. **Remind the user to strip any sensitive or proprietary code from the bug description before submitting.**
+If you discover a gap where an extractor, schema, or tracedecay tool could be improved to answer a question natively, propose to the user that they open an issue at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. **Remind the user to strip any sensitive or proprietary code from the bug description before submitting.**

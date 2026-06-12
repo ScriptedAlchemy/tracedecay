@@ -594,7 +594,7 @@ fn print_corruption_warning() {
     eprintln!("[tracedecay]");
     eprintln!("[tracedecay] This was likely caused by a crash or kill during indexing.");
     eprintln!("[tracedecay] Please report this at:");
-    eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tokensave/issues");
+    eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tracedecay/issues");
     eprintln!(
         "[tracedecay]   Include: tracedecay version (v{version}), OS, and what happened before the crash."
     );

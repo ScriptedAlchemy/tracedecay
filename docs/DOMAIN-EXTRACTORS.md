@@ -1,6 +1,6 @@
 # Domain Symbol Extractors
 
-Configurable, project-local rules that promote string literals and structural patterns into first-class graph nodes. Motivated by [issue #48](https://github.com/ScriptedAlchemy/tokensave/issues/48).
+Configurable, project-local rules that promote string literals and structural patterns into first-class graph nodes. Motivated by [issue #48](https://github.com/ScriptedAlchemy/tracedecay/issues/48).
 
 ---
 

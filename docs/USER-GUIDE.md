@@ -59,7 +59,7 @@ cargo install tracedecay --no-default-features    # 11 languages (lite)
 
 **Prebuilt binaries:**
 
-Download from the [latest release](https://github.com/ScriptedAlchemy/tokensave/releases/latest) and place the binary somewhere on your `PATH`. Archives are available for macOS (Apple Silicon), Linux (x86_64 and ARM64), and Windows (x86_64).
+Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest) and place the binary somewhere on your `PATH`. Archives are available for macOS (Apple Silicon), Linux (x86_64 and ARM64), and Windows (x86_64).
 
 ---
 
@@ -841,4 +841,4 @@ This updates tool permissions, hooks, and prompt rules to match the new version.
 
 ### Getting help
 
-If you run into something not covered here, check the [GitHub repository](https://github.com/ScriptedAlchemy/tokensave) or open an issue.
+If you run into something not covered here, check the [GitHub repository](https://github.com/ScriptedAlchemy/tracedecay) or open an issue.

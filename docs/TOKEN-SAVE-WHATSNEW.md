@@ -289,7 +289,7 @@ TokenSave started as a way to make Claude Code stop reading the same files over 
 
 ---
 
-Learn more at [the TraceDecay repository on GitHub](https://github.com/ScriptedAlchemy/tokensave).
+Learn more at [the TraceDecay repository on GitHub](https://github.com/ScriptedAlchemy/tracedecay).
 
 Want more like this?
 I write regularly about Rust, design patterns, and performance tips.

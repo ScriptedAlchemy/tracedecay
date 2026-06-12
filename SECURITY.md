@@ -5,7 +5,7 @@
 If you discover a security vulnerability in tracedecay, please report it responsibly:
 
 - **Email:** enzinol@gmail.com
-- **GitHub:** Open a [private security advisory](https://github.com/ScriptedAlchemy/tokensave/security/advisories/new)
+- **GitHub:** Open a [private security advisory](https://github.com/ScriptedAlchemy/tracedecay/security/advisories/new)
 
 Please do **not** open a public issue for security vulnerabilities. We aim to acknowledge reports within 48 hours and provide a fix or mitigation plan within 7 days.
 
@@ -84,7 +84,7 @@ The edit tools target a single file with a unique anchor and re-index in place. 
 
 ### Self-update integrity
 
-`tracedecay upgrade` downloads pre-built binaries from [GitHub Releases](https://github.com/ScriptedAlchemy/tokensave/releases). The upgrade process:
+`tracedecay upgrade` downloads pre-built binaries from [GitHub Releases](https://github.com/ScriptedAlchemy/tracedecay/releases). The upgrade process:
 
 - Downloads from the same release channel (stable/beta) currently installed
 - Replaces the running binary in place via `self-replace`
