@@ -29,7 +29,7 @@ pub(crate) async fn handle_memory_action(action: MemoryAction) -> tokensave::err
                 llm,
                 llm_ops: llm_ops_value,
                 max_clusters: max_clusters.clamp(1, 50),
-                min_confidence,
+                min_confidence: min_confidence.clamp(0.0, 1.0),
             };
             let report = run_memory_curate(&cg, &options).await?;
             println!(

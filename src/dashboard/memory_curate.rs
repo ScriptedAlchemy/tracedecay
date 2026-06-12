@@ -119,17 +119,63 @@ async fn cli_state(cg: &TokenSave) -> DashboardState {
 /// Runs the curate verb and returns the JSON report printed by the CLI.
 pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) -> Result<Value> {
     let state = cli_state(cg).await;
+    let mut report = Map::new();
+    report.insert("mode".to_string(), json!("similarity_dedup"));
+    report.insert("dry_run".to_string(), json!(!options.apply));
 
-    // Similarity-dedup tier (the dashboard's `/curate` semantics).
+    // Externally produced LLM ops are validated and applied FIRST: they were
+    // planned against the current store, and running the similarity-dedup
+    // deletions beforehand would invalidate the very clusters the ops
+    // reference (their fact ids would already be gone).
+    if let Some(provided) = options.llm_ops.as_ref() {
+        let clusters = build_clusters(&state, options.max_clusters).await?;
+        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        let raw_ops = provided
+            .get("ops")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| TokenSaveError::Config {
+                message: "--llm-ops payload must be a JSON object with an `ops` array".to_string(),
+            })?;
+        let (valid, rejected) = validate_llm_ops(&raw_ops, &allowed_ids, options.min_confidence);
+        let mut llm_report = Map::new();
+        llm_report.insert("clusters_reviewed".to_string(), json!(clusters.len()));
+        llm_report.insert("rejected_ops".to_string(), Value::Array(rejected));
+        if options.apply {
+            let mut results = Vec::new();
+            let mut applied = 0i64;
+            for op in &valid {
+                let (result, ok) = match op.get("op").and_then(Value::as_str) {
+                    Some("delete") => apply_delete_op(&state, op).await,
+                    Some("merge") => apply_merge_op(&state, op).await,
+                    _ => (json!({ "status": "error", "error": "unknown op" }), false),
+                };
+                if ok {
+                    applied += 1;
+                }
+                results.push(result);
+            }
+            llm_report.insert("applied".to_string(), json!(applied));
+            llm_report.insert("results".to_string(), Value::Array(results));
+            llm_report.insert("ops".to_string(), Value::Array(valid));
+        } else {
+            llm_report.insert("ops".to_string(), Value::Array(valid));
+            llm_report.insert(
+                "note".to_string(),
+                json!("dry run: re-run with --apply to execute these ops"),
+            );
+        }
+        report.insert("llm_apply".to_string(), Value::Object(llm_report));
+    }
+
+    // Similarity-dedup tier (the dashboard's `/curate` semantics), planned
+    // on the post-LLM-ops store state.
     let (actions, counts, total) =
         build_delete_plan(&state)
             .await
             .map_err(|message| TokenSaveError::Config {
                 message: format!("curation analysis failed: {message}"),
             })?;
-    let mut report = Map::new();
-    report.insert("mode".to_string(), json!("similarity_dedup"));
-    report.insert("dry_run".to_string(), json!(!options.apply));
     report.insert("counts".to_string(), Value::Object(counts));
     report.insert(
         "coverage".to_string(),
@@ -156,55 +202,10 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     }
     report.insert("actions".to_string(), Value::Array(actions));
 
-    if options.llm || options.llm_ops.is_some() {
+    if options.llm && options.llm_ops.is_none() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
-        let allowed_ids: BTreeSet<i64> = clusters
-            .iter()
-            .filter_map(|cluster| cluster.get("members").and_then(Value::as_array))
-            .flatten()
-            .filter_map(|member| member.get("fact_id").and_then(Value::as_i64))
-            .collect();
-
-        if let Some(provided) = options.llm_ops.as_ref() {
-            let raw_ops = provided
-                .get("ops")
-                .and_then(Value::as_array)
-                .cloned()
-                .ok_or_else(|| TokenSaveError::Config {
-                    message: "--llm-ops payload must be a JSON object with an `ops` array"
-                        .to_string(),
-                })?;
-            let (valid, rejected) =
-                validate_llm_ops(&raw_ops, &allowed_ids, options.min_confidence);
-            let mut llm_report = Map::new();
-            llm_report.insert("clusters_reviewed".to_string(), json!(clusters.len()));
-            llm_report.insert("rejected_ops".to_string(), Value::Array(rejected));
-            if options.apply {
-                let mut results = Vec::new();
-                let mut applied = 0i64;
-                for op in &valid {
-                    let (result, ok) = match op.get("op").and_then(Value::as_str) {
-                        Some("delete") => apply_delete_op(&state, op).await,
-                        Some("merge") => apply_merge_op(&state, op).await,
-                        _ => (json!({ "status": "error", "error": "unknown op" }), false),
-                    };
-                    if ok {
-                        applied += 1;
-                    }
-                    results.push(result);
-                }
-                llm_report.insert("applied".to_string(), json!(applied));
-                llm_report.insert("results".to_string(), Value::Array(results));
-                llm_report.insert("ops".to_string(), Value::Array(valid));
-            } else {
-                llm_report.insert("ops".to_string(), Value::Array(valid));
-                llm_report.insert(
-                    "note".to_string(),
-                    json!("dry run: re-run with --apply to execute these ops"),
-                );
-            }
-            report.insert("llm_apply".to_string(), Value::Object(llm_report));
-        } else {
+        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        {
             // Plan half of the two-phase contract: hand the caller the exact
             // chat messages the Hermes wrapper sends to its auxiliary LLM.
             let user_message = format!(
@@ -233,6 +234,16 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     }
 
     Ok(Value::Object(report))
+}
+
+/// All member fact ids across the reviewable clusters (the evidence guard).
+fn cluster_fact_ids(clusters: &[Value]) -> BTreeSet<i64> {
+    clusters
+        .iter()
+        .filter_map(|cluster| cluster.get("members").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|member| member.get("fact_id").and_then(Value::as_i64))
+        .collect()
 }
 
 /// Groups candidate similarity pairs into reviewable clusters (union-find
