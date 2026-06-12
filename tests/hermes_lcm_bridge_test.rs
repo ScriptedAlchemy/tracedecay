@@ -833,6 +833,7 @@ fn generated_context_engine_registers_when_supported() {
         r#"
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
 import sys
 import types
@@ -912,9 +913,11 @@ assert profile_args == {
 }
 
 fallback_args = plugin._storage_args()
+# Match the plugin's expanduser fallback byte-for-byte: pathlib normalizes
+# separators on Windows while expanduser("~/.hermes") emits mixed ones.
 assert fallback_args == {
     "storage_scope": "hermes_profile",
-    "hermes_home": str(pathlib.Path("~/.hermes").expanduser()),
+    "hermes_home": os.path.expanduser("~/.hermes"),
 }
 
 calls = []
@@ -956,7 +959,7 @@ name, args, kwargs = calls.pop()
 assert name == "tokensave_lcm_preflight"
 assert args["session_id"] == "next"
 assert args["storage_scope"] == "hermes_profile"
-assert args["hermes_home"] == str(pathlib.Path("~/.hermes").expanduser())
+assert args["hermes_home"] == os.path.expanduser("~/.hermes")
 assert "project_root" not in args
 
 profile_engine = plugin.TokenSaveContextEngine()
@@ -1144,6 +1147,7 @@ fn context_engine_session_start_reports_compression_boundary() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
@@ -1201,9 +1205,10 @@ assert argv[0] == plugin.tools.TOKENSAVE_BIN
 assert argv[1:4] == ["tool", "tokensave_lcm_session_boundary", "--json"]
 assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
     "storage_scope": "hermes_profile",
-    "hermes_home": str(pathlib.Path("~/.hermes").expanduser()),
+    "hermes_home": os.path.expanduser("~/.hermes"),
     "session_id": "session-b",
     "old_session_id": "session-c",
     "boundary_reason": "compression",
@@ -1328,9 +1333,10 @@ assert argv[0] == plugin.tools.TOKENSAVE_BIN
 assert argv[1:4] == ["tool", "tokensave_lcm_compress", "--json"]
 assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
     "storage_scope": "hermes_profile",
-    "hermes_home": str(pathlib.Path("~/.hermes").expanduser()),
+    "hermes_home": os.path.expanduser("~/.hermes"),
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -1505,6 +1511,7 @@ fn context_engine_expand_query_and_profile_storage_project_flags() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
@@ -1565,7 +1572,8 @@ assert project_argv[1:4] == ["tool", "tokensave_lcm_expand_query", "--json"]
 assert "--project" not in project_argv
 project_args = json.loads(project_argv[project_argv.index("--args") + 1])
 assert project_args["storage_scope"] == "hermes_profile"
-assert project_args["hermes_home"] == str(pathlib.Path("~/.hermes").expanduser())
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
+assert project_args["hermes_home"] == os.path.expanduser("~/.hermes")
 
 profile_engine = plugin.TokenSaveContextEngine()
 profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
