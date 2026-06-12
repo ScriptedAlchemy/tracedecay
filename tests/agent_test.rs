@@ -2890,6 +2890,40 @@ fn test_cursor_install_creates_plugin() {
 }
 
 #[test]
+fn test_cursor_install_sweeps_legacy_tokensave_plugin_dir() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+
+    // Simulate a pre-rebrand plugin install: tokensave-branded manifest plus
+    // the legacy rule file and dispatcher skill dirs the current bundle no
+    // longer ships. Earlier sweeps missed these and stranded the directory.
+    let legacy_dir = home.join(".cursor/plugins/local/tokensave");
+    std::fs::create_dir_all(legacy_dir.join(".cursor-plugin")).unwrap();
+    std::fs::write(
+        legacy_dir.join(".cursor-plugin/plugin.json"),
+        r#"{"name": "tokensave", "version": "5.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(legacy_dir.join("rules")).unwrap();
+    std::fs::write(legacy_dir.join("rules/tokensave.mdc"), "legacy rule\n").unwrap();
+    for skill in ["tokensave-audit-safety", "tokensave-map-architecture"] {
+        let skill_dir = legacy_dir.join("skills").join(skill);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "legacy dispatcher\n").unwrap();
+    }
+
+    let ctx = make_install_ctx(home);
+    CursorIntegration.install(&ctx).unwrap();
+
+    assert!(
+        !legacy_dir.exists(),
+        "legacy tokensave plugin dir should be fully removed once the \
+         tokensave.mdc rule and tokensave-<verb> dispatcher skills are swept"
+    );
+    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
+}
+
+#[test]
 fn test_opencode_install_creates_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();

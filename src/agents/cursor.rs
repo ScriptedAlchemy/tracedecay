@@ -458,16 +458,29 @@ const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "commands",
     "skills/tokensave-arch",
     "skills/tokensave-audit",
+    "skills/tokensave-audit-safety",
     "skills/tokensave-branch",
+    "skills/tokensave-check-health",
     "skills/tokensave-clean",
+    "skills/tokensave-clean-dead-code",
     "skills/tokensave-commit",
+    "skills/tokensave-compare-branches",
+    "skills/tokensave-curate-memory",
     "skills/tokensave-diagnose",
+    "skills/tokensave-draft-commit",
+    "skills/tokensave-find-impact",
+    "skills/tokensave-fix-build",
     "skills/tokensave-health",
     "skills/tokensave-impact",
+    "skills/tokensave-map-architecture",
     "skills/tokensave-port",
+    "skills/tokensave-port-code",
     "skills/tokensave-recall",
+    "skills/tokensave-recall-memory",
     "skills/tokensave-review",
+    "skills/tokensave-review-diff",
     "skills/tokensave-test",
+    "skills/tokensave-test-changes",
     "skills/tracedecay-arch",
     "skills/tracedecay-audit",
     "skills/tracedecay-branch",
@@ -481,6 +494,11 @@ const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "skills/tracedecay-review",
     "skills/tracedecay-test",
 ];
+
+/// Individual files shipped by older (pre-rebrand) plugin bundles that the
+/// current bundle no longer contains. Swept alongside [`LEGACY_PLUGIN_DIRS`]
+/// so upgrades from tokensave-branded installs don't strand them.
+const LEGACY_PLUGIN_FILES: &[&str] = &["rules/tokensave.mdc"];
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
@@ -515,6 +533,12 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
         let path = install_dir.join(legacy);
         if path.is_dir() {
             std::fs::remove_dir_all(&path).ok();
+        }
+    }
+    for legacy in LEGACY_PLUGIN_FILES {
+        let path = install_dir.join(legacy);
+        if path.is_file() {
+            std::fs::remove_file(&path).ok();
         }
     }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {

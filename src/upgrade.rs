@@ -16,9 +16,9 @@ const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 // Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use crate::cloud::asset_name;
+use crate::cloud::asset_name_candidates;
 #[cfg(test)]
-use crate::cloud::current_platform;
+use crate::cloud::{asset_name, current_platform, legacy_asset_name};
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
@@ -31,8 +31,10 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
     }
 }
 
-/// Fetches the `browser_download_url` for a specific asset in a GitHub release.
-fn fetch_asset_url(tag: &str, expected_asset: &str) -> Result<String> {
+/// Fetches the `browser_download_url` for the first matching asset name in a
+/// GitHub release. Candidates are probed in order, so the post-rebrand
+/// `tracedecay-v*` name wins over the legacy `tokensave-v*` fallback.
+fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -62,23 +64,24 @@ fn fetch_asset_url(tag: &str, expected_asset: &str) -> Result<String> {
             message: format!("failed to parse release info: {e}"),
         })?;
 
-    release
-        .assets
-        .into_iter()
-        .find(|a| a.name == expected_asset)
-        .map(|a| a.browser_download_url)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "release {tag} exists but asset '{expected_asset}' is not yet available.\n  \
-                 CI build may still be in progress — try again in a few minutes.\n  \
-                 https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-            ),
-        })
+    for candidate in candidates {
+        if let Some(asset) = release.assets.iter().find(|a| a.name == *candidate) {
+            return Ok(asset.browser_download_url.clone());
+        }
+    }
+    let expected = candidates.join("' or '");
+    Err(TraceDecayError::Config {
+        message: format!(
+            "release {tag} exists but asset '{expected}' is not yet available.\n  \
+             CI build may still be in progress — try again in a few minutes.\n  \
+             https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+        ),
+    })
 }
 
-/// Downloads the archive from `url` into memory, then extracts `bin_name`
-/// to a temp path. Returns the temp path.
-fn download_and_extract(url: &str, bin_name: &str) -> Result<std::path::PathBuf> {
+/// Downloads the archive from `url` into memory, then extracts the first
+/// entry matching any of `bin_names` to a temp path. Returns the temp path.
+fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::PathBuf> {
     let tmp_path = std::env::temp_dir().join(format!(
         "tracedecay_upgrade_{}{}",
         std::process::id(),
@@ -115,18 +118,19 @@ fn download_and_extract(url: &str, bin_name: &str) -> Result<std::path::PathBuf>
     eprint!("  Extracting...");
 
     #[cfg(not(windows))]
-    extract_targz(&raw, bin_name, &tmp_path)?;
+    extract_targz(&raw, bin_names, &tmp_path)?;
 
     #[cfg(windows)]
-    extract_zip(&raw, bin_name, &tmp_path)?;
+    extract_zip(&raw, bin_names, &tmp_path)?;
 
     eprintln!(" Done");
     Ok(tmp_path)
 }
 
-/// Extracts `bin_name` from a `.tar.gz` archive (Unix).
+/// Extracts the first entry matching any of `bin_names` from a `.tar.gz`
+/// archive (Unix).
 #[cfg(not(windows))]
-fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
+fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
     use std::io::Cursor;
     use tar::Archive;
@@ -141,7 +145,8 @@ fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
             .map_err(io_err("archive path error"))?
             .to_path_buf();
 
-        if path.file_name().and_then(|n| n.to_str()) == Some(bin_name) {
+        let file_name = path.file_name().and_then(|n| n.to_str());
+        if file_name.is_some_and(|n| bin_names.contains(&n)) {
             entry.unpack(dest).map_err(io_err("extract failed"))?;
 
             #[cfg(unix)]
@@ -159,13 +164,14 @@ fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
     }
 
     Err(TraceDecayError::Config {
-        message: format!("binary '{bin_name}' not found in archive"),
+        message: format!("binary '{}' not found in archive", bin_names.join("' or '")),
     })
 }
 
-/// Extracts `bin_name` from a `.zip` archive (Windows).
+/// Extracts the first entry matching any of `bin_names` from a `.zip`
+/// archive (Windows).
 #[cfg(windows)]
-fn extract_zip(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
+fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use std::io::Cursor;
 
     let mut archive =
@@ -178,7 +184,8 @@ fn extract_zip(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
             message: format!("zip entry error: {e}"),
         })?;
 
-        if Path::new(file.name()).file_name().and_then(|n| n.to_str()) == Some(bin_name) {
+        let file_name = Path::new(file.name()).file_name().and_then(|n| n.to_str());
+        if file_name.is_some_and(|n| bin_names.contains(&n)) {
             let mut out = std::fs::File::create(dest).map_err(io_err("create temp file failed"))?;
             std::io::copy(&mut file, &mut out).map_err(io_err("extract failed"))?;
             return Ok(());
@@ -186,7 +193,7 @@ fn extract_zip(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
     }
 
     Err(TraceDecayError::Config {
-        message: format!("binary '{bin_name}' not found in zip"),
+        message: format!("binary '{}' not found in zip", bin_names.join("' or '")),
     })
 }
 
@@ -481,9 +488,9 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<()> {
 /// release yet.
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
     let tag = release_tag(version);
-    let expected = asset_name(version, is_beta);
-    eprintln!("  Asset: {expected}");
-    fetch_asset_url(&tag, &expected)
+    let candidates = asset_name_candidates(version, is_beta);
+    eprintln!("  Asset: {}", candidates[0]);
+    fetch_asset_url(&tag, &candidates)
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -507,13 +514,15 @@ fn record_previous_version() {
 }
 
 fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Result<()> {
-    let bin_name = if cfg!(windows) {
-        "tokensave.exe"
+    // Post-rebrand archives ship a `tracedecay` binary; legacy archives a
+    // `tokensave` one. Probe new name first.
+    let bin_names: &[&str] = if cfg!(windows) {
+        &["tracedecay.exe", "tokensave.exe"]
     } else {
-        "tokensave"
+        &["tracedecay", "tokensave"]
     };
 
-    let tmp = download_and_extract(asset_url, bin_name)?;
+    let tmp = download_and_extract(asset_url, bin_names)?;
 
     let label = match method {
         InstallMethod::Brew => " (Homebrew Cellar)",
@@ -672,7 +681,7 @@ mod tests {
     #[test]
     fn test_asset_name_stable() {
         let name = asset_name("3.3.3", false);
-        assert!(name.starts_with("tokensave-v3.3.3-"));
+        assert!(name.starts_with("tracedecay-v3.3.3-"));
         assert!(!name.contains("beta"));
         if cfg!(windows) {
             assert!(name.ends_with(".zip"));
@@ -684,12 +693,27 @@ mod tests {
     #[test]
     fn test_asset_name_beta() {
         let name = asset_name("4.0.2-beta.1", true);
-        assert!(name.starts_with("tokensave-beta-v4.0.2-beta.1-"));
+        assert!(name.starts_with("tracedecay-beta-v4.0.2-beta.1-"));
         if cfg!(windows) {
             assert!(name.ends_with(".zip"));
         } else {
             assert!(name.ends_with(".tar.gz"));
         }
+    }
+
+    #[test]
+    fn test_legacy_asset_name_keeps_tokensave_prefix() {
+        let stable = legacy_asset_name("3.3.3", false);
+        assert!(stable.starts_with("tokensave-v3.3.3-"));
+        let beta = legacy_asset_name("4.0.2-beta.1", true);
+        assert!(beta.starts_with("tokensave-beta-v4.0.2-beta.1-"));
+    }
+
+    #[test]
+    fn test_asset_name_candidates_probe_new_then_legacy() {
+        let candidates = asset_name_candidates("3.3.3", false);
+        assert!(candidates[0].starts_with("tracedecay-v3.3.3-"));
+        assert!(candidates[1].starts_with("tokensave-v3.3.3-"));
     }
 
     #[test]
@@ -716,18 +740,21 @@ mod tests {
         let stable = asset_name("3.3.3", false);
         let platform = current_platform();
         if cfg!(windows) {
-            assert_eq!(stable, format!("tokensave-v3.3.3-{platform}.zip"));
+            assert_eq!(stable, format!("tracedecay-v3.3.3-{platform}.zip"));
         } else {
-            assert_eq!(stable, format!("tokensave-v3.3.3-{platform}.tar.gz"));
+            assert_eq!(stable, format!("tracedecay-v3.3.3-{platform}.tar.gz"));
         }
 
         let beta = asset_name("4.0.2-beta.1", true);
         if cfg!(windows) {
-            assert_eq!(beta, format!("tokensave-beta-v4.0.2-beta.1-{platform}.zip"));
+            assert_eq!(
+                beta,
+                format!("tracedecay-beta-v4.0.2-beta.1-{platform}.zip")
+            );
         } else {
             assert_eq!(
                 beta,
-                format!("tokensave-beta-v4.0.2-beta.1-{platform}.tar.gz")
+                format!("tracedecay-beta-v4.0.2-beta.1-{platform}.tar.gz")
             );
         }
     }

@@ -126,17 +126,43 @@ pub(crate) fn current_platform() -> &'static str {
 /// `tar czf` / `Compress-Archive` invocations in `.github/workflows/release.yml`
 /// and `release-beta.yml`:
 ///
-/// - Stable: `tokensave-v{version}-{platform}.{ext}`
-/// - Beta:   `tokensave-beta-v{version}-{platform}.{ext}`
+/// - Stable: `tracedecay-v{version}-{platform}.{ext}`
+/// - Beta:   `tracedecay-beta-v{version}-{platform}.{ext}`
 pub(crate) fn asset_name(version: &str, is_beta: bool) -> String {
+    let prefix = if is_beta {
+        "tracedecay-beta"
+    } else {
+        "tracedecay"
+    };
+    platform_asset_name(prefix, version)
+}
+
+/// Legacy (pre-rebrand) archive name. Releases published while the project
+/// was still called "tokensave" carry `tokensave-v*` / `tokensave-beta-v*`
+/// assets; upgrades to/from those versions must keep working.
+pub(crate) fn legacy_asset_name(version: &str, is_beta: bool) -> String {
     let prefix = if is_beta {
         "tokensave-beta"
     } else {
         "tokensave"
     };
+    platform_asset_name(prefix, version)
+}
+
+fn platform_asset_name(prefix: &str, version: &str) -> String {
     let platform = current_platform();
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
     format!("{prefix}-v{version}-{platform}.{ext}")
+}
+
+/// Candidate asset names for a release, newest naming first. The upgrade
+/// path probes these in order so both post-rebrand (`tracedecay-v*`) and
+/// legacy (`tokensave-v*`) releases stay installable.
+pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 2] {
+    [
+        asset_name(version, is_beta),
+        legacy_asset_name(version, is_beta),
+    ]
 }
 
 /// True when the release lists an asset matching the current platform.
@@ -145,8 +171,8 @@ pub(crate) fn asset_name(version: &str, is_beta: bool) -> String {
 /// cannot actually install.
 fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
     let version = release.tag_name.trim_start_matches('v');
-    let expected = asset_name(version, release.prerelease);
-    release.assets.iter().any(|a| a.name == expected)
+    let candidates = asset_name_candidates(version, release.prerelease);
+    release.assets.iter().any(|a| candidates.contains(&a.name))
 }
 
 /// Fetches the latest release version from GitHub.
@@ -347,6 +373,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_release_with_legacy_tokensave_asset() {
+        // Releases published before the rebrand carry `tokensave-v*` assets
+        // and must remain installable.
+        let expected = legacy_asset_name("9.9.9", false);
+        let r = release("v9.9.9", false, &[&expected]);
+        assert!(release_has_current_platform_asset(&r));
+    }
+
+    #[test]
     fn accepts_beta_release_with_matching_beta_asset() {
         let expected = asset_name("9.9.9-beta.1", true);
         let r = release("v9.9.9-beta.1", true, &[&expected]);
@@ -354,12 +389,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_beta_release_with_legacy_tokensave_beta_asset() {
+        let expected = legacy_asset_name("9.9.9-beta.1", true);
+        let r = release("v9.9.9-beta.1", true, &[&expected]);
+        assert!(release_has_current_platform_asset(&r));
+    }
+
+    #[test]
     fn rejects_stable_named_asset_on_beta_release() {
-        // If someone uploads a `tokensave-v...` asset to a prerelease, the
+        // If someone uploads a stable-named asset to a prerelease, the
         // filter should still reject — the naming convention says beta
-        // releases carry `tokensave-beta-v...` assets.
+        // releases carry `*-beta-v...` assets.
         let stable_name = asset_name("9.9.9-beta.1", false);
-        let r = release("v9.9.9-beta.1", true, &[&stable_name]);
+        let legacy_stable_name = legacy_asset_name("9.9.9-beta.1", false);
+        let r = release("v9.9.9-beta.1", true, &[&stable_name, &legacy_stable_name]);
         assert!(!release_has_current_platform_asset(&r));
+    }
+
+    #[test]
+    fn asset_name_candidates_orders_new_name_first() {
+        let [first, second] = asset_name_candidates("9.9.9", false);
+        assert!(first.starts_with("tracedecay-v9.9.9-"));
+        assert!(second.starts_with("tokensave-v9.9.9-"));
     }
 }
