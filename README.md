@@ -342,6 +342,8 @@ Trust scoring is fact-level, not just text-level. The store combines source meta
 
 See [docs/USER-GUIDE.md](docs/USER-GUIDE.md#memory-and-fact-recall) for common memory payloads. For the exact current input schema, inspect the live MCP descriptors for `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status`.
 
+Memory hygiene is covered by a behavioral eval suite (no-pollution, secret rejection, supersede-without-dup, multi-turn continuity, curation conservatism): a deterministic layer runs in the normal test suite, and a cost-gated real-agent layer drives Hermes or `cursor-agent` against throwaway fixtures. See [docs/memory-evals.md](docs/memory-evals.md).
+
 ---
 
 ## Savings Ledger

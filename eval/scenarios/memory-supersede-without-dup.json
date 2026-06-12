@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "id": "memory-supersede-without-dup",
+  "title": "Preference pivots update the existing fact instead of duplicating it",
+  "description": "When a stored preference is superseded (npm -> pnpm), the existing fact must be updated or replaced, never duplicated. Once the sibling near-dup diff / supersession-proposal write path lands, even a naive duplicate add must be defended against.",
+  "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "pending-sibling",
+  "contract_notes": "Sibling branch work (src/memory + agents) adds near-dup detection and supersession proposals on the add path. Until it lands, the violation phase reports PENDING-SIBLING: the duplicate is detected by the instrument but nothing defends against it.",
+  "setup": {
+    "facts": [
+      {
+        "content": "User prefers npm as the package manager for this project.",
+        "category": "user_pref",
+        "source": "eval-seed",
+        "trust": 0.7,
+        "retrieval_count": 3
+      }
+    ],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "fact_store",
+        "args": {
+          "action": "update",
+          "fact_id": "1",
+          "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference)."
+        }
+      }
+    ],
+    "violation": {
+      "expectation": "defend-or-detect",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "fact_store",
+          "args": {
+            "action": "add",
+            "content": "User prefers pnpm as the package manager for this project.",
+            "category": "user_pref",
+            "source": "eval-agent"
+          }
+        }
+      ]
+    }
+  },
+  "real_model": {
+    "prompts": [
+      "Use your memory tools to update existing project memory. The durable preference is now pnpm, superseding the earlier npm preference. Update or replace the existing entry instead of adding a duplicate. Reply done."
+    ],
+    "max_turns": 8
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "single_package_manager_fact",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%package manager%'",
+      "op": "eq",
+      "value": 1,
+      "phase": "both"
+    },
+    {
+      "kind": "sql",
+      "name": "pivot_to_pnpm_present",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%pnpm%'",
+      "op": "eq",
+      "value": 1,
+      "phase": "both"
+    },
+    {
+      "kind": "sql",
+      "name": "stale_npm_preference_gone",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%prefers npm%'",
+      "op": "eq",
+      "value": 0,
+      "phase": "both"
+    }
+  ]
+}
