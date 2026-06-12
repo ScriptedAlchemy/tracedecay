@@ -182,8 +182,7 @@ class UnsafeRegisteredToolCtx:
         self.context_engines = []
 
     def register_tool(self, **kwargs):
-        self.tools.append(kwargs)
-        raise AssertionError("register_tool should be skipped on unsafe hosts")
+        self.tools.append(kwargs["name"])
 
     def register_hook(self, name, handler):
         pass
@@ -197,13 +196,20 @@ class UnsafeRegisteredToolCtx:
 ctx = UnsafeRegisteredToolCtx()
 plugin.register(ctx)
 
-assert ctx.tools == []
+# Code-graph / memory / transcript tools register even without message
+# forwarding; only the live-ingest LCM verbs whose schemas carry the
+# in-memory messages list (and the context-engine tool mirrors) are gated.
+assert "tracedecay_search" in ctx.tools
+assert "tracedecay_context" in ctx.tools
+assert "tracedecay_lcm_compress" not in ctx.tools
+assert "tracedecay_lcm_preflight" not in ctx.tools
+assert "lcm_grep" not in ctx.tools
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
 assert engine.name == "tracedecay"
 assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
 "#,
-        "generated plugin should skip direct tools when host does not forward messages",
+        "generated plugin should gate only message-dependent tools when host does not forward messages",
     );
 }
 
@@ -277,7 +283,7 @@ assert doctor_params["properties"] == {}
 status = engine.get_status()
 assert status["engine"] == "tracedecay"
 assert status["session_id"] == "session-1"
-assert status["storage_scope"] == "project_local"
+assert status["storage_scope"] == "hermes_profile"
 assert status["context_engine_tool_names"] == sorted(schema_names)
 
 calls = []
@@ -325,7 +331,7 @@ assert json.loads(implicit_current_result) == {"ok": True, "tool": "tracedecay_l
 assert calls[0][0] == "tracedecay_lcm_preflight"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
 assert calls[0][1]["session_id"] == "session-1"
-assert calls[0][1]["storage_scope"] == "project_local"
+assert calls[0][1]["storage_scope"] == "hermes_profile"
 assert calls[1][0] == "tracedecay_lcm_grep"
 assert calls[1][1]["query"] == "orchard"
 assert calls[1][1]["scope"] == "current"
@@ -338,8 +344,8 @@ assert "session_scope" not in calls[1][1]
 assert "time_from" not in calls[1][1]
 assert "time_to" not in calls[1][1]
 assert "messages" not in calls[1][1]
-assert calls[1][1]["storage_scope"] == "project_local"
-assert calls[1][1]["project_root"] == "/tmp/project"
+assert calls[1][1]["storage_scope"] == "hermes_profile"
+assert calls[1][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[1][1]["session_id"] == "session-1"
 assert calls[1][2] == {}
 assert calls[2][0] == "tracedecay_lcm_preflight"
@@ -371,15 +377,15 @@ assert calls[7][0] == "tracedecay_lcm_grep"
 assert calls[7][1]["query"] == "direct"
 assert calls[7][1]["scope"] == "all"
 assert "session_scope" not in calls[7][1]
-assert calls[7][1]["storage_scope"] == "project_local"
-assert calls[7][1]["project_root"] == "/tmp/project"
+assert calls[7][1]["storage_scope"] == "hermes_profile"
+assert calls[7][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[7][1]["session_id"] == "session-1"
 assert calls[8][0] == "tracedecay_lcm_grep"
 assert calls[8][1]["query"] == "implicit"
 assert calls[8][1]["scope"] == "current"
 assert "session_scope" not in calls[8][1]
-assert calls[8][1]["storage_scope"] == "project_local"
-assert calls[8][1]["project_root"] == "/tmp/project"
+assert calls[8][1]["storage_scope"] == "hermes_profile"
+assert calls[8][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[8][1]["session_id"] == "session-1"
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
@@ -578,7 +584,7 @@ engine = plugin.TraceDecayContextEngine()
 engine.agent = agent
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
-result = engine.compress([{"role": "user", "content": "current"}], current_tokens=700)
+result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
 
 assert result["status"] == "ok"
 assert len(compress_calls) == 2
@@ -670,7 +676,7 @@ engine = plugin.TraceDecayContextEngine()
 engine.agent = agent
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
-result = engine.compress([{"role": "user", "content": "current"}], current_tokens=700)
+result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
 assert result["status"] == "ok"
 provided = compress_calls[1]
 payload = json.loads(provided["summarizer"]["route"])
@@ -827,6 +833,7 @@ fn generated_context_engine_registers_when_supported() {
         r#"
 import importlib.machinery
 import importlib.util
+import os
 import pathlib
 import sys
 import types
@@ -891,10 +898,12 @@ assert engine.active_session_id == "session-123"
 assert engine.hermes_home == "/tmp/hermes-profile"
 assert engine.project_root == "/tmp/project"
 
+# LCM/session storage is always profile-scoped: a project_root pin is a
+# code-project anchor for code-graph tools, never a storage-home switch.
 local_args = plugin._storage_args(project_root="/tmp/project", hermes_home="/tmp/hermes-profile")
 assert local_args == {
-    "storage_scope": "project_local",
-    "project_root": "/tmp/project",
+    "storage_scope": "hermes_profile",
+    "hermes_home": "/tmp/hermes-profile",
 }
 
 profile_args = plugin._storage_args(hermes_home="/tmp/hermes-profile")
@@ -904,7 +913,12 @@ assert profile_args == {
 }
 
 fallback_args = plugin._storage_args()
-assert fallback_args == {"storage_scope": "hermes_profile"}
+# Match the plugin's expanduser fallback byte-for-byte: pathlib normalizes
+# separators on Windows while expanduser("~/.hermes") emits mixed ones.
+assert fallback_args == {
+    "storage_scope": "hermes_profile",
+    "hermes_home": os.path.expanduser("~/.hermes"),
+}
 
 calls = []
 
@@ -933,8 +947,9 @@ project_engine.should_compress_preflight(messages=[], current_tokens=456)
 name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "session-2"
-assert args["storage_scope"] == "project_local"
-assert args["project_root"] == "/tmp/project"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == "/tmp/hermes"
+assert "project_root" not in args
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.initialize(session_id="initial", project_root="/tmp/project")
@@ -943,8 +958,9 @@ project_engine.should_compress_preflight(messages=[], current_tokens=789)
 name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "next"
-assert args["storage_scope"] == "project_local"
-assert args["project_root"] == "/tmp/project"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == os.path.expanduser("~/.hermes")
+assert "project_root" not in args
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
@@ -1060,7 +1076,7 @@ plugin.tools.subprocess.run = fake_run
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(hermes_home="/tmp/hermes-profile")
 engine.on_session_start(session_id="session-1", project_root="/tmp/project")
-result = engine.should_compress_preflight(
+result = engine._preflight_probe(
     [{"role": "user", "content": "hello"}],
     current_tokens=987,
 )
@@ -1072,12 +1088,13 @@ assert result["messages"] == []
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_preflight", "--json"]
+assert argv[1:4] == ["tool", "tracedecay_lcm_preflight", "--json"]
+assert "--project" not in argv
 args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
-    "storage_scope": "project_local",
-    "project_root": "/tmp/project",
+    "storage_scope": "hermes_profile",
+    "hermes_home": "/tmp/hermes-profile",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -1130,6 +1147,7 @@ fn context_engine_session_start_reports_compression_boundary() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
@@ -1184,11 +1202,13 @@ engine.on_session_start(
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_session_boundary", "--json"]
+assert argv[1:4] == ["tool", "tracedecay_lcm_session_boundary", "--json"]
+assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
-    "storage_scope": "project_local",
-    "project_root": "/tmp/project",
+    "storage_scope": "hermes_profile",
+    "hermes_home": os.path.expanduser("~/.hermes"),
     "session_id": "session-b",
     "old_session_id": "session-c",
     "boundary_reason": "compression",
@@ -1294,22 +1314,29 @@ plugin.tools.subprocess.run = fake_run
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-2", project_root="/tmp/project")
+messages = [{"role": "assistant", "content": "hello"}]
 result = engine.compress(
-    [{"role": "assistant", "content": "hello"}],
+    list(messages),
     current_tokens=1200,
     focus_topic="handoff",
 )
 
-assert result == {"status": "not_implemented", "message": "placeholder parsed"}
+# Host ABC contract: compress() returns a message LIST (here: the input,
+# since the placeholder result carries no usable replay window); the raw
+# tracedecay result stays on the engine for diagnostics.
+assert result == messages
+assert engine.last_compress_result == {"status": "not_implemented", "message": "placeholder parsed"}
 
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_compress", "--json"]
+assert argv[1:4] == ["tool", "tracedecay_lcm_compress", "--json"]
+assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
-    "storage_scope": "project_local",
-    "project_root": "/tmp/project",
+    "storage_scope": "hermes_profile",
+    "hermes_home": os.path.expanduser("~/.hermes"),
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -1319,7 +1346,7 @@ assert args == {
     "summary_fan_in": 4,
     "incremental_max_depth": 1,
     "session_id": "session-2",
-    "messages": [{"role": "assistant", "content": "hello"}],
+    "messages": messages,
     "current_tokens": 1200,
     "focus_topic": "handoff",
     "summarizer": {"mode": "hermes_auxiliary"},
@@ -1484,6 +1511,7 @@ fn context_engine_expand_query_and_profile_storage_project_flags() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
@@ -1539,15 +1567,19 @@ answer = project_engine.expand_query(prompt="What changed?", query="orchard")
 assert answer["status"] == "ok"
 project_argv = calls.pop()
 assert project_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert project_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_expand_query", "--json"]
+# LCM session state is profile-scoped even for project-pinned engines.
+assert project_argv[1:4] == ["tool", "tracedecay_lcm_expand_query", "--json"]
+assert "--project" not in project_argv
 project_args = json.loads(project_argv[project_argv.index("--args") + 1])
-assert project_args["storage_scope"] == "project_local"
-assert project_args["project_root"] == "/tmp/project"
+assert project_args["storage_scope"] == "hermes_profile"
+# expanduser matches the plugin's fallback byte-for-byte on Windows too.
+assert project_args["hermes_home"] == os.path.expanduser("~/.hermes")
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.initialize(session_id="session-2", hermes_home="/tmp/hermes-profile")
-profile_result = profile_engine.should_compress_preflight(messages=[], current_tokens=100)
+profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100)
 assert profile_result["status"] == "ok"
+assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
 assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
 assert profile_argv[1:4] == ["tool", "tracedecay_lcm_preflight", "--json"]
@@ -1694,10 +1726,12 @@ fn context_engine_expand_query_synthesizes_and_degrades() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
 
 parent_name = "_hermes_user_context"
 parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
@@ -1742,8 +1776,8 @@ def needs_synthesis():
 def fake_call_tracedecay_tool(name, args, **kwargs):
     assert name == "tracedecay_lcm_expand_query"
     assert args["session_id"] == "session-1"
-    assert args["storage_scope"] == "project_local"
-    assert args["project_root"] == "/tmp/project"
+    assert args["storage_scope"] == "hermes_profile"
+    assert args["hermes_home"] == os.environ["HERMES_HOME"]
     assert args["prompt"] == "What changed?"
     assert args["query"] == "orchard"
     return mcp_response(responses.pop(0))
@@ -1798,14 +1832,16 @@ assert empty_payload["degraded"] is True
 assert "empty answer" in empty_payload["error"]
 assert empty_payload["needs_synthesis"] is False
 
+# Non-timeout synthesis failures (RuntimeError / provider SDK / httpx)
+# must degrade with the retrieval intact, never escape as a handler
+# exception that loses the retrieval behind a generic registry error.
 agent.auxiliary_client.mode = "unexpected"
 responses.append(needs_synthesis())
-try:
-    engine.expand_query(prompt="What changed?", query="orchard")
-except RuntimeError as exc:
-    assert "schema bug" in str(exc)
-else:
-    raise AssertionError("unexpected synthesis exceptions must propagate")
+failed_payload = engine.expand_query(prompt="What changed?", query="orchard")
+assert failed_payload["degraded"] is True
+assert "schema bug" in failed_payload["error"]
+assert failed_payload["needs_synthesis"] is False
+assert failed_payload["matches"], "retrieval must survive synthesis failures"
 "#,
     )
     .unwrap();
@@ -1930,7 +1966,7 @@ class Aux:
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": old_one}],
     current_tokens=1200,
     focus_topic="handoff",
@@ -2079,7 +2115,7 @@ class OversizedAux:
 agent = type("Agent", (), {"auxiliary_client": OversizedAux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": source_content}],
     current_tokens=1200,
     focus_topic="handoff",
@@ -2218,7 +2254,7 @@ class ContextLimitedAux:
 agent = type("Agent", (), {"auxiliary_client": ContextLimitedAux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
     current_tokens=1200,
     focus_topic="handoff",
@@ -2388,7 +2424,7 @@ class BadTemplateAux:
 agent = type("Agent", (), {"auxiliary_client": BadTemplateAux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
     current_tokens=1200,
     focus_topic="handoff",
@@ -2720,7 +2756,7 @@ class EscalatingAux:
 agent = type("Agent", (), {"auxiliary_client": EscalatingAux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": source_content}],
     current_tokens=1200,
     focus_topic="handoff",
@@ -2902,7 +2938,7 @@ class Aux:
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-result = engine.compress(
+result = engine._compress_to_result(
     [{"role": "user", "content": "active"}],
     current_tokens=1200,
 )
@@ -3254,8 +3290,14 @@ assert tool == "tracedecay_lcm_compress"
 assert args["context_length"] == 1000000
 assert args["threshold_tokens"] == 800000
 
-# should_compress mirrors post-response gating and returns a bool.
-assert engine.should_compress(prompt_tokens=1) is True
+# should_compress gates locally below the tracked threshold (no spawn)...
+calls.clear()
+assert engine.should_compress(prompt_tokens=1) is False
+assert calls == []
+# ...and defers to the preflight probe once tokens reach the threshold.
+assert engine.should_compress(prompt_tokens=800000) is True
+tool, _args = calls.pop()
+assert tool == "tracedecay_lcm_preflight"
 "#,
         "generated plugin should propagate update_model/session_start context windows into preflight/compress",
     );
@@ -3696,17 +3738,23 @@ engine.on_session_start(
 )
 
 messages = [{"role": "user", "content": "hello"}]
-preflight = engine.should_compress_preflight(messages, current_tokens=128)
+preflight = engine._preflight_probe(messages, current_tokens=128)
 assert isinstance(preflight, dict), preflight
 assert preflight["error"].startswith("tracedecay tool failed:"), preflight
+# ABC contract: the bool probe must not treat the error dict as truthy.
+assert engine.should_compress_preflight(messages, current_tokens=128) is False
 
 status = engine.status()
 assert isinstance(status, dict)
 assert status["error"].startswith("tracedecay tool failed:"), status
 
+# compress() honors the host ABC contract even while degraded: the input
+# list comes back unchanged, the abort flag is set, and the raw error dict
+# stays on the engine for diagnostics.
 compressed = engine.compress(messages, current_tokens=128)
-assert isinstance(compressed, dict), compressed
-assert compressed["error"].startswith("tracedecay tool failed:"), compressed
+assert compressed == messages, compressed
+assert engine._last_compress_aborted is True
+assert engine.last_compress_result["error"].startswith("tracedecay tool failed:")
 
 # Tool dispatch through the engine surface stays JSON-stringly typed.
 raw = engine.handle_tool_call("lcm_status", {})

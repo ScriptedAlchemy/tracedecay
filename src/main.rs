@@ -1493,6 +1493,9 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
         }
+        Commands::Memory { action } => {
+            commands::handle_memory_action(action).await?;
+        }
         Commands::Wipe { all } => {
             commands::handle_wipe(all).await?;
         }

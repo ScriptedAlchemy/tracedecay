@@ -28,6 +28,7 @@ mod graph_api;
 mod lcm_api;
 mod memory_analysis;
 mod memory_api;
+pub mod memory_curate;
 mod savings_api;
 mod savings_pricing;
 mod token_count;
@@ -162,11 +163,13 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
     state
 }
 
-/// Detached catch-up ingest for hookless agents (Claude, Codex, Vibe,
-/// Cline-like), mirroring the MCP serve startup sweep so a standalone
-/// `tracedecay dashboard` reflects transcripts written while no MCP server
-/// was running. Cursor needs no sweep — its hooks ingest at end of turn.
-/// Fail-open and incremental (`parse_offsets` makes repeats cheap no-ops).
+/// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
+/// Cline-like, and Cursor's historical backlog), mirroring the MCP serve
+/// startup sweep so a standalone `tracedecay dashboard` reflects transcripts
+/// written while no MCP server was running. Cursor's live turns still arrive
+/// via hooks; the sweep shares their parse offsets so it only picks up
+/// transcripts the hooks never saw. Fail-open and incremental
+/// (`parse_offsets` makes repeats cheap no-ops).
 fn spawn_session_catch_up_ingest(project_root: PathBuf) {
     tokio::spawn(async move {
         if let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await {

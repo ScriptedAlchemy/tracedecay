@@ -72,7 +72,11 @@ fn install_deploys_dashboard_plugin_page() {
     // The proxy backend bakes in the installing binary (env still wins).
     let api = read(&dash.join("plugin_api.py"));
     assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
-    assert!(api.contains("DEPLOYED_PROJECT_ROOT = None"));
+    // Unpinned installs serve the profile home's `.tracedecay/` stores (the
+    // hermes_profile storage scope), not whatever cwd Hermes spawns from.
+    let encoded_home =
+        serde_json::to_string(home.path().join(".hermes").to_string_lossy().as_ref()).unwrap();
+    assert!(api.contains(&format!("DEPLOYED_PROJECT_ROOT = {encoded_home}")));
     assert!(api.contains("router = APIRouter()"));
 }
 

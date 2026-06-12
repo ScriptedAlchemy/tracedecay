@@ -1122,6 +1122,13 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
             "count": 0
         })));
     };
+    if provider == "hermes" {
+        // Hermes history lives in per-profile state.db stores normally swept
+        // by the serve/dashboard startup catch-ups; an incremental
+        // search-time catch-up makes the `tokensave tool` / generated-plugin
+        // path self-sufficient (cursor-based, so it is cheap when fresh).
+        let _ = crate::sessions::hermes::ingest_for_project(&db, cg.project_root()).await;
+    }
     let results = db
         .search_session_messages_filtered(
             provider,

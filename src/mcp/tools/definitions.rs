@@ -1730,8 +1730,8 @@ fn def_message_search() -> ToolDefinition {
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Message provider to search (default: cursor).",
-                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo"]
+                    "description": "Message provider to search (default: cursor). Use 'hermes' for Hermes agent conversation history ingested from per-profile state.db stores.",
+                    "enum": ["cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"]
                 },
                 "project_key": {
                     "type": "string",

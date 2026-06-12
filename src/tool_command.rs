@@ -17,6 +17,8 @@
 //! - `--args <json>` — escape hatch. Treats the JSON value as the entire
 //!   argument object; mutually exclusive with `--key value` flags. Use for
 //!   complex shapes like `tracedecay_multi_str_replace`'s array-of-pairs.
+//!   `--args @/path.json` reads the JSON object from that file, sidestepping
+//!   the kernel's 128 KiB per-argv-string cap for large payloads.
 //!
 //! Any value starting with `@` is read from the file at that path, which makes
 //! multi-line strings (replacements, ast-grep patterns, decision text) ergonomic.
@@ -30,6 +32,7 @@ use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
     get_tool_definitions, handle_profile_scoped_lcm_tool_call, handle_tool_call, ToolDefinition,
 };
+use tracedecay::tracedecay::TraceDecay;
 
 use crate::serve;
 
@@ -48,6 +51,18 @@ const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
     "tracedecay_lcm_preflight",
     "tracedecay_lcm_compress",
     "tracedecay_lcm_session_boundary",
+];
+/// Profile-store tools the generated Hermes plugin anchors at the Hermes
+/// home (`--project <hermes_home>`). The store is created on first touch —
+/// a fresh profile has no `.tracedecay` until the first fact lands — instead
+/// of demanding a manual `tracedecay init` of the profile directory. Gated on
+/// an explicit `--project` so a bare invocation from an uninitialised cwd
+/// still gets the "run tracedecay init" guidance rather than a silent store.
+const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
+    "tracedecay_fact_store",
+    "tracedecay_fact_feedback",
+    "tracedecay_memory_status",
+    "tracedecay_message_search",
 ];
 
 /// Entry point for `tracedecay tool ...`.
@@ -93,8 +108,17 @@ pub(crate) async fn run(
     // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
     // --project wins; otherwise walk up from cwd to the nearest initialised
     // project so the command works from subdirectories.
-    let project_path = tracedecay::config::resolve_path_with_discovery(project.or(parsed_project));
-    let cg = serve::ensure_initialized(&project_path).await?;
+    let explicit_project = project.or(parsed_project);
+    let explicitly_targeted = explicit_project.is_some();
+    let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
+    let cg = if explicitly_targeted
+        && FIRST_TOUCH_STORE_TOOLS.contains(&def.name.as_str())
+        && !TraceDecay::is_initialized(&project_path)
+    {
+        TraceDecay::init(&project_path).await?
+    } else {
+        serve::ensure_initialized(&project_path).await?
+    };
     let result = handle_tool_call(&cg, &def.name, tool_args, None, None).await?;
     print_tool_output(&result.value, raw_json);
     Ok(())
@@ -191,7 +215,12 @@ fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvoc
                 out.project = Some(take_value(&mut iter, "--project")?);
             }
             "--args" => {
-                let json_str = take_value(&mut iter, "--args")?;
+                // `--args @/path/payload.json` reads the JSON object from
+                // disk. Valid JSON can never start with `@`, so the prefix is
+                // unambiguous here — callers with payloads near the kernel's
+                // per-argv-string cap (MAX_ARG_STRLEN, 128 KiB on Linux) spill
+                // to a file instead of failing with E2BIG/EFAULT.
+                let json_str = resolve_at_file(&take_value(&mut iter, "--args")?)?;
                 let value: Value =
                     serde_json::from_str(&json_str).map_err(|e| TraceDecayError::Config {
                         message: format!("--args: invalid JSON: {e}"),
@@ -605,7 +634,7 @@ fn print_tool_help(def: &ToolDefinition) {
         );
     }
     println!();
-    println!("Reserved flags: --json, --project <path>, --args <json>, -h/--help");
+    println!("Reserved flags: --json, --project <path>, --args <json|@file>, -h/--help");
 }
 
 #[cfg(test)]
@@ -704,6 +733,41 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.tool_args["query"], json!("foo"));
         assert_eq!(parsed.tool_args["limit"], json!(3));
+    }
+
+    #[test]
+    fn args_escape_hatch_reads_at_file() {
+        let d = def("search");
+        let dir = std::env::temp_dir().join(format!("ts-args-at-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Payload comfortably above Linux's 128 KiB MAX_ARG_STRLEN to prove
+        // the @file path carries what a literal argv string cannot.
+        let big = "x".repeat(200 * 1024);
+        let path = dir.join("payload.json");
+        std::fs::write(&path, format!(r#"{{"query":"{big}","limit":7}}"#)).unwrap();
+        let parsed =
+            parse_invocation(&d, &["--args".to_string(), format!("@{}", path.display())]).unwrap();
+        assert_eq!(parsed.tool_args["limit"], json!(7));
+        assert_eq!(
+            parsed.tool_args["query"].as_str().map(str::len),
+            Some(big.len())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn args_escape_hatch_missing_at_file_errors() {
+        let d = def("search");
+        let err = parse_invocation(
+            &d,
+            &[
+                "--args".to_string(),
+                "@/nonexistent/tracedecay-args.json".to_string(),
+            ],
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("failed to read @"), "got: {msg}");
     }
 
     #[test]
