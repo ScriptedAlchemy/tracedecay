@@ -5,6 +5,13 @@
 
 use serde_json::{json, Value};
 
+// Similarity primitives live in `crate::memory::similarity` (shared with the
+// write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
+// behavior and call sites stay identical.
+pub(crate) use crate::memory::similarity::{
+    lexical_overlap, phase_cosine_similarity, similarity_classification,
+};
+
 pub(crate) const SIMILARITY_FACT_CAP: i64 = 2000;
 pub(crate) const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;
 /// Most pairs any single `/similarity` response can return (`limit` is
@@ -18,11 +25,6 @@ pub(crate) const SIMILARITY_PAIR_FLOOR: f64 = -1.0;
 pub(crate) const SIMILARITY_SCORE_MIN: f64 = -1.0;
 pub(crate) const SIMILARITY_SCORE_MAX: f64 = 1.0;
 const SIMILARITY_DISTRIBUTION_BINS: usize = 20;
-
-const TOKEN_STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is",
-    "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
-];
 
 /// Top-2 principal components of the centered feature matrix, computed via
 /// power iteration on the (n × n) Gram matrix. Callers cap n at
@@ -111,87 +113,6 @@ pub(crate) fn pca_scores(features: &[Vec<f64>]) -> Option<Vec<[f64; 2]>> {
         }
     }
     Some(scores)
-}
-
-pub(crate) fn content_tokens(content: &str) -> std::collections::BTreeSet<String> {
-    let mut tokens = std::collections::BTreeSet::new();
-    let mut current = String::new();
-    for ch in content.chars() {
-        let lower = ch.to_ascii_lowercase();
-        let is_token_char = if current.is_empty() {
-            lower.is_ascii_alphanumeric()
-        } else {
-            lower.is_ascii_alphanumeric() || lower == '_' || lower == '\'' || lower == '-'
-        };
-        if is_token_char {
-            current.push(lower);
-        } else if !current.is_empty() {
-            tokens.insert(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.insert(current);
-    }
-    tokens
-        .into_iter()
-        .map(|t| {
-            t.trim_matches(|c| c == '_' || c == '\'' || c == '-')
-                .to_string()
-        })
-        .filter(|t| t.len() > 1 && !TOKEN_STOPWORDS.contains(&t.as_str()))
-        .collect()
-}
-
-pub(crate) fn lexical_overlap(a: &str, b: &str) -> (Value, f64, f64) {
-    let a_tokens = content_tokens(a);
-    let b_tokens = content_tokens(b);
-    let shared: Vec<&String> = a_tokens.intersection(&b_tokens).collect();
-    let union = a_tokens.union(&b_tokens).count();
-    let min_size = a_tokens.len().min(b_tokens.len());
-    let token_overlap = if union > 0 {
-        (shared.len() as f64 / union as f64 * 10_000.0).round() / 10_000.0
-    } else {
-        0.0
-    };
-    let overlap_coefficient = if min_size > 0 {
-        (shared.len() as f64 / min_size as f64 * 10_000.0).round() / 10_000.0
-    } else {
-        0.0
-    };
-    let payload = json!({
-        "token_overlap": token_overlap,
-        "overlap_coefficient": overlap_coefficient,
-        "shared_token_count": shared.len(),
-        "a_token_count": a_tokens.len(),
-        "b_token_count": b_tokens.len(),
-        "shared_tokens": shared.iter().take(10).collect::<Vec<_>>(),
-    });
-    (payload, token_overlap, overlap_coefficient)
-}
-
-pub(crate) fn similarity_classification(
-    similarity: f64,
-    token_overlap: f64,
-    overlap_coefficient: f64,
-) -> &'static str {
-    if similarity >= 0.95 && (overlap_coefficient >= 0.65 || token_overlap >= 0.45) {
-        return "likely_duplicate";
-    }
-    if similarity >= 0.90 && (overlap_coefficient >= 0.35 || token_overlap >= 0.20) {
-        return "merge_candidate";
-    }
-    if similarity >= 0.97 && overlap_coefficient >= 0.25 {
-        return "merge_candidate";
-    }
-    "related"
-}
-
-/// Phase-cosine similarity between two equal-length phase vectors.
-pub(crate) fn phase_cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    a.iter().zip(b).map(|(x, y)| (x - y).cos()).sum::<f64>() / a.len() as f64
 }
 
 /// Score all pairs above `threshold` from decoded vectored facts.
@@ -414,6 +335,16 @@ pub(crate) fn build_similarity_computation(
     }
 }
 
+/// Above this similarity, a pair is near-identical enough that the
+/// access-count delete-reluctance rule (below) no longer blocks an automatic
+/// dedup proposal.
+pub(crate) const ACCESS_RELUCTANCE_EXTREME_SIMILARITY: f64 = 0.98;
+
+/// Similarity floor for "possible supersession" hygiene entries: a
+/// negation/state-change cue only signals supersession when the two facts are
+/// substantially similar (mirrors the write-time conflict threshold).
+pub(crate) const SUPERSESSION_SIMILARITY_THRESHOLD: f64 = 0.7;
+
 /// Propose hard-delete actions for `likely_duplicate` pairs from pre-scored facts.
 ///
 /// Each fact is consumed at most once per plan: once a fact is chosen as a
@@ -421,6 +352,15 @@ pub(crate) fn build_similarity_computation(
 /// reference) for a later pair, so an applied plan never deletes a fact that
 /// another action in the same plan points at. Residual duplicate relations
 /// surface again on the next preview.
+///
+/// Access-count delete-reluctance: the planner never auto-proposes deleting
+/// the HIGHER-access fact of a pair as the loser unless the similarity is
+/// extreme (≥ [`ACCESS_RELUCTANCE_EXTREME_SIMILARITY`]). A fact that recall
+/// searches keep returning is demonstrably in use; when the trust-based loser
+/// choice would delete it, the pair is left out of the automatic plan for
+/// LLM/human review instead. (Access frequency is deliberately NOT part of
+/// retrieval ranking — see `combined_score` in `memory::retrieval` — it is a
+/// curation-only signal.)
 pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut actions: Vec<Value> = Vec::new();
@@ -446,11 +386,25 @@ pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Ve
             std::cmp::Ordering::Equal => a_id > b_id,
             std::cmp::Ordering::Greater => false,
         };
-        let (loser_id, loser_content, winner_id) = if a_loses {
-            (a_id, a_content, b_id)
+        let (loser, loser_id, loser_content, winner, winner_id) = if a_loses {
+            (a, a_id, a_content, b, b_id)
         } else {
-            (b_id, b_content, a_id)
+            (b, b_id, b_content, a, a_id)
         };
+
+        // Delete-reluctance (documented above): a higher-access loser is
+        // never auto-deleted below the extreme-similarity bar.
+        let loser_access = loser
+            .get("access_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let winner_access = winner
+            .get("access_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if loser_access > winner_access && sim < ACCESS_RELUCTANCE_EXTREME_SIMILARITY {
+            continue;
+        }
 
         // Skip if either side of the pair is already being deleted by this plan.
         if consumed_losers.contains(&loser_id) || consumed_losers.contains(&winner_id) {
@@ -468,6 +422,7 @@ pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Ve
             ),
             "content": loser_content.chars().take(200).collect::<String>(),
             "similarity": similarity_rounded,
+            "access_count": loser_access,
             "tier": "duplicate",
         }));
     }
@@ -475,40 +430,123 @@ pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Ve
     actions
 }
 
+fn truncated_content(fact: &Value) -> String {
+    fact.get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+fn fact_i64(fact: &Value, key: &str) -> i64 {
+    fact.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+/// Deterministic hygiene PROPOSALS for the curation dry-run plan: secret-like
+/// facts, transient run-output facts, and negation-cue "possible
+/// supersession" pairs. Pure rule-based scanning — no model is invoked.
+///
+/// Entries are shaped like `/curate/apply` delete ops so an external reviewer
+/// (human, or the Hermes LLM curation layer) can confirm and apply them
+/// through the existing ops contract. They are NEVER auto-applied: the
+/// `/curate` apply path only executes the dedup `actions` list.
+pub(crate) fn propose_hygiene_actions(
+    facts: &[Value],
+    pairs: &[ScoredPair],
+    dedup_loser_ids: &std::collections::HashSet<i64>,
+) -> Value {
+    let mut secret_like: Vec<Value> = Vec::new();
+    let mut transient: Vec<Value> = Vec::new();
+    let mut flagged: std::collections::HashSet<i64> = dedup_loser_ids.clone();
+
+    for fact in facts {
+        let fact_id = fact_i64(fact, "fact_id");
+        if flagged.contains(&fact_id) {
+            continue;
+        }
+        let content = fact.get("content").and_then(Value::as_str).unwrap_or("");
+        if let Some(reason) = crate::memory::hygiene::detect_secret_like(content) {
+            flagged.insert(fact_id);
+            secret_like.push(json!({
+                "op": "delete",
+                "fact_id": fact_id,
+                "reason": format!("Secret-like content ({reason}); memory must not retain credentials"),
+                "content": truncated_content(fact),
+                "tier": "secret_like",
+            }));
+        } else if let Some(reason) = crate::memory::hygiene::detect_transient(content) {
+            flagged.insert(fact_id);
+            transient.push(json!({
+                "op": "delete",
+                "fact_id": fact_id,
+                "reason": format!("Transient run output ({reason}); likely ephemeral, not durable knowledge"),
+                "content": truncated_content(fact),
+                "tier": "transient",
+            }));
+        }
+    }
+
+    // Possible supersession: substantially similar pairs where either side
+    // carries a negation/state-change cue. Proposes deleting the OLDER fact;
+    // an LLM or human confirms which one is current before applying.
+    let mut supersession: Vec<Value> = Vec::new();
+    let mut proposed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for pair in pairs {
+        if pair.similarity < SUPERSESSION_SIMILARITY_THRESHOLD {
+            continue;
+        }
+        let a = &facts[pair.a];
+        let b = &facts[pair.b];
+        let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
+        let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
+        if !crate::memory::diff::contains_negation_cue(a_content)
+            && !crate::memory::diff::contains_negation_cue(b_content)
+        {
+            continue;
+        }
+        // Older = smaller created_at; on a tie, the smaller fact_id.
+        let (older, newer) = match fact_i64(a, "created_at").cmp(&fact_i64(b, "created_at")) {
+            std::cmp::Ordering::Less => (a, b),
+            std::cmp::Ordering::Greater => (b, a),
+            std::cmp::Ordering::Equal => {
+                if fact_i64(a, "fact_id") <= fact_i64(b, "fact_id") {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
+            }
+        };
+        let older_id = fact_i64(older, "fact_id");
+        let newer_id = fact_i64(newer, "fact_id");
+        if flagged.contains(&older_id) || !proposed.insert(older_id) {
+            continue;
+        }
+        let similarity_rounded = (pair.similarity * 10_000.0).round() / 10_000.0;
+        supersession.push(json!({
+            "op": "delete",
+            "fact_id": older_id,
+            "superseded_by": newer_id,
+            "similarity": similarity_rounded,
+            "reason": format!(
+                "Possible supersession: negation/state-change cue with similarity {similarity_rounded:.4} to newer fact #{newer_id}; confirm which fact is current before applying"
+            ),
+            "content": truncated_content(older),
+            "access_count": fact_i64(older, "access_count"),
+            "tier": "supersession",
+        }));
+    }
+
+    json!({
+        "secret_like": secret_like,
+        "transient": transient,
+        "supersession": supersession,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn content_tokens_strips_stopwords() {
-        let tokens = content_tokens("The quick brown fox and the lazy dog");
-        assert!(tokens.contains("quick"));
-        assert!(tokens.contains("brown"));
-        assert!(!tokens.contains("the"));
-        assert!(!tokens.contains("and"));
-    }
-
-    #[test]
-    fn lexical_overlap_identical_text() {
-        let text = "hello world example";
-        let (payload, token_overlap, overlap_coefficient) = lexical_overlap(text, text);
-        assert!((token_overlap - 1.0).abs() < f64::EPSILON);
-        assert!((overlap_coefficient - 1.0).abs() < f64::EPSILON);
-        assert_eq!(payload["shared_token_count"], 3);
-    }
-
-    #[test]
-    fn similarity_classification_duplicate() {
-        assert_eq!(
-            similarity_classification(0.96, 0.5, 0.7),
-            "likely_duplicate"
-        );
-        assert_eq!(
-            similarity_classification(0.92, 0.25, 0.4),
-            "merge_candidate"
-        );
-        assert_eq!(similarity_classification(0.80, 0.1, 0.1), "related");
-    }
 
     #[test]
     fn pca_scores_two_points() {
@@ -518,13 +556,6 @@ mod tests {
         };
         assert_eq!(scores.len(), 2);
         assert!(scores[0][0].abs() > 0.0 || scores[0][1].abs() > 0.0);
-    }
-
-    #[test]
-    fn phase_cosine_identical_vectors() {
-        let v = vec![0.1, 0.2, 0.3];
-        let sim = phase_cosine_similarity(&v, &v);
-        assert!((sim - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -601,6 +632,83 @@ mod tests {
         assert_eq!(actions[0]["op"], "delete");
         assert_eq!(actions[0]["fact_id"], 2);
         assert_eq!(actions[0]["duplicate_of"], 1);
+    }
+
+    #[test]
+    fn propose_dedup_actions_spares_higher_access_losers_below_extreme_similarity() {
+        let facts = vec![
+            json!({"fact_id": 1, "content": "same text here", "trust_score": 0.9, "access_count": 0}),
+            json!({"fact_id": 2, "content": "same text here", "trust_score": 0.5, "access_count": 7}),
+        ];
+        // The trust-based loser (#2) is the higher-access fact: below the
+        // extreme-similarity bar the pair is left for review, not auto-planned.
+        let reluctant = propose_dedup_actions(&facts, &[ScoredPair::analyze(&facts, 0.96, 0, 1)]);
+        assert!(
+            reluctant.is_empty(),
+            "higher-access loser must not be auto-proposed below extreme similarity"
+        );
+        // At extreme similarity the dedup proposal goes through.
+        let extreme = propose_dedup_actions(&facts, &[ScoredPair::analyze(&facts, 0.99, 0, 1)]);
+        assert_eq!(extreme.len(), 1);
+        assert_eq!(extreme[0]["fact_id"], 2);
+        assert_eq!(extreme[0]["access_count"], 7);
+    }
+
+    #[test]
+    fn propose_hygiene_actions_flags_secret_transient_and_supersession() {
+        let facts = vec![
+            json!({"fact_id": 1, "content": "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH", "trust_score": 0.5, "created_at": 10}),
+            json!({"fact_id": 2, "content": "dev server listening on 127.0.0.1:8081", "trust_score": 0.5, "created_at": 11}),
+            json!({"fact_id": 3, "content": "We use Redis for caching sessions", "trust_score": 0.8, "created_at": 5, "access_count": 4}),
+            json!({"fact_id": 4, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 9}),
+        ];
+        let pairs = vec![ScoredPair::analyze(&facts, 0.85, 2, 3)];
+        let hygiene = propose_hygiene_actions(&facts, &pairs, &std::collections::HashSet::new());
+
+        let secret = hygiene["secret_like"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected secret_like array"));
+        assert_eq!(secret.len(), 1);
+        assert_eq!(secret[0]["fact_id"], 1);
+        assert_eq!(secret[0]["op"], "delete");
+        assert_eq!(secret[0]["tier"], "secret_like");
+
+        let transient = hygiene["transient"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected transient array"));
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient[0]["fact_id"], 2);
+        assert_eq!(transient[0]["tier"], "transient");
+
+        // Supersession proposes deleting the OLDER fact of the cue pair.
+        let supersession = hygiene["supersession"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected supersession array"));
+        assert_eq!(supersession.len(), 1);
+        assert_eq!(supersession[0]["fact_id"], 3);
+        assert_eq!(supersession[0]["superseded_by"], 4);
+        assert_eq!(supersession[0]["access_count"], 4);
+        assert_eq!(supersession[0]["tier"], "supersession");
+    }
+
+    #[test]
+    fn propose_hygiene_actions_respects_exclusions_and_thresholds() {
+        let facts = vec![
+            json!({"fact_id": 1, "content": "scratch file at /tmp/run-output.json", "trust_score": 0.5, "created_at": 1}),
+            json!({"fact_id": 2, "content": "We use Redis for caching sessions", "trust_score": 0.8, "created_at": 5}),
+            json!({"fact_id": 3, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 9}),
+        ];
+        // Fact already consumed by the dedup plan is never re-proposed.
+        let consumed: std::collections::HashSet<i64> = [1].into_iter().collect();
+        // Below the supersession similarity floor the cue pair is ignored.
+        let weak_pair = vec![ScoredPair::analyze(&facts, 0.5, 1, 2)];
+        let hygiene = propose_hygiene_actions(&facts, &weak_pair, &consumed);
+        assert!(hygiene["transient"]
+            .as_array()
+            .is_some_and(std::vec::Vec::is_empty));
+        assert!(hygiene["supersession"]
+            .as_array()
+            .is_some_and(std::vec::Vec::is_empty));
     }
 
     #[test]

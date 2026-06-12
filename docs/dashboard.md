@@ -572,6 +572,8 @@ complete row — plus linked entities — from here. Returns `404` with a
     "tags": "[\"lcm\",\"ux\"]",
     "trust_score": 0.76,
     "retrieval_count": 3,
+    "access_count": 1,
+    "last_recalled_at": 1700000150,
     "helpful_count": 2,
     "created_at": 1700000020,
     "updated_at": 1700000120,
@@ -583,6 +585,12 @@ complete row — plus linked entities — from here. Returns `404` with a
   "error": ""
 }
 ```
+
+`access_count` / `last_recalled_at` track only recall-search returns
+(`fact_store` `action: "search"` results actually handed to a caller);
+`retrieval_count` also counts probe/list/related/reason scans. Access
+frequency deliberately does NOT feed recall ranking (rich-get-richer risk) —
+it is a curation signal (delete-reluctance for actively used facts).
 
 #### `GET /api/plugins/holographic/projection`
 
@@ -708,6 +716,22 @@ memory-bank dirty marking).
       "tier": "duplicate"
     }
   ],
+  "hygiene": {
+    "secret_like": [ /* delete-shaped proposals, tier "secret_like" */ ],
+    "transient": [ /* delete-shaped proposals, tier "transient" */ ],
+    "supersession": [
+      {
+        "op": "delete",
+        "fact_id": 4,
+        "superseded_by": 7,
+        "similarity": 0.8123,
+        "reason": "Possible supersession: negation/state-change cue ...",
+        "content": "Fact content preview...",
+        "access_count": 2,
+        "tier": "supersession"
+      }
+    ]
+  },
   "counts": { "delete": 1 },
   "coverage": {
     "scanned": 500,
@@ -718,6 +742,15 @@ memory-bank dirty marking).
   "mode": "similarity_dedup"
 }
 ```
+
+`hygiene` is the deterministic rule-based proposal set (secret-like content,
+transient run output, negation-cue supersession pairs). These entries are
+**never auto-applied** — `dry_run=false` only executes `actions` (dedup
+deletes); a reviewer (human, the `tokensave memory curate --llm` two-phase
+flow, or the Hermes LLM wrapper) confirms hygiene entries through
+`POST /curate/apply`. The dedup planner also applies access-count
+delete-reluctance: the higher-access fact of a pair is never auto-proposed as
+the loser unless the similarity is extreme (≥ 0.98).
 
 **Response (dry_run=false):**
 Same structure with `applied_counts` showing what was actually deleted and
@@ -771,6 +804,33 @@ only fails wholesale (400) on a malformed body.
 
 Failed ops carry `"status": "error"` and an `"error"` message (e.g.
 `fact 99999 not found`, `unsupported op 'x'`, `winner fact 42 not found`).
+
+#### `GET /api/plugins/holographic/oplog`
+
+Recent memory operations, newest first, from `memory_oplog` — the append-only
+audit written by the store mutation paths (`add` / `update` / `remove` /
+`feedback`, plus `reject_secret_like` for blocked writes) and curation applies
+(`curate_apply`). `detail` never carries fact content beyond what the op
+needs; deletes record a `content_hash`, not the content (the hard-delete
+stance is preserved).
+
+**Query Parameters:**
+- `limit` — Max rows (default: 50, max: 300)
+
+**Response:**
+```json
+{
+  "events": [
+    { "id": 12, "ts": 1765000000, "op": "curate_apply", "fact_id": null,
+      "detail": { "mode": "ops", "deleted": 1, "merged": 0, "errors": 0 } },
+    { "id": 11, "ts": 1765000000, "op": "remove", "fact_id": 103,
+      "detail": { "category": "tool", "content_hash": "9f2c..." } }
+  ],
+  "count": 2,
+  "limit": 50,
+  "error": ""
+}
+```
 
 ---
 

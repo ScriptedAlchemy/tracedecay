@@ -27,9 +27,10 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::memory_analysis::{
-    build_similarity_computation, pca_scores, propose_dedup_actions, score_distribution,
-    score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_FACT_CAP,
-    SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN,
+    build_similarity_computation, pca_scores, propose_dedup_actions, propose_hygiene_actions,
+    score_distribution, score_similar_pairs, SimilarityComputation, SIMILARITY_DEFAULT_THRESHOLD,
+    SIMILARITY_FACT_CAP, SIMILARITY_PAIR_CAP, SIMILARITY_PAIR_FLOOR, SIMILARITY_SCORE_MAX,
+    SIMILARITY_SCORE_MIN,
 };
 use super::util::{
     coerce_limit, http_detail, like_pattern, query_i64, query_rows, JsonPath, JsonQuery,
@@ -100,7 +101,8 @@ async fn fetch_facts(
         query_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
-                    retrieval_count, helpful_count, created_at, updated_at,
+                    retrieval_count, access_count, last_recalled_at,
+                    helpful_count, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              ORDER BY trust_score DESC, updated_at DESC
@@ -113,7 +115,8 @@ async fn fetch_facts(
         query_rows(
             &state.mem_conn,
             "SELECT fact_id, content, category, tags, trust_score,
-                    retrieval_count, helpful_count, created_at, updated_at,
+                    retrieval_count, access_count, last_recalled_at,
+                    helpful_count, created_at, updated_at,
                     hrr_vector IS NOT NULL AS has_hrr
              FROM memory_facts
              WHERE content LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'
@@ -554,7 +557,8 @@ pub(crate) async fn fact_detail(
     let rows = query_rows(
         &state.mem_conn,
         "SELECT fact_id, content, category, tags, trust_score,
-                retrieval_count, helpful_count, created_at, updated_at,
+                retrieval_count, access_count, last_recalled_at,
+                helpful_count, created_at, updated_at,
                 hrr_vector IS NOT NULL AS has_hrr
          FROM memory_facts
          WHERE fact_id = ?1
@@ -598,7 +602,8 @@ async fn vector_facts(
     let (sql, params): (String, Vec<libsql::Value>) = if q.is_empty() {
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
-                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count
+                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
+                    f.access_count, f.last_recalled_at, f.created_at
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -612,7 +617,8 @@ async fn vector_facts(
     } else {
         (
             "SELECT f.fact_id, f.content, f.category, f.trust_score, f.retrieval_count,
-                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count
+                    f.hrr_vector, b.bank_id, b.bank_name, COUNT(fe.entity_id) AS entity_count,
+                    f.access_count, f.last_recalled_at, f.created_at
              FROM memory_facts f
              LEFT JOIN memory_banks b ON b.bank_name = f.category
              LEFT JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
@@ -661,6 +667,9 @@ async fn vector_facts(
             _ => Value::Null,
         };
         let entity_count: i64 = row.get(8).unwrap_or(0);
+        let access_count: i64 = row.get(9).unwrap_or(0);
+        let last_recalled_at: Option<i64> = row.get(10).unwrap_or(None);
+        let created_at: i64 = row.get(11).unwrap_or(0);
         out.push((
             json!({
                 "fact_id": fact_id,
@@ -668,6 +677,9 @@ async fn vector_facts(
                 "category": category,
                 "trust_score": trust_score,
                 "retrieval_count": retrieval_count,
+                "access_count": access_count,
+                "last_recalled_at": last_recalled_at,
+                "created_at": created_at,
                 "bank_id": bank_id,
                 "bank_name": bank_name,
                 "entity_count": entity_count,
@@ -1090,31 +1102,43 @@ pub(crate) async fn curation_preview(State(state): State<DashboardState>) -> Jso
 
 /// Build a deduplication plan from the cached similarity computation.
 ///
-/// Returns (actions, counts, total) where actions is the list of proposed
-/// `delete` operations for `likely_duplicate` pairs.
+/// Returns (actions, hygiene, counts, total): `actions` is the list of
+/// auto-appliable `delete` operations for `likely_duplicate` pairs; `hygiene`
+/// is the deterministic rule-based proposal set (`secret_like` / `transient` /
+/// `supersession` — see `propose_hygiene_actions`). Hygiene entries are
+/// PROPOSALS only: the `/curate` apply path never executes them; a reviewer
+/// (human, or the external-LLM flows in `memory_curate` / the Hermes wrapper)
+/// confirms them through the existing ops contract.
 pub(crate) async fn build_delete_plan(
     state: &DashboardState,
-) -> Result<(Vec<Value>, Map<String, Value>, i64), String> {
+) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {
     let total = query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
     let computation = similarity_computation(state).await?;
-    if computation.facts.len() < 2 || computation.dim == 0 {
-        return Ok((Vec::new(), Map::new(), total));
-    }
 
     // The retained pair set always covers every pair at or above the
     // planner threshold (see `build_similarity_computation`).
-    let planner_len = computation
-        .pairs
+    let actions = if computation.facts.len() < 2 || computation.dim == 0 {
+        Vec::new()
+    } else {
+        let planner_len = computation
+            .pairs
+            .iter()
+            .take_while(|pair| pair.similarity >= SIMILARITY_DEFAULT_THRESHOLD)
+            .count();
+        propose_dedup_actions(&computation.facts, &computation.pairs[..planner_len])
+    };
+
+    let dedup_loser_ids: std::collections::HashSet<i64> = actions
         .iter()
-        .take_while(|pair| pair.similarity >= SIMILARITY_DEFAULT_THRESHOLD)
-        .count();
-    let actions = propose_dedup_actions(&computation.facts, &computation.pairs[..planner_len]);
+        .filter_map(|action| action.get("fact_id").and_then(Value::as_i64))
+        .collect();
+    let hygiene = propose_hygiene_actions(&computation.facts, &computation.pairs, &dedup_loser_ids);
 
     let mut counts = Map::new();
     if !actions.is_empty() {
         counts.insert("delete".to_string(), json!(actions.len()));
     }
-    Ok((actions, counts, total))
+    Ok((actions, hygiene, counts, total))
 }
 
 /// Hard-deletes one fact through the canonical store path (transactional
@@ -1144,7 +1168,7 @@ pub(crate) async fn curate(
 ) -> (StatusCode, Json<Value>) {
     let dry_run = body.is_none_or(|b| b.dry_run);
 
-    let (actions, counts, total) = match build_delete_plan(&state).await {
+    let (actions, hygiene, counts, total) = match build_delete_plan(&state).await {
         Ok(result) => result,
         Err(e) => {
             return (
@@ -1154,10 +1178,14 @@ pub(crate) async fn curate(
         }
     };
 
+    // `hygiene` is additive and proposal-only: the apply branch below only
+    // executes `actions` (dedup deletes); hygiene entries wait for explicit
+    // confirmation through `/curate/apply`.
     let report = json!({
         "ran": true,
         "dry_run": dry_run,
         "actions": actions,
+        "hygiene": hygiene,
         "counts": counts,
         "applied_counts": if dry_run { Value::Null } else { json!(counts.clone()) },
         "llm_calls": 0,
@@ -1202,6 +1230,16 @@ pub(crate) async fn curate(
     *state.curate_preview.write().await = None;
     super::curate_preview_store::clear(&state.project_root).await;
 
+    // Oplog summary for the apply run (per-fact "remove" rows are written by
+    // the store path itself). Fire-and-forget: never fails the response.
+    let _ = MemoryStore::new(&state.mem_conn)
+        .record_oplog(
+            "curate_apply",
+            None,
+            &json!({ "mode": "similarity_dedup", "deleted": applied, "skipped": skipped }),
+        )
+        .await;
+
     let mut applied_counts = Map::new();
     if applied > 0 {
         applied_counts.insert("delete".to_string(), json!(applied));
@@ -1210,6 +1248,7 @@ pub(crate) async fn curate(
         "ran": true,
         "dry_run": false,
         "actions": report["actions"],
+        "hygiene": report["hygiene"],
         "counts": report["counts"],
         "applied_counts": applied_counts,
         "skipped_actions": skipped,
@@ -1440,6 +1479,15 @@ pub(crate) async fn curate_apply(
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
         super::curate_preview_store::clear(&state.project_root).await;
+        // Oplog summary for the explicit-ops apply (per-fact rows come from
+        // the store paths). Fire-and-forget: never fails the response.
+        let _ = MemoryStore::new(&state.mem_conn)
+            .record_oplog(
+                "curate_apply",
+                None,
+                &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
+            )
+            .await;
     }
 
     (
@@ -1449,4 +1497,53 @@ pub(crate) async fn curate_apply(
             "counts": { "deleted": deleted, "merged": merged, "errors": errors },
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Memory operation log
+// ---------------------------------------------------------------------------
+
+/// `GET /api/plugins/holographic/oplog` — recent memory operations, newest
+/// first. Rows come from `memory_oplog`, the append-only audit written by the
+/// store mutation paths (add/update/remove/feedback) and curation applies.
+/// `detail_json` never carries fact content beyond what the op needs
+/// (deletes record a content hash, not the content).
+pub(crate) async fn oplog(
+    State(state): State<DashboardState>,
+    JsonQuery(params): JsonQuery<LimitParams>,
+) -> Json<Value> {
+    let limit = coerce_limit(params.limit, 50, 300);
+    match query_rows(
+        &state.mem_conn,
+        "SELECT id, ts, op, fact_id, detail_json
+         FROM memory_oplog
+         ORDER BY id DESC
+         LIMIT ?1",
+        libsql::params![limit],
+    )
+    .await
+    {
+        Ok(rows) => {
+            let events: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let detail = row
+                        .get("detail_json")
+                        .and_then(Value::as_str)
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        .unwrap_or_else(|| json!({}));
+                    json!({
+                        "id": row.get("id").cloned().unwrap_or(Value::Null),
+                        "ts": row.get("ts").cloned().unwrap_or(Value::Null),
+                        "op": row.get("op").cloned().unwrap_or(Value::Null),
+                        "fact_id": row.get("fact_id").cloned().unwrap_or(Value::Null),
+                        "detail": detail,
+                    })
+                })
+                .collect();
+            let count = events.len();
+            Json(json!({ "events": events, "count": count, "limit": limit, "error": "" }))
+        }
+        Err(e) => Json(json!({ "events": [], "count": 0, "limit": limit, "error": e })),
+    }
 }

@@ -742,6 +742,15 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array in overview payload"));
         assert_eq!(facts.len(), 2, "query should filter to cache facts only");
+        // Access tracking is part of every fact payload (seeded rows carry
+        // the column defaults).
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact["access_count"].is_number()
+                    && fact.get("last_recalled_at").is_some()),
+            "fact list rows must surface access_count and last_recalled_at"
+        );
         let graph_nodes = overview["holographic"]["graph"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected graph nodes array"));
@@ -922,6 +931,13 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             curate["actions"].as_array().is_some(),
             "curate dry-run should return an actions array"
         );
+        // The deterministic hygiene proposal section is always present.
+        for key in ["secret_like", "transient", "supersession"] {
+            assert!(
+                curate["hygiene"][key].as_array().is_some(),
+                "curate dry-run should include hygiene.{key} proposals"
+            );
+        }
     });
 }
 
@@ -979,6 +995,14 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
         assert_eq!(detail["fact"]["has_hrr"], 1);
         assert_eq!(detail["fact"]["trust_score"], 0.76);
+        assert!(
+            detail["fact"]["access_count"].is_number(),
+            "fact detail must surface access_count"
+        );
+        assert!(
+            detail["fact"].get("last_recalled_at").is_some(),
+            "fact detail must surface last_recalled_at"
+        );
         let entities = detail["fact"]["entities"]
             .as_array()
             .unwrap_or_else(|| panic!("expected entities array in fact detail"));
@@ -1150,6 +1174,75 @@ fn curation_delete_lifecycle() {
         );
         assert_eq!(status, 200);
         assert!(preview_after["report"].is_null());
+    });
+}
+
+#[test]
+fn memory_oplog_endpoint_lists_recent_operations() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent();
+
+        // Fresh fixture: no operations recorded yet.
+        let (status, empty) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/oplog?limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(empty["count"], 0);
+        assert_eq!(empty["error"], "");
+
+        // An explicit-ops delete writes a per-fact "remove" row plus a
+        // "curate_apply" summary row.
+        let (status, applied) = post_json_body(
+            &agent,
+            &format!("{}/api/plugins/holographic/curate/apply", fixture.base_url),
+            &serde_json::json!({
+                "ops": [{ "op": "delete", "fact_id": 103, "reason": "oplog fixture" }]
+            }),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(applied["counts"]["deleted"], 1);
+
+        let (status, oplog) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/oplog?limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(oplog["error"], "");
+        let events = oplog["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected oplog events array"));
+        assert_eq!(events.len(), 2, "expected remove + curate_apply rows");
+
+        // Newest first: the curate_apply summary follows the per-fact remove.
+        assert_eq!(events[0]["op"], "curate_apply");
+        assert_eq!(events[0]["detail"]["deleted"], 1);
+        assert_eq!(events[1]["op"], "remove");
+        assert_eq!(events[1]["fact_id"], 103);
+        let remove_detail = events[1]["detail"].to_string();
+        assert!(
+            remove_detail.contains("content_hash"),
+            "remove rows must carry a content hash: {remove_detail}"
+        );
+        assert!(
+            !remove_detail.contains("empty states"),
+            "remove rows must not leak deleted fact content: {remove_detail}"
+        );
+        assert!(
+            events.iter().all(|event| event["ts"].is_number()),
+            "every oplog row carries a timestamp"
+        );
     });
 }
 

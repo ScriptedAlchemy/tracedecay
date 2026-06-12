@@ -280,11 +280,19 @@ export interface MemoryCurateAction {
  * plan/report. With `dry_run` the actions are proposals; otherwise
  * `applied_counts`/`apply_errors` describe what was actually executed.
  */
+/** Deterministic rule-based hygiene proposals (never auto-applied). */
+export interface MemoryCurateHygiene {
+  secret_like: MemoryCurateAction[];
+  transient: MemoryCurateAction[];
+  supersession: MemoryCurateAction[];
+}
+
 export interface MemoryCurateResponse {
   provider?: string;
   ran: boolean;
   dry_run: boolean;
   actions: MemoryCurateAction[];
+  hygiene?: MemoryCurateHygiene;
   counts: Record<string, number>;
   applied_counts?: Record<string, number>;
   skipped_actions?: number;
@@ -376,6 +384,26 @@ export interface MemoryCuratorActivityEvent {
  */
 export interface MemoryCuratorActivityResponse {
   events: MemoryCuratorActivityEvent[];
+  count: number;
+  limit: number;
+  error?: string;
+}
+
+/**
+ * One row of `GET /api/plugins/holographic/oplog` — the append-only memory
+ * operation audit (add/update/remove/feedback/curate_apply). Deletes carry a
+ * content hash in `detail`, never the deleted content.
+ */
+export interface MemoryOplogEvent {
+  id: number;
+  ts: number;
+  op: string;
+  fact_id?: number | null;
+  detail: Record<string, unknown>;
+}
+
+export interface MemoryOplogResponse {
+  events: MemoryOplogEvent[];
   count: number;
   limit: number;
   error?: string;

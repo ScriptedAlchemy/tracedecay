@@ -65,8 +65,20 @@ Per-op required fields:\n\
 \"merged_content\" (string) when the winner's text should be replaced \
 by a consolidated fact.\n\
   delete: {\"fact_id\": <id>}\n\
-Only reference fact ids that appear in the input clusters. \
-Return ONLY the JSON object.";
+Only reference fact ids that appear in the input clusters or in \
+hygiene_candidates. Return ONLY the JSON object.\n\n\
+Hygiene categories: the input may also carry \"hygiene_candidates\" — \
+deterministic rule-flagged proposals to review with the same conservatism. \
+secret_like: flagged as credential-like content; delete unless it is clearly \
+a false positive (e.g. prose ABOUT secret handling with no actual \
+credential). transient: looks like ephemeral run output (ports, PIDs, temp \
+paths, run logs); delete unless it encodes a durable decision. supersession: \
+a negation/state-change cue pairs an older fact with a newer one; confirm \
+from the texts which fact is current, delete the stale one, or emit a \
+time-aware merge when both matter. Usage signals: members may carry \
+access_count / last_recalled_at (recall-search returns). Treat high access \
+as evidence a fact is actively used — avoid deleting the more-accessed fact \
+of a pair unless the duplication is near-exact.";
 
 /// Options for one `tokensave memory curate` run.
 pub struct MemoryCurateOptions {
@@ -129,7 +141,17 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     // reference (their fact ids would already be gone).
     if let Some(provided) = options.llm_ops.as_ref() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
-        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        // Evidence guard: cluster members plus the deterministic hygiene
+        // candidates (recomputed against the same pre-apply state the ops
+        // were planned on) are the only legal delete targets.
+        let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        let (_, pre_apply_hygiene, _, _) =
+            build_delete_plan(&state)
+                .await
+                .map_err(|message| TokenSaveError::Config {
+                    message: format!("curation analysis failed: {message}"),
+                })?;
+        allowed_ids.extend(hygiene_fact_ids(&pre_apply_hygiene));
         let raw_ops = provided
             .get("ops")
             .and_then(Value::as_array)
@@ -169,14 +191,18 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     }
 
     // Similarity-dedup tier (the dashboard's `/curate` semantics), planned
-    // on the post-LLM-ops store state.
-    let (actions, counts, total) =
+    // on the post-LLM-ops store state. `hygiene` carries the deterministic
+    // rule-based proposals (secret_like / transient / supersession); they are
+    // never auto-applied here — the external LLM (or a human) confirms them
+    // and feeds delete ops back through `--llm-ops`.
+    let (actions, hygiene, counts, total) =
         build_delete_plan(&state)
             .await
             .map_err(|message| TokenSaveError::Config {
                 message: format!("curation analysis failed: {message}"),
             })?;
     report.insert("counts".to_string(), Value::Object(counts));
+    report.insert("hygiene".to_string(), hygiene.clone());
     report.insert(
         "coverage".to_string(),
         json!({ "scanned": total, "active_total": total }),
@@ -204,23 +230,28 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
 
     if options.llm && options.llm_ops.is_none() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
-        let allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
+        allowed_ids.extend(hygiene_fact_ids(&hygiene));
+        let has_hygiene = !hygiene_fact_ids(&hygiene).is_empty();
         {
             // Plan half of the two-phase contract: hand the caller the exact
             // chat messages the Hermes wrapper sends to its auxiliary LLM.
+            // Hygiene candidates ride along so the external LLM reviews them
+            // through the same ops contract.
             let user_message = format!(
                 "Review these candidate clusters and return ops as strict JSON.\n\n{}",
-                Value::Object(Map::from_iter([(
-                    "clusters".to_string(),
-                    Value::Array(clusters.clone()),
-                )]))
+                Value::Object(Map::from_iter([
+                    ("clusters".to_string(), Value::Array(clusters.clone())),
+                    ("hygiene_candidates".to_string(), hygiene.clone()),
+                ]))
             );
             report.insert(
                 "llm_review".to_string(),
                 json!({
-                    "status": if clusters.is_empty() { "nothing_to_review" } else { "needs_llm_review" },
+                    "status": if clusters.is_empty() && !has_hygiene { "nothing_to_review" } else { "needs_llm_review" },
                     "clusters_reviewed": clusters.len(),
                     "clusters": clusters,
+                    "hygiene_candidates": hygiene,
                     "allowed_fact_ids": allowed_ids,
                     "min_confidence": options.min_confidence,
                     "messages": [
@@ -234,6 +265,17 @@ pub async fn run_memory_curate(cg: &TokenSave, options: &MemoryCurateOptions) ->
     }
 
     Ok(Value::Object(report))
+}
+
+/// Fact ids referenced by the deterministic hygiene proposal set — these are
+/// legal delete targets for the evidence guard alongside cluster members.
+fn hygiene_fact_ids(hygiene: &Value) -> BTreeSet<i64> {
+    ["secret_like", "transient", "supersession"]
+        .iter()
+        .filter_map(|key| hygiene.get(*key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(|entry| entry.get("fact_id").and_then(Value::as_i64))
+        .collect()
 }
 
 /// All member fact ids across the reviewable clusters (the evidence guard).
@@ -361,7 +403,8 @@ async fn fact_details(
     }
     let ids: Vec<i64> = fact_ids.iter().copied().collect();
     let sql = format!(
-        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at
+        "SELECT fact_id, content, category, tags, trust_score, created_at, updated_at,
+                access_count, last_recalled_at
          FROM memory_facts WHERE fact_id IN ({})",
         qmarks(ids.len())
     );

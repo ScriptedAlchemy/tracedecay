@@ -280,6 +280,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/holographic/curate/apply",
             post(memory_api::curate_apply),
         )
+        .route("/api/plugins/holographic/oplog", get(memory_api::oplog))
         // LCM plugin API (mirrors hermes-lcm dashboard/plugin_api.py)
         .route("/api/plugins/hermes-lcm/overview", get(lcm_api::overview))
         .route("/api/plugins/hermes-lcm/search", get(lcm_api::search))
