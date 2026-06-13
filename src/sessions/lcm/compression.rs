@@ -341,6 +341,8 @@ pub(crate) async fn preflight(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
         request.fresh_tail_count,
+        request.current_tokens,
+        request.threshold_tokens,
     );
     let (should_compress, reason) = preflight_decision(&request, &existing_frontier, &window);
     let should_compress = ingested.changed_replay || should_compress;
@@ -501,6 +503,8 @@ async fn compress_in_transaction(
                 &raw_messages,
                 existing_frontier.current_frontier_store_id,
                 request.fresh_tail_count,
+                request.current_tokens,
+                request.threshold_tokens,
             );
             let replay_messages =
                 replay_without_summary(&window.pinned_anchors, &window.fresh_tail);
@@ -522,6 +526,8 @@ async fn compress_in_transaction(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
         request.fresh_tail_count,
+        request.current_tokens,
+        request.threshold_tokens,
     );
 
     if window.backlog.is_empty() {
@@ -948,6 +954,8 @@ fn compression_window(
     raw_messages: &[LcmRawMessage],
     current_frontier_store_id: Option<i64>,
     fresh_tail_count: Option<usize>,
+    current_tokens: Option<i64>,
+    threshold_tokens: Option<i64>,
 ) -> CompressionWindow {
     let frontier_store_id = current_frontier_store_id.unwrap_or(0);
     let unsummarized = raw_messages
@@ -955,9 +963,16 @@ fn compression_window(
         .filter(|message| message.store_id > frontier_store_id)
         .cloned()
         .collect::<Vec<_>>();
+    let configured_fresh_tail_count = fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT);
+    let effective_fresh_tail_count =
+        if unsummarized.len() > 1 && threshold_pressure(current_tokens, threshold_tokens) {
+            configured_fresh_tail_count.min(unsummarized.len() - 1)
+        } else {
+            configured_fresh_tail_count
+        };
     let backlog_len = unsummarized
         .len()
-        .saturating_sub(fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT));
+        .saturating_sub(effective_fresh_tail_count);
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
@@ -1891,18 +1906,17 @@ fn summary_request_for_backlog(
          Preserve durable instructions, decisions, open tasks, and facts needed to continue."
     );
 
+    let extraction_request =
+        extraction::build_extraction_request(session_id, &source_range, &source_messages);
+
     LcmSummaryRequest {
         provider: provider.to_string(),
         session_id: session_id.to_string(),
         focus_topic,
         prompt,
         source_range: source_range.clone(),
-        source_messages: source_messages.clone(),
-        extraction_request: extraction::build_extraction_request(
-            session_id,
-            &source_range,
-            &source_messages,
-        ),
+        source_messages,
+        extraction_request,
     }
 }
 

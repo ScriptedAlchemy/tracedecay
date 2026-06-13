@@ -1330,9 +1330,16 @@ assert engine.last_compress_result == {"status": "not_implemented", "message": "
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:4] == ["tool", "tracedecay_lcm_compress", "--json"]
-assert "--project" not in argv
-args = json.loads(argv[argv.index("--args") + 1])
+assert argv[1] == "tool"
+tool_idx = argv.index("tracedecay_lcm_compress")
+assert argv[tool_idx + 1] == "--json"
+assert argv[tool_idx + 2] == "--args"
+args_ref = argv[argv.index("--args") + 1]
+if args_ref.startswith("@"):
+    with open(args_ref[1:], encoding="utf-8") as args_file:
+        args = json.load(args_file)
+else:
+    args = json.loads(args_ref)
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
     "storage_scope": "hermes_profile",

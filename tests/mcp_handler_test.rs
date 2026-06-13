@@ -5467,6 +5467,59 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 }
 
 #[tokio::test]
+async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "alpha oversized context ".repeat(8_000);
+
+    let compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-needs-summary",
+            "messages": [
+                {"id": "oversized-1", "role": "user", "content": huge_source},
+                {"id": "oversized-2", "role": "assistant", "content": "acknowledged"},
+                {"id": "oversized-3", "role": "user", "content": "latest objective"}
+            ],
+            "current_tokens": 30_000,
+            "threshold_tokens": 1_000,
+            "fresh_tail_count": 64,
+            "leaf_chunk_tokens": 20_000,
+            "summarizer": {"mode": "hermes_auxiliary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&compress.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "needs_summary");
+    assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
+    assert!(
+        payload["replay_messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()),
+        "bridge must retain replay messages, got {payload:#}"
+    );
+    assert!(
+        payload["summary_request"].is_object(),
+        "bridge must retain summary request metadata, got {payload:#}"
+    );
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(extract_text(&compress.value).len() <= 15_000);
+    assert!(payload["summary_request"].get("source_messages").is_none());
+    assert_eq!(
+        payload["summary_request"]["source_messages_omitted_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
     let (cg, _dir) = setup_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
