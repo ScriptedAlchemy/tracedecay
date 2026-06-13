@@ -262,8 +262,7 @@ fn compact_replay_messages(
                     if key == "content" {
                         let content_text = field
                             .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| serde_json::to_string(field).unwrap_or_default());
+                            .map_or_else(|| serde_json::to_string(field).unwrap_or_default(), str::to_string);
                         let (content, content_truncated) =
                             truncate_chars(&content_text, content_chars);
                         object.insert(key.clone(), json!(content));
