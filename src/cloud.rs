@@ -155,9 +155,9 @@ fn platform_asset_name(prefix: &str, version: &str) -> String {
     format!("{prefix}-v{version}-{platform}.{ext}")
 }
 
-/// Candidate asset names for a release, newest naming first. The upgrade
-/// path probes these in order so both post-rebrand (`tracedecay-v*`) and
-/// legacy (`tokensave-v*`) releases stay installable.
+/// Candidate asset names for explicit release installs, newest naming first.
+/// The install path probes these in order so both post-rebrand
+/// (`tracedecay-v*`) and legacy (`tokensave-v*`) archives remain installable.
 pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 2] {
     [
         asset_name(version, is_beta),
@@ -165,14 +165,19 @@ pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 2]
     ]
 }
 
-/// True when the release lists an asset matching the current platform.
-/// Filters out releases whose CI build hasn't finished uploading binaries
-/// for the current target — otherwise we'd announce a version the user
-/// cannot actually install.
+/// True when the release lists the current platform asset using the
+/// post-rebrand naming convention (`tracedecay-v*` / `tracedecay-beta-v*`).
+///
+/// This is intentionally stricter than explicit install probing: after the
+/// rebrand reset from legacy `tokensave` version epochs to `tracedecay`
+/// `0.x`, "latest version" detection must not consider releases that only
+/// publish legacy `tokensave-*` assets. That structural guard prevents
+/// accidental upgrades back into pre-reset history if old releases ever
+/// reappear.
 fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
     let version = release.tag_name.trim_start_matches('v');
-    let candidates = asset_name_candidates(version, release.prerelease);
-    release.assets.iter().any(|a| candidates.contains(&a.name))
+    let required = asset_name(version, release.prerelease);
+    release.assets.iter().any(|a| a.name == required)
 }
 
 /// Fetches the latest release version from GitHub.
@@ -235,6 +240,10 @@ pub fn is_beta() -> bool {
 /// Returns true if `latest` is strictly newer than `current` using semver comparison.
 /// Handles pre-release suffixes (e.g. "2.5.0-beta.1") by stripping them for the
 /// base version comparison, then comparing pre-release tags lexicographically.
+/// After the rebrand epoch reset (legacy versions reached `6.x`, new tracedecay
+/// releases restart at `0.x`), this comparator intentionally stays plain semver:
+/// release discovery already filters out legacy-only assets, so no hard-coded
+/// version gates are needed here.
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
     /// Parses a version string into (major, minor, patch, pre-release).
     fn parse(v: &str) -> Option<(u64, u64, u64, Option<&str>)> {
@@ -373,12 +382,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_release_with_legacy_tokensave_asset() {
-        // Releases published before the rebrand carry `tokensave-v*` assets
-        // and must remain installable.
+    fn skips_release_with_only_legacy_tokensave_asset() {
+        // Legacy `tokensave-v*` assets remain valid for explicit version
+        // installs, but latest-version detection must ignore them.
         let expected = legacy_asset_name("9.9.9", false);
         let r = release("v9.9.9", false, &[&expected]);
-        assert!(release_has_current_platform_asset(&r));
+        assert!(!release_has_current_platform_asset(&r));
     }
 
     #[test]
@@ -389,10 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_beta_release_with_legacy_tokensave_beta_asset() {
+    fn skips_beta_release_with_only_legacy_tokensave_beta_asset() {
         let expected = legacy_asset_name("9.9.9-beta.1", true);
         let r = release("v9.9.9-beta.1", true, &[&expected]);
-        assert!(release_has_current_platform_asset(&r));
+        assert!(!release_has_current_platform_asset(&r));
     }
 
     #[test]

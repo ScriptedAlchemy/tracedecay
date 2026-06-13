@@ -241,6 +241,10 @@ enum UpgradeStatus<'a> {
 }
 
 fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
+    // Keep this as a plain semver check. After the rebrand/version-epoch
+    // reset, `cloud::fetch_latest_*` only yields releases that publish
+    // post-rebrand `tracedecay-*` assets for this platform, which prevents
+    // legacy `tokensave` history from being considered "latest".
     if cloud::is_newer_version(current, latest) {
         UpgradeStatus::UpgradeAvailable(latest)
     } else {
