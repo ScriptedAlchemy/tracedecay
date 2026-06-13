@@ -5520,6 +5520,45 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
 }
 
 #[tokio::test]
+async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "preflight oversized active context ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-preflight",
+            "messages": [
+                {"id": "preflight-1", "role": "user", "content": huge_source},
+                {"id": "preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["should_compress"], false);
+    assert_eq!(payload["reason"], "no_compression_needed");
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
     let (cg, _dir) = setup_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]

@@ -283,8 +283,22 @@ assert doctor_params["properties"] == {}
 status = engine.get_status()
 assert status["engine"] == "tracedecay"
 assert status["session_id"] == "session-1"
+assert status["active_session_id"] == "session-1"
 assert status["storage_scope"] == "hermes_profile"
+assert status["hermes_home"] == os.environ["HERMES_HOME"]
+assert status["project_root"] == "/tmp/project"
+assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
+assert isinstance(status["tracedecay_binary_available"], bool)
 assert status["context_engine_tool_names"] == sorted(schema_names)
+assert status["route_failures"] == {}
+assert status["cooldown_routes"] == []
+assert status["route_cooldowns"] == {}
+assert status["last_compress_result"] == {"status": "never_ran"}
+assert status["live_ingest"]["registered_tool_names"] == []
+assert status["live_ingest"]["context_tool_names"] == []
+assert status["live_ingest"]["host_forwards_messages"] is None
+assert status["live_ingest"]["message_dependent_tools_registered"] is False
+assert status["live_ingest"]["gate_reason"] == "not_registered"
 
 calls = []
 
@@ -389,6 +403,83 @@ assert calls[8][1]["hermes_home"] == os.environ["HERMES_HOME"]
 assert calls[8][1]["session_id"] == "session-1"
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
+    );
+}
+
+#[test]
+fn generated_context_engine_exposes_optional_hermes_hooks() {
+    run_generated_plugin_script(
+        "check_context_engine_optional_hooks.py",
+        r#"
+import json
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="old-session", project_root="/tmp/project")
+
+calls = []
+
+def envelope(payload):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    if name == "tracedecay_lcm_preflight":
+        return envelope({"should_compress": True})
+    if name == "tracedecay_lcm_compress":
+        return envelope({
+            "status": "compressed",
+            "replay_messages": [{"role": "system", "content": "summary"}],
+            "summary_node_count": 1,
+            "raw_message_count": 2,
+        })
+    if name == "tracedecay_lcm_session_boundary":
+        return json.dumps({"ok": True})
+    raise AssertionError(f"unexpected tool call: {name}")
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+assert engine.has_content_to_compress([]) is False
+assert engine.has_content_to_compress([
+    {"role": "system", "content": ""},
+    {"role": "assistant", "content": "   "},
+]) is False
+assert calls == []
+assert engine.has_content_to_compress([
+    {"role": "user", "content": "single message stays protected"},
+]) is False
+
+eligible = [
+    {"role": "user", "content": "older content"},
+    {"role": "assistant", "content": "newer content"},
+]
+assert engine.has_content_to_compress(eligible, current_tokens=123) is True
+assert calls == []
+
+compressed = engine.compress(
+    [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}],
+    current_tokens=999,
+)
+assert compressed == [{"role": "system", "content": "summary"}]
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=1000) is True
+status = engine.get_status()
+assert status["awaiting_real_usage_after_compression"] is True
+assert status["last_compress_result"]["status"] == "compressed"
+assert status["last_compress_result"]["summary_node_count"] == 1
+assert status["last_compress_result"]["raw_message_count"] == 2
+
+engine.update_from_response({"prompt_tokens": 321, "completion_tokens": 7})
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=1000) is False
+assert engine.last_real_prompt_tokens == 321
+
+engine.carry_over_new_session_context("old-session", "new-session")
+boundary_calls = [call for call in calls if call[0] == "tracedecay_lcm_session_boundary"]
+assert len(boundary_calls) == 1
+assert boundary_calls[0][1]["old_session_id"] == "old-session"
+assert boundary_calls[0][1]["session_id"] == "new-session"
+assert boundary_calls[0][1]["boundary_reason"] == "compression"
+assert engine.active_session_id == "new-session"
+"#,
+        "generated context engine should expose optional Hermes hook shims",
     );
 }
 
@@ -3595,6 +3686,35 @@ assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested 
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
 assert call_with_outer(outer_error) == outer_error
+
+calls = []
+
+def envelope(payload):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+def fake_retrieve_call(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    if name == "tracedecay_lcm_preflight":
+        return envelope({"truncated": True, "handle": "payload-1"})
+    if name == "tracedecay_retrieve":
+        assert args == {"handle": "payload-1"}
+        return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
+    if name == "tracedecay_fact_store":
+        return envelope({"truncated": True, "handle": "payload-ignored"})
+    raise AssertionError(f"unexpected tool call: {name}")
+
+plugin.tools.call_tracedecay_tool = fake_retrieve_call
+retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+assert retrieved == {"should_compress": True, "source": "retrieved"}
+assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
+
+not_contract_critical = plugin.call_tracedecay_json("tracedecay_fact_store", {})
+assert not_contract_critical == {"truncated": True, "handle": "payload-ignored"}
+assert [call[0] for call in calls] == [
+    "tracedecay_lcm_preflight",
+    "tracedecay_retrieve",
+    "tracedecay_fact_store",
+]
 "#,
     )
     .unwrap();

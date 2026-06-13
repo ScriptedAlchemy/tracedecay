@@ -42,6 +42,67 @@ fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     }
 }
 
+fn lcm_preflight_tool_json(value: &Value) -> ToolResult {
+    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
+        formatted
+    } else {
+        let compact = compact_lcm_preflight_payload(value, formatted.len(), 8, 512);
+        let compact_text = serde_json::to_string_pretty(&compact).unwrap_or_default();
+        if compact_text.len() <= MAX_RESPONSE_CHARS {
+            compact_text
+        } else {
+            let minimal = compact_lcm_preflight_payload(value, formatted.len(), 4, 256);
+            serde_json::to_string_pretty(&minimal).unwrap_or_default()
+        }
+    };
+    ToolResult {
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files: Vec::new(),
+    }
+}
+
+fn compact_lcm_preflight_payload(
+    value: &Value,
+    original_chars: usize,
+    replay_limit: usize,
+    replay_content_chars: usize,
+) -> Value {
+    let mut object = Map::new();
+    for key in [
+        "status",
+        "provider",
+        "session_id",
+        "should_compress",
+        "reason",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    let (replay_messages, replay_truncated) = compact_replay_messages(
+        value.get("replay_messages"),
+        replay_limit,
+        replay_content_chars,
+    );
+    object.insert("replay_messages".to_string(), replay_messages);
+    object.insert(
+        "replay_messages_truncated_for_mcp".to_string(),
+        json!(replay_truncated),
+    );
+    object.insert("mcp_response_truncated".to_string(), json!(true));
+    object.insert("contract_truncated".to_string(), json!(true));
+    object.insert(
+        "mcp_original_response_chars".to_string(),
+        json!(original_chars),
+    );
+    object.insert(
+        "mcp_truncation_reason".to_string(),
+        json!("lcm-preflight response compacted to preserve Hermes bridge contract"),
+    );
+    Value::Object(object)
+}
+
 fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
@@ -1671,17 +1732,14 @@ pub(super) async fn handle_lcm_preflight(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(tool_json(
-        project_root,
-        &json!({
-            "status": response.status,
-            "provider": provider,
-            "session_id": session_id,
-            "should_compress": response.should_compress,
-            "reason": response.reason,
-            "replay_messages": response.replay_messages,
-        }),
-    ))
+    Ok(lcm_preflight_tool_json(&json!({
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "should_compress": response.should_compress,
+        "reason": response.reason,
+        "replay_messages": response.replay_messages,
+    })))
 }
 
 pub(super) async fn handle_lcm_compress(
