@@ -2037,9 +2037,11 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
         and payload.get("truncated") is True
         and payload.get("handle")
     ):
+        retrieve_kwargs = _copy_without_none({"project_root": kwargs.get("project_root")})
         retrieved_raw = tools.call_tracedecay_tool(
             "tracedecay_retrieve",
             {"handle": payload["handle"]},
+            **retrieve_kwargs,
         )
         return _parse_retrieved_tracedecay_content(retrieved_raw)
     return payload

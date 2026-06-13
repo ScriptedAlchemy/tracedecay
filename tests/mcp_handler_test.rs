@@ -5552,10 +5552,64 @@ async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
     assert_eq!(payload["contract_truncated"], true);
     assert!(payload.get("truncated").is_none());
     assert!(text.len() <= 15_000);
+    assert!(payload["replay_messages_compacted_for_mcp"]
+        .as_bool()
+        .unwrap_or(false));
     assert_eq!(
         payload["replay_messages"][0]["content_truncated_for_mcp"],
         true
     );
+}
+
+#[tokio::test]
+async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "structured preflight payload ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-structured-preflight",
+            "messages": [
+                {
+                    "id": "structured-preflight-1",
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": huge_source},
+                        {"type": "input_json", "value": {"nested": huge_source}}
+                    ]
+                },
+                {"id": "structured-preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    let compacted_content = payload["replay_messages"][0]["content"]
+        .as_str()
+        .expect("structured replay content should be serialized to bounded text");
+    assert!(compacted_content.len() <= 512);
+    assert_eq!(
+        payload["replay_messages"][0]["content_serialized_for_mcp"],
+        true
+    );
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+    assert_eq!(payload["replay_messages_compacted_for_mcp"], true);
 }
 
 #[tokio::test]

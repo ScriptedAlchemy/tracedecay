@@ -3698,13 +3698,14 @@ def fake_retrieve_call(name, args, **kwargs):
         return envelope({"truncated": True, "handle": "payload-1"})
     if name == "tracedecay_retrieve":
         assert args == {"handle": "payload-1"}
+        assert kwargs == {"project_root": "/tmp/project"}
         return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
     if name == "tracedecay_fact_store":
         return envelope({"truncated": True, "handle": "payload-ignored"})
     raise AssertionError(f"unexpected tool call: {name}")
 
 plugin.tools.call_tracedecay_tool = fake_retrieve_call
-retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {}, project_root="/tmp/project")
 assert retrieved == {"should_compress": True, "source": "retrieved"}
 assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
 
