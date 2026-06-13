@@ -241,6 +241,8 @@ enum UpgradeStatus<'a> {
 }
 
 fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
+    // Plain semver is safe across the version-epoch reset: `cloud::fetch_latest_*`
+    // never yields pre-reset releases (see `release_has_current_platform_asset`).
     if cloud::is_newer_version(current, latest) {
         UpgradeStatus::UpgradeAvailable(latest)
     } else {

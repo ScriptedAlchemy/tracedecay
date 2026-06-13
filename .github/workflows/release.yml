@@ -344,3 +344,75 @@ jobs:
           git add bucket/tracedecay.json
           git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push
+
+  # Rewrites the MCP registry manifest (server.json) from the actual release
+  # artifacts so the version, download URLs, and fileSha256 digests always
+  # describe real uploaded assets — the in-repo copy carries placeholder
+  # hashes between releases. Skips (with a warning) when the release has no
+  # MCPB packages, since those are not yet produced by the build matrix.
+  update-server-json:
+    name: Update server.json manifest
+    if: github.event_name == 'release' && !github.event.release.prerelease && !cancelled()
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Rewrite server.json from release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+          PLATFORMS="aarch64-macos:mcp.tar.gz x86_64-linux:mcp.tar.gz aarch64-linux:mcp.tar.gz x86_64-windows:mcp.zip"
+
+          mkdir -p assets
+          missing=0
+          for entry in $PLATFORMS; do
+            platform="${entry%%:*}"
+            ext="${entry#*:}"
+            asset="tracedecay-${TAG}-${platform}.${ext}"
+            if ! gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir assets; then
+              echo "::warning::release asset ${asset} not found"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::warning::server.json not updated — this release has no complete MCPB package set"
+            exit 0
+          fi
+
+          printf '[' > sha-map.json
+          sep=""
+          for entry in $PLATFORMS; do
+            platform="${entry%%:*}"
+            ext="${entry#*:}"
+            asset="tracedecay-${TAG}-${platform}.${ext}"
+            sha=$(sha256sum "assets/${asset}" | cut -d' ' -f1)
+            printf '%s{"platform":"%s","ext":"%s","sha":"%s"}' "$sep" "$platform" "$ext" "$sha" >> sha-map.json
+            sep=","
+          done
+          printf ']' >> sha-map.json
+
+          jq --arg v "$VERSION" --arg tag "$TAG" --arg repo "$REPO" --slurpfile map sha-map.json '
+            .version = $v
+            | .packages |= map(
+                . as $p
+                | ($map[0][] | select(.platform as $pl | $p.identifier | contains("-" + $pl + ".mcp."))) as $m
+                | $p
+                | .version = $v
+                | .identifier = "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\($m.platform).\($m.ext)"
+                | .fileSha256 = $m.sha
+              )
+          ' server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add server.json
+          git diff --cached --quiet || git commit -m "server.json: tracedecay ${VERSION}"
+          git push

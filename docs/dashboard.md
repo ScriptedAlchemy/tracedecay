@@ -495,7 +495,7 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 ```json
 {
   "name": "tracedecay-dashboard",
-  "version": "6.1.3",
+  "version": "0.0.2",
   "mode": "standalone",
   "project_root": "/home/user/my-project",
   "memory_db": "/home/user/my-project/.tracedecay/tracedecay.db",
