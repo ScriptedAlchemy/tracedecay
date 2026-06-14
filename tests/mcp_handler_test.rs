@@ -5512,9 +5512,15 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
     assert_eq!(payload["contract_truncated"], true);
     assert!(payload.get("truncated").is_none());
     assert!(extract_text(&compress.value).len() <= 15_000);
-    assert!(payload["summary_request"].get("source_messages").is_none());
+    let source_messages = payload["summary_request"]["source_messages"]
+        .as_array()
+        .expect("compact needs-summary payload should retain bounded source messages");
+    assert!(!source_messages.is_empty());
+    assert!(source_messages[0]["content"]
+        .as_str()
+        .is_some_and(|content| content.len() <= 512));
     assert_eq!(
-        payload["summary_request"]["source_messages_omitted_for_mcp"],
+        payload["summary_request"]["source_messages_compacted_for_mcp"],
         true
     );
 }

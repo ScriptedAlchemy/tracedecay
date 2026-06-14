@@ -215,7 +215,20 @@ fn compact_lcm_compress_payload(
                 compact_request.insert(key.to_string(), field.clone());
             }
         }
-        compact_request.insert("source_messages_omitted_for_mcp".to_string(), json!(true));
+        let (source_messages, source_truncated, source_compacted) = compact_replay_messages(
+            summary_request.get("source_messages"),
+            replay_limit,
+            replay_content_chars,
+        );
+        compact_request.insert("source_messages".to_string(), source_messages);
+        compact_request.insert(
+            "source_messages_truncated_for_mcp".to_string(),
+            json!(source_truncated),
+        );
+        compact_request.insert(
+            "source_messages_compacted_for_mcp".to_string(),
+            json!(source_compacted),
+        );
         compact_request.insert("prompt_omitted_for_mcp".to_string(), json!(true));
         compact_request.insert(
             "extraction_request_omitted_for_mcp".to_string(),
