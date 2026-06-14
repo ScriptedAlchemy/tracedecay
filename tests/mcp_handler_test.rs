@@ -5467,6 +5467,158 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 }
 
 #[tokio::test]
+async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "alpha oversized context ".repeat(8_000);
+
+    let compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-needs-summary",
+            "messages": [
+                {"id": "oversized-1", "role": "user", "content": huge_source},
+                {"id": "oversized-2", "role": "assistant", "content": "acknowledged"},
+                {"id": "oversized-3", "role": "user", "content": "latest objective"}
+            ],
+            "current_tokens": 30_000,
+            "threshold_tokens": 1_000,
+            "fresh_tail_count": 64,
+            "leaf_chunk_tokens": 20_000,
+            "summarizer": {"mode": "hermes_auxiliary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&compress.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "needs_summary");
+    assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
+    assert!(
+        payload["replay_messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()),
+        "bridge must retain replay messages, got {payload:#}"
+    );
+    assert!(
+        payload["summary_request"].is_object(),
+        "bridge must retain summary request metadata, got {payload:#}"
+    );
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(extract_text(&compress.value).len() <= 15_000);
+    let source_messages = payload["summary_request"]["source_messages"]
+        .as_array()
+        .expect("compact needs-summary payload should retain bounded source messages");
+    assert!(!source_messages.is_empty());
+    assert!(source_messages[0]["content"]
+        .as_str()
+        .is_some_and(|content| content.len() <= 512));
+    assert_eq!(
+        payload["summary_request"]["source_messages_compacted_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "preflight oversized active context ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-preflight",
+            "messages": [
+                {"id": "preflight-1", "role": "user", "content": huge_source},
+                {"id": "preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["should_compress"], false);
+    assert_eq!(payload["reason"], "no_compression_needed");
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    assert!(payload["replay_messages_compacted_for_mcp"]
+        .as_bool()
+        .unwrap_or(false));
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "structured preflight payload ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-structured-preflight",
+            "messages": [
+                {
+                    "id": "structured-preflight-1",
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": huge_source},
+                        {"type": "input_json", "value": {"nested": huge_source}}
+                    ]
+                },
+                {"id": "structured-preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    let compacted_content = payload["replay_messages"][0]["content"]
+        .as_str()
+        .expect("structured replay content should be serialized to bounded text");
+    assert!(compacted_content.len() <= 512);
+    assert_eq!(
+        payload["replay_messages"][0]["content_serialized_for_mcp"],
+        true
+    );
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+    assert_eq!(payload["replay_messages_compacted_for_mcp"], true);
+}
+
+#[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
     let (cg, _dir) = setup_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
