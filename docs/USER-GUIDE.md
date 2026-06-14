@@ -247,6 +247,29 @@ provider config, and LCM session storage. If you pass
 targets the named profile instead of the project plugin directory; use this when
 you want to run the command from a project but update a Hermes profile.
 
+#### Verifying Hermes plugin and context-engine changes
+
+When changing generated Hermes plugin or context-engine behavior, start with
+TraceDecay's read-only analysis tools before rebuilding or reinstalling
+anything: use `tracedecay_diff_context` to inspect modified symbols,
+dependencies, and affected tests; `tracedecay_simplify_scan` for complexity,
+duplication, dead-code, and coupling regressions; `tracedecay_test_risk` for
+untested hot spots; `tracedecay_diagnostics` for structured compiler/type
+feedback; and `tracedecay_run_affected_tests` for the focused test set when test
+execution is appropriate.
+
+For LCM/session issues, pair `tracedecay_lcm_status` with the LCM doctor
+(`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper). Prefer its
+dry-run or diagnose mode first, then inspect the reported store, config, and
+payload diagnostics before applying any repair.
+
+Known Hermes API caveats: native `lcm_*` tool dispatch receives
+`messages=messages`, but direct registered live-ingest tools should remain
+gated unless the host explicitly forwards messages. The
+`context_engine_tool_handlers_receive_messages` flag is a TraceDecay convention,
+not stock Hermes API. Treat `compression.*` as built-in compressor config; only
+`compression.enabled` gates auto-compaction globally.
+
 Kiro setup registers tracedecay in `~/.kiro/settings/mcp.json`, writes steering to
 `~/.kiro/steering/tracedecay.md`, and writes a tracedecay-managed agent that loads
 that steering as a resource while keeping Kiro's default prompt. The managed

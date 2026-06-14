@@ -1958,9 +1958,14 @@ def _bridge_preview(value, limit: int = 2048) -> str:
         return preview[:limit] + "...[truncated]"
     return preview
 
+CONTRACT_CRITICAL_RETRIEVABLE_TOOLS = frozenset((
+    "tracedecay_lcm_compress",
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_expand_query",
+    "tracedecay_lcm_status",
+))
 
-def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
-    raw = tools.call_tracedecay_tool(name, args, **kwargs)
+def _parse_tracedecay_json_response(raw) -> dict:
     try:
         outer = json.loads(raw)
     except json.JSONDecodeError:
@@ -1994,6 +1999,52 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
             "error": "tracedecay tool returned invalid nested JSON",
             "text_preview": _bridge_preview(text),
         }
+
+def _parse_retrieved_tracedecay_content(raw) -> dict:
+    payload = _parse_tracedecay_json_response(raw)
+    if not isinstance(payload, dict):
+        return {"error": "tracedecay retrieve returned invalid payload"}
+    if payload.get("expired"):
+        return {"error": "tracedecay retrieve handle expired", "handle": payload.get("handle")}
+    content = payload.get("content")
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return {
+                "error": "tracedecay retrieve content was not JSON",
+                "text_preview": _bridge_preview(content),
+            }
+        if isinstance(parsed, dict):
+            return parsed
+        return {
+            "error": "tracedecay retrieve content was not an object",
+            "text_preview": _bridge_preview(content),
+        }
+    if isinstance(content, dict):
+        return content
+    return {
+        "error": "tracedecay retrieve response missing content",
+        "raw_preview": _bridge_preview(payload),
+    }
+
+def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
+    raw = tools.call_tracedecay_tool(name, args, **kwargs)
+    payload = _parse_tracedecay_json_response(raw)
+    if (
+        name in CONTRACT_CRITICAL_RETRIEVABLE_TOOLS
+        and isinstance(payload, dict)
+        and payload.get("truncated") is True
+        and payload.get("handle")
+    ):
+        retrieve_kwargs = _copy_without_none({"project_root": kwargs.get("project_root")})
+        retrieved_raw = tools.call_tracedecay_tool(
+            "tracedecay_retrieve",
+            {"handle": payload["handle"]},
+            **retrieve_kwargs,
+        )
+        return _parse_retrieved_tracedecay_content(retrieved_raw)
+    return payload
 
 def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
@@ -3317,6 +3368,26 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
 
 _ENGINE_DEFAULT_SESSION = "__default__"
 
+def _has_compressible_message_content(messages) -> bool:
+    if not isinstance(messages, list):
+        return False
+
+    def _content_has_text(content) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        if isinstance(content, list):
+            return any(_content_has_text(item) for item in content)
+        if isinstance(content, dict):
+            for key in ("text", "content"):
+                if _content_has_text(content.get(key)):
+                    return True
+        return False
+
+    for message in messages:
+        if isinstance(message, dict) and _content_has_text(message.get("content")):
+            return True
+    return False
+
 class _EngineSessionState:
     """Mutable per-conversation engine state.
 
@@ -3332,6 +3403,7 @@ class _EngineSessionState:
         "last_prompt_tokens",
         "last_completion_tokens",
         "last_total_tokens",
+        "last_real_prompt_tokens",
         "context_length",
         "threshold_tokens",
         "compression_count",
@@ -3341,6 +3413,7 @@ class _EngineSessionState:
         "_runtime_context_length",
         "_session_start_context_length",
         "_last_preflight_signature",
+        "_awaiting_real_usage_after_compression",
     )
 
     def __init__(self):
@@ -3349,6 +3422,7 @@ class _EngineSessionState:
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
+        self.last_real_prompt_tokens = 0
         # Host-contract token state (run_agent.py reads these directly; the
         # minimum-context guard in agent/agent_init.py checks context_length).
         self.context_length = 0
@@ -3362,6 +3436,7 @@ class _EngineSessionState:
         self._runtime_context_length = None
         self._session_start_context_length = None
         self._last_preflight_signature = None
+        self._awaiting_real_usage_after_compression = False
 
     def adopt(self, other):
         """Carry conversation state across a compression-rotation rebind."""
@@ -3406,12 +3481,17 @@ class TraceDecayContextEngine(ContextEngine):
         # a broken summary model is broken for every session.
         self._route_failures = {}
         self._cooldown_until = {}
+        self._registered_tool_names = []
+        self._registered_context_tool_names = []
+        self._host_forwards_registered_tool_messages = None
+        self._live_ingest_gate_reason = "not_registered"
 
     agent = _engine_session_property("agent")
     model = _engine_session_property("model")
     last_prompt_tokens = _engine_session_property("last_prompt_tokens")
     last_completion_tokens = _engine_session_property("last_completion_tokens")
     last_total_tokens = _engine_session_property("last_total_tokens")
+    last_real_prompt_tokens = _engine_session_property("last_real_prompt_tokens")
     context_length = _engine_session_property("context_length")
     threshold_tokens = _engine_session_property("threshold_tokens")
     compression_count = _engine_session_property("compression_count")
@@ -3421,6 +3501,7 @@ class TraceDecayContextEngine(ContextEngine):
     _runtime_context_length = _engine_session_property("_runtime_context_length")
     _session_start_context_length = _engine_session_property("_session_start_context_length")
     _last_preflight_signature = _engine_session_property("_last_preflight_signature")
+    _awaiting_real_usage_after_compression = _engine_session_property("_awaiting_real_usage_after_compression")
 
     def _session_key(self, session_id=None):
         if session_id:
@@ -3500,6 +3581,24 @@ class TraceDecayContextEngine(ContextEngine):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
+    def carry_over_new_session_context(self, old_session_id, new_session_id, **kwargs):
+        """Compatibility hook for Hermes compression session rotation."""
+        old_session_id = str(old_session_id or "")
+        new_session_id = str(new_session_id or "")
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return False
+        bound_session_id = self.active_session_id or old_session_id
+        self._bind_session(new_session_id, old_session_id=old_session_id, **kwargs)
+        boundary_kwargs = dict(kwargs)
+        boundary_kwargs["old_session_id"] = old_session_id
+        boundary_kwargs["boundary_reason"] = "compression"
+        self._report_compression_boundary(
+            new_session_id,
+            bound_session_id,
+            boundary_kwargs,
+        )
+        return True
+
     def on_session_end(self, session_id=None, messages=None, **kwargs):
         # Real session boundary: drop the per-session record so long-lived
         # gateway processes do not accumulate dead conversation state.
@@ -3562,6 +3661,9 @@ class TraceDecayContextEngine(ContextEngine):
         self.last_total_tokens = _as_int(usage.get("total_tokens")) or (
             self.last_prompt_tokens + self.last_completion_tokens
         )
+        self.last_real_prompt_tokens = self.last_prompt_tokens
+        if self.last_prompt_tokens or self.last_completion_tokens or self.last_total_tokens:
+            self._awaiting_real_usage_after_compression = False
 
     def _effective_context_length(self):
         if self._runtime_context_length is not None:
@@ -3600,6 +3702,23 @@ class TraceDecayContextEngine(ContextEngine):
             tools.call_tracedecay_tool("tracedecay_lcm_session_boundary", args)
         except Exception as exc:
             logger.warning("LCM session boundary report failed: %s", exc)
+
+    def has_content_to_compress(self, messages, current_tokens=None, **kwargs):
+        """Optional Hermes hook: conservatively probe only eligible content."""
+        del current_tokens, kwargs
+        if not _has_compressible_message_content(messages):
+            return False
+        compressible = [
+            message
+            for message in messages
+            if isinstance(message, dict) and _has_compressible_message_content([message])
+        ]
+        return len(compressible) > 1
+
+    def should_defer_preflight_to_real_usage(self, rough_tokens=None, **kwargs):
+        """Suppress rough-token retry loops until post-compression usage arrives."""
+        del rough_tokens, kwargs
+        return bool(self._awaiting_real_usage_after_compression)
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         """ABC contract: quick pre-flight check returning a BOOL.
@@ -3670,11 +3789,50 @@ class TraceDecayContextEngine(ContextEngine):
     def get_tool_schemas(self):
         return _lcm_tool_schemas()
 
+    def _last_compress_result_summary(self):
+        result = self.last_compress_result
+        if result is None:
+            return {"status": "never_ran"}
+        if not isinstance(result, dict):
+            return {"status": "invalid", "type": type(result).__name__}
+        summary = {}
+        for key in (
+            "status",
+            "reason",
+            "error",
+            "summary_node_count",
+            "summary_nodes_created",
+            "raw_message_count",
+            "replay_token_estimate",
+            "replay_over_budget",
+            "auxiliary_attempts",
+            "auxiliary_retry_status",
+            "auxiliary_error_classification",
+            "fallback_used",
+        ):
+            if key in result:
+                summary[key] = result[key]
+        if "status" not in summary:
+            summary["status"] = "error" if result.get("error") else "ok"
+        return summary
+
     def get_status(self):
         storage = _storage_args(self.project_root, self.hermes_home)
+        now = time.time()
+        route_cooldowns = {
+            route: max(0, int(until - now))
+            for route, until in self._cooldown_until.items()
+        }
+        message_dependent_registered = bool(
+            set(self._registered_tool_names).intersection(MESSAGE_DEPENDENT_TOOLS)
+            or self._registered_context_tool_names
+        )
         return {
             "engine": self.name,
             "session_id": self.active_session_id,
+            "active_session_id": self.active_session_id,
+            "tracedecay_binary_path": tools.TRACEDECAY_BIN,
+            "tracedecay_binary_available": _tracedecay_binary_available(),
             "storage_scope": storage.get("storage_scope"),
             "hermes_home": self.hermes_home,
             "project_root": self.project_root,
@@ -3683,6 +3841,18 @@ class TraceDecayContextEngine(ContextEngine):
             ),
             "route_failures": dict(self._route_failures),
             "cooldown_routes": sorted(self._cooldown_until.keys()),
+            "route_cooldowns": route_cooldowns,
+            "last_compress_result": self._last_compress_result_summary(),
+            "awaiting_real_usage_after_compression": bool(
+                self._awaiting_real_usage_after_compression
+            ),
+            "live_ingest": {
+                "registered_tool_names": sorted(self._registered_tool_names),
+                "context_tool_names": sorted(self._registered_context_tool_names),
+                "host_forwards_messages": self._host_forwards_registered_tool_messages,
+                "message_dependent_tools_registered": message_dependent_registered,
+                "gate_reason": self._live_ingest_gate_reason,
+            },
         }
 
     def _current_turn_preflight(self, messages, **kwargs):
@@ -4110,6 +4280,7 @@ class TraceDecayContextEngine(ContextEngine):
             logger.warning("tracedecay compression failed: %s", exc)
             self._last_compress_aborted = True
             self._last_summary_error = str(exc)
+            self._awaiting_real_usage_after_compression = False
             return original
         self.last_compress_result = result if isinstance(result, dict) else {}
         if (
@@ -4124,14 +4295,19 @@ class TraceDecayContextEngine(ContextEngine):
                 )
             else:
                 self._last_summary_error = "invalid compression result"
+            self._awaiting_real_usage_after_compression = False
             return original
         replay = _replay_message_list(result.get("replay_messages"))
         if replay is None or (not replay and original):
             # No usable replay window — treat as a no-op; the host detects
             # ``compressed == messages`` and skips session rotation.
+            self._awaiting_real_usage_after_compression = False
             return original
         if replay != original:
             self.compression_count += 1
+            self._awaiting_real_usage_after_compression = True
+        else:
+            self._awaiting_real_usage_after_compression = False
         return replay
 
     def _compress_to_result(self, messages, current_tokens=None, focus_topic=None, **kwargs):
@@ -4608,6 +4784,11 @@ def register(ctx):
     register_tool = getattr(ctx, "register_tool", None)
     host_forwards_messages = _host_forwards_registered_tool_messages(ctx)
     tracedecay_is_memory_provider = _active_memory_provider(ctx) == "tracedecay"
+    context_engine._host_forwards_registered_tool_messages = (
+        host_forwards_messages if callable(register_tool) else None
+    )
+    registered_tool_names = []
+    registered_context_tool_names = []
     if callable(register_tool):
         for schema in schemas.TOOL_SCHEMAS:
             name = schema["name"]
@@ -4634,6 +4815,8 @@ def register(ctx):
                 )
             else:
                 _REGISTERED_TOOL_NAMES.add(name)
+                if name in MESSAGE_DEPENDENT_TOOLS:
+                    registered_tool_names.append(name)
         if host_forwards_messages:
             for schema in context_engine.get_tool_schemas():
                 name = schema["name"]
@@ -4651,14 +4834,21 @@ def register(ctx):
                         name,
                         exc,
                     )
+                else:
+                    registered_context_tool_names.append(name)
+            context_engine._live_ingest_gate_reason = "registered"
         else:
+            context_engine._live_ingest_gate_reason = "host_does_not_forward_messages"
             logger.info(
                 "tracedecay LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
             )
     else:
+        context_engine._live_ingest_gate_reason = "register_tool_unavailable"
         logger.info(
             "tracedecay direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
         )
+    context_engine._registered_tool_names = registered_tool_names
+    context_engine._registered_context_tool_names = registered_context_tool_names
 
     skills_dir = Path(__file__).parent / "skills"
     skill_path = skills_dir / "tracedecay" / "SKILL.md"
