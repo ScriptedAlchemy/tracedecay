@@ -381,6 +381,72 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
 }
 
 #[tokio::test]
+async fn threshold_pressure_summarizes_short_huge_active_context() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "short-huge").await;
+
+    let messages = vec![
+        json!({
+            "id": "short-huge-1",
+            "role": "user",
+            "content": "first long user turn ".repeat(80),
+        }),
+        json!({
+            "id": "short-huge-2",
+            "role": "assistant",
+            "content": "assistant response ".repeat(80),
+        }),
+        json!({
+            "id": "short-huge-3",
+            "role": "user",
+            "content": "latest user objective ".repeat(80),
+        }),
+    ];
+
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
+            provider: "cursor".into(),
+            session_id: "short-huge".into(),
+            messages,
+            current_tokens: Some(2_000),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            threshold_tokens: Some(1_000),
+            max_assembly_tokens: None,
+            leaf_chunk_tokens: Some(100),
+            max_source_messages: None,
+            summary_fan_in: None,
+            incremental_max_depth: None,
+            fresh_tail_count: Some(64),
+            dynamic_leaf_chunk_enabled: None,
+            dynamic_leaf_chunk_max: None,
+            context_length: None,
+            reserve_tokens_floor: None,
+            summarizer: LcmSummarizerMode::HermesAuxiliary,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status, "needs_summary",
+        "response reason: {}",
+        response.reason
+    );
+    assert_eq!(response.reason, "hermes_auxiliary_not_available");
+    let summary_request = response
+        .summary_request
+        .expect("threshold pressure should select source messages to summarize");
+    assert!(
+        !summary_request.source_messages.is_empty(),
+        "short high-token conversations must not be kept entirely as fresh tail"
+    );
+}
+
+#[tokio::test]
 async fn active_structured_content_survives_preflight_and_noop_compress_replay() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
