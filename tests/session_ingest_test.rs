@@ -140,6 +140,54 @@ async fn offset_resume_only_ingests_appended_lines() {
 }
 
 #[tokio::test]
+async fn incomplete_jsonl_tail_does_not_advance_resume_offset() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let cursor_home = tmp.path().join("cursor-home");
+    let transcript = cursor_home
+        .join(".cursor/projects/project-slug/agent-transcripts/convo-tail/convo-tail.jsonl");
+    let complete =
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"complete marker"}]}}"#;
+    let partial =
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"partial marker"#;
+    if let Some(parent) = transcript.parent() {
+        fs::create_dir_all(parent).expect("create fixture parent");
+    }
+    fs::write(&transcript, format!("{complete}\n{partial}")).expect("write partial fixture");
+
+    let roots = SessionIngestRoots {
+        cursor_home,
+        codex_home: tmp.path().join("codex-home"),
+    };
+    let first = ingest_sessions_from_roots(&db, SessionIngestProvider::Cursor, &roots).await;
+    assert_eq!(first.messages_inserted, 1);
+    assert_eq!(first.malformed_lines, 1);
+
+    let offset_key = format!("cursor:{}", transcript.to_string_lossy().replace('\\', "/"));
+    let (offset, _) = db
+        .get_parse_offset(&offset_key)
+        .await
+        .expect("offset should stop at the last complete line");
+    assert_eq!(offset, (complete.len() + 1) as u64);
+
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .expect("open transcript for append");
+    file.write_all(b" completed\"}]}}\n")
+        .expect("complete partial line");
+
+    let second = ingest_sessions_from_roots(&db, SessionIngestProvider::Cursor, &roots).await;
+    assert_eq!(second.messages_inserted, 1);
+    assert_eq!(
+        db.search_session_messages("cursor", Some("project-slug"), "partial", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn malformed_and_unknown_records_fail_open() {
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;

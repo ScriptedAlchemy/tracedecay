@@ -176,29 +176,41 @@ async fn read_jsonl_records(
         0
     };
     let mut current_offset = start as u64;
+    let mut committed_offset = start as u64;
     let mut records = Vec::new();
 
     for chunk in bytes[start..].split_inclusive(|byte| *byte == b'\n') {
+        let complete_line = chunk.ends_with(b"\n");
         let line_offset = current_offset;
         current_offset = current_offset.saturating_add(chunk.len() as u64);
         let line = trim_jsonl_line(chunk);
         if line.is_empty() {
+            if complete_line {
+                committed_offset = current_offset;
+            }
             continue;
         }
 
         let Ok(line) = std::str::from_utf8(line) else {
             stats.malformed_lines += 1;
+            if complete_line {
+                committed_offset = current_offset;
+            }
             continue;
         };
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             stats.malformed_lines += 1;
+            if complete_line {
+                committed_offset = current_offset;
+            }
             continue;
         };
 
         records.push((value, line_offset));
+        committed_offset = current_offset;
     }
 
-    db.set_parse_offset(&offset_key, bytes.len() as u64, file_mtime(path))
+    db.set_parse_offset(&offset_key, committed_offset, file_mtime(path))
         .await;
     records
 }

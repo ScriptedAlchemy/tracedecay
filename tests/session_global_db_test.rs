@@ -152,3 +152,35 @@ async fn search_session_messages_uses_fts_and_filters_provider_project() {
     assert_eq!(results[0].session.project_key, "project-a");
     assert!(results[0].score > 0.0);
 }
+
+#[tokio::test]
+async fn search_session_messages_applies_hyphen_filter_before_limit() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let session = sample_session("cursor", "cursor-hyphen", "project-a");
+    db.upsert_session(&session).await;
+
+    for index in 0..12 {
+        db.upsert_session_message(&sample_message(
+            "cursor",
+            &format!("plain-{index}"),
+            "cursor-hyphen",
+            &format!("foo bar filler message {index}"),
+        ))
+        .await;
+    }
+    db.upsert_session_message(&sample_message(
+        "cursor",
+        "hyphenated",
+        "cursor-hyphen",
+        "the literal foo-bar marker should survive limiting",
+    ))
+    .await;
+
+    let results = db
+        .search_session_messages("cursor", Some("project-a"), "foo-bar", 10)
+        .await;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].message.message_id, "hyphenated");
+}

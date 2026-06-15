@@ -536,7 +536,7 @@ impl GlobalDb {
             .map(str::to_lowercase)
             .collect();
 
-        let select = "SELECT
+        let mut sql = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json,
                 m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
@@ -545,25 +545,28 @@ impl GlobalDb {
              FROM session_messages_fts
              JOIN session_messages m ON session_messages_fts.rowid = m.rowid
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2";
-        let order = " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
-                      LIMIT ?";
+             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2"
+            .to_string();
+        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_string())];
+        if let Some(project_key) = project_key {
+            query_params.push(Value::Text(project_key.to_string()));
+            sql.push_str(&format!(" AND s.project_key = ?{}", query_params.len()));
+        }
+        for term in &literal_terms {
+            query_params.push(Value::Text(term.clone()));
+            sql.push_str(&format!(
+                " AND instr(lower(m.text), ?{}) > 0",
+                query_params.len()
+            ));
+        }
+        query_params.push(Value::Integer(limit as i64));
+        sql.push_str(&format!(
+            " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+                      LIMIT ?{}",
+            query_params.len()
+        ));
 
-        let rows_result = if let Some(project_key) = project_key {
-            self.conn
-                .query(
-                    &format!("{select} AND s.project_key = ?3{order}"),
-                    params![fts_query.as_str(), provider, project_key, limit as i64],
-                )
-                .await
-        } else {
-            self.conn
-                .query(
-                    &format!("{select}{order}"),
-                    params![fts_query.as_str(), provider, limit as i64],
-                )
-                .await
-        };
+        let rows_result = self.conn.query(&sql, query_params).await;
 
         let Ok(mut rows) = rows_result else {
             return Vec::new();
@@ -577,12 +580,6 @@ impl GlobalDb {
             let Some(message) = row_to_message(&row, 9) else {
                 continue;
             };
-            if !literal_terms.is_empty() {
-                let text = message.text.to_lowercase();
-                if !literal_terms.iter().all(|term| text.contains(term)) {
-                    continue;
-                }
-            }
             let score = row.get::<f64>(22).map_or(0.0, |rank| -rank);
             results.push(SessionMessageSearchResult {
                 session,
