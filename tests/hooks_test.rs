@@ -700,6 +700,10 @@ fn test_cursor_branch_switch_target_extracts_branch() {
         cursor_branch_switch_target("git worktree add -b newbranch ../wt"),
         Some("newbranch".to_string())
     );
+    assert_eq!(
+        cursor_branch_switch_target("git worktree add -b feature/new ../wt main"),
+        Some("feature/new".to_string())
+    );
 }
 
 #[test]
@@ -708,9 +712,15 @@ fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
         cursor_branch_switch_target("git checkout -- src/main.rs"),
         None
     );
+    assert_eq!(cursor_branch_switch_target("git checkout ."), None);
     assert_eq!(cursor_branch_switch_target("git checkout README.md"), None);
     assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
     assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
+    assert_eq!(cursor_branch_switch_target("git worktree add ../wt"), None);
+    assert_eq!(
+        cursor_branch_switch_target("git worktree add --detach ../wt main"),
+        None
+    );
     assert_eq!(cursor_branch_switch_target("git status"), None);
     assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
 }
@@ -728,6 +738,10 @@ fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
     assert_eq!(
         cursor_shell_sync_plan("git worktree add ../wt feature/z"),
         CursorShellSyncPlan::BranchAdd("feature/z".to_string())
+    );
+    assert_eq!(
+        cursor_shell_sync_plan("git worktree add -b feature/new ../wt main"),
+        CursorShellSyncPlan::BranchAdd("feature/new".to_string())
     );
 }
 
