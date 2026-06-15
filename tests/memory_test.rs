@@ -1208,6 +1208,43 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
     );
 }
 
+#[tokio::test]
+async fn fact_retriever_reason_deduplicates_entity_predicates() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let retriever = FactRetriever::new(db.conn());
+
+    let mut request = fact_request(
+        "Project Phoenix uses SQLite for memory search",
+        MemoryCategory::Decision,
+        0.9,
+    );
+    request.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
+    let fact = store
+        .add_fact(request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+
+    let results = retriever
+        .reason(
+            &[
+                "Project Phoenix".to_string(),
+                "project phoenix".to_string(),
+                "SQLite".to_string(),
+            ],
+            Some(MemoryCategory::Decision),
+            Some(0.3),
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].fact.fact_id, fact.fact_id);
+}
+
 /// Policy: deleted memories are permanently hard-deleted. `remove_fact` (the
 /// path behind dashboard curation and the MCP `fact_remove` tool) must leave
 /// no trace on the store's own connection: the fact row, its FTS mirror, its
