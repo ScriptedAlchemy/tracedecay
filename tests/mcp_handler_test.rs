@@ -5478,7 +5478,7 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
             "provider": "cursor",
             "session_id": "lcm-oversized-needs-summary",
             "messages": [
-                {"id": "oversized-1", "role": "user", "content": huge_source},
+                {"id": "oversized-1", "role": "user", "content": huge_source.clone()},
                 {"id": "oversized-2", "role": "assistant", "content": "acknowledged"},
                 {"id": "oversized-3", "role": "user", "content": "latest objective"}
             ],
@@ -5495,7 +5495,26 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
     .unwrap();
 
     let text = extract_text(&compress.value);
-    let payload: Value = serde_json::from_str(text).unwrap();
+    let envelope: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(envelope["truncated"], true);
+    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
+    assert!(text.len() <= 15_000);
+
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("oversized needs-summary payload should include retrieve handle");
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    let payload: Value =
+        serde_json::from_str(retrieved_payload["content"].as_str().unwrap()).unwrap();
     assert_eq!(payload["status"], "needs_summary");
     assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
     assert!(
@@ -5508,20 +5527,13 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
         payload["summary_request"].is_object(),
         "bridge must retain summary request metadata, got {payload:#}"
     );
-    assert_eq!(payload["mcp_response_truncated"], true);
-    assert_eq!(payload["contract_truncated"], true);
-    assert!(payload.get("truncated").is_none());
-    assert!(extract_text(&compress.value).len() <= 15_000);
     let source_messages = payload["summary_request"]["source_messages"]
         .as_array()
-        .expect("compact needs-summary payload should retain bounded source messages");
+        .expect("retrieved needs-summary payload should retain exact source messages");
     assert!(!source_messages.is_empty());
-    assert!(source_messages[0]["content"]
-        .as_str()
-        .is_some_and(|content| content.len() <= 512));
     assert_eq!(
-        payload["summary_request"]["source_messages_compacted_for_mcp"],
-        true
+        source_messages[0]["content"].as_str(),
+        Some(huge_source.as_str())
     );
 }
 

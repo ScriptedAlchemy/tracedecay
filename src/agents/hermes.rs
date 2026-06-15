@@ -767,7 +767,7 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             .map(str::trim)
             .unwrap_or_default();
         match parse_yaml_scalar(current).as_deref() {
-            None | Some("compressor") | Some("tokensave") => {
+            None | Some("compressor" | "tokensave") => {
                 lines[engine_line] = "  engine: tracedecay".to_string();
             }
             Some("tracedecay") => {}
@@ -3368,25 +3368,24 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
 
 _ENGINE_DEFAULT_SESSION = "__default__"
 
+def _content_has_text(content) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(_content_has_text(item) for item in content)
+    if isinstance(content, dict):
+        for key in ("text", "content"):
+            if _content_has_text(content.get(key)):
+                return True
+    return False
+
+def _message_has_compressible_content(message) -> bool:
+    return isinstance(message, dict) and _content_has_text(message.get("content"))
+
 def _has_compressible_message_content(messages) -> bool:
     if not isinstance(messages, list):
         return False
-
-    def _content_has_text(content) -> bool:
-        if isinstance(content, str):
-            return bool(content.strip())
-        if isinstance(content, list):
-            return any(_content_has_text(item) for item in content)
-        if isinstance(content, dict):
-            for key in ("text", "content"):
-                if _content_has_text(content.get(key)):
-                    return True
-        return False
-
-    for message in messages:
-        if isinstance(message, dict) and _content_has_text(message.get("content")):
-            return True
-    return False
+    return any(_message_has_compressible_content(message) for message in messages)
 
 class _EngineSessionState:
     """Mutable per-conversation engine state.
@@ -3718,14 +3717,15 @@ class TraceDecayContextEngine(ContextEngine):
     def has_content_to_compress(self, messages, current_tokens=None, **kwargs):
         """Optional Hermes hook: conservatively probe only eligible content."""
         del current_tokens, kwargs
-        if not _has_compressible_message_content(messages):
+        if not isinstance(messages, list):
             return False
-        compressible = [
-            message
-            for message in messages
-            if isinstance(message, dict) and _has_compressible_message_content([message])
-        ]
-        return len(compressible) > 1
+        compressible = 0
+        for message in messages:
+            if _message_has_compressible_content(message):
+                compressible += 1
+                if compressible > 1:
+                    return True
+        return False
 
     def should_defer_preflight_to_real_usage(self, rough_tokens=None, **kwargs):
         """Suppress rough-token retry loops until post-compression usage arrives."""
