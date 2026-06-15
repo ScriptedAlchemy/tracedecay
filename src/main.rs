@@ -1281,13 +1281,10 @@ fn parse_session_provider(
 fn session_search_providers(
     provider: Option<&str>,
 ) -> tokensave::errors::Result<Vec<&'static str>> {
-    match provider.unwrap_or("all") {
-        "cursor" => Ok(vec!["cursor"]),
-        "codex" => Ok(vec!["codex"]),
-        "all" => Ok(vec!["cursor", "codex"]),
-        other => Err(TokenSaveError::Config {
-            message: format!("unknown session provider '{other}' (expected cursor, codex, or all)"),
-        }),
+    match parse_session_provider(provider)? {
+        SessionIngestProvider::Cursor => Ok(vec!["cursor"]),
+        SessionIngestProvider::Codex => Ok(vec!["codex"]),
+        SessionIngestProvider::All => Ok(vec!["cursor", "codex"]),
     }
 }
 

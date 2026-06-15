@@ -132,6 +132,7 @@ async fn ingest_cursor_sessions(db: &GlobalDb, cursor_home: &Path, stats: &mut S
         path.components()
             .any(|component| component.as_os_str() == "agent-transcripts")
     });
+    files.sort();
 
     for path in files {
         stats.files_seen += 1;
@@ -145,6 +146,7 @@ async fn ingest_cursor_sessions(db: &GlobalDb, cursor_home: &Path, stats: &mut S
 async fn ingest_codex_sessions(db: &GlobalDb, codex_home: &Path, stats: &mut SessionIngestStats) {
     let mut files = Vec::new();
     collect_jsonl_files(&codex_home.join(".codex").join("sessions"), &mut files);
+    files.sort();
 
     for path in files {
         stats.files_seen += 1;
@@ -502,7 +504,6 @@ fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
-    files.sort();
 }
 
 fn component_after(path: &Path, marker: &str) -> Option<String> {
