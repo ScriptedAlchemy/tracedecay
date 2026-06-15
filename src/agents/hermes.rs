@@ -767,7 +767,7 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             .map(str::trim)
             .unwrap_or_default();
         match parse_yaml_scalar(current).as_deref() {
-            None | Some("compressor") | Some("tokensave") => {
+            None | Some("compressor" | "tokensave") => {
                 lines[engine_line] = "  engine: tracedecay".to_string();
             }
             Some("tracedecay") => {}
@@ -3414,6 +3414,8 @@ class _EngineSessionState:
         "_session_start_context_length",
         "_last_preflight_signature",
         "_awaiting_real_usage_after_compression",
+        "_last_compression_rough_tokens",
+        "_last_rough_tokens_when_real_prompt_fit",
     )
 
     def __init__(self):
@@ -3437,6 +3439,8 @@ class _EngineSessionState:
         self._session_start_context_length = None
         self._last_preflight_signature = None
         self._awaiting_real_usage_after_compression = False
+        self._last_compression_rough_tokens = 0
+        self._last_rough_tokens_when_real_prompt_fit = 0
 
     def adopt(self, other):
         """Carry conversation state across a compression-rotation rebind."""
@@ -3502,6 +3506,8 @@ class TraceDecayContextEngine(ContextEngine):
     _session_start_context_length = _engine_session_property("_session_start_context_length")
     _last_preflight_signature = _engine_session_property("_last_preflight_signature")
     _awaiting_real_usage_after_compression = _engine_session_property("_awaiting_real_usage_after_compression")
+    _last_compression_rough_tokens = _engine_session_property("_last_compression_rough_tokens")
+    _last_rough_tokens_when_real_prompt_fit = _engine_session_property("_last_rough_tokens_when_real_prompt_fit")
 
     def _session_key(self, session_id=None):
         if session_id:
@@ -3662,6 +3668,12 @@ class TraceDecayContextEngine(ContextEngine):
             self.last_prompt_tokens + self.last_completion_tokens
         )
         self.last_real_prompt_tokens = self.last_prompt_tokens
+        if self.last_prompt_tokens > 0:
+            if self.last_prompt_tokens < self.threshold_tokens:
+                if self._awaiting_real_usage_after_compression and self._last_compression_rough_tokens > 0:
+                    self._last_rough_tokens_when_real_prompt_fit = self._last_compression_rough_tokens
+            else:
+                self._last_rough_tokens_when_real_prompt_fit = 0
         if self.last_prompt_tokens or self.last_completion_tokens or self.last_total_tokens:
             self._awaiting_real_usage_after_compression = False
 
@@ -3717,8 +3729,24 @@ class TraceDecayContextEngine(ContextEngine):
 
     def should_defer_preflight_to_real_usage(self, rough_tokens=None, **kwargs):
         """Suppress rough-token retry loops until post-compression usage arrives."""
-        del rough_tokens, kwargs
-        return bool(self._awaiting_real_usage_after_compression)
+        del kwargs
+        try:
+            tokens = int(rough_tokens or 0)
+        except (TypeError, ValueError):
+            return False
+        if tokens < self.threshold_tokens:
+            return False
+        if self.last_real_prompt_tokens <= 0 or self.last_real_prompt_tokens >= self.threshold_tokens:
+            return False
+        baseline = self._last_rough_tokens_when_real_prompt_fit or self._last_compression_rough_tokens
+        if baseline <= 0:
+            return False
+        growth = max(0, tokens - baseline)
+        tolerated_growth = max(4096, int(self.threshold_tokens * 0.05))
+        if growth > tolerated_growth:
+            return False
+        self._last_rough_tokens_when_real_prompt_fit = max(baseline, tokens)
+        return True
 
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
         """ABC contract: quick pre-flight check returning a BOOL.
@@ -4306,6 +4334,10 @@ class TraceDecayContextEngine(ContextEngine):
         if replay != original:
             self.compression_count += 1
             self._awaiting_real_usage_after_compression = True
+            try:
+                self._last_compression_rough_tokens = int(current_tokens or 0)
+            except (TypeError, ValueError):
+                self._last_compression_rough_tokens = 0
         else:
             self._awaiting_real_usage_after_compression = False
         return replay

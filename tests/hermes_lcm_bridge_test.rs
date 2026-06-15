@@ -415,6 +415,7 @@ import json
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="old-session", project_root="/tmp/project")
+engine.threshold_tokens = 2000
 
 calls = []
 
@@ -457,10 +458,10 @@ assert calls == []
 
 compressed = engine.compress(
     [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}],
-    current_tokens=999,
+    current_tokens=2100,
 )
 assert compressed == [{"role": "system", "content": "summary"}]
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=1000) is True
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is False
 status = engine.get_status()
 assert status["awaiting_real_usage_after_compression"] is True
 assert status["last_compress_result"]["status"] == "compressed"
@@ -468,7 +469,9 @@ assert status["last_compress_result"]["summary_node_count"] == 1
 assert status["last_compress_result"]["raw_message_count"] == 2
 
 engine.update_from_response({"prompt_tokens": 321, "completion_tokens": 7})
-assert engine.should_defer_preflight_to_real_usage(rough_tokens=1000) is False
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is True
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=7000) is False
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is True
 assert engine.last_real_prompt_tokens == 321
 
 engine.carry_over_new_session_context("old-session", "new-session")

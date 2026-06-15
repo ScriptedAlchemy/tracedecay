@@ -123,14 +123,7 @@ fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolRes
         if compact_text.len() <= MAX_RESPONSE_CHARS {
             compact_text
         } else {
-            let minimal = compact_lcm_compress_payload(value, formatted.len(), true, 8, 512);
-            let minimal_text = serde_json::to_string_pretty(&minimal).unwrap_or_default();
-            if minimal_text.len() <= MAX_RESPONSE_CHARS {
-                minimal_text
-            } else {
-                let floor = compact_lcm_compress_payload(value, formatted.len(), true, 1, 64);
-                bounded_lcm_contract_text(&floor)
-            }
+            truncated_json_envelope_with_handle(project_root, &formatted)
         }
     } else {
         truncated_json_envelope_with_handle(project_root, &formatted)
@@ -215,7 +208,17 @@ fn compact_lcm_compress_payload(
                 compact_request.insert(key.to_string(), field.clone());
             }
         }
-        compact_request.insert("source_messages_omitted_for_mcp".to_string(), json!(true));
+        if let Some(field) = summary_request.get("source_messages") {
+            compact_request.insert("source_messages".to_string(), field.clone());
+            compact_request.insert(
+                "source_messages_truncated_for_mcp".to_string(),
+                json!(false),
+            );
+            compact_request.insert(
+                "source_messages_compacted_for_mcp".to_string(),
+                json!(false),
+            );
+        }
         compact_request.insert("prompt_omitted_for_mcp".to_string(), json!(true));
         compact_request.insert(
             "extraction_request_omitted_for_mcp".to_string(),
@@ -260,9 +263,10 @@ fn compact_replay_messages(
             if let Some(map) = item.as_object() {
                 for (key, field) in map {
                     if key == "content" {
-                        let content_text = field
-                            .as_str()
-                            .map_or_else(|| serde_json::to_string(field).unwrap_or_default(), str::to_string);
+                        let content_text = field.as_str().map_or_else(
+                            || serde_json::to_string(field).unwrap_or_default(),
+                            str::to_string,
+                        );
                         let (content, content_truncated) =
                             truncate_chars(&content_text, content_chars);
                         object.insert(key.clone(), json!(content));
