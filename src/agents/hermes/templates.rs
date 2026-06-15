@@ -588,6 +588,8 @@ MEMORY_PROVIDER_TOOLS = frozenset((
 # first-turn guidance nudge so it never advertises tools that are not
 # actually registered.
 _REGISTERED_TOOL_NAMES = set()
+_CONTEXT_TOOL_NAMES = set()
+_HOST_FORWARDS_MESSAGES = None
 
 # Auxiliary task key for pre-compaction extraction. Upgraded to the
 # plugin-registered "lcm_extraction" task when the host supports
@@ -713,12 +715,34 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
         }
     text = content[0]["text"]
     try:
-        return json.loads(text)
+        payload = json.loads(text)
     except json.JSONDecodeError:
         return {
             "error": "tracedecay tool returned invalid nested JSON",
             "text_preview": _bridge_preview(text),
         }
+    if (
+        isinstance(payload, dict)
+        and payload.get("truncated") is True
+        and isinstance(payload.get("handle"), str)
+        and name.startswith("tracedecay_lcm_")
+    ):
+        retrieved = call_tracedecay_json(
+            "tracedecay_retrieve",
+            {"handle": payload["handle"]},
+            **kwargs,
+        )
+        if isinstance(retrieved, dict):
+            nested = retrieved.get("content")
+            if isinstance(nested, str):
+                try:
+                    decoded = json.loads(nested)
+                except json.JSONDecodeError:
+                    return retrieved
+                if isinstance(decoded, dict):
+                    return decoded
+            return retrieved
+    return payload
 
 def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
@@ -2084,6 +2108,7 @@ class _EngineSessionState:
         "agent",
         "model",
         "last_prompt_tokens",
+        "last_real_prompt_tokens",
         "last_completion_tokens",
         "last_total_tokens",
         "context_length",
@@ -2101,6 +2126,7 @@ class _EngineSessionState:
         self.agent = None
         self.model = ""
         self.last_prompt_tokens = 0
+        self.last_real_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
         # Host-contract token state (run_agent.py reads these directly; the
@@ -2164,6 +2190,7 @@ class TraceDecayContextEngine(ContextEngine):
     agent = _engine_session_property("agent")
     model = _engine_session_property("model")
     last_prompt_tokens = _engine_session_property("last_prompt_tokens")
+    last_real_prompt_tokens = _engine_session_property("last_real_prompt_tokens")
     last_completion_tokens = _engine_session_property("last_completion_tokens")
     last_total_tokens = _engine_session_property("last_total_tokens")
     context_length = _engine_session_property("context_length")
@@ -2310,6 +2337,7 @@ class TraceDecayContextEngine(ContextEngine):
         self.last_prompt_tokens = _as_int(
             usage.get("prompt_tokens") or usage.get("input_tokens")
         )
+        self.last_real_prompt_tokens = self.last_prompt_tokens
         self.last_completion_tokens = _as_int(
             usage.get("completion_tokens") or usage.get("output_tokens")
         )
@@ -2417,6 +2445,44 @@ class TraceDecayContextEngine(ContextEngine):
             return bool(response.get("should_compress"))
         return False
 
+    def has_content_to_compress(self, messages, current_tokens=None, **kwargs):
+        del current_tokens, kwargs
+        non_empty = [
+            message
+            for message in (messages or [])
+            if str((message or {}).get("content") or "").strip()
+        ]
+        return len(non_empty) >= 2
+
+    def should_defer_preflight_to_real_usage(self, rough_tokens=None):
+        if not (
+            isinstance(self.last_compress_result, dict)
+            and self.last_compress_result.get("status") == "compressed"
+        ):
+            return False
+        try:
+            rough = int(rough_tokens or 0)
+            real = int(self.last_real_prompt_tokens or 0)
+        except (TypeError, ValueError):
+            return False
+        if real <= 0 or rough <= real:
+            return False
+        # Defer only when the rough estimate is plausibly near the last real
+        # usage; very large estimates should still trigger a backend preflight.
+        return rough <= real * 10
+
+    def carry_over_new_session_context(self, old_session_id, new_session_id):
+        old_session_id = str(old_session_id or "")
+        new_session_id = str(new_session_id or "")
+        if not new_session_id:
+            return
+        self._bind_session(new_session_id, old_session_id=old_session_id)
+        self._report_compression_boundary(
+            new_session_id,
+            old_session_id,
+            {"boundary_reason": "compression", "old_session_id": old_session_id},
+        )
+
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
         args.update(_lcm_gc_config_args(self.config))
@@ -2427,17 +2493,53 @@ class TraceDecayContextEngine(ContextEngine):
 
     def get_status(self):
         storage = _storage_args(self.project_root, self.hermes_home)
+        last_result = self.last_compress_result
+        if not isinstance(last_result, dict):
+            last_result = {"status": "never_ran"}
+        now = time.time()
+        route_cooldowns = {
+            route: max(0, int(deadline - now))
+            for route, deadline in self._cooldown_until.items()
+            if deadline > now
+        }
         return {
             "engine": self.name,
             "session_id": self.active_session_id,
+            "active_session_id": self.active_session_id,
             "storage_scope": storage.get("storage_scope"),
             "hermes_home": self.hermes_home,
             "project_root": self.project_root,
+            "tracedecay_binary_path": tools.TRACEDECAY_BIN,
+            "tracedecay_binary_available": _tracedecay_binary_available(),
             "context_engine_tool_names": sorted(
                 schema["name"] for schema in self.get_tool_schemas()
             ),
             "route_failures": dict(self._route_failures),
             "cooldown_routes": sorted(self._cooldown_until.keys()),
+            "route_cooldowns": route_cooldowns,
+            "last_compress_result": last_result,
+            "awaiting_real_usage_after_compression": (
+                isinstance(self.last_compress_result, dict)
+                and self.last_compress_result.get("status") == "compressed"
+                and not self.last_real_prompt_tokens
+            ),
+            "live_ingest": {
+                "registered_tool_names": sorted(_REGISTERED_TOOL_NAMES),
+                "context_tool_names": sorted(_CONTEXT_TOOL_NAMES),
+                "host_forwards_messages": _HOST_FORWARDS_MESSAGES,
+                "message_dependent_tools_registered": bool(
+                    MESSAGE_DEPENDENT_TOOLS.intersection(_REGISTERED_TOOL_NAMES)
+                ),
+                "gate_reason": (
+                    "not_registered"
+                    if not _REGISTERED_TOOL_NAMES and not _CONTEXT_TOOL_NAMES
+                    else (
+                        "host_does_not_forward_messages"
+                        if _HOST_FORWARDS_MESSAGES is False
+                        else "registered"
+                    )
+                ),
+            },
         }
 
     def _current_turn_preflight(self, messages, **kwargs):
@@ -3318,6 +3420,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         return tools.call_tracedecay_tool(tracedecay_name, tool_args, **kwargs)
 
 def register(ctx):
+    global _HOST_FORWARDS_MESSAGES
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     # Declare the plugins.tracedecay config block so its keys exist in
     # load_config() even before the user edits config.yaml.
@@ -3379,6 +3482,7 @@ def register(ctx):
     #     context_engine.get_tool_schemas()).
     register_tool = getattr(ctx, "register_tool", None)
     host_forwards_messages = _host_forwards_registered_tool_messages(ctx)
+    _HOST_FORWARDS_MESSAGES = host_forwards_messages if callable(register_tool) else None
     tracedecay_is_memory_provider = _active_memory_provider(ctx) == "tracedecay"
     if callable(register_tool):
         for schema in schemas.TOOL_SCHEMAS:
@@ -3423,6 +3527,8 @@ def register(ctx):
                         name,
                         exc,
                     )
+            else:
+                _CONTEXT_TOOL_NAMES.add(name)
         else:
             logger.info(
                 "tracedecay LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
