@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch};
-use crate::sessions::source::{
+use crate::sessions::shared::{
     content_storage_text_and_tools, paths_equal, preview_title, read_new_rows, title_from_messages,
     StoredCursor, TranscriptIngestStats,
 };

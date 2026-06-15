@@ -853,7 +853,7 @@ async fn externalized_payload_indexes_placeholder_without_body_text() {
 }
 
 #[tokio::test]
-async fn lcm_status_reports_missing_and_unreferenced_payloads_without_previewing_content() {
+async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_content() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
@@ -892,10 +892,11 @@ async fn lcm_status_reports_missing_and_unreferenced_payloads_without_previewing
     assert_eq!(status_json["summary_node_count"], 0);
     assert_eq!(status_json["external_payload_count"], 1);
     assert_eq!(status_json["missing_payload_count"], 1);
-    assert_eq!(status_json["unreferenced_payload_count"], 1);
+    assert_eq!(status_json["unreferenced_payload_count"], 0);
     assert_eq!(status_json["payload"]["externalized_count"], 1);
     assert_eq!(status_json["payload"]["missing_count"], 1);
-    assert_eq!(status_json["payload"]["unreferenced_count"], 1);
+    assert_eq!(status_json["payload"]["unreferenced_count"], 0);
+    assert_eq!(status_json["payload"]["orphan_file_count"], 1);
     assert_eq!(status_json["payload"]["root_contained"], true);
     assert_eq!(status_json["lifecycle"]["maintenance_debt_count"], 0);
     assert_eq!(status_json["redaction"]["enabled"], false);

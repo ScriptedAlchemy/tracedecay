@@ -1,4 +1,4 @@
-//! Trust score helpers for bounded confidence, feedback, and aging.
+//! Trust score helpers for bounded confidence and feedback.
 
 use super::types::FeedbackAction;
 
@@ -41,12 +41,4 @@ pub fn trust_distribution(scores: &[f64]) -> (usize, usize, usize) {
             _ => (low, medium, high + 1),
         }
     })
-}
-
-pub fn temporal_decay(current_trust: f64, age_days: f64) -> f64 {
-    let age = age_days.max(0.0);
-    let decay_weight = 1.0 - (-age / 180.0).exp();
-    let decayed = current_trust.mul_add(1.0 - decay_weight, DEFAULT_TRUST * decay_weight);
-
-    clamp_trust(decayed)
 }

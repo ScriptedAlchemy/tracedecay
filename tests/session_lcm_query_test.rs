@@ -761,6 +761,14 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     assert_eq!(status.summary_node_count, 1);
     assert_eq!(status.external_payload_count, 1);
     assert_eq!(status.missing_payload_count, 0);
+    assert_eq!(status.payload.externalized_count, 1);
+    assert_eq!(status.payload.referenced_count, 1);
+    assert_eq!(status.payload.unreferenced_count, 0);
+    assert_eq!(status.payload.orphan_file_count, 0);
+    assert_eq!(status.payload.reclaimable_bytes, 0);
+    assert_eq!(status.payload_gc.last_gc_at, None);
+    assert_eq!(status.payload_gc.last_gc_status, None);
+    assert!(status.payload.total_bytes > 0);
     assert_eq!(status.maintenance_debt_count, 1);
     assert_eq!(status.lifecycle.lifecycle_state_count, 1);
     assert_eq!(status.lifecycle.frontier_count, 1);

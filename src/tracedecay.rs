@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
+use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::branch;
@@ -24,7 +25,7 @@ use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
     FeedbackRequest, FeedbackResult, MemoryCategory, MemoryRepairStats, MemoryStatus,
-    SearchFactsRequest, UpdateFactRequest,
+    SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
 use crate::resolution::ReferenceResolver;
 use crate::sync;
@@ -223,6 +224,50 @@ pub struct TraceDecay {
     serving_branch: Option<String>,
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackedBranchDiagnostic {
+    pub name: String,
+    pub db_file: String,
+    pub db_path: PathBuf,
+    pub db_exists: bool,
+    pub size_bytes: u64,
+    pub parent: Option<String>,
+    pub parent_db_path: Option<PathBuf>,
+    pub parent_db_exists: Option<bool>,
+    pub created_at: String,
+    pub last_synced_at: String,
+    pub is_default: bool,
+    pub is_current: bool,
+    pub is_open_active: bool,
+    pub is_serving: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchDiagnostics {
+    pub tracking_enabled: bool,
+    pub default_branch: Option<String>,
+    pub current_branch: Option<String>,
+    pub open_active_branch: Option<String>,
+    pub serving_branch: Option<String>,
+    pub serving_db_path: PathBuf,
+    pub serving_db_exists: bool,
+    pub branch_drifted: bool,
+    pub branch_resolution: String,
+    pub is_fallback: bool,
+    pub fallback_target: Option<String>,
+    pub fallback_warning: Option<String>,
+    pub live_branch_tracked: bool,
+    pub live_branch_db_path: Option<PathBuf>,
+    pub live_branch_db_exists: Option<bool>,
+    pub nearest_tracked_ancestor: Option<String>,
+    pub nearest_tracked_ancestor_db_path: Option<PathBuf>,
+    pub nearest_tracked_ancestor_db_exists: Option<bool>,
+    pub tracked_branch_count: usize,
+    pub branches: Vec<TrackedBranchDiagnostic>,
+    pub warnings: Vec<String>,
 }
 
 /// Result of a full indexing operation.
@@ -2971,6 +3016,218 @@ impl TraceDecay {
         path
     }
 
+    fn build_branch_diagnostics(
+        project_root: &Path,
+        open_active_branch: Option<String>,
+        serving_branch: Option<String>,
+        fallback_warning: Option<String>,
+        serving_db_path: PathBuf,
+    ) -> BranchDiagnostics {
+        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let meta = branch_meta::load_branch_meta(&tracedecay_dir);
+        let current_branch = branch::current_branch(project_root);
+        let tracking_enabled = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
+        let branch_drifted =
+            tracking_enabled && current_branch.as_deref() != open_active_branch.as_deref();
+        let is_fallback = fallback_warning.is_some();
+        let fallback_target = if is_fallback {
+            serving_branch.clone()
+        } else {
+            None
+        };
+        let serving_db_exists = serving_db_path.exists();
+
+        let (
+            live_branch_tracked,
+            live_branch_db_path,
+            live_branch_db_exists,
+            nearest_tracked_ancestor,
+            nearest_tracked_ancestor_db_path,
+            nearest_tracked_ancestor_db_exists,
+        ) = if let (Some(meta), Some(current)) = (meta.as_ref(), current_branch.as_deref()) {
+            let live_branch_tracked = meta.is_tracked(current);
+            let live_branch_db_path = if live_branch_tracked {
+                branch::resolve_branch_db_path(&tracedecay_dir, current, meta)
+            } else {
+                None
+            };
+            let live_branch_db_exists = live_branch_db_path.as_ref().map(|path| path.exists());
+            let nearest_tracked_ancestor = if live_branch_tracked {
+                None
+            } else {
+                branch::find_nearest_tracked_ancestor(project_root, current, meta)
+            };
+            let nearest_tracked_ancestor_db_path =
+                nearest_tracked_ancestor.as_deref().and_then(|ancestor| {
+                    branch::resolve_branch_db_path(&tracedecay_dir, ancestor, meta)
+                });
+            let nearest_tracked_ancestor_db_exists = nearest_tracked_ancestor_db_path
+                .as_ref()
+                .map(|path| path.exists());
+            (
+                live_branch_tracked,
+                live_branch_db_path,
+                live_branch_db_exists,
+                nearest_tracked_ancestor,
+                nearest_tracked_ancestor_db_path,
+                nearest_tracked_ancestor_db_exists,
+            )
+        } else {
+            (false, None, None, None, None, None)
+        };
+
+        let mut warnings = Vec::new();
+        if branch_drifted {
+            warnings.push(format!(
+                "branch drift detected: working tree is on '{}' but this instance opened on '{}' and is still serving '{}'. Reopen the index so reads and writes target the live branch.",
+                current_branch.as_deref().unwrap_or("detached HEAD"),
+                open_active_branch.as_deref().unwrap_or("detached HEAD"),
+                serving_branch.as_deref().unwrap_or("default branch"),
+            ));
+        }
+        if !serving_db_exists {
+            warnings.push(format!(
+                "serving branch '{}' points at a missing DB: {}",
+                serving_branch.as_deref().unwrap_or("default branch"),
+                serving_db_path.display(),
+            ));
+        }
+        if let (Some(current), Some(false), Some(path)) = (
+            current_branch.as_deref(),
+            live_branch_db_exists,
+            live_branch_db_path.as_ref(),
+        ) {
+            warnings.push(format!(
+                "tracked branch '{}' is listed in branch metadata but its DB is missing at '{}'; serving '{}' instead.",
+                current,
+                path.display(),
+                serving_branch.as_deref().unwrap_or("default branch"),
+            ));
+        } else if is_fallback {
+            match (
+                current_branch.as_deref(),
+                nearest_tracked_ancestor.as_deref(),
+                fallback_target.as_deref(),
+            ) {
+                (Some(current), Some(ancestor), Some(target)) => warnings.push(format!(
+                    "branch '{current}' is not tracked; nearest indexed ancestor is '{ancestor}' and tracedecay is serving '{target}' instead."
+                )),
+                (Some(current), None, Some(target)) => warnings.push(format!(
+                    "branch '{current}' is not tracked and no indexed ancestor DB was available; tracedecay is serving '{target}' instead."
+                )),
+                _ => {}
+            }
+        }
+
+        let branch_resolution = if !tracking_enabled {
+            "single_db".to_string()
+        } else if branch_drifted {
+            "stale_serving_branch".to_string()
+        } else if current_branch.is_none() {
+            "detached_default".to_string()
+        } else if is_fallback {
+            match (
+                nearest_tracked_ancestor.as_deref(),
+                fallback_target.as_deref(),
+            ) {
+                (Some(ancestor), Some(target)) if ancestor == target => {
+                    "fallback_ancestor".to_string()
+                }
+                _ => "fallback_default".to_string(),
+            }
+        } else {
+            "exact".to_string()
+        };
+
+        let mut branches = Vec::new();
+        if let Some(meta) = meta.as_ref() {
+            let mut names: Vec<_> = meta.branches.keys().cloned().collect();
+            names.sort();
+            for name in names {
+                let entry = &meta.branches[&name];
+                let db_path = tracedecay_dir.join(&entry.db_file);
+                let db_exists = db_path.exists();
+                let size_bytes = db_path.metadata().map_or(0, |metadata| metadata.len());
+                let parent_db_path = entry.parent.as_deref().and_then(|parent| {
+                    branch::resolve_branch_db_path(&tracedecay_dir, parent, meta)
+                });
+                let parent_db_exists = parent_db_path.as_ref().map(|path| path.exists());
+                let mut branch_warnings = Vec::new();
+                if !db_exists {
+                    branch_warnings.push(format!("missing DB at '{}'", db_path.display()));
+                }
+                if entry.parent.is_some() && parent_db_exists == Some(false) {
+                    branch_warnings.push("parent DB is missing".to_string());
+                }
+                branches.push(TrackedBranchDiagnostic {
+                    name: name.clone(),
+                    db_file: entry.db_file.clone(),
+                    db_path,
+                    db_exists,
+                    size_bytes,
+                    parent: entry.parent.clone(),
+                    parent_db_path,
+                    parent_db_exists,
+                    created_at: entry.created_at.clone(),
+                    last_synced_at: entry.last_synced_at.clone(),
+                    is_default: name == meta.default_branch,
+                    is_current: current_branch.as_deref() == Some(name.as_str()),
+                    is_open_active: open_active_branch.as_deref() == Some(name.as_str()),
+                    is_serving: serving_branch.as_deref() == Some(name.as_str()),
+                    warnings: branch_warnings,
+                });
+            }
+        }
+
+        BranchDiagnostics {
+            tracking_enabled,
+            default_branch: meta.as_ref().map(|m| m.default_branch.clone()),
+            current_branch,
+            open_active_branch,
+            serving_branch,
+            serving_db_path,
+            serving_db_exists,
+            branch_drifted,
+            branch_resolution,
+            is_fallback,
+            fallback_target,
+            fallback_warning,
+            live_branch_tracked,
+            live_branch_db_path,
+            live_branch_db_exists,
+            nearest_tracked_ancestor,
+            nearest_tracked_ancestor_db_path,
+            nearest_tracked_ancestor_db_exists,
+            tracked_branch_count: branches.len(),
+            branches,
+            warnings,
+        }
+    }
+
+    pub fn project_branch_diagnostics(project_root: &Path) -> BranchDiagnostics {
+        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let current_branch = branch::current_branch(project_root);
+        let (serving_db_path, serving_branch, fallback_warning) =
+            Self::resolve_db_for_branch(project_root, &tracedecay_dir, current_branch.as_deref());
+        Self::build_branch_diagnostics(
+            project_root,
+            current_branch,
+            serving_branch,
+            fallback_warning,
+            serving_db_path,
+        )
+    }
+
+    pub fn branch_diagnostics(&self) -> BranchDiagnostics {
+        Self::build_branch_diagnostics(
+            &self.project_root,
+            self.active_branch.clone(),
+            self.serving_branch.clone(),
+            self.fallback_warning.clone(),
+            self.db_path(),
+        )
+    }
+
     /// Returns the active git branch, if any.
     pub fn active_branch(&self) -> Option<&str> {
         self.active_branch.as_deref()
@@ -3361,6 +3618,12 @@ impl TraceDecay {
     pub async fn record_fact_feedback(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
         MemoryStore::new(self.db.conn())
             .record_feedback_event(request)
+            .await
+    }
+
+    pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
+        MemoryStore::new(self.db.conn())
+            .fact_trust_history(fact_id)
             .await
     }
 

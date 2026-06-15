@@ -574,8 +574,8 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
         assert_eq!(status, 200);
         assert_eq!(
             initial["pairs"].as_array().map(Vec::len),
-            Some(1),
-            "fixture starts with one near-duplicate pair"
+            Some(3),
+            "dashboard startup backfills legacy fixture vectors, so all three seeded facts participate in the >=0.99 similarity set"
         );
 
         set_fact_access_without_touching_updated_at(&fixture, 102, 7, 1_700_000_500).await;
@@ -609,9 +609,10 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             ),
         );
         assert_eq!(status, 200);
-        assert!(
-            repaired_cache["pairs"].as_array().map_or(0, Vec::len) >= 3,
-            "re-encoded vectors (updated_at bump) must invalidate the similarity cache, got {repaired_cache}"
+        assert_eq!(
+            repaired_cache["pairs"].as_array().map(Vec::len),
+            Some(1),
+            "updated_at-only vector rewrites must invalidate the similarity cache even when the rewritten fact no longer participates in the repaired 2048-dim pair set; got {repaired_cache}"
         );
 
         clear_fact_vector_without_touching_updated_at(&fixture, 103).await;
@@ -779,11 +780,12 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(status, 200);
         assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
-        assert_eq!(overview["holographic"]["overview"]["banks"], 2);
+        assert_eq!(overview["holographic"]["overview"]["banks"], 3);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
         // Bank list counts must be live (consistent with the header fact
-        // count), not the stale stored bundle snapshot — which stays exposed
-        // as bundled_fact_count.
+        // count). The stored bundle snapshot still stays exposed as
+        // bundled_fact_count, but startup backfill rebuilds now refresh the
+        // seeded project bank to the live membership count.
         let memory_banks = overview["holographic"]["overview"]["memory_banks"]
             .as_array()
             .unwrap_or_else(|| panic!("expected memory_banks array"));
@@ -796,8 +798,8 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "bank list must report live membership counts"
         );
         assert_eq!(
-            project_bank["bundled_fact_count"], 5,
-            "stale bundled snapshot must stay available for staleness UIs"
+            project_bank["bundled_fact_count"], 2,
+            "startup bank rebuild should refresh the bundled project snapshot to the live membership count"
         );
         let facts = overview["holographic"]["facts"]
             .as_array()
@@ -848,7 +850,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(status, 200);
         assert_eq!(projection["limit"], 2000);
         assert_eq!(projection["method"], "pca");
-        assert_eq!(projection["dim"], 3);
+        assert_eq!(projection["dim"], 2048);
         let projection_points = projection["points"]
             .as_array()
             .unwrap_or_else(|| panic!("expected projection points array"));
@@ -888,7 +890,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(status, 200);
         assert_eq!(similarity["limit"], 2000);
         assert_eq!(similarity["min_similarity"], 0.0);
-        assert_eq!(similarity["dim"], 3);
+        assert_eq!(similarity["dim"], 2048);
         assert_eq!(similarity["count"], 3);
         assert_eq!(similarity["total_pairs"], 3);
         let pairs = similarity["pairs"]
@@ -1081,6 +1083,109 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         let (status, missing) = get_json(
             &agent,
             &format!("{}/api/plugins/holographic/fact/99999", fixture.base_url),
+        );
+        assert_eq!(status, 404);
+        assert!(
+            missing["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("99999"),
+            "404 body should carry the requested fact id"
+        );
+    });
+}
+
+#[test]
+fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewed_facts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let conn = project_db_conn(&fixture).await;
+        conn.execute(
+            "INSERT INTO memory_feedback_events
+                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            libsql::params![
+                103_i64,
+                "helpful",
+                0.05_f64,
+                0.71_f64,
+                0.76_f64,
+                1_700_000_450_i64,
+                "dashboard-test",
+                "confirmed durable"
+            ],
+        )
+        .await
+        .unwrap_or_else(|err| panic!("failed to insert helpful feedback row: {err}"));
+        conn.execute(
+            "INSERT INTO memory_feedback_events
+                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            libsql::params![
+                103_i64,
+                "unhelpful",
+                -0.10_f64,
+                0.76_f64,
+                0.66_f64,
+                1_700_000_460_i64,
+                "dashboard-test",
+                libsql::Value::Null
+            ],
+        )
+        .await
+        .unwrap_or_else(|err| panic!("failed to insert unhelpful feedback row: {err}"));
+
+        let agent = http_agent();
+        let (status, history) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/103/trust-history",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(history["error"], "");
+        assert_eq!(history["fact_id"], 103);
+        let trail = history["trust_history"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected trust_history array: {history}"));
+        assert_eq!(trail.len(), 2);
+        assert_eq!(trail[0]["timestamp"], 1_700_000_450_i64);
+        assert_eq!(trail[0]["action"], "helpful");
+        assert_eq!(trail[0]["old_trust"], 0.71);
+        assert_eq!(trail[0]["new_trust"], 0.76);
+        assert_eq!(trail[0]["delta"], 0.05);
+        assert_eq!(trail[0]["source"], "dashboard-test");
+        assert_eq!(trail[0]["note"], "confirmed durable");
+        assert_eq!(trail[1]["action"], "unhelpful");
+        assert!(trail[1]["note"].is_null());
+
+        let (status, empty_history) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/101/trust-history",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(empty_history["fact_id"], 101);
+        assert_eq!(
+            empty_history["trust_history"]
+                .as_array()
+                .map(|rows| rows.len()),
+            Some(0)
+        );
+
+        let (status, missing) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/99999/trust-history",
+                fixture.base_url
+            ),
         );
         assert_eq!(status, 404);
         assert!(

@@ -59,8 +59,34 @@ cargo test --no-default-features --features lite
 4. **Format your code** with the standard Rust toolchain:
    ```bash
    cargo fmt
-   cargo clippy
+   cargo clippy --workspace --all-targets
    ```
+
+### Clippy policy
+
+The CI `Clippy` job runs the same command contributors should run locally before
+pushing:
+
+```bash
+cargo clippy --workspace --all-targets
+```
+
+This check is blocking in CI: the workflow fails if `cargo clippy --workspace
+--all-targets` exits non-zero. The crate-level lint policy in `src/lib.rs`
+currently denies `clippy::all`, `clippy::unwrap_used`, and
+`clippy::expect_used`; new violations of those lints must be fixed or justified
+with the narrowest practical `#[allow(...)]` at the affected item. Do not add a
+broad allow or weaken the crate policy just to get CI green.
+
+`clippy::pedantic` remains advisory. Pedantic diagnostics are emitted as
+warnings and should be addressed when they point to a real maintainability issue,
+but they do not block CI unless a future policy change promotes a specific lint
+to `deny`.
+
+There is no separate Clippy baseline file today. If a policy change intentionally
+promotes additional advisory lints to blocking, update `src/lib.rs`, fix or
+narrowly allow the existing violations in the same change, and update this
+section so the contributor command and blocking/advisory split still match CI.
 
 ## Adding a New Language Extractor
 

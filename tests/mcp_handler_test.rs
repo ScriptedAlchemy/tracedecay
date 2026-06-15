@@ -7,6 +7,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -78,6 +80,147 @@ fn test_helper() { assert!(!helper().is_empty()); }
     (cg, dir)
 }
 
+/// Creates a small Rust library with an integration-style test that calls a
+/// public entry point, which then reaches an internal helper. This exercises
+/// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
+async fn setup_integration_test_risk_project() -> (TraceDecay, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+
+    fs::write(
+        project.join("Cargo.toml"),
+        r#"
+[package]
+name = "risk_fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+pub mod api;
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/api.rs"),
+        r#"
+pub fn public_entry() -> String {
+    format_greeting("world")
+}
+
+pub fn unused_public_api() -> String {
+    "unused".to_string()
+}
+
+fn format_greeting(name: &str) -> String {
+    format!("Hello, {}!", name)
+}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("tests/integration_api.rs"),
+        r#"
+use risk_fixture::api::public_entry;
+
+#[test]
+fn integration_public_entry() {
+    assert_eq!(public_entry(), "Hello, world!");
+}
+"#,
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (cg, dir)
+}
+
+/// Extends the calibrated integration-risk fixture with a build script so the
+/// test-risk denominator can prove non-`src/` functions are excluded.
+async fn setup_test_risk_non_src_fixture() -> (TraceDecay, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(project.join("tests")).unwrap();
+
+    fs::write(
+        project.join("Cargo.toml"),
+        r#"
+[package]
+name = "risk_fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+pub mod api;
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/api.rs"),
+        r#"
+pub fn public_entry() -> String {
+    format_greeting("world")
+}
+
+pub fn unused_public_api() -> String {
+    "unused".to_string()
+}
+
+fn format_greeting(name: &str) -> String {
+    format!("Hello, {}!", name)
+}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("tests/integration_api.rs"),
+        r#"
+use risk_fixture::api::public_entry;
+
+#[test]
+fn integration_public_entry() {
+    assert_eq!(public_entry(), "Hello, world!");
+}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("build.rs"),
+        r#"
+fn build_script_helper(flag: &str) -> String {
+    format!("cargo:warning={flag}")
+}
+
+fn main() {
+    println!("{}", build_script_helper("ok"));
+}
+"#,
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (cg, dir)
+}
+
 /// Extracts the text content from a `ToolResult` value (the standard
 /// `content[0].text` envelope).
 fn extract_text(value: &Value) -> &str {
@@ -91,6 +234,212 @@ fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
         Ok(_) => panic!("expected tool call to fail"),
         Err(err) => format!("{err}"),
     }
+}
+
+fn tool_schema<'a>(tools: &'a [tracedecay::mcp::ToolDefinition], name: &str) -> &'a Value {
+    &tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("missing tool definition for {name}"))
+        .input_schema
+}
+
+fn required_args_at<'a>(schema: &'a Value, path: &[&str]) -> Vec<&'a str> {
+    let mut node = schema;
+    for segment in path {
+        node = &node["properties"][*segment];
+    }
+    node["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("schema path {path:?} is missing a required array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("schema path {path:?} has non-string required entry"))
+        })
+        .collect()
+}
+
+fn assert_schema_requires(
+    tools: &[tracedecay::mcp::ToolDefinition],
+    tool_name: &str,
+    expected: &[&str],
+) {
+    let schema = tool_schema(tools, tool_name);
+    let actual = required_args_at(schema, &[]);
+    assert_eq!(
+        actual, expected,
+        "{tool_name} schema required arguments drifted from handler parser expectations"
+    );
+}
+
+fn assert_nested_schema_requires(
+    tools: &[tracedecay::mcp::ToolDefinition],
+    tool_name: &str,
+    path: &[&str],
+    expected: &[&str],
+) {
+    let schema = tool_schema(tools, tool_name);
+    let actual = required_args_at(schema, path);
+    assert_eq!(
+        actual, expected,
+        "{tool_name} schema required arguments at {path:?} drifted from handler parser expectations"
+    );
+}
+
+fn assert_action_schema_requires(
+    tools: &[tracedecay::mcp::ToolDefinition],
+    tool_name: &str,
+    action: &str,
+    expected_required: &[&str],
+) {
+    let schema = tool_schema(tools, tool_name);
+    let all_of = schema["allOf"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tool_name} schema is missing allOf action requirements"));
+    let matching = all_of
+        .iter()
+        .find(|entry| entry["if"]["properties"]["action"]["const"].as_str() == Some(action));
+    let entry = matching.unwrap_or_else(|| {
+        panic!("{tool_name} schema is missing conditional requirements for action={action}")
+    });
+    let actual: Vec<&str> = entry["then"]["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tool_name} action={action} is missing then.required"))
+        .iter()
+        .map(|value| {
+            value.as_str().unwrap_or_else(|| {
+                panic!("{tool_name} action={action} has non-string required entry")
+            })
+        })
+        .collect();
+    assert_eq!(
+        actual, expected_required,
+        "{tool_name} schema conditional requirements for action={action} drifted from handler parser expectations"
+    );
+}
+
+fn assert_schema_has_required_alternatives(
+    tools: &[tracedecay::mcp::ToolDefinition],
+    tool_name: &str,
+    alternatives: &[&str],
+) {
+    let schema = tool_schema(tools, tool_name);
+    let any_of = schema["anyOf"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tool_name} schema is missing anyOf required alternatives"));
+    for alternative in alternatives {
+        assert!(
+            any_of
+                .iter()
+                .any(|entry| entry["required"] == json!([alternative])),
+            "{tool_name} schema must advertise that one of {alternatives:?} is required by the handler parser; missing alternative {alternative}"
+        );
+    }
+}
+
+async fn expect_missing_argument_error(
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: Value,
+    expected_message: &str,
+) {
+    let message = expect_tool_error(handle_tool_call(cg, tool_name, args, None, None).await);
+    assert!(
+        message.contains(expected_message),
+        "{tool_name} parser error should mention `{expected_message}`, got `{message}`"
+    );
+}
+
+#[tokio::test]
+async fn schema_required_arguments_match_representative_handler_parsers() {
+    let (cg, _dir) = setup_project().await;
+    let tools = get_tool_definitions();
+
+    // Direct `args.get(...).ok_or(...)` parser style.
+    assert_schema_requires(&tools, "tracedecay_search", &["query"]);
+    expect_missing_argument_error(
+        &cg,
+        "tracedecay_search",
+        json!({}),
+        "missing required parameter: query",
+    )
+    .await;
+
+    // Shared helper parser style, including canonical node_id despite id alias support.
+    assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
+    expect_missing_argument_error(
+        &cg,
+        "tracedecay_callers",
+        json!({}),
+        "missing required parameter: node_id",
+    )
+    .await;
+
+    // Non-empty array parser style.
+    assert_schema_requires(&tools, "tracedecay_callers_for", &["node_ids"]);
+    expect_missing_argument_error(&cg, "tracedecay_callers_for", json!({}), "node_ids").await;
+
+    // Multi-field edit parser style.
+    assert_schema_requires(
+        &tools,
+        "tracedecay_insert_at",
+        &["path", "anchor", "content"],
+    );
+    expect_missing_argument_error(
+        &cg,
+        "tracedecay_insert_at",
+        json!({ "path": "src/lib.rs" }),
+        "missing required parameter: anchor",
+    )
+    .await;
+
+    // Action-dependent parser style: fact_store requires different arguments per action.
+    assert_schema_requires(&tools, "tracedecay_fact_store", &["action"]);
+    for (action, required_arg, expected_message) in [
+        ("add", "content", "missing required parameter: content"),
+        ("search", "query", "missing required parameter: query"),
+        ("probe", "entity", "missing required parameter: entity"),
+        ("related", "entity", "missing required parameter: entity"),
+        ("update", "fact_id", "missing required parameter: fact_id"),
+        ("remove", "fact_id", "missing required parameter: fact_id"),
+    ] {
+        assert_action_schema_requires(&tools, "tracedecay_fact_store", action, &[required_arg]);
+        expect_missing_argument_error(
+            &cg,
+            "tracedecay_fact_store",
+            json!({ "action": action }),
+            expected_message,
+        )
+        .await;
+    }
+
+    // Alternative parser style: fact_feedback accepts action/helpful/unhelpful, but one is required.
+    assert_schema_requires(&tools, "tracedecay_fact_feedback", &["fact_id"]);
+    assert_schema_has_required_alternatives(
+        &tools,
+        "tracedecay_fact_feedback",
+        &["action", "helpful", "unhelpful"],
+    );
+    expect_missing_argument_error(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({ "fact_id": 1 }),
+        "missing feedback action",
+    )
+    .await;
+
+    // Nested-object parser style.
+    assert_schema_requires(&tools, "tracedecay_lcm_expand", &["session_id", "target"]);
+    assert_nested_schema_requires(&tools, "tracedecay_lcm_expand", &["target"], &["kind"]);
+    expect_missing_argument_error(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({ "session_id": "session-1", "target": {} }),
+        "target.kind must be one of raw_message, summary_node, external_payload",
+    )
+    .await;
 }
 
 #[test]
@@ -244,7 +593,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_doctor definition");
     assert_eq!(
         doctor.input_schema["properties"]["mode"]["enum"],
-        json!(["diagnose", "repair", "retention", "clean"])
+        json!(["diagnose", "repair", "retention", "clean", "gc"])
     );
     assert_eq!(
         doctor.input_schema["properties"]["apply"]["type"],
@@ -253,6 +602,14 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     assert_eq!(
         doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
         json!("boolean")
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["lcm_gc_apply_enabled"]["type"],
+        json!("boolean")
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["gc_config"]["type"],
+        json!("object")
     );
 }
 
@@ -379,6 +736,67 @@ async fn retrieve_tool_returns_full_stored_response() {
 }
 
 #[tokio::test]
+async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
+    let (cg, _dir) = setup_project().await;
+
+    let missing = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": "rh_0123456789abcdef01234567" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let missing_payload: Value = serde_json::from_str(extract_text(&missing.value)).unwrap();
+    assert_eq!(missing_payload["expired"], true);
+    assert_eq!(missing_payload["content"], Value::Null);
+    assert_eq!(missing_payload["reason_code"], "handle_not_found");
+    assert_eq!(missing_payload["retryable"], true);
+    assert!(missing_payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not found"));
+    assert!(missing_payload["retry_instruction"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Re-run the original MCP tool"));
+
+    let expired = tracedecay::mcp::response_handles::store_response_handle(
+        cg.project_root(),
+        "{\"items\":[42]}",
+        tracedecay::tracedecay::current_timestamp()
+            - tracedecay::mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
+            - 5,
+    )
+    .unwrap();
+
+    let expired_result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": expired.handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expired_payload: Value = serde_json::from_str(extract_text(&expired_result.value)).unwrap();
+    assert_eq!(expired_payload["expired"], true);
+    assert_eq!(expired_payload["content"], Value::Null);
+    assert_eq!(expired_payload["reason_code"], "handle_expired");
+    assert_eq!(expired_payload["retryable"], true);
+    assert_eq!(expired_payload["expires_at"], expired.expires_at);
+    assert!(expired_payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("expired"));
+    assert!(expired_payload["retry_instruction"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Re-run the original MCP tool"));
+}
+
+#[tokio::test]
 async fn fact_store_large_list_response_uses_retrieve_handle() {
     let (cg, _dir) = setup_project().await;
     let mut last_fact_id = None;
@@ -471,6 +889,68 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
         full_json.contains("LONG_FACT_MARKER_34"),
         "retrieved response should include the full fact list"
     );
+}
+
+#[tokio::test]
+async fn fact_store_large_list_response_reports_store_failure_actionably() {
+    let (cg, _dir) = setup_project().await;
+    for i in 0..35 {
+        handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "STORE_FAILURE_MARKER_{i:02}: {}",
+                    "large fact-store response should surface cache failures ".repeat(80)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    fs::write(
+        cg.project_root().join(".tracedecay/response-handles"),
+        "not-a-directory",
+    )
+    .unwrap();
+
+    let listed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let envelope: Value = serde_json::from_str(extract_text(&listed.value)).unwrap();
+
+    assert_eq!(envelope["truncated"], true);
+    assert_eq!(envelope["handle_available"], false);
+    assert!(envelope.get("handle").is_none());
+    assert!(envelope["preview"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("STORE_FAILURE_MARKER_"));
+    assert_eq!(
+        envelope["handle_status"]["reason_code"],
+        "handle_store_failed"
+    );
+    assert_eq!(envelope["handle_status"]["retryable"], true);
+    assert!(envelope["handle_status"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("could not be cached locally"));
+    assert!(envelope["handle_status"]["retry_instruction"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("re-run the original MCP tool"));
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +1121,58 @@ async fn test_status() {
         text.contains("server"),
         "status should include server stats"
     );
+    assert!(
+        text.contains("branch_diagnostics"),
+        "status should include branch diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn test_branch_list_reports_live_vs_serving_drift_state() {
+    fn git(project: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("git command failed to spawn");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(project, &["init"]);
+    git(project, &["config", "user.email", "test@test.com"]);
+    git(project, &["config", "user.name", "Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+    git(project, &["branch", "-M", "main"]);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    tracedecay::branch_meta::save_branch_meta(
+        &project.join(".tracedecay"),
+        &tracedecay::branch_meta::BranchMeta::new("main"),
+    )
+    .unwrap();
+
+    let cg = TraceDecay::open(project).await.unwrap();
+    git(project, &["checkout", "-b", "feature"]);
+
+    let result = handle_tool_call(&cg, "tracedecay_branch_list", json!({}), None, None)
+        .await
+        .unwrap();
+    let report: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(report["current_branch"], json!("feature"));
+    assert_eq!(report["open_active_branch"], json!("main"));
+    assert_eq!(report["serving_branch"], json!("main"));
+    assert_eq!(report["branch_drifted"], json!(true));
+    assert_eq!(report["branch_resolution"], json!("stale_serving_branch"));
 }
 
 // ---------------------------------------------------------------------------
@@ -3048,7 +3580,141 @@ async fn test_test_risk() {
         "total_functions should be > 0, got: {}",
         text
     );
+    assert_eq!(
+        summary["attribution"]["depth"].as_u64(),
+        Some(3),
+        "test-risk summary should advertise the calibrated attribution depth"
+    );
+    assert!(
+        summary["buckets"]["attributed"].as_u64().is_some(),
+        "summary should include calibrated attribution buckets, got: {}",
+        text
+    );
+    assert_eq!(
+        summary["confidence"].as_str(),
+        Some("static_lower_bound"),
+        "summary should label the calibrated coverage signal honestly"
+    );
     assert!(parsed.get("risks").is_some(), "risks array should exist");
+}
+
+#[tokio::test]
+async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
+    let (cg, _dir) = setup_integration_test_risk_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_risk",
+        json!({ "limit": 10, "include_tested": true }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let summary = &parsed["summary"];
+
+    assert_eq!(summary["total_functions"].as_u64(), Some(3));
+    assert_eq!(summary["tested"].as_u64(), Some(2));
+    assert_eq!(summary["coverage_pct"].as_f64(), Some(67.0));
+    assert_eq!(
+        summary["attribution"]["direct_unit_attributed"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        summary["attribution"]["closure_attributed"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(summary["buckets"]["attributed"].as_u64(), Some(2));
+    assert_eq!(summary["buckets"]["orphan_entry"].as_u64(), Some(1));
+    assert_eq!(summary["confidence"].as_str(), Some("static_lower_bound"));
+
+    let risks = parsed["risks"]
+        .as_array()
+        .expect("risks should be an array");
+    let public_entry = risks
+        .iter()
+        .find(|item| item["name"].as_str() == Some("public_entry"))
+        .expect("public_entry should appear in risk output");
+    let format_greeting = risks
+        .iter()
+        .find(|item| item["name"].as_str() == Some("format_greeting"))
+        .expect("format_greeting should appear in risk output");
+    let unused_public_api = risks
+        .iter()
+        .find(|item| item["name"].as_str() == Some("unused_public_api"))
+        .expect("unused_public_api should appear in risk output");
+
+    assert_eq!(public_entry["has_test"].as_bool(), Some(true));
+    assert_eq!(
+        public_entry["attribution_method"].as_str(),
+        Some("direct_unit")
+    );
+    assert_eq!(public_entry["attribution_depth"].as_u64(), Some(1));
+
+    assert_eq!(format_greeting["has_test"].as_bool(), Some(true));
+    assert_eq!(
+        format_greeting["attribution_method"].as_str(),
+        Some("closure")
+    );
+    assert_eq!(format_greeting["attribution_depth"].as_u64(), Some(2));
+
+    assert_eq!(unused_public_api["has_test"].as_bool(), Some(false));
+    assert_eq!(
+        unused_public_api["attribution_method"].as_str(),
+        Some("none")
+    );
+    assert!(
+        summary["confidence_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("closure")),
+        "confidence note should explain the conservative closure signal, got: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() {
+    let (cg, _dir) = setup_test_risk_non_src_fixture().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_test_risk",
+        json!({ "limit": 10, "include_tested": true }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let summary = &parsed["summary"];
+
+    assert_eq!(summary["total_functions"].as_u64(), Some(3));
+    assert_eq!(summary["buckets"]["attributed"].as_u64(), Some(2));
+    assert_eq!(summary["buckets"]["orphan_entry"].as_u64(), Some(1));
+    assert_eq!(summary["buckets"]["excluded"].as_u64(), Some(2));
+    assert_eq!(
+        summary["top_risk_untested"].as_str(),
+        Some("unused_public_api")
+    );
+
+    let risks = parsed["risks"]
+        .as_array()
+        .expect("risks should be an array");
+    assert!(
+        risks
+            .iter()
+            .all(|item| item["file"].as_str() != Some("build.rs")),
+        "non-src build script functions should be excluded from risk rows, got: {}",
+        text
+    );
+    assert!(
+        risks
+            .iter()
+            .all(|item| item["name"].as_str() != Some("build_script_helper")),
+        "build script helper should not be ranked as source risk, got: {}",
+        text
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3814,6 +4480,27 @@ async fn memory_feedback_and_status_include_trust_fields() {
     );
     assert_eq!(unhelpful["feedback"]["helpful_count"], 1);
     assert_eq!(unhelpful["feedback"]["unhelpful_count"], 1);
+
+    let fetched = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "get", "fact_id": fact_id}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let fetched: Value = serde_json::from_str(extract_text(&fetched.value)).unwrap();
+    assert_eq!(fetched["action"], "get");
+    assert_eq!(fetched["fact"]["fact_id"], fact_id);
+    let trust_history = fetched["trust_history"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected trust_history array: {fetched}"));
+    assert_eq!(trust_history.len(), 2);
+    assert_eq!(trust_history[0]["action"], "helpful");
+    assert_eq!(trust_history[0]["note"], "matched");
+    assert_eq!(trust_history[1]["action"], "unhelpful");
+    assert!(trust_history[1]["note"].is_null());
 
     let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
@@ -4707,6 +5394,94 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
     );
     let text = extract_text(&result.value);
     assert!(!text.contains("gc candidate body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "gc-preview-session",
+        "gc-preview-message",
+        "seed message for gc preview",
+        1,
+    )
+    .await;
+    let payload_dir = cg.project_root().join(".tracedecay/lcm-payloads");
+    fs::create_dir_all(&payload_dir).unwrap();
+    let payload_ref =
+        "payload_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.payload";
+    let payload_path = payload_dir.join(payload_ref);
+    fs::write(&payload_path, "gc mode secret body that must not leak").unwrap();
+    fs::File::open(&payload_path)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        )
+        .unwrap();
+
+    let preview = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "gc", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preview_text = extract_text(&preview.value);
+    let preview_payload: Value = serde_json::from_str(preview_text).unwrap();
+    assert_eq!(preview_payload["mode"], "gc");
+    assert_eq!(preview_payload["dry_run"], true);
+    assert_eq!(
+        preview_payload["repairs"]["gc_report"]["orphans"]["count"],
+        1
+    );
+    assert!(payload_path.is_file());
+    assert!(!preview_text.contains("gc mode secret body that must not leak"));
+
+    let apply = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "gc",
+            "apply": true,
+            "lcm_gc_apply_enabled": true
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let apply_text = extract_text(&apply.value);
+    let apply_payload: Value = serde_json::from_str(apply_text).unwrap();
+    assert_eq!(apply_payload["mode"], "gc");
+    assert_eq!(apply_payload["dry_run"], false);
+    assert_eq!(apply_payload["repairs"]["gc_report"]["orphans"]["count"], 1);
+    assert!(!payload_path.exists());
+    assert!(!apply_text.contains("gc mode secret body that must not leak"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_gc_apply_is_denied_by_default() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "gc", "apply": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["mode"], "gc");
+    assert_eq!(
+        payload["repairs"]["unsafe_actions_skipped"][0]["reason"],
+        "lcm_gc_apply_disabled"
+    );
 }
 
 #[tokio::test]

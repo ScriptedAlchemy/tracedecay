@@ -4,12 +4,30 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
-import { chromium } from "playwright";
+import { chromium, devices } from "playwright";
 
-const VIEWPORTS = [
-  { name: "desktop", width: 1280, height: 900 },
-  { name: "narrow", width: 420, height: 900 },
-];
+const VIEWPORT_PROFILES = {
+  desktop: {
+    name: "desktop",
+    contextOptions: { viewport: { width: 1280, height: 900 } },
+  },
+  narrow: {
+    name: "narrow",
+    contextOptions: { viewport: { width: 420, height: 900 } },
+  },
+  iphone12: {
+    name: "iphone12",
+    contextOptions: { ...devices["iPhone 12"] },
+  },
+  pixel5: {
+    name: "pixel5",
+    contextOptions: { ...devices["Pixel 5"] },
+  },
+  ipadmini: {
+    name: "ipadmini",
+    contextOptions: { ...devices["iPad Mini"] },
+  },
+};
 
 const DASHBOARD_URL_RE = /(http:\/\/127\.0\.0\.1:\d+\/)/;
 
@@ -109,9 +127,9 @@ async function waitForAny(page, locators, timeoutMs) {
   return Promise.race([timeout, ...checks]);
 }
 
-async function runViewportSmoke(browser, baseUrl, viewport, expectLcmMode) {
+async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   const context = await browser.newContext({
-    viewport: { width: viewport.width, height: viewport.height },
+    ...profile.contextOptions,
   });
   const page = await context.newPage();
   await page.goto(baseUrl, { waitUntil: "networkidle" });
@@ -206,6 +224,18 @@ async function main() {
   if (!["either", "empty", "non-empty"].includes(expectLcmMode)) {
     throw new Error("--expect-lcm must be one of: either, empty, non-empty");
   }
+  const profilesArg = process.argv.find((arg) => arg.startsWith("--profiles="));
+  const profileKeys = (profilesArg ? profilesArg.replace("--profiles=", "") : "desktop,narrow")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const profiles = profileKeys.map((key) => {
+    const profile = VIEWPORT_PROFILES[key];
+    if (!profile) {
+      throw new Error(`Unknown --profiles entry: ${key}. Expected one of ${Object.keys(VIEWPORT_PROFILES).join(", ")}`);
+    }
+    return profile;
+  });
   let server = null;
   let workspace = null;
 
@@ -223,9 +253,11 @@ async function main() {
 
     const browser = await chromium.launch({ headless: true });
     try {
-      for (const viewport of VIEWPORTS) {
-        console.log(`Running ${viewport.name} smoke (${viewport.width}x${viewport.height})...`);
-        await runViewportSmoke(browser, server.baseUrl, viewport, expectLcmMode);
+      for (const profile of profiles) {
+        const viewport = profile.contextOptions.viewport;
+        const size = viewport ? `${viewport.width}x${viewport.height}` : "device-default";
+        console.log(`Running ${profile.name} smoke (${size})...`);
+        await runViewportSmoke(browser, server.baseUrl, profile, expectLcmMode);
       }
     } finally {
       await browser.close();

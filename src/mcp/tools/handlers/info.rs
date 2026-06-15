@@ -26,38 +26,49 @@ pub(super) async fn handle_status(
     }
 
     // Branch info
-    if let Some(branch) = cg.active_branch() {
-        output["active_branch"] = json!(branch);
-        let ts_dir = crate::config::get_tracedecay_dir(cg.project_root());
-        if let Some(meta) = crate::branch_meta::load_branch_meta(&ts_dir) {
-            if let Some(entry) = meta.branches.get(branch) {
-                if let Some(ref parent) = entry.parent {
-                    output["parent_branch"] = json!(parent);
-                }
-            }
-        }
-        // Surface a checkout/index branch divergence prominently: a graph
-        // that silently tracks another branch is the fastest way to lose an
-        // agent's trust in the index.
-        if let Some(git_branch) = crate::branch::current_branch(cg.project_root()) {
-            if git_branch != branch {
-                output["branch_mismatch"] = json!({
-                    "git_branch": git_branch,
-                    "indexed_branch": branch,
-                });
-                output["branch_mismatch_warning"] = json!(format!(
-                    "WARNING: git checkout is on '{git_branch}' but the index tracks \
-                     '{branch}'. Results may be stale for this branch — run \
-                     `tracedecay branch add {git_branch}` to track it."
-                ));
-            }
-        }
+    let branch_diagnostics = cg.branch_diagnostics();
+    if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
+        output["active_branch"] = json!(open_branch);
     }
-    if cg.is_fallback() {
+    if let Some(current_branch) = branch_diagnostics.current_branch.as_deref() {
+        output["current_branch"] = json!(current_branch);
+        output["live_branch"] = json!(current_branch);
+    }
+    if let Some(serving_branch) = branch_diagnostics.serving_branch.as_deref() {
+        output["serving_branch"] = json!(serving_branch);
+    }
+    if let Some(parent) = branch_diagnostics
+        .branches
+        .iter()
+        .find(|entry| entry.is_serving)
+        .and_then(|entry| entry.parent.as_deref())
+    {
+        output["parent_branch"] = json!(parent);
+    }
+    output["branch_drifted"] = json!(branch_diagnostics.branch_drifted);
+    output["branch_resolution"] = json!(branch_diagnostics.branch_resolution.clone());
+    output["tracked_branch_count"] = json!(branch_diagnostics.tracked_branch_count);
+    output["serving_db_path"] = json!(branch_diagnostics.serving_db_path);
+    output["serving_db_exists"] = json!(branch_diagnostics.serving_db_exists);
+    output["branch_diagnostics"] = serde_json::to_value(&branch_diagnostics).unwrap_or(json!({}));
+    if branch_diagnostics.branch_drifted {
+        output["branch_mismatch"] = json!({
+            "git_branch": branch_diagnostics.current_branch,
+            "indexed_branch": branch_diagnostics.open_active_branch,
+            "serving_branch": branch_diagnostics.serving_branch,
+        });
+    }
+    if branch_diagnostics.is_fallback {
         output["branch_fallback"] = json!(true);
-        if let Some(warning) = cg.fallback_warning() {
+        if let Some(target) = branch_diagnostics.fallback_target.as_deref() {
+            output["branch_fallback_target"] = json!(target);
+        }
+        if let Some(warning) = branch_diagnostics.fallback_warning.as_deref() {
             output["branch_warning"] = json!(warning);
         }
+    }
+    if !branch_diagnostics.warnings.is_empty() {
+        output["branch_warnings"] = json!(branch_diagnostics.warnings);
     }
 
     // Session-transcript ingest health (recall trust): last ingest time and

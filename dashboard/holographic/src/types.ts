@@ -87,6 +87,37 @@ export interface HolographicOverview {
   growth?: Array<{ date: string; facts: number; cumulative_facts?: number }>;
 }
 
+export interface MemoryStatusRecord {
+  fact_count: number;
+  entity_count: number;
+  bank_count: number;
+  algebra_name: string;
+  hrr_dim: number;
+  estimated_capacity: number;
+  trust_0_025_count: number;
+  trust_025_050_count: number;
+  trust_050_075_count: number;
+  trust_075_100_count: number;
+  below_default_recall_threshold_count: number;
+  helpful_count: number;
+  unhelpful_count: number;
+  missing_vector_count: number;
+  legacy_backfill_complete: boolean;
+  repair: {
+    missing_vectors_repaired: number;
+    banks_rebuilt: number;
+  };
+}
+
+export interface MemoryStatusResponse {
+  path: string;
+  exists: boolean;
+  memory: MemoryStatusRecord;
+  largest_bank_fact_count: number;
+  largest_bank_utilization_pct: number;
+  error: string;
+}
+
 export interface HolographicGraphNode {
   id: string;
   kind: "category" | "bank" | "fact" | "entity" | string;

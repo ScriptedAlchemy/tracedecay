@@ -15,7 +15,7 @@ use super::similarity::content_tokens;
 use super::trust::{apply_feedback, clamp_trust, DEFAULT_MIN_TRUST};
 use super::types::{
     AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, FactRecord, FeedbackAction,
-    FeedbackRequest, FeedbackResult, MemoryCategory, UpdateFactRequest,
+    FeedbackRequest, FeedbackResult, MemoryCategory, TrustHistoryEntry, UpdateFactRequest,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::sync::content_hash;
@@ -165,9 +165,9 @@ impl<'a> MemoryStore<'a> {
             .execute(
                 "INSERT OR IGNORE INTO memory_facts (
                     content, category, tags, trust_score, created_at,
-                    updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim
+                    updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     content.as_str(),
                     request.category.as_str(),
@@ -180,6 +180,7 @@ impl<'a> MemoryStore<'a> {
                     vector,
                     HRR_ALGEBRA,
                     HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
                 ],
             )
             .await
@@ -442,8 +443,9 @@ impl<'a> MemoryStore<'a> {
                      hrr_vector = ?7,
                      hrr_algebra = ?8,
                      hrr_dim = ?9,
-                     updated_at = ?10
-                 WHERE fact_id = ?11",
+                     hrr_precision = ?10,
+                     updated_at = ?11
+                 WHERE fact_id = ?12",
                 params![
                     content,
                     category.as_str(),
@@ -454,6 +456,7 @@ impl<'a> MemoryStore<'a> {
                     vector,
                     HRR_ALGEBRA,
                     HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
                     now,
                     request.fact_id,
                 ],
@@ -554,8 +557,13 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        self.with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
-            .await
+        let changed = self
+            .with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
+            .await?;
+        if changed {
+            self.incremental_vacuum().await?;
+        }
+        Ok(changed)
     }
 
     async fn remove_fact_inner(&self, fact_id: i64) -> Result<bool> {
@@ -847,6 +855,55 @@ impl<'a> MemoryStore<'a> {
         .await
     }
 
+    pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT created_at, action, old_trust, new_trust, trust_delta, source, note
+                 FROM memory_feedback_events
+                 WHERE fact_id = ?1
+                 ORDER BY created_at ASC, event_id ASC",
+                params![fact_id],
+            )
+            .await
+            .map_err(|e| db_error("fact_trust_history", e))?;
+
+        let mut history = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("fact_trust_history", e))?
+        {
+            let action = parse_feedback_action(
+                &row.get::<String>(1)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                "fact_trust_history",
+            )?;
+            history.push(TrustHistoryEntry {
+                timestamp: row
+                    .get::<i64>(0)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                action,
+                old_trust: row
+                    .get::<f64>(2)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                new_trust: row
+                    .get::<f64>(3)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                delta: row
+                    .get::<f64>(4)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                source: row
+                    .get::<String>(5)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+                note: row
+                    .get::<Option<String>>(6)
+                    .map_err(|e| db_error("fact_trust_history", e))?,
+            });
+        }
+        Ok(history)
+    }
+
     async fn record_feedback_event_inner(
         &self,
         request: FeedbackRequest,
@@ -938,11 +995,15 @@ impl<'a> MemoryStore<'a> {
                  WHERE hrr_vector IS NULL
                     OR hrr_algebra != ?1
                     OR hrr_dim != ?2
+                    OR hrr_precision != ?3
+                    OR length(hrr_vector) != ?4
                  ORDER BY updated_at DESC
-                 LIMIT ?3",
+                 LIMIT ?5",
                 params![
                     HRR_ALGEBRA,
                     HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
+                    HolographicEncoder::SERIALIZED_F32_BYTES as i64,
                     limit as i64
                 ],
             )
@@ -971,12 +1032,16 @@ impl<'a> MemoryStore<'a> {
                 self.conn
                     .execute(
                         "UPDATE memory_facts
-                         SET hrr_vector = ?1, hrr_algebra = ?2, hrr_dim = ?3
-                         WHERE fact_id = ?4",
+                         SET hrr_vector = ?1,
+                             hrr_algebra = ?2,
+                             hrr_dim = ?3,
+                             hrr_precision = ?4
+                         WHERE fact_id = ?5",
                         params![
                             vector,
                             HRR_ALGEBRA,
                             HolographicEncoder::DIMENSIONS as i64,
+                            HolographicEncoder::HRR_PRECISION,
                             *fact_id,
                         ],
                     )
@@ -1357,12 +1422,14 @@ impl<'a> MemoryStore<'a> {
                  SET hrr_vector = ?1,
                      hrr_algebra = ?2,
                      hrr_dim = ?3,
-                     updated_at = ?4
-                 WHERE fact_id = ?5",
+                     hrr_precision = ?4,
+                     updated_at = ?5
+                 WHERE fact_id = ?6",
                 params![
                     vector,
                     HRR_ALGEBRA,
                     HolographicEncoder::DIMENSIONS as i64,
+                    HolographicEncoder::HRR_PRECISION,
                     current_timestamp(),
                     fact_id,
                 ],
@@ -1375,6 +1442,34 @@ impl<'a> MemoryStore<'a> {
     async fn mark_fact_banks_dirty(&self, category: MemoryCategory) -> Result<()> {
         self.mark_bank_dirty("all").await?;
         self.mark_bank_dirty(category.as_str()).await
+    }
+
+    async fn incremental_vacuum(&self) -> Result<()> {
+        let freelist_pages = {
+            let mut rows = self
+                .conn
+                .query("PRAGMA freelist_count", ())
+                .await
+                .map_err(|e| db_error("incremental_vacuum", e))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| db_error("incremental_vacuum", e))?
+                .ok_or_else(|| {
+                    db_message("incremental_vacuum", "freelist_count returned no rows")
+                })?;
+            row.get::<i64>(0)
+                .map_err(|e| db_error("incremental_vacuum", e))?
+        };
+        if freelist_pages <= 0 {
+            return Ok(());
+        }
+
+        self.conn
+            .execute_batch(&format!("PRAGMA incremental_vacuum({freelist_pages});"))
+            .await
+            .map_err(|e| db_error("incremental_vacuum", e))?;
+        Ok(())
     }
 
     async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
@@ -1529,6 +1624,17 @@ fn feedback_action_str(action: FeedbackAction) -> &'static str {
     match action {
         FeedbackAction::Helpful => "helpful",
         FeedbackAction::Unhelpful => "unhelpful",
+    }
+}
+
+fn parse_feedback_action(value: &str, operation: &str) -> Result<FeedbackAction> {
+    match value {
+        "helpful" => Ok(FeedbackAction::Helpful),
+        "unhelpful" => Ok(FeedbackAction::Unhelpful),
+        other => Err(db_message(
+            operation,
+            format!("failed to parse feedback action: {other}"),
+        )),
     }
 }
 

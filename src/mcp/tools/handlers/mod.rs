@@ -23,8 +23,9 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::response_handles::{
-    retrieve_response_handle, store_response_handle, RESPONSE_HANDLE_TTL_SECS,
-    RESPONSE_RETRIEVE_TOOL,
+    note_response_handle_store_skipped_no_project_root, observe_response_truncation,
+    retrieve_response_handle, store_response_handle, ResponseHandleLookup,
+    RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL,
 };
 use crate::tracedecay::current_timestamp;
 use crate::tracedecay::TraceDecay;
@@ -101,12 +102,23 @@ pub(crate) fn truncate_response(s: &str) -> String {
     if s.len() <= MAX_RESPONSE_CHARS {
         s.to_string()
     } else {
+        let started = std::time::Instant::now();
+        let now = current_timestamp();
         // Find a valid UTF-8 character boundary at or before MAX_RESPONSE_CHARS
         let mut end = MAX_RESPONSE_CHARS;
         while !s.is_char_boundary(end) && end > 0 {
             end -= 1;
         }
-        format!("{}\n\n[... truncated at {} chars]", &s[..end], end)
+        let truncated = format!("{}\n\n[... truncated at {} chars]", &s[..end], end);
+        observe_response_truncation(
+            s.len(),
+            truncated.len(),
+            false,
+            now,
+            "not_available",
+            started.elapsed(),
+        );
+        truncated
     }
 }
 
@@ -120,6 +132,10 @@ pub(crate) fn truncate_response(s: &str) -> String {
 /// Wraps oversized JSON text in a valid preview envelope. When a project root
 /// is available, stores the full original locally and includes a retrieval
 /// handle.
+///
+/// If local handle storage is unavailable or fails, the envelope still carries
+/// a preview but also includes explicit recovery metadata so clients can tell
+/// why no handle was emitted and what to retry.
 pub(crate) fn truncated_json_envelope_with_handle(
     project_root: Option<&Path>,
     formatted: &str,
@@ -127,8 +143,34 @@ pub(crate) fn truncated_json_envelope_with_handle(
     if formatted.len() <= MAX_RESPONSE_CHARS {
         return formatted.to_string();
     }
-    let stored = project_root
-        .and_then(|root| store_response_handle(root, formatted, current_timestamp()).ok());
+    let started = std::time::Instant::now();
+    let now = current_timestamp();
+    let mut handle_unavailable = None;
+    let stored = if let Some(root) = project_root {
+        match store_response_handle(root, formatted, current_timestamp()) {
+            Ok(record) => Some(record),
+            Err(err) => {
+                handle_unavailable = Some(json!({
+                    "reason_code": "handle_store_failed",
+                    "message": format!(
+                        "The full response could not be cached locally, so no retrieval handle is available: {err}"
+                    ),
+                    "retryable": true,
+                    "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+                }));
+                None
+            }
+        }
+    } else {
+        note_response_handle_store_skipped_no_project_root();
+        handle_unavailable = Some(json!({
+            "reason_code": "handle_storage_unavailable",
+            "message": "This response was truncated in a context without a project-local cache path, so no retrieval handle could be created.",
+            "retryable": true,
+            "retry_instruction": "Re-run the original MCP tool from a project-scoped tracedecay session if you need a retrievable full response."
+        }));
+        None
+    };
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
         while end > 0 && !formatted.is_char_boundary(end) {
@@ -141,28 +183,48 @@ pub(crate) fn truncated_json_envelope_with_handle(
             "preview_chars": preview.len(),
             "preview": preview,
         });
-        if let (Some(record), Some(object)) = (&stored, envelope.as_object_mut()) {
-            object.insert("handle".to_string(), json!(record.handle));
-            object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
-            object.insert(
-                "retrieve_ttl_seconds".to_string(),
-                json!(RESPONSE_HANDLE_TTL_SECS),
-            );
-            object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
-            object.insert(
-                "retrieve_instruction".to_string(),
-                json!(format!(
-                    "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. Only call it if the missing details are needed to answer the user's request.",
-                    preview.len(),
-                    formatted.len(),
-                    record.expires_at,
-                    RESPONSE_HANDLE_TTL_SECS,
-                    record.handle
-                )),
-            );
+        if let Some(object) = envelope.as_object_mut() {
+            if let Some(record) = &stored {
+                object.insert("handle".to_string(), json!(record.handle));
+                object.insert("retrieve_tool".to_string(), json!(RESPONSE_RETRIEVE_TOOL));
+                object.insert(
+                    "retrieve_ttl_seconds".to_string(),
+                    json!(RESPONSE_HANDLE_TTL_SECS),
+                );
+                object.insert("retrieve_expires_at".to_string(), json!(record.expires_at));
+                object.insert(
+                    "retrieve_instruction".to_string(),
+                    json!(format!(
+                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. Only call it if the missing details are needed to answer the user's request.",
+                        preview.len(),
+                        formatted.len(),
+                        record.expires_at,
+                        RESPONSE_HANDLE_TTL_SECS,
+                        record.handle
+                    )),
+                );
+            } else if let Some(status) = &handle_unavailable {
+                object.insert("handle_available".to_string(), json!(false));
+                object.insert("handle_status".to_string(), status.clone());
+            }
         }
         let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
+            let handle_status = if stored.is_some() {
+                "stored"
+            } else if project_root.is_none() {
+                "no_project_root"
+            } else {
+                "store_failed"
+            };
+            observe_response_truncation(
+                formatted.len(),
+                text.len(),
+                true,
+                now,
+                handle_status,
+                started.elapsed(),
+            );
             return text;
         }
         end = end.saturating_sub(1024);
@@ -174,10 +236,12 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
         args.get("handle")
             .and_then(Value::as_str)
             .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: handle".to_string(),
+                message:
+                    "missing required parameter: handle (copy the exact `handle` value from a truncated MCP response envelope)"
+                        .to_string(),
             })?;
     let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())? {
-        Some(record) => json!({
+        ResponseHandleLookup::Found(record) => json!({
             "handle": record.handle,
             "expired": false,
             "original_chars": record.original_chars(),
@@ -185,10 +249,30 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
             "expires_at": record.expires_at,
             "content": record.content,
         }),
-        None => json!({
+        ResponseHandleLookup::Missing => json!({
             "handle": handle,
             "expired": true,
             "content": null,
+            "reason_code": "handle_not_found",
+            "message": "Response handle was not found in this project's local cache.",
+            "retryable": true,
+            "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.",
+        }),
+        ResponseHandleLookup::Expired {
+            created_at,
+            expires_at,
+        } => json!({
+            "handle": handle,
+            "expired": true,
+            "content": null,
+            "reason_code": "handle_expired",
+            "message": format!(
+                "Response handle expired at {expires_at} and was removed from this project's local cache."
+            ),
+            "retryable": true,
+            "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle.",
+            "created_at": created_at,
+            "expires_at": expires_at,
         }),
     };
     let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
@@ -369,10 +453,122 @@ pub async fn handle_profile_scoped_lcm_tool_call(
     clippy::uninlined_format_args
 )]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::json;
 
     use super::super::get_tool_definitions;
     use super::*;
+
+    fn dispatch_tool_names_from_source(function_name: &str) -> BTreeSet<String> {
+        let source = include_str!("mod.rs");
+        let fn_marker = format!("pub async fn {function_name}");
+        let function_source = source
+            .split_once(&fn_marker)
+            .unwrap_or_else(|| panic!("missing function source for {function_name}"))
+            .1;
+        let match_source = function_source
+            .split_once("match tool_name {")
+            .unwrap_or_else(|| panic!("{function_name} does not match on tool_name"))
+            .1;
+        let handler_arms = match_source
+            .split_once("_ => Err")
+            .unwrap_or_else(|| panic!("{function_name} does not have an unknown-tool fallback"))
+            .0;
+
+        handler_arms
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                if !trimmed.starts_with("\"tracedecay_") || !trimmed.contains("=>") {
+                    return None;
+                }
+                let after_opening_quote = trimmed.strip_prefix('"')?;
+                let (name, after_name) = after_opening_quote.split_once('"')?;
+                if after_name.trim_start().starts_with("=>") {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn assert_set_empty(names: BTreeSet<String>, message: &str) {
+        assert!(
+            names.is_empty(),
+            "{message}: {}",
+            names.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    // MCP registry maintenance guardrail:
+    // when adding a tool, update all three surfaces together: its
+    // `def_*` entry in definitions.rs, the `get_tool_definitions()` registry,
+    // and the `handle_tool_call` match arm below. For profile-scoped LCM tools,
+    // also advertise `storage_scope: ["project_local", "hermes_profile"]`
+    // plus `hermes_home` in the schema, then add the profile handler arm. These
+    // lockstep tests intentionally fail with the missing tool name when any
+    // surface drifts.
+    #[test]
+    fn tool_definitions_and_dispatch_handlers_stay_in_lockstep() {
+        let definition_names = get_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>();
+        let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
+
+        // This tool is intentionally hidden from the advertised surface when
+        // the host is missing ast-grep; mirror that runtime filter so the
+        // integrity check covers the actual MCP tools/list surface.
+        if !super::super::definitions::ast_grep_available() {
+            handler_names.remove("tracedecay_ast_grep_rewrite");
+        }
+
+        assert_set_empty(
+            definition_names
+                .difference(&handler_names)
+                .cloned()
+                .collect(),
+            "MCP tool definitions missing handle_tool_call handlers",
+        );
+        assert_set_empty(
+            handler_names
+                .difference(&definition_names)
+                .cloned()
+                .collect(),
+            "handle_tool_call handlers missing MCP tool definitions",
+        );
+    }
+
+    #[test]
+    fn profile_scoped_lcm_definitions_and_handlers_stay_in_lockstep() {
+        let profile_scoped_definition_names = get_tool_definitions()
+            .into_iter()
+            .filter(|tool| {
+                tool.input_schema["properties"]["storage_scope"]["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == "hermes_profile"))
+            })
+            .map(|tool| tool.name)
+            .collect::<BTreeSet<_>>();
+        let handler_names = dispatch_tool_names_from_source("handle_profile_scoped_lcm_tool_call");
+
+        assert_set_empty(
+            profile_scoped_definition_names
+                .difference(&handler_names)
+                .cloned()
+                .collect(),
+            "profile-scoped MCP tool definitions missing profile handler dispatch",
+        );
+        assert_set_empty(
+            handler_names
+                .difference(&profile_scoped_definition_names)
+                .cloned()
+                .collect(),
+            "profile-scoped handler dispatches missing MCP tool definitions",
+        );
+    }
 
     #[test]
     fn test_tool_definitions_complete() {
@@ -619,9 +815,39 @@ mod tests {
             handle,
             crate::tracedecay::current_timestamp(),
         )
-        .unwrap()
-        .expect("stored response should be retrievable");
-        assert_eq!(stored.content, long);
+        .unwrap();
+        match stored {
+            ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
+            other => panic!("stored response should be retrievable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_truncated_json_envelope_reports_store_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".tracedecay"), "not-a-directory").unwrap();
+        let long = format!(
+            "{{\"items\":[{}]}}",
+            (0..3_000)
+                .map(|i| format!("{{\"id\":{i},\"name\":\"item-{i}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let result = truncated_json_envelope_with_handle(Some(dir.path()), &long);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["handle_available"], false);
+        assert!(parsed.get("handle").is_none());
+        assert_eq!(
+            parsed["handle_status"]["reason_code"],
+            "handle_store_failed"
+        );
+        assert!(parsed["handle_status"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be cached locally"));
     }
 
     #[test]

@@ -1,0 +1,36 @@
+{
+  "name": "tracedecay",
+  "version": "0.0.0",
+  "description": "Codex integration for the TraceDecay semantic code intelligence MCP server.",
+  "author": {
+    "name": "ScriptedAlchemy",
+    "url": "https://github.com/ScriptedAlchemy"
+  },
+  "homepage": "https://github.com/ScriptedAlchemy/tracedecay",
+  "repository": "https://github.com/ScriptedAlchemy/tracedecay",
+  "license": "MIT",
+  "keywords": [
+    "code-graph",
+    "mcp",
+    "code-search",
+    "token-savings",
+    "call-graph",
+    "code-health"
+  ],
+  "interface": {
+    "displayName": "TraceDecay",
+    "shortDescription": "Semantic code intelligence and memory for Codex.",
+    "longDescription": "TraceDecay adds a code graph MCP server and Codex skills for cheap code reading, impact analysis, project memory, and context-saving workflows.",
+    "developerName": "ScriptedAlchemy",
+    "category": "Productivity",
+    "defaultPrompt": "Use TraceDecay when you need to inspect code, map dependencies, estimate impact, recall prior project context, or reduce repeated file reads.",
+    "capabilities": [
+      "mcp",
+      "skills",
+      "code-search",
+      "project-memory"
+    ]
+  },
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
+}

@@ -813,3 +813,21 @@ class [[nodiscard]] Result {
         .collect();
     assert!(annot_refs.len() >= 3, "expected at least 3 Annotates refs");
 }
+
+#[test]
+fn test_cpp_function_pointer_typedef() {
+    let source = r#"
+typedef int (*compare_fn)(const void *, const void *);
+"#;
+    let extractor = CppExtractor;
+    let result = extractor.extract("types.hpp", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let typedefs: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Typedef)
+        .collect();
+    assert_eq!(typedefs.len(), 1, "typedef nodes: {:?}", typedefs);
+    assert_eq!(typedefs[0].name, "compare_fn");
+}

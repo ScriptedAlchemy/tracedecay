@@ -1,7 +1,7 @@
 //! Health, test risk, sessions, gini, dependency depth, DSM, and test map
 //! tool handlers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{json, Value};
 
@@ -642,8 +642,106 @@ struct RiskEntry {
     complexity: u32,
     fan_in: usize,
     has_test: bool,
+    attribution_method: TestAttributionMethod,
+    attribution_depth: Option<usize>,
     risk: f64,
     churn: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestAttributionMethod {
+    None,
+    DirectUnit,
+    Closure,
+}
+
+impl TestAttributionMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DirectUnit => "direct_unit",
+            Self::Closure => "closure",
+        }
+    }
+
+    fn risk_multiplier(self) -> f64 {
+        match self {
+            Self::None => 1.0,
+            // Existing direct caller attribution remains a strong signal.
+            Self::DirectUnit => 0.1,
+            // Transitive closure is intentionally more conservative than a
+            // direct test→function edge: broad integration evidence should
+            // reduce risk, not erase it.
+            Self::Closure => 0.4,
+        }
+    }
+}
+
+fn build_test_attribution_depths(
+    all_edges: &[crate::types::Edge],
+    node_to_file: &HashMap<String, String>,
+    test_annotated_callers: &HashSet<String>,
+    max_depth: usize,
+) -> HashMap<String, usize> {
+    let mut outgoing_calls: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seed_nodes: HashSet<String> = HashSet::new();
+
+    for edge in all_edges {
+        if edge.kind != EdgeKind::Calls {
+            continue;
+        }
+
+        outgoing_calls
+            .entry(edge.source.clone())
+            .or_default()
+            .push(edge.target.clone());
+
+        let is_test_seed = node_to_file
+            .get(&edge.source)
+            .is_some_and(|file| crate::tracedecay::is_test_file(file))
+            || test_annotated_callers.contains(&edge.source);
+        if is_test_seed {
+            seed_nodes.insert(edge.source.clone());
+        }
+    }
+
+    let mut reached_depths: HashMap<String, usize> = HashMap::new();
+    let mut queue: VecDeque<(String, usize)> = seed_nodes
+        .into_iter()
+        .map(|node_id| (node_id, 0usize))
+        .collect();
+    let mut best_seen: HashMap<String, usize> = queue.iter().cloned().collect();
+
+    while let Some((node_id, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        let next_depth = depth + 1;
+        for target in outgoing_calls.get(&node_id).into_iter().flatten() {
+            let should_visit = best_seen
+                .get(target)
+                .is_none_or(|seen_depth| next_depth < *seen_depth);
+            if !should_visit {
+                continue;
+            }
+            best_seen.insert(target.clone(), next_depth);
+            reached_depths
+                .entry(target.clone())
+                .and_modify(|existing| *existing = (*existing).min(next_depth))
+                .or_insert(next_depth);
+            queue.push_back((target.clone(), next_depth));
+        }
+    }
+
+    reached_depths
+}
+
+fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
+    match depth {
+        Some(1) => TestAttributionMethod::DirectUnit,
+        Some(depth) if depth >= 2 => TestAttributionMethod::Closure,
+        None | Some(_) => TestAttributionMethod::None,
+    }
 }
 
 /// Handles `tracedecay_test_risk` tool calls.
@@ -680,10 +778,10 @@ pub(super) async fn handle_test_risk(
     let test_annotated_fns = cg.get_test_annotated_node_ids(&fn_ids).await?;
     let skip_coverage = cg.get_skip_test_coverage_node_ids().await?;
 
-    // Source functions/methods (exclude test files, test-named nodes,
-    // #[test]-annotated functions, functions inside #[cfg(test)] modules,
-    // and functions marked with `/// skip-test-coverage`).
-    let source_fns: Vec<_> = all_nodes
+    // Eligible functions/methods for test-risk accounting after excluding
+    // tests/test helpers and explicit skip markers, but before removing
+    // non-`src/` code from the denominator.
+    let eligible_fns: Vec<_> = all_nodes
         .iter()
         .filter(|n| {
             matches!(n.kind, NodeKind::Function | NodeKind::Method)
@@ -707,6 +805,19 @@ pub(super) async fn handle_test_risk(
         })
         .collect();
 
+    // Phase-1 honest bucketing: non-`src/` code (dashboard Python, scripts,
+    // benches, build.rs, etc.) is tracked separately and removed from the
+    // denominator entirely.
+    let excluded_count = eligible_fns
+        .iter()
+        .filter(|n| !n.file_path.starts_with("src/"))
+        .count();
+    let source_fns: Vec<_> = eligible_fns
+        .iter()
+        .copied()
+        .filter(|n| n.file_path.starts_with("src/"))
+        .collect();
+
     // Count fan_in (calls edges targeting each node)
     let mut fan_in: HashMap<String, usize> = HashMap::new();
     for e in &all_edges {
@@ -715,29 +826,35 @@ pub(super) async fn handle_test_risk(
         }
     }
 
-    // Determine which nodes are tested: called by nodes in test files or
-    // by #[test]-annotated functions (inline test modules).
+    // Determine which nodes are test-attributed: seed from direct test
+    // callers, then walk outgoing Calls edges up to depth 3 so the aggregate
+    // view matches the depth-3 transitive test mapping used by test_map.
     let call_source_ids: Vec<String> = all_edges
         .iter()
         .filter(|e| e.kind == EdgeKind::Calls)
         .map(|e| e.source.clone())
         .collect();
     let test_annotated_callers = cg.get_test_annotated_node_ids(&call_source_ids).await?;
-    let mut tested: HashSet<String> = HashSet::new();
-    for e in &all_edges {
-        if e.kind == EdgeKind::Calls {
-            let is_test = node_to_file
-                .get(&e.source)
-                .is_some_and(|f| crate::tracedecay::is_test_file(f))
-                || test_annotated_callers.contains(&e.source);
-            if is_test {
-                tested.insert(e.target.clone());
-            }
-        }
-    }
+    let attribution_depths =
+        build_test_attribution_depths(&all_edges, &node_to_file, &test_annotated_callers, 3);
 
     let total_functions = source_fns.len();
-    let tested_count = source_fns.iter().filter(|n| tested.contains(&n.id)).count();
+    let attributed_count = source_fns
+        .iter()
+        .filter(|n| attribution_depths.contains_key(&n.id))
+        .count();
+    let direct_unit_attributed = source_fns
+        .iter()
+        .filter(|n| attribution_depths.get(&n.id).copied() == Some(1))
+        .count();
+    let closure_attributed = source_fns
+        .iter()
+        .filter(|n| {
+            attribution_depths
+                .get(&n.id)
+                .is_some_and(|depth| *depth >= 2)
+        })
+        .count();
     let skipped_count = all_nodes
         .iter()
         .filter(|n| {
@@ -754,8 +871,10 @@ pub(super) async fn handle_test_risk(
         .map(|n| {
             let complexity = n.branches + n.loops + n.returns + n.max_nesting;
             let fi = *fan_in.get(&n.id).unwrap_or(&0);
-            let has_test = tested.contains(&n.id);
-            let multiplier = if has_test { 0.1 } else { 1.0 };
+            let attribution_depth = attribution_depths.get(&n.id).copied();
+            let attribution_method = classify_test_attribution(attribution_depth);
+            let has_test = attribution_method != TestAttributionMethod::None;
+            let multiplier = attribution_method.risk_multiplier();
             let risk = (f64::from(complexity) + 1.0) * (fi as f64 + 1.0) * multiplier;
             RiskEntry {
                 id: n.id.clone(),
@@ -765,6 +884,8 @@ pub(super) async fn handle_test_risk(
                 complexity,
                 fan_in: fi,
                 has_test,
+                attribution_method,
+                attribution_depth,
                 risk,
                 churn: 0,
             }
@@ -796,10 +917,23 @@ pub(super) async fn handle_test_risk(
         .map(|r| r.name.clone())
         .unwrap_or_default();
 
+    let reachable_unattributed = source_fns
+        .iter()
+        .filter(|n| {
+            !attribution_depths.contains_key(&n.id) && fan_in.get(&n.id).copied().unwrap_or(0) > 0
+        })
+        .count();
+    let orphan_entry = source_fns
+        .iter()
+        .filter(|n| {
+            !attribution_depths.contains_key(&n.id) && fan_in.get(&n.id).copied().unwrap_or(0) == 0
+        })
+        .count();
+
     let coverage_pct = if total_functions == 0 {
         0.0
     } else {
-        (tested_count as f64 / total_functions as f64 * 100.0).round()
+        (attributed_count as f64 / total_functions as f64 * 100.0).round()
     };
 
     risks.truncate(limit);
@@ -815,6 +949,8 @@ pub(super) async fn handle_test_risk(
                 "complexity": r.complexity,
                 "fan_in": r.fan_in,
                 "has_test": r.has_test,
+                "attribution_method": r.attribution_method.as_str(),
+                "attribution_depth": r.attribution_depth,
                 "risk": (r.risk * 100.0).round() / 100.0,
                 "churn": r.churn,
             })
@@ -825,10 +961,28 @@ pub(super) async fn handle_test_risk(
         "risks": risk_items,
         "summary": {
             "total_functions": total_functions,
-            "tested": tested_count,
+            "tested": attributed_count,
             "skipped": skipped_count,
             "coverage_pct": coverage_pct,
             "top_risk_untested": top_risk_untested,
+            "top_risk_unattributed": top_risk_untested,
+            "attribution": {
+                "depth": 3,
+                "direct_unit_attributed": direct_unit_attributed,
+                "closure_attributed": closure_attributed,
+                "trait_resolved_attributed": 0,
+                "public_api_attributed": 0,
+                "cli_entry_attributed": 0,
+                "total_attributed": attributed_count,
+            },
+            "buckets": {
+                "attributed": attributed_count,
+                "reachable_unattributed": reachable_unattributed,
+                "orphan_entry": orphan_entry,
+                "excluded": excluded_count,
+            },
+            "confidence": "static_lower_bound",
+            "confidence_note": "coverage_pct is a depth-3 static attribution lower bound; direct_unit is strongest, closure is calibrated integration-style evidence and keeps a higher residual risk than a direct test edge.",
         }
     });
 

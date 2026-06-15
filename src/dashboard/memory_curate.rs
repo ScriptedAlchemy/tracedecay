@@ -19,7 +19,7 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
-use super::memory_api::{
+use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
 use super::util::{qmarks, query_rows};

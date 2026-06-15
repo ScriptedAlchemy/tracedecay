@@ -198,8 +198,8 @@ Each branch DB is a full copy (~37MB in a typical project). Mitigation strategie
 
 The following questions from the original design were resolved during implementation:
 
-- **MCP server DB selection**: reads `.git/HEAD` at startup, opens the corresponding branch DB. No mid-session switching.
-- **`tracedecay status` branch info**: yes, `tracedecay_status` now includes `active_branch`, `branch_fallback`, and `branch_warning` fields.
+- **MCP server DB selection**: reads `.git/HEAD` at startup, opens the corresponding branch DB, and hot-reopens on mid-session branch drift before MCP tool calls. If the live branch is untracked, the reopened instance serves the nearest tracked ancestor/default with an explicit fallback warning.
+- **`tracedecay status` branch info**: yes, `tracedecay_status` now includes open/live/serving branch fields, `branch_resolution`, `branch_drifted`, `branch_warnings`, and the full `branch_diagnostics` object; legacy `branch_fallback`/`branch_warning` are still emitted for fallback cases.
 - **`tracedecay sync --force`**: re-indexes the current branch's DB only.
 - **Cleanup strategy**: manual only via `tracedecay branch remove` and `tracedecay branch gc`. No automatic pruning.
 - **Opt-in model**: multi-branch activates when the user runs `tracedecay branch add`. Without it, single-DB mode is unchanged.

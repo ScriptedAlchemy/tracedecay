@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 
 use crate::tracedecay::current_timestamp;
 
-use super::{payload, schema, security, util, LcmCleanConfig, LcmError, LCM_SCHEMA_VERSION};
+use super::{
+    gc, payload, query, schema, security, util, LcmCleanConfig, LcmError, LcmGcConfig,
+    LCM_SCHEMA_VERSION,
+};
 
 const MAX_SAMPLES: usize = 20;
 const RETENTION_OLD_DAYS: f64 = 30.0;
@@ -28,6 +31,7 @@ pub(crate) struct DoctorRequest<'a> {
     pub(crate) mode: &'a str,
     pub(crate) apply: bool,
     pub(crate) clean_config: LcmCleanConfig,
+    pub(crate) gc_config: LcmGcConfig,
 }
 
 struct RepairRequest<'a> {
@@ -39,6 +43,7 @@ struct RepairRequest<'a> {
     mode: &'a str,
     apply: bool,
     clean_config: &'a LcmCleanConfig,
+    gc_config: &'a LcmGcConfig,
 }
 
 pub(crate) async fn doctor(
@@ -51,6 +56,7 @@ pub(crate) async fn doctor(
         request.provider,
         request.session_id,
         &request.clean_config,
+        &request.gc_config,
     )
     .await?;
     let repairs = plan_and_apply_repairs(
@@ -64,6 +70,7 @@ pub(crate) async fn doctor(
             mode: request.mode,
             apply: request.apply,
             clean_config: &request.clean_config,
+            gc_config: &request.gc_config,
         },
     )
     .await?;
@@ -85,7 +92,7 @@ pub(crate) async fn doctor(
         "provider": request.provider,
         "session_id": request.session_id,
         "mode": request.mode,
-        "dry_run": matches!(request.mode, "repair" | "clean") && !request.apply,
+        "dry_run": matches!(request.mode, "repair" | "clean" | "gc") && !request.apply,
         "apply": request.apply,
         "diagnostics": diagnostics,
         "repairs": repairs,
@@ -98,6 +105,7 @@ async fn gather_diagnostics(
     provider: &str,
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
+    gc_config: &LcmGcConfig,
 ) -> Result<Value, LcmError> {
     let schema_version = schema::schema_version(conn).await;
     let raw_message_count =
@@ -107,7 +115,7 @@ async fn gather_diagnostics(
     let external_payload_count =
         util::count_by_provider_session(conn, "lcm_external_payloads", provider, session_id)
             .await?;
-    let payloads = payload_diagnostics(conn, storage_root, provider, session_id).await?;
+    let payloads = payload_diagnostics(conn, storage_root, provider, session_id, gc_config).await?;
     let fts = fts_diagnostics(conn, provider, session_id).await?;
     let summaries = summary_integrity(conn, provider, session_id).await?;
     let lifecycle = lifecycle_integrity(conn, provider, session_id).await?;
@@ -146,6 +154,7 @@ async fn plan_and_apply_repairs(
         mode,
         apply,
         clean_config,
+        gc_config,
     } = request;
     let mut planned = Vec::new();
     let mut applied = Vec::new();
@@ -169,9 +178,6 @@ async fn plan_and_apply_repairs(
         });
         planned.push(action.clone());
         if apply {
-            // Recreates the table/triggers in the current (v3, content-only)
-            // structure before rebuilding, so this also repairs databases
-            // whose FTS objects predate the role/metadata_json removal.
             schema::rebuild_raw_fts(conn)
                 .await
                 .ok_or_else(|| LcmError::Db("raw FTS rebuild failed".to_string()))?;
@@ -204,7 +210,7 @@ async fn plan_and_apply_repairs(
             let action = json!({
                 "kind": "clean_lcm_noise",
                 "safe": true,
-                "description": "Delete LCM ignored/stateless session candidates and standalone configured-noise raw messages",
+                "description": "Delete LCM ignored/stateless session candidates and standalone configured-noise raw messages. Payload files owned by deleted rows are reaped separately by payload GC after the grace window.",
                 "candidate_count": candidate_count,
                 "session_candidate_count": diagnostics["cleanup"]["session_candidates"].as_array().map(Vec::len).unwrap_or_default(),
                 "message_candidate_count": diagnostics["cleanup"]["message_candidates"].as_array().map(Vec::len).unwrap_or_default(),
@@ -228,6 +234,43 @@ async fn plan_and_apply_repairs(
                 applied.push(applied_action);
             }
         }
+    }
+
+    if mode == "gc" {
+        let report = gc::run_payload_gc_with_apply(
+            conn,
+            storage_root,
+            provider,
+            session_id,
+            gc_config,
+            apply,
+            current_timestamp(),
+        )
+        .await?;
+        backup = report.backup.clone().unwrap_or(Value::Null);
+        let action = json!({
+            "kind": "payload_gc",
+            "safe": true,
+            "description": if apply {
+                "Apply payload garbage collection"
+            } else {
+                "Preview payload garbage collection"
+            },
+            "reapable_now_refs": report.orphans.count + report.unreferenced.count,
+            "reapable_now_bytes": report.orphans.bytes + report.unreferenced.bytes,
+        });
+        if apply {
+            applied.push(action);
+        } else {
+            planned.push(action);
+        }
+        return Ok(json!({
+            "planned_actions": planned,
+            "applied_actions": applied,
+            "backup": backup,
+            "unsafe_actions_skipped": [],
+            "gc_report": report,
+        }));
     }
 
     Ok(json!({
@@ -312,74 +355,47 @@ async fn payload_diagnostics(
     storage_root: &Path,
     provider: &str,
     session_id: Option<&str>,
+    gc_config: &LcmGcConfig,
 ) -> Result<Value, LcmError> {
-    let dir = payload::payload_dir(storage_root);
-    let mut missing = 0;
-    let mut missing_refs = Vec::new();
-    let mut metadata_refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref
-             FROM lcm_external_payloads
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let payload_ref: String = row.get(0)?;
-        metadata_refs.insert(payload_ref.clone());
-        if payload::validate_payload_ref(&payload_ref).is_err() || !dir.join(&payload_ref).is_file()
-        {
-            missing += 1;
-            if missing_refs.len() < MAX_SAMPLES {
-                missing_refs.push(payload_ref);
-            }
-        }
-    }
+    let detail = query::payload_health_detail(
+        conn,
+        storage_root,
+        provider,
+        session_id,
+        false,
+        MAX_SAMPLES,
+        gc_config,
+    )
+    .await?;
+    let orphan_refs = detail
+        .orphan_files
+        .iter()
+        .map(|sample| sample.payload_ref.clone())
+        .collect::<Vec<_>>();
 
-    let mut orphan_files = 0;
-    let mut orphan_refs = Vec::new();
-    let file_owner_refs = if session_id.is_some() {
-        all_payload_metadata_refs(conn).await?
-    } else {
-        metadata_refs.clone()
-    };
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if payload::validate_payload_ref(&name).is_err() || !entry.path().is_file() {
-                continue;
-            }
-            if !file_owner_refs.contains(&name) {
-                orphan_files += 1;
-                if orphan_refs.len() < MAX_SAMPLES {
-                    orphan_refs.push(name);
-                }
-            }
-        }
-    }
-
-    let unreferenced_metadata =
-        count_unreferenced_payload_metadata(conn, provider, session_id).await?;
-    let placeholder_refs =
-        placeholder_ref_diagnostics(conn, &dir, provider, session_id, &metadata_refs).await?;
     Ok(json!({
-        "missing_files": missing,
-        "missing_payload_refs": missing_refs,
-        "orphan_files": orphan_files,
+        "missing_files": detail.payload.missing_count,
+        "missing_payload_refs": detail.missing_payload_refs,
+        "orphan_files": detail.payload.orphan_file_count,
         "orphan_payload_refs": orphan_refs,
-        "unreferenced_metadata": unreferenced_metadata,
-        "placeholder_refs_total": placeholder_refs["placeholder_refs_total"],
-        "missing_placeholder_metadata": placeholder_refs["missing_placeholder_metadata"],
-        "missing_placeholder_files": placeholder_refs["missing_placeholder_files"],
-        "missing_placeholder_refs": placeholder_refs["missing_placeholder_refs"],
-        "gc_candidate_files": orphan_files,
+        "unreferenced_metadata": detail.payload.unreferenced_count,
+        "placeholder_refs_total": detail.payload.placeholder_ref_count,
+        "missing_placeholder_metadata": detail.payload.missing_placeholder_metadata_count,
+        "missing_placeholder_files": detail.payload.missing_placeholder_file_count,
+        "missing_placeholder_refs": detail.missing_placeholder_refs,
+        "gc_candidate_files": detail.payload.orphan_file_count,
         "gc_candidate_payload_refs": orphan_refs,
+        "total_bytes": detail.payload.total_bytes,
+        "referenced_bytes": detail.payload.referenced_bytes,
+        "orphan_file_bytes": detail.payload.orphan_file_bytes,
+        "reclaimable_bytes": detail.payload.reclaimable_bytes,
+        "reclaimable_bytes_after_grace": detail.payload.reclaimable_bytes_after_grace,
+        "integrity_mismatch_count": detail.payload.integrity_mismatch_count,
+        "integrity_mismatch_refs": detail.integrity_mismatch_refs,
     }))
 }
 
+#[allow(dead_code)]
 async fn placeholder_ref_diagnostics(
     conn: &Connection,
     payload_dir: &Path,
@@ -458,6 +474,7 @@ async fn placeholder_ref_diagnostics(
     }))
 }
 
+#[allow(dead_code)]
 async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>, LcmError> {
     let mut refs = BTreeSet::new();
     let mut rows = conn
@@ -470,6 +487,7 @@ async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>
     Ok(refs)
 }
 
+#[allow(dead_code)]
 async fn count_unreferenced_payload_metadata(
     conn: &Connection,
     provider: &str,
@@ -495,39 +513,13 @@ async fn count_unreferenced_payload_metadata(
     Ok(unreferenced)
 }
 
+#[allow(dead_code)]
 async fn referenced_payload_refs(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let storage_kind: String = row.get(0)?;
-        let payload_ref: Option<String> = row.get(1).unwrap_or(None);
-        if storage_kind == "external" {
-            if let Some(payload_ref) = payload_ref {
-                refs.insert(payload_ref);
-            }
-        }
-        for index in 2..6 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            refs.extend(
-                value
-                    .as_deref()
-                    .map(payload::extract_payload_refs_from_text)
-                    .unwrap_or_default(),
-            );
-        }
-    }
-    Ok(refs)
+    gc::referenced_payload_refs(conn, provider, session_id).await
 }
 
 async fn fts_diagnostics(

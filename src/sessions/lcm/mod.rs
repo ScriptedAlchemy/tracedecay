@@ -1,13 +1,16 @@
 pub mod compression;
+pub mod compression_decision;
 pub mod dag;
 pub mod doctor;
 pub mod extraction;
+pub mod gc;
 pub mod hermes;
 pub mod payload;
 pub mod query;
 pub mod raw;
 pub mod schema;
 pub mod security;
+mod summarizer;
 pub mod types;
 pub mod util;
 
@@ -23,14 +26,16 @@ pub use types::{
     LcmError, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
     LcmExpandQueryPagination, LcmExpandQueryRequest, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination,
-    LcmExpandTarget, LcmExpandedSummarySource, LcmGrepHit, LcmGrepRequest, LcmGrepSort,
-    LcmLifecycleState, LcmLifecycleUpdate, LcmLoadSessionMessage, LcmLoadSessionPage,
-    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPayloadExpansion, LcmPayloadRef,
-    LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRawMessageOverview, LcmScope,
-    LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSourceRef, LcmStatus, LcmStorageKind,
-    LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
+    LcmExpandTarget, LcmExpandedSummarySource, LcmGcConfig, LcmGrepHit, LcmGrepRequest,
+    LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate, LcmLoadSessionMessage, LcmLoadSessionPage,
+    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPayloadExpansion, LcmPayloadGcStatus,
+    LcmPayloadRef, LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRawMessageOverview,
+    LcmScope, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSourceRef, LcmStatus,
+    LcmStorageKind, LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
     LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
     DERIVED_TRUNCATION_MARKER, LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS,
     LCM_DEFAULT_FRESH_TAIL_COUNT, LCM_DEFAULT_SUMMARY_FAN_IN, MAX_DERIVED_SNIPPET_CHARS,
     MAX_DERIVED_TEXT_CHARS,
 };
+
+pub use gc::LcmGcReport;

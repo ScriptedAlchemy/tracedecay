@@ -19,10 +19,12 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 
+use crate::sessions::shared::{
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
+    title_from_messages, StoredCursor, TranscriptIngestStats,
+};
 use crate::sessions::source::{
-    append_tool_calls_metadata, append_usage_metadata, collect_files_with_ext,
-    content_storage_text_and_tools, paths_equal, read_changed_file, title_from_messages,
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    collect_files_with_ext, read_changed_file, ParsedTranscript, SessionDraft, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -128,9 +130,9 @@ pub async fn ingest_kiro_for_project(
     db: &crate::global_db::GlobalDb,
     project_root: &Path,
     max_new_bytes: Option<u64>,
-) -> crate::sessions::source::TranscriptIngestStats {
+) -> TranscriptIngestStats {
     let Some(source) = KiroSource::new() else {
-        return crate::sessions::source::TranscriptIngestStats::default();
+        return TranscriptIngestStats::default();
     };
     crate::sessions::source::ingest_source(db, &source, project_root, max_new_bytes).await
 }

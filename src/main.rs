@@ -254,6 +254,12 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         None => return commands::handle_no_command().await,
     };
 
+    maybe_run_extract_worker(&command);
+    run_startup_preamble(&command);
+    dispatch_command(command).await
+}
+
+fn maybe_run_extract_worker(command: &Commands) {
     // Worker mode bypasses every normal startup path (no config load, no
     // worldwide-counter ping, no agent checks). The token handshake inside
     // run_worker is the only authentication; this dispatch must happen
@@ -261,16 +267,16 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     if matches!(command, Commands::ExtractWorker) {
         tracedecay::extraction_worker::run_worker();
     }
+}
 
-    let skip_startup_maintenance = should_skip_startup_maintenance(&command);
-    let skip_agent_install_maintenance = should_skip_agent_install_maintenance(&command);
+fn run_startup_preamble(command: &Commands) {
+    let skip_startup_maintenance = should_skip_startup_maintenance(command);
+    let skip_agent_install_maintenance = should_skip_agent_install_maintenance(command);
 
     // First-run notice (check BEFORE any config save creates the file)
     let is_first_run = tracedecay::user_config::UserConfig::is_fresh();
 
     // Best-effort flush of pending worldwide counter tokens.
-    // `matches!` borrows `command` temporarily; the borrow is dropped
-    // before the `match command` move below, so this compiles.
     let is_force_flush = matches!(
         command,
         Commands::Init { .. } | Commands::Sync { .. } | Commands::Status { .. }
@@ -283,7 +289,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     if !skip_startup_maintenance {
         global::try_flush(&mut user_config, is_force_flush);
     }
-    if !is_local_install_command(&command) {
+    if !is_local_install_command(command) {
         user_config.save_if_exists();
     }
 
@@ -301,8 +307,11 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     // Best-effort check: warn if install needs re-running.
     if !skip_agent_install_maintenance {
         tracedecay::agents::claude::check_install_stale();
+        maybe_run_silent_reinstall(&mut user_config);
     }
+}
 
+fn maybe_run_silent_reinstall(user_config: &mut tracedecay::user_config::UserConfig) {
     // Silent reinstall: re-run install for every tracked agent so permissions,
     // hooks, and MCP config stay in sync with the new binary.
     //
@@ -313,95 +322,123 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     //       we just advance `previous_version` and skip reinstall.
     //   (b) Fallback for external upgrades (`brew upgrade`, `cargo install`):
     //       the running version is newer than `last_installed_version`.
-    if !skip_agent_install_maintenance {
-        let running = env!("CARGO_PKG_VERSION");
-        let previous_version = if user_config.previous_version.is_empty() {
-            "6.0.0".to_string()
-        } else {
-            user_config.previous_version.clone()
-        };
-        let upgrade_detected = previous_version != running;
-        let transition_needs_reinstall = upgrade_detected
-            && (tracedecay::cloud::is_newer_minor_version(&previous_version, running)
-                || tracedecay::cloud::is_newer_minor_version(running, &previous_version));
-        let external_upgrade_needs_reinstall = !upgrade_detected
-            && (user_config.last_installed_version.is_empty()
-                || tracedecay::cloud::is_newer_version(
-                    &user_config.last_installed_version,
-                    running,
-                ));
-        let needs_reinstall = transition_needs_reinstall || external_upgrade_needs_reinstall;
+    let running = env!("CARGO_PKG_VERSION");
+    let previous_version = if user_config.previous_version.is_empty() {
+        "6.0.0".to_string()
+    } else {
+        user_config.previous_version.clone()
+    };
+    let upgrade_detected = previous_version != running;
+    let transition_needs_reinstall = upgrade_detected
+        && (tracedecay::cloud::is_newer_minor_version(&previous_version, running)
+            || tracedecay::cloud::is_newer_minor_version(running, &previous_version));
+    let external_upgrade_needs_reinstall = !upgrade_detected
+        && (user_config.last_installed_version.is_empty()
+            || tracedecay::cloud::is_newer_version(&user_config.last_installed_version, running));
+    let needs_reinstall = transition_needs_reinstall || external_upgrade_needs_reinstall;
 
-        if !user_config.installed_agents.is_empty() && !running.is_empty() && needs_reinstall {
-            if let (Some(home), Some(bin)) = (
-                tracedecay::agents::home_dir(),
-                tracedecay::agents::which_tracedecay(),
-            ) {
-                let mut all_ok = true;
-                for id in &user_config.installed_agents {
-                    if let Ok(ag) = tracedecay::agents::get_integration(id) {
-                        let ctx = tracedecay::agents::InstallContext {
-                            home: home.clone(),
-                            tracedecay_bin: bin.clone(),
-                            tool_permissions: tracedecay::agents::expected_tool_perms(),
-                            profile: None,
-                            project_root: None,
-                            dashboard: true,
-                        };
-                        if ag.install(&ctx).is_err() {
-                            all_ok = false;
-                        }
+    if !user_config.installed_agents.is_empty() && !running.is_empty() && needs_reinstall {
+        if let (Some(home), Some(bin)) = (
+            tracedecay::agents::home_dir(),
+            tracedecay::agents::which_tracedecay(),
+        ) {
+            let mut all_ok = true;
+            for id in &user_config.installed_agents {
+                if let Ok(ag) = tracedecay::agents::get_integration(id) {
+                    let ctx = tracedecay::agents::InstallContext {
+                        home: home.clone(),
+                        tracedecay_bin: bin.clone(),
+                        tool_permissions: tracedecay::agents::expected_tool_perms(),
+                        profile: None,
+                        project_root: None,
+                        dashboard: true,
+                    };
+                    if ag.install(&ctx).is_err() {
+                        all_ok = false;
                     }
                 }
-                if all_ok {
-                    user_config.last_installed_version = running.to_string();
-                    user_config.previous_version = running.to_string();
-                    user_config.save();
-                }
             }
-        } else if upgrade_detected {
-            // Patch-only bump (or nothing to reinstall) — advance the marker
-            // so we don't keep re-checking on every subsequent startup.
-            user_config.previous_version = running.to_string();
-            user_config.save();
+            if all_ok {
+                user_config.last_installed_version = running.to_string();
+                user_config.previous_version = running.to_string();
+                user_config.save();
+            }
         }
+    } else if upgrade_detected {
+        // Patch-only bump (or nothing to reinstall) — advance the marker so we
+        // don't keep re-checking on every subsequent startup.
+        user_config.previous_version = running.to_string();
+        user_config.save();
     }
+}
 
+async fn largest_memory_bank_fact_count(cg: &TraceDecay) -> tracedecay::errors::Result<usize> {
+    let db = libsql::Builder::new_local(cg.db_path()).build().await?;
+    let conn = db.connect()?;
+    let mut rows = conn
+        .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(0);
+    };
+    Ok(row.get::<i64>(0).unwrap_or(0).max(0) as usize)
+}
+
+fn format_memory_status_report(
+    status: &tracedecay::memory::types::MemoryStatus,
+    largest_bank_facts: usize,
+) -> String {
+    let capacity = status.estimated_capacity.max(1);
+    let utilization_pct = largest_bank_facts as f64 / capacity as f64 * 100.0;
+    format!(
+        concat!(
+            "Holographic memory status\n",
+            "facts: {}\n",
+            "entities: {}\n",
+            "banks: {}\n",
+            "algebra: {}\n",
+            "hrr dim: {}\n",
+            "capacity / bank: {}\n",
+            "largest bank utilization: {}/{} ({:.1}%)\n",
+            "below recall floor: {}\n",
+            "missing vectors: {}\n",
+            "helpful feedback: {}\n",
+            "unhelpful feedback: {}\n",
+            "trust buckets: <0.25={}  0.25-0.50={}  0.50-0.75={}  0.75-1.00={}\n",
+            "legacy backfill complete: {}\n",
+            "repair: missing_vectors_repaired={}  banks_rebuilt={}\n"
+        ),
+        status.fact_count,
+        status.entity_count,
+        status.bank_count,
+        status.algebra_name,
+        status.hrr_dim,
+        status.estimated_capacity,
+        largest_bank_facts,
+        status.estimated_capacity,
+        utilization_pct,
+        status.below_default_recall_threshold_count,
+        status.missing_vector_count,
+        status.helpful_count,
+        status.unhelpful_count,
+        status.trust_0_025_count,
+        status.trust_025_050_count,
+        status.trust_050_075_count,
+        status.trust_075_100_count,
+        if status.legacy_backfill_complete {
+            "yes"
+        } else {
+            "no"
+        },
+        status.repair.missing_vectors_repaired,
+        status.repair.banks_rebuilt,
+    )
+}
+
+async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Init { path, skip_folders } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            if TraceDecay::is_initialized(&project_path) {
-                eprintln!(
-                    "\x1b[31merror:\x1b[0m TraceDecay is already initialized at '{}'.\n\
-                     Use \x1b[1mtracedecay sync\x1b[0m to update the index, or \
-                     \x1b[1mtracedecay sync --force\x1b[0m to rebuild it.",
-                    project_path.display()
-                );
-                std::process::exit(1);
-            }
-            // Check for updates in parallel with indexing
-            let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-            commands::init_and_index(&project_path, &skip_folders, false).await?;
-
-            // Print update notice from parallel check (suppressed for 15 min)
-            if let Ok(Some(latest)) = version_handle.join() {
-                let current_version = env!("CARGO_PKG_VERSION");
-                let now = current_unix_timestamp();
-                let mut config = tracedecay::user_config::UserConfig::load();
-                config.cached_latest_version = latest.clone();
-                config.last_version_check_at = now;
-                config.save_if_exists();
-                if tracedecay::cloud::is_newer_version(current_version, &latest)
-                    && now - config.last_version_warning_at >= 900
-                {
-                    eprintln!(
-                        "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
-                        current_version, latest
-                    );
-                    config.last_version_warning_at = now;
-                    config.save_if_exists();
-                }
-            }
+            commands::handle_init(path, skip_folders).await?;
         }
         Commands::Sync {
             path,
@@ -410,112 +447,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
             doctor,
             verbose,
         } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            if !TraceDecay::is_initialized(&project_path) {
-                eprintln!(
-                    "\x1b[31merror:\x1b[0m no TraceDecay index found at '{}'.\n\
-                     Run \x1b[1mtracedecay init\x1b[0m to create one first.",
-                    project_path.display()
-                );
-                std::process::exit(1);
-            }
-            // Warn if legacy .codegraph directory exists
-            if project_path.join(".codegraph").is_dir() {
-                eprintln!(
-                    "warning: found legacy .codegraph/ directory at '{}'. \
-                     tracedecay now uses .tracedecay/ — the old directory can be safely deleted.",
-                    project_path.display()
-                );
-            }
-            // Check for updates in parallel with indexing
-            let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-
-            if force {
-                commands::init_and_index(&project_path, &skip_folders, verbose).await?;
-            } else {
-                let mut cg = TraceDecay::open(&project_path).await?;
-                cg.add_skip_folders(&skip_folders);
-                let spinner = Spinner::new();
-                let sync_start = std::time::Instant::now();
-                let result = cg
-                    .sync_with_progress_verbose(
-                        |current, total, detail| {
-                            if current == 0 {
-                                // Phase message (scanning, hashing, detecting, resolving)
-                                spinner.set_message(detail);
-                            } else {
-                                // Per-file progress with ETA
-                                let elapsed = sync_start.elapsed().as_secs_f64();
-                                let eta = if current > 1 {
-                                    let per_file = elapsed / (current - 1) as f64;
-                                    let remaining = per_file * (total - current) as f64;
-                                    if remaining >= 1.0 {
-                                        format!(" (ETA: {remaining:.0}s)")
-                                    } else {
-                                        String::new()
-                                    }
-                                } else {
-                                    String::new()
-                                };
-                                spinner.set_message(&format!(
-                                    "[{current}/{total}] syncing {detail}{eta}"
-                                ));
-                            }
-                        },
-                        |msg| {
-                            if verbose {
-                                eprintln!("  \x1b[2m[verbose]\x1b[0m {msg}");
-                            }
-                        },
-                    )
-                    .await?;
-                let skipped_msg = if result.skipped_paths.is_empty() {
-                    String::new()
-                } else {
-                    format!(", {} skipped", result.skipped_paths.len())
-                };
-                spinner.done(&format!(
-                    "sync done — {} added, {} modified, {} removed{skipped_msg} in {}ms",
-                    result.files_added,
-                    result.files_modified,
-                    result.files_removed,
-                    result.duration_ms
-                ));
-                if !result.skipped_paths.is_empty() {
-                    eprintln!();
-                    eprintln!(
-                        "\x1b[33mSkipped ({}) — files found but not readable:\x1b[0m",
-                        result.skipped_paths.len()
-                    );
-                    for (path, reason) in &result.skipped_paths {
-                        eprintln!("  ! {path}: {reason}");
-                    }
-                }
-                if doctor {
-                    commands::print_sync_doctor(&result);
-                }
-                global::update_global_db(&cg).await;
-            }
-
-            // Print update notice from parallel check (suppressed for 15 min)
-            if let Ok(Some(latest)) = version_handle.join() {
-                let current_version = env!("CARGO_PKG_VERSION");
-                let now = current_unix_timestamp();
-                let mut config = tracedecay::user_config::UserConfig::load();
-                config.cached_latest_version = latest.clone();
-                config.last_version_check_at = now;
-                config.save_if_exists();
-                if tracedecay::cloud::is_newer_version(current_version, &latest)
-                    && now - config.last_version_warning_at >= 900
-                {
-                    eprintln!(
-                        "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
-                        current_version, latest
-                    );
-                    config.last_version_warning_at = now;
-                    config.save_if_exists();
-                }
-            }
+            commands::handle_sync(path, force, skip_folders, doctor, verbose).await?;
         }
         Commands::Status {
             path,
@@ -1236,47 +1168,13 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {
-            let mut config = tracedecay::user_config::UserConfig::load();
-            config.upload_enabled = false;
-            config.save();
-            eprintln!("Worldwide counter upload disabled. You can re-enable with `tracedecay enable-upload-counter`.");
+            commands::handle_upload_counter(false);
         }
         Commands::EnableUploadCounter => {
-            let mut config = tracedecay::user_config::UserConfig::load();
-            config.upload_enabled = true;
-            config.save();
-            eprintln!("Worldwide counter upload enabled.");
+            commands::handle_upload_counter(true);
         }
         Commands::Gitignore { path, action } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let mut config = tracedecay::config::load_config(&project_path)?;
-            match action.as_deref() {
-                Some("on") => {
-                    config.git_ignore = true;
-                    tracedecay::config::save_config(&project_path, &config)?;
-                    eprintln!(
-                        "gitignore enabled — .gitignore rules will be respected during indexing."
-                    );
-                    eprintln!("Run `tracedecay sync` to re-index with the new setting.");
-                }
-                Some("off") => {
-                    config.git_ignore = false;
-                    tracedecay::config::save_config(&project_path, &config)?;
-                    eprintln!(
-                        "gitignore disabled — .gitignore rules will be ignored during indexing."
-                    );
-                    eprintln!("Run `tracedecay sync` to re-index with the new setting.");
-                }
-                Some(other) => {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: format!("unknown action '{other}': expected 'on' or 'off'"),
-                    });
-                }
-                None => {
-                    let status = if config.git_ignore { "on" } else { "off" };
-                    eprintln!("gitignore: {status}");
-                }
-            }
+            commands::handle_gitignore(path, action)?;
         }
         Commands::Doctor { agent } => {
             tracedecay::doctor::run_doctor(agent.as_deref()).await;
@@ -1313,7 +1211,9 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
                 tracedecay::accounting::metrics::cost_summary(&gdb, since, tokens_saved).await;
 
             let Some(s) = summary else {
-                println!("No session data found. Use Claude Code and then run `tracedecay cost` to see spending.");
+                println!(
+                    "No session data found. Use Claude Code and then run `tracedecay cost` to see spending."
+                );
                 return Ok(());
             };
 
@@ -1444,37 +1344,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
             path,
             max_nodes,
         } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-
-            let opts = tracedecay::bench::BenchOptions {
-                format: if json {
-                    tracedecay::bench::OutputFormat::Json
-                } else {
-                    tracedecay::bench::OutputFormat::Markdown
-                },
-                max_nodes,
-            };
-
-            let report = match queries {
-                Some(p) => {
-                    tracedecay::bench::run_bench(&cg, std::path::Path::new(&p), opts).await?
-                }
-                None => {
-                    tracedecay::bench::run_bench_with_toml(
-                        &cg,
-                        tracedecay::bench::DEFAULT_QUERIES_TOML,
-                        opts,
-                    )
-                    .await?
-                }
-            };
-
-            if json {
-                println!("{}", tracedecay::bench::format_report_json(&report));
-            } else {
-                print!("{}", tracedecay::bench::format_report_console(&report));
-            }
+            commands::handle_bench(queries, json, path, max_nodes).await?;
         }
         Commands::Gain {
             all,
@@ -1493,9 +1363,38 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
         }
-        Commands::Memory { action } => {
-            commands::handle_memory_action(action).await?;
-        }
+        Commands::Memory { action } => match action {
+            MemoryAction::Status { json, path } => {
+                let project_path = tracedecay::config::resolve_path_with_discovery(path);
+                let cg = crate::serve::ensure_initialized(&project_path).await?;
+                let status = cg.memory_status().await?;
+                let largest_bank_fact_count = largest_memory_bank_fact_count(&cg).await?;
+                let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
+                    largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
+                } else {
+                    0.0
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "memory": status,
+                            "largest_bank_fact_count": largest_bank_fact_count,
+                            "largest_bank_utilization_pct": largest_bank_utilization_pct,
+                        }))
+                        .unwrap_or_default()
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        format_memory_status_report(&status, largest_bank_fact_count)
+                    );
+                }
+            }
+            other => {
+                commands::handle_memory_action(other).await?;
+            }
+        },
         Commands::Wipe { all } => {
             commands::handle_wipe(all).await?;
         }
@@ -1581,7 +1480,12 @@ fn is_local_install_command(command: &Commands) -> bool {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{should_skip_agent_install_maintenance, should_skip_startup_maintenance, Commands};
+    use super::{
+        hermes_profile_targets, hermes_selected_profile_targets, is_local_install_command,
+        should_skip_agent_install_maintenance, should_skip_startup_maintenance,
+        validate_hermes_profile_flags, validate_hermes_project_root_flag, Commands,
+    };
+    use tempfile::TempDir;
 
     #[test]
     fn doctor_skips_startup_maintenance() {
@@ -1710,6 +1614,104 @@ mod startup_tests {
             &Commands::HookKiroPostToolUse
         ));
     }
+
+    #[test]
+    fn local_install_detection_tracks_dispatch_preamble_behavior() {
+        let local = Commands::Install {
+            agent: Some("hermes".to_string()),
+            local: true,
+            profile: Some("dev".to_string()),
+            all_profiles: false,
+            project_root: None,
+            no_dashboard: false,
+        };
+        let global = Commands::Install {
+            agent: Some("hermes".to_string()),
+            local: false,
+            profile: Some("dev".to_string()),
+            all_profiles: false,
+            project_root: None,
+            no_dashboard: false,
+        };
+
+        assert!(is_local_install_command(&local));
+        assert!(!is_local_install_command(&global));
+    }
+
+    #[test]
+    fn hermes_profile_flags_are_restricted_to_hermes() {
+        let profile = Some("dev".to_string());
+        let none_profile: Option<String> = None;
+
+        let profile_err = validate_hermes_profile_flags(Some("cursor"), &profile, false)
+            .expect_err("non-hermes --profile should fail");
+        assert!(format!("{profile_err}")
+            .contains("`--profile` is only supported with `--agent hermes`"));
+
+        let all_profiles_err = validate_hermes_profile_flags(Some("cursor"), &none_profile, true)
+            .expect_err("non-hermes --all-profiles should fail");
+        assert!(format!("{all_profiles_err}")
+            .contains("`--all-profiles` is only supported with `--agent hermes`"));
+
+        assert!(validate_hermes_profile_flags(Some("hermes"), &profile, false).is_ok());
+        assert!(validate_hermes_profile_flags(Some("hermes"), &none_profile, true).is_ok());
+    }
+
+    #[test]
+    fn hermes_project_root_flag_requires_hermes_and_absolute_paths() {
+        let temp = TempDir::new().expect("tempdir should exist");
+        let absolute = temp.path().join("project-root");
+        let absolute_str = absolute.to_string_lossy().to_string();
+        let absolute_flag = Some(absolute_str.clone());
+
+        let agent_err = validate_hermes_project_root_flag(Some("cursor"), &absolute_flag)
+            .expect_err("non-hermes project-root should fail");
+        assert!(format!("{agent_err}")
+            .contains("`--project-root` is only supported with `--agent hermes`"));
+
+        let relative_flag = Some("relative/project".to_string());
+        let relative_err = validate_hermes_project_root_flag(Some("hermes"), &relative_flag)
+            .expect_err("relative project-root should fail");
+        assert!(format!("{relative_err}").contains("`--project-root` must be an absolute path"));
+
+        assert_eq!(
+            validate_hermes_project_root_flag(Some("hermes"), &absolute_flag)
+                .expect("absolute hermes project-root should pass"),
+            Some(absolute)
+        );
+    }
+
+    #[test]
+    fn hermes_profile_target_helpers_preserve_default_and_sorted_profiles() {
+        let temp = TempDir::new().expect("tempdir should exist");
+        let profiles_dir = temp.path().join(".hermes/profiles");
+        std::fs::create_dir_all(profiles_dir.join("zeta")).expect("zeta profile dir");
+        std::fs::create_dir_all(profiles_dir.join("alpha")).expect("alpha profile dir");
+        std::fs::write(profiles_dir.join("README.txt"), "not a profile")
+            .expect("profile marker file");
+
+        let all_targets =
+            hermes_profile_targets(temp.path()).expect("profile discovery should work");
+        assert_eq!(
+            all_targets,
+            vec![None, Some("alpha".to_string()), Some("zeta".to_string()),]
+        );
+
+        let selected =
+            hermes_selected_profile_targets(temp.path(), &Some("dev".to_string()), false)
+                .expect("explicit profile selection should not scan disk");
+        assert_eq!(selected, vec![Some("dev".to_string())]);
+
+        let selected_all = hermes_selected_profile_targets(temp.path(), &None, true)
+            .expect("all-profiles selection should enumerate profiles");
+        assert_eq!(selected_all, all_targets);
+    }
+
+    // These tests intentionally stay on pure parse/dispatch guard seams. Direct
+    // invocation of blocking or destructive run arms (serve/dashboard/upgrade,
+    // install mutations, status network paths, hooks that `process::exit`) is
+    // documented in docs/MAIN-RUN-DISPATCH-NOTE.md §5 and remains covered, where
+    // appropriate, by spawn-the-binary integration tests instead.
 }
 
 // handle_branch_action, handle_wipe, handle_list, handle_no_command,
@@ -1718,4 +1720,3 @@ mod startup_tests {
 // update_global_db, try_flush, check_for_update, gather_target_projects,
 // gather_local_projects, gather_local_projects_from, find_descendant_tracedecay,
 // print_flash_warning, and tracedecay_dir_size have been moved to src/global.rs.
-// direct test 1774739850

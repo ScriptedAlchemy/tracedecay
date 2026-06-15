@@ -6,7 +6,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::extraction::complexity::{count_complexity, C_COMPLEXITY};
+use crate::extraction::{
+    complexity::{count_complexity, C_COMPLEXITY},
+    traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind},
+};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -229,7 +232,7 @@ impl CExtractor {
         }
 
         // Extract call sites from the function body.
-        if let Some(body) = Self::find_child_by_kind(node, "compound_statement") {
+        if let Some(body) = find_direct_child_by_kind(node, "compound_statement") {
             Self::extract_call_sites(state, body, &id);
         }
     }
@@ -238,15 +241,15 @@ impl CExtractor {
     /// The name is typically inside a `function_declarator` -> `identifier`.
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Look for function_declarator which contains the name
-        if let Some(declarator) = Self::find_descendant_by_kind(node, "function_declarator") {
+        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
             // The function name is the identifier child of the function_declarator
-            if let Some(ident) = Self::find_child_by_kind(declarator, "identifier") {
+            if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
                 return Some(state.node_text(ident));
             }
             // Could also be inside a pointer_declarator -> function_declarator
-            if let Some(ident) = Self::find_child_by_kind(declarator, "parenthesized_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(declarator, "parenthesized_declarator") {
                 // For function pointer patterns, try finding identifier deeper
-                if let Some(inner_ident) = Self::find_descendant_by_kind(ident, "identifier") {
+                if let Some(inner_ident) = find_descendant_by_kind(ident, "identifier") {
                     return Some(state.node_text(inner_ident));
                 }
             }
@@ -273,16 +276,16 @@ impl CExtractor {
     /// or other declaration.
     fn visit_declaration(state: &mut ExtractionState, node: TsNode<'_>) {
         // Check if this declaration contains a function_declarator (prototype)
-        if Self::find_descendant_by_kind(node, "function_declarator").is_some() {
+        if find_descendant_by_kind(node, "function_declarator").is_some() {
             Self::visit_function_prototype(state, node);
             return;
         }
 
         // Check if this is a standalone struct/union/enum declaration
         // (e.g., `struct Foo { ... };`)
-        if Self::has_child_kind(node, "struct_specifier")
-            || Self::has_child_kind(node, "union_specifier")
-            || Self::has_child_kind(node, "enum_specifier")
+        if has_direct_child_kind(node, "struct_specifier")
+            || has_direct_child_kind(node, "union_specifier")
+            || has_direct_child_kind(node, "enum_specifier")
         {
             // These are handled by their own visitor when they appear as standalone declarations
             // with a body. Visit children to catch them.
@@ -418,25 +421,25 @@ impl CExtractor {
     /// Extract a variable name from a declaration node.
     fn extract_variable_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // Look for init_declarator first (e.g., `int x = 0;`)
-        if let Some(init_decl) = Self::find_child_by_kind(node, "init_declarator") {
+        if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             // The identifier is the first child of init_declarator
-            if let Some(ident) = Self::find_child_by_kind(init_decl, "identifier") {
+            if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
                 return Some(state.node_text(ident));
             }
             // Could be a pointer declarator: `int *x = NULL;`
-            if let Some(ptr_decl) = Self::find_child_by_kind(init_decl, "pointer_declarator") {
-                if let Some(ident) = Self::find_child_by_kind(ptr_decl, "identifier") {
+            if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator") {
+                if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
                     return Some(state.node_text(ident));
                 }
             }
         }
         // Direct identifier child (e.g., `int x;`)
-        if let Some(ident) = Self::find_child_by_kind(node, "identifier") {
+        if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
             return Some(state.node_text(ident));
         }
         // Pointer declarator without init (e.g., `char *name;`)
-        if let Some(ptr_decl) = Self::find_child_by_kind(node, "pointer_declarator") {
-            if let Some(ident) = Self::find_child_by_kind(ptr_decl, "identifier") {
+        if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator") {
+            if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
                 return Some(state.node_text(ident));
             }
         }
@@ -450,25 +453,25 @@ impl CExtractor {
     /// Visit a `type_definition` node (typedef).
     fn visit_type_definition(state: &mut ExtractionState, node: TsNode<'_>) {
         // Check for typedef struct { ... } Name;
-        if let Some(struct_spec) = Self::find_child_by_kind(node, "struct_specifier") {
+        if let Some(struct_spec) = find_direct_child_by_kind(node, "struct_specifier") {
             Self::visit_typedef_struct(state, node, struct_spec);
             return;
         }
 
         // Check for typedef union { ... } Name;
-        if let Some(union_spec) = Self::find_child_by_kind(node, "union_specifier") {
+        if let Some(union_spec) = find_direct_child_by_kind(node, "union_specifier") {
             Self::visit_typedef_union(state, node, union_spec);
             return;
         }
 
         // Check for typedef enum { ... } Name;
-        if let Some(enum_spec) = Self::find_child_by_kind(node, "enum_specifier") {
+        if let Some(enum_spec) = find_direct_child_by_kind(node, "enum_specifier") {
             Self::visit_typedef_enum(state, node, enum_spec);
             return;
         }
 
         // Check for function pointer typedef: typedef int (*name)(args);
-        if Self::find_descendant_by_kind(node, "function_declarator").is_some() {
+        if find_descendant_by_kind(node, "function_declarator").is_some() {
             Self::visit_typedef_function_pointer(state, node);
             return;
         }
@@ -539,8 +542,8 @@ impl CExtractor {
         }
 
         // Also create a Struct node if it has a body
-        if Self::find_child_by_kind(struct_spec, "field_declaration_list").is_some() {
-            let struct_name = Self::find_child_by_kind(struct_spec, "type_identifier")
+        if find_direct_child_by_kind(struct_spec, "field_declaration_list").is_some() {
+            let struct_name = find_direct_child_by_kind(struct_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
 
             Self::create_struct_node(state, &struct_name, struct_spec, docstring);
@@ -608,8 +611,8 @@ impl CExtractor {
         }
 
         // Also create a Union node if it has a body
-        if Self::find_child_by_kind(union_spec, "field_declaration_list").is_some() {
-            let union_name = Self::find_child_by_kind(union_spec, "type_identifier")
+        if find_direct_child_by_kind(union_spec, "field_declaration_list").is_some() {
+            let union_name = find_direct_child_by_kind(union_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
 
             Self::create_union_node(state, &union_name, union_spec, docstring);
@@ -677,8 +680,8 @@ impl CExtractor {
         }
 
         // Also create an Enum node if it has a body
-        if Self::find_child_by_kind(enum_spec, "enumerator_list").is_some() {
-            let enum_name = Self::find_child_by_kind(enum_spec, "type_identifier")
+        if find_direct_child_by_kind(enum_spec, "enumerator_list").is_some() {
+            let enum_name = find_direct_child_by_kind(enum_spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n));
 
             Self::create_enum_node(state, &enum_name, enum_spec, docstring);
@@ -748,14 +751,14 @@ impl CExtractor {
         // In `typedef int (*name)(args)`, the name is inside
         // function_declarator -> parenthesized_declarator -> pointer_declarator -> identifier
         // or function_declarator -> parenthesized_declarator -> identifier
-        if let Some(func_decl) = Self::find_descendant_by_kind(node, "function_declarator") {
+        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator") {
             if let Some(paren_decl) =
-                Self::find_child_by_kind(func_decl, "parenthesized_declarator")
+                find_direct_child_by_kind(func_decl, "parenthesized_declarator")
             {
-                if let Some(ident) = Self::find_descendant_by_kind(paren_decl, "identifier") {
+                if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
                     return Some(state.node_text(ident));
                 }
-                if let Some(ident) = Self::find_descendant_by_kind(paren_decl, "type_identifier") {
+                if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
                     return Some(state.node_text(ident));
                 }
             }
@@ -841,10 +844,10 @@ impl CExtractor {
     /// Visit a standalone struct specifier (e.g., `struct Point { int x; int y; };`).
     fn visit_standalone_struct(state: &mut ExtractionState, node: TsNode<'_>) {
         // Only handle if it has a body (field_declaration_list)
-        if Self::find_child_by_kind(node, "field_declaration_list").is_none() {
+        if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         // Skip anonymous structs that are not inside a typedef
@@ -858,10 +861,10 @@ impl CExtractor {
 
     /// Visit a standalone union specifier.
     fn visit_standalone_union(state: &mut ExtractionState, node: TsNode<'_>) {
-        if Self::find_child_by_kind(node, "field_declaration_list").is_none() {
+        if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
             return;
         }
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         if name == "<anonymous>" {
@@ -874,10 +877,10 @@ impl CExtractor {
 
     /// Visit a standalone enum specifier.
     fn visit_standalone_enum(state: &mut ExtractionState, node: TsNode<'_>) {
-        if Self::find_child_by_kind(node, "enumerator_list").is_none() {
+        if find_direct_child_by_kind(node, "enumerator_list").is_none() {
             return;
         }
-        let name = Self::find_child_by_kind(node, "type_identifier")
+        let name = find_direct_child_by_kind(node, "type_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         if name == "<anonymous>" {
@@ -1075,7 +1078,7 @@ impl CExtractor {
 
     /// Extract a preprocessor #define.
     fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let text = state.node_text(node);
@@ -1132,8 +1135,8 @@ impl CExtractor {
     /// Extract a preprocessor #include.
     fn visit_preproc_include(state: &mut ExtractionState, node: TsNode<'_>) {
         // The include path is in a string_literal or system_lib_string child
-        let path = Self::find_child_by_kind(node, "string_literal")
-            .or_else(|| Self::find_child_by_kind(node, "system_lib_string"))
+        let path = find_direct_child_by_kind(node, "string_literal")
+            .or_else(|| find_direct_child_by_kind(node, "system_lib_string"))
             .map_or_else(
                 || "<unknown>".to_string(),
                 |n| {
@@ -1196,7 +1199,7 @@ impl CExtractor {
 
     /// Extract fields from a struct or union specifier.
     fn extract_struct_fields(state: &mut ExtractionState, spec_node: TsNode<'_>) {
-        if let Some(field_list) = Self::find_child_by_kind(spec_node, "field_declaration_list") {
+        if let Some(field_list) = find_direct_child_by_kind(spec_node, "field_declaration_list") {
             let mut cursor = field_list.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -1216,7 +1219,7 @@ impl CExtractor {
     fn extract_single_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // In C, the field name is a field_identifier child of the field_declaration
         // or inside a field_declarator child.
-        let name = Self::find_descendant_by_kind(node, "field_identifier")
+        let name = find_descendant_by_kind(node, "field_identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let text = state.node_text(node);
@@ -1267,7 +1270,7 @@ impl CExtractor {
 
     /// Extract enum variants from an `enum_specifier` node.
     fn extract_enum_variants(state: &mut ExtractionState, enum_spec: TsNode<'_>) {
-        if let Some(enumerator_list) = Self::find_child_by_kind(enum_spec, "enumerator_list") {
+        if let Some(enumerator_list) = find_direct_child_by_kind(enum_spec, "enumerator_list") {
             let mut cursor = enumerator_list.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -1285,7 +1288,7 @@ impl CExtractor {
 
     /// Extract a single enumerator as an `EnumVariant` node.
     fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_child_by_kind(node, "identifier")
+        let name = find_direct_child_by_kind(node, "identifier")
             .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
         let text = state.node_text(node);
@@ -1446,49 +1449,6 @@ impl CExtractor {
             }
         }
         false
-    }
-
-    /// Check if a node has a direct child of the given kind.
-    fn has_child_kind(node: TsNode<'_>, kind: &str) -> bool {
-        Self::find_child_by_kind(node, kind).is_some()
-    }
-
-    /// Find the first direct child of a node with a given kind.
-    fn find_child_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    /// Find the first descendant of a node with a given kind (recursive search).
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                // Recurse into children
-                if let Some(found) = Self::find_descendant_by_kind(child, kind) {
-                    return Some(found);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

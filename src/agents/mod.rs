@@ -14,7 +14,6 @@ pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod hermes;
-mod hermes_dashboard;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;

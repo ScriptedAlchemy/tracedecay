@@ -12,8 +12,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::mcp::response_handles::{
+    cleanup_expired_response_handles, response_handle_stats_json, RESPONSE_RETRIEVE_TOOL,
+};
 use crate::tracedecay::TraceDecay;
 
 use super::tools::{explore_call_budget, get_tool_definitions_with_budget, handle_tool_call};
@@ -279,6 +282,81 @@ fn mark_semantic_tool_error(value: &mut Value) {
     }
 }
 
+/// Map response-handle failures onto actionable JSON-RPC errors at the MCP
+/// boundary so clients can distinguish bad input from cache/runtime problems.
+fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> JsonRpcResponse {
+    if tool_name == RESPONSE_RETRIEVE_TOOL {
+        match error {
+            TraceDecayError::Config { message }
+                if message.starts_with("missing required parameter: handle") =>
+            {
+                return JsonRpcResponse::error_with_data(
+                    id,
+                    ErrorCode::InvalidParams,
+                    "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope."
+                        .to_string(),
+                    Some(json!({
+                        "tool": RESPONSE_RETRIEVE_TOOL,
+                        "reason_code": "missing_handle_argument",
+                        "retryable": false,
+                        "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
+                    })),
+                );
+            }
+            TraceDecayError::Config { message }
+                if message.starts_with("invalid response handle") =>
+            {
+                return JsonRpcResponse::error_with_data(
+                    id,
+                    ErrorCode::InvalidParams,
+                    message.clone(),
+                    Some(json!({
+                        "tool": RESPONSE_RETRIEVE_TOOL,
+                        "reason_code": "invalid_handle",
+                        "retryable": false,
+                        "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
+                    })),
+                );
+            }
+            TraceDecayError::Json(err) => {
+                return JsonRpcResponse::error_with_data(
+                    id,
+                    ErrorCode::InternalError,
+                    format!(
+                        "tool execution failed: cached response handle record is unreadable: {err}"
+                    ),
+                    Some(json!({
+                        "tool": RESPONSE_RETRIEVE_TOOL,
+                        "reason_code": "corrupt_handle_record",
+                        "retryable": true,
+                        "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."
+                    })),
+                );
+            }
+            TraceDecayError::Io(err) => {
+                return JsonRpcResponse::error_with_data(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("tool execution failed: failed to read cached response handle: {err}"),
+                    Some(json!({
+                        "tool": RESPONSE_RETRIEVE_TOOL,
+                        "reason_code": "handle_read_failed",
+                        "retryable": true,
+                        "retry_instruction": "Fix the local project cache/filesystem issue, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+                    })),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    JsonRpcResponse::error(
+        id,
+        ErrorCode::InternalError,
+        format!("tool execution failed: {error}"),
+    )
+}
+
 /// Cached result of a latest-version check against GitHub releases.
 struct VersionCheckState {
     latest: Option<String>,
@@ -372,6 +450,7 @@ impl McpServer {
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
+        let response_handle_project_root = cg.project_root().to_path_buf();
         let global_db: Option<Arc<GlobalDb>> = if crate::global_db::global_accounting_enabled() {
             GlobalDb::open().await.map(Arc::new)
         } else {
@@ -436,6 +515,13 @@ impl McpServer {
                 }
             });
         }
+
+        tokio::task::spawn_blocking(move || {
+            let _ = cleanup_expired_response_handles(
+                &response_handle_project_root,
+                crate::tracedecay::current_timestamp(),
+            );
+        });
 
         server
     }
@@ -1224,9 +1310,13 @@ impl McpServer {
 
     /// Returns graph statistics as a JSON resource.
     async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
-        match self.cg_snapshot().await.get_stats().await {
+        let cg = self.reopen_if_branch_drifted().await;
+        match cg.get_stats().await {
             Ok(stats) => {
-                let text = serde_json::to_string_pretty(&stats).unwrap_or_default();
+                let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
+                output["branch_diagnostics"] =
+                    serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
+                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
                 JsonRpcResponse::success(
                     id,
                     json!({
@@ -1616,7 +1706,8 @@ impl McpServer {
                         let warning = if hours >= 24 {
                             format!(
                                 "WARNING: Index last synced {}d {}h ago. Run `tracedecay sync` to update.",
-                                hours / 24, hours % 24
+                                hours / 24,
+                                hours % 24
                             )
                         } else {
                             format!(
@@ -1651,11 +1742,7 @@ impl McpServer {
                 mark_semantic_tool_error(&mut result.value);
                 JsonRpcResponse::success(id, result.value)
             }
-            Err(e) => JsonRpcResponse::error(
-                id,
-                ErrorCode::InternalError,
-                format!("tool execution failed: {e}"),
-            ),
+            Err(e) => tool_error_response(id, tool_name, &e),
         }
     }
 
@@ -1683,6 +1770,9 @@ impl McpServer {
                 stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
             }
         }
+
+        let cg = self.cg_snapshot().await;
+        stats["response_handles"] = response_handle_stats_json(Some(cg.project_root()));
 
         // Surface the verbose worktree-mismatch warning when present, so
         // `tracedecay_status` is the one tool whose output is loud about

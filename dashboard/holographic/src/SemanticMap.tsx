@@ -21,6 +21,25 @@ import type {
   MemoryProjectionPoint,
 } from "./types";
 import { NUM_BADGE, truncate } from "./ui";
+import { buildDensity, DENSITY_AUTO_THRESHOLD } from "./semanticMap/density";
+import { buildGrid, findNearest, type PlacedPoint } from "./semanticMap/hitTest";
+import {
+  FIT_MAX_ZOOM,
+  HOVER_RADIUS,
+  IDENTITY,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  type MapTransform,
+  fitTransformToPlaced,
+  screenToBaseCoords,
+  semanticMapKeyResult,
+  zoomTransformAt,
+} from "./semanticMap/transform";
+import {
+  panTransformFromDrag,
+  pickPointAtScreen,
+  selectIdsInScreenRect,
+} from "./semanticMap/gestures";
 import { categoryColorMap } from "./viz/colors";
 import { extent, padDomain, scaleLinear } from "./viz/scale";
 import { useMeasuredWidth } from "./viz/useMeasure";
@@ -28,134 +47,6 @@ import { useVirtualList } from "./viz/useVirtualList";
 import { VizLegend } from "./viz/Legend";
 import { VizTooltip, TipRow, TipTitle, type TooltipState } from "./viz/Tooltip";
 import { PanelError, PanelLoading } from "./viz/Status";
-
-/* ------------------------------------------------------------------ scatter */
-
-interface MapTransform {
-  k: number;
-  tx: number;
-  ty: number;
-}
-
-const IDENTITY: MapTransform = { k: 1, tx: 0, ty: 0 };
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 24;
-/** Cap for programmatic fit-zoom so tiny clusters keep some context. */
-const FIT_MAX_ZOOM = 8;
-/** Spatial-grid cell size (base px) for O(1) hover hit-testing. */
-const GRID_CELL = 48;
-/** Hover snap radius in screen px. */
-const HOVER_RADIUS = 22;
-/** Density underlay kicks in automatically above this point count. */
-const DENSITY_AUTO_THRESHOLD = 350;
-
-interface PlacedPoint {
-  point: MemoryProjectionPoint;
-  x: number;
-  y: number;
-  r: number;
-  color: string;
-}
-
-function buildGrid(placed: PlacedPoint[]): Map<string, number[]> {
-  const grid = new Map<string, number[]>();
-  placed.forEach((p, i) => {
-    const key = `${Math.floor(p.x / GRID_CELL)},${Math.floor(p.y / GRID_CELL)}`;
-    const cell = grid.get(key);
-    if (cell) cell.push(i);
-    else grid.set(key, [i]);
-  });
-  return grid;
-}
-
-function findNearest(
-  placed: PlacedPoint[],
-  grid: Map<string, number[]>,
-  bx: number,
-  by: number,
-  radius: number,
-): PlacedPoint | null {
-  const c0 = Math.floor((bx - radius) / GRID_CELL);
-  const c1 = Math.floor((bx + radius) / GRID_CELL);
-  const r0 = Math.floor((by - radius) / GRID_CELL);
-  const r1 = Math.floor((by + radius) / GRID_CELL);
-  let best: PlacedPoint | null = null;
-  let bestD = radius * radius;
-  for (let cx = c0; cx <= c1; cx++) {
-    for (let cy = r0; cy <= r1; cy++) {
-      const cell = grid.get(`${cx},${cy}`);
-      if (!cell) continue;
-      for (const i of cell) {
-        const p = placed[i];
-        const dx = p.x - bx;
-        const dy = p.y - by;
-        const d = dx * dx + dy * dy;
-        if (d <= bestD) {
-          bestD = d;
-          best = p;
-        }
-      }
-    }
-  }
-  return best;
-}
-
-interface DensityCell {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  opacity: number;
-}
-
-function buildDensity(placed: PlacedPoint[], baseW: number, baseH: number): DensityCell[] {
-  const cols = Math.max(8, Math.round(baseW / 30));
-  const rows = Math.max(6, Math.round(baseH / 30));
-  const cw = baseW / cols;
-  const ch = baseH / rows;
-  const counts = new Float32Array(cols * rows);
-  for (const p of placed) {
-    const cx = Math.min(cols - 1, Math.max(0, Math.floor(p.x / cw)));
-    const cy = Math.min(rows - 1, Math.max(0, Math.floor(p.y / ch)));
-    counts[cy * cols + cx] += 1;
-  }
-  // One smoothing pass (3x3 box blur) so the underlay reads as contours, not pixels.
-  const blurred = new Float32Array(cols * rows);
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      let sum = 0;
-      let n = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = x + dx;
-          const yy = y + dy;
-          if (xx < 0 || yy < 0 || xx >= cols || yy >= rows) continue;
-          sum += counts[yy * cols + xx];
-          n += 1;
-        }
-      }
-      blurred[y * cols + x] = sum / n;
-    }
-  }
-  let max = 0;
-  for (const v of blurred) if (v > max) max = v;
-  if (max <= 0) return [];
-  const cells: DensityCell[] = [];
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const v = blurred[y * cols + x];
-      if (v <= 0.01) continue;
-      cells.push({
-        x: x * cw,
-        y: y * ch,
-        w: cw + 0.5,
-        h: ch + 0.5,
-        opacity: Math.min(0.34, (v / max) * 0.34),
-      });
-    }
-  }
-  return cells;
-}
 
 /* --------------------------------------------------------------- component */
 
@@ -375,8 +266,7 @@ export default function SemanticMap({
   /* ------------------------------------------------------------ transforms */
 
   const screenToBase = useCallback((sx: number, sy: number) => {
-    const { k, tx, ty } = transformRef.current;
-    return [(sx - tx) / k, (sy - ty) / k] as const;
+    return screenToBaseCoords(transformRef.current, sx, sy);
   }, []);
 
   const localPos = useCallback((event: { clientX: number; clientY: number }) => {
@@ -388,15 +278,9 @@ export default function SemanticMap({
 
   const zoomAt = useCallback(
     (sx: number, sy: number, factor: number) => {
-      const prev = transformRef.current;
-      const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev.k * factor));
-      if (k === prev.k) return;
-      const scale = k / prev.k;
-      applyTransform({
-        k,
-        tx: sx - (sx - prev.tx) * scale,
-        ty: sy - (sy - prev.ty) * scale,
-      });
+      const next = zoomTransformAt(transformRef.current, sx, sy, factor);
+      if (next === transformRef.current) return;
+      applyTransform(next);
     },
     [applyTransform],
   );
@@ -409,30 +293,7 @@ export default function SemanticMap({
   const fitToPlaced = useCallback(
     (targets: PlacedPoint[]) => {
       if (targets.length === 0) return;
-      let x0 = Infinity;
-      let y0 = Infinity;
-      let x1 = -Infinity;
-      let y1 = -Infinity;
-      for (const p of targets) {
-        x0 = Math.min(x0, p.x);
-        y0 = Math.min(y0, p.y);
-        x1 = Math.max(x1, p.x);
-        y1 = Math.max(y1, p.y);
-      }
-      const margin = 48;
-      const spanX = Math.max(x1 - x0, 1e-6);
-      const spanY = Math.max(y1 - y0, 1e-6);
-      const fitK = Math.min(
-        (width - margin * 2) / spanX,
-        (height - margin * 2) / spanY,
-      );
-      const k = Math.min(FIT_MAX_ZOOM, Math.max(MIN_ZOOM, fitK));
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-      applyTransform(
-        { k, tx: width / 2 - cx * k, ty: height / 2 - cy * k },
-        true,
-      );
+      applyTransform(fitTransformToPlaced(targets, width, height), true);
     },
     [applyTransform, width, height],
   );
@@ -566,11 +427,9 @@ export default function SemanticMap({
       if (!drag.moved && Math.hypot(dx, dy) > 3) {
         setDrag({ ...drag, moved: true });
       }
-      applyTransform({
-        k: drag.origin.k,
-        tx: drag.origin.tx + dx,
-        ty: drag.origin.ty + dy,
-      });
+      applyTransform(
+        panTransformFromDrag(drag.origin, { x: drag.startX, y: drag.startY }, { x: sx, y: sy }),
+      );
     } else {
       setDrag({ ...drag, x: sx, y: sy });
     }
@@ -582,76 +441,35 @@ export default function SemanticMap({
     setDrag(null);
     if (!current) return;
     if (current.kind === "select") {
-      const x0 = Math.min(current.startX, current.x);
-      const x1 = Math.max(current.startX, current.x);
-      const y0 = Math.min(current.startY, current.y);
-      const y1 = Math.max(current.startY, current.y);
-      if (x1 - x0 < 4 && y1 - y0 < 4) {
+      const ids = selectIdsInScreenRect(layout.placed, transformRef.current, current);
+      if (!ids) {
         setSelection(null);
         return;
       }
-      const { k, tx, ty } = transformRef.current;
-      const ids = new Set<number>();
-      for (const p of layout.placed) {
-        const sx = p.x * k + tx;
-        const sy = p.y * k + ty;
-        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) ids.add(p.point.fact_id);
-      }
-      setSelection(ids.size > 0 ? ids : null);
+      setSelection(ids);
       return;
     }
     // Pan gesture that never moved = click: pin the hovered point (or clear).
     if (!current.moved) {
       const [sx, sy] = localPos(event);
-      const [bx, by] = screenToBase(sx, sy);
-      const hit = findNearest(
-        layout.placed,
-        layout.grid,
-        bx,
-        by,
-        HOVER_RADIUS / transformRef.current.k,
-      );
+      const hit = pickPointAtScreen(layout.placed, transformRef.current, sx, sy);
       setSelected(hit ? hit.point : null);
     }
   };
 
   // Keyboard equivalents for pan/zoom/clear so the map isn't pointer-only.
   const onKeyDown = (event: React.KeyboardEvent<SVGSVGElement>) => {
-    const PAN_STEP = 48;
-    const pan = (dx: number, dy: number) => {
-      const prev = transformRef.current;
-      applyTransform({ ...prev, tx: prev.tx + dx, ty: prev.ty + dy });
-    };
-    switch (event.key) {
-      case "ArrowLeft":
-        pan(PAN_STEP, 0);
-        break;
-      case "ArrowRight":
-        pan(-PAN_STEP, 0);
-        break;
-      case "ArrowUp":
-        pan(0, PAN_STEP);
-        break;
-      case "ArrowDown":
-        pan(0, -PAN_STEP);
-        break;
-      case "+":
-      case "=":
-        zoomAt(width / 2, height / 2, 1.3);
-        break;
-      case "-":
-      case "_":
-        zoomAt(width / 2, height / 2, 1 / 1.3);
-        break;
-      case "0":
-        applyTransform(IDENTITY, true);
-        break;
-      case "Escape":
-        setSelection(null);
-        setSelected(null);
-        break;
-      default:
-        return;
+    const result = semanticMapKeyResult({
+      key: event.key,
+      transform: transformRef.current,
+      width,
+      height,
+    });
+    if (!result.handled) return;
+    if (result.clearSelection) setSelection(null);
+    if (result.clearSelected) setSelected(null);
+    if (result.nextTransform !== transformRef.current || result.nextTransform === IDENTITY) {
+      applyTransform(result.nextTransform, result.nextTransform === IDENTITY);
     }
     event.preventDefault();
   };

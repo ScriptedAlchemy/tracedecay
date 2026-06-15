@@ -9,12 +9,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use tempfile::TempDir;
 use tracedecay::agents::{get_integration, InstallContext, UpdatePluginOutcome};
 
+mod common;
+use common::EnvVarGuard;
+
 const OLD_BIN: &str = "/old/bin/tracedecay";
 const NEW_BIN: &str = "/new/bin/tracedecay";
+static HERMES_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn hermes_env_guard() -> (MutexGuard<'static, ()>, EnvVarGuard) {
+    let lock = HERMES_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let guard = EnvVarGuard::unset("HERMES_HOME");
+    (lock, guard)
+}
 
 fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
     InstallContext {
@@ -63,6 +76,7 @@ fn file_listing(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
+    let (_env_lock, _hermes_home) = hermes_env_guard();
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let hermes = get_integration("hermes").unwrap();
@@ -129,6 +143,7 @@ fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
 
 #[test]
 fn hermes_update_plugin_succeeds_where_a_config_rewrite_would_refuse() {
+    let (_env_lock, _hermes_home) = hermes_env_guard();
     let home = TempDir::new().unwrap();
     let hermes = get_integration("hermes").unwrap();
     hermes.install(&ctx(home.path(), OLD_BIN)).unwrap();
@@ -153,6 +168,7 @@ fn hermes_update_plugin_succeeds_where_a_config_rewrite_would_refuse() {
 
 #[test]
 fn hermes_update_plugin_reports_not_installed_when_nothing_is_detected() {
+    let (_env_lock, _hermes_home) = hermes_env_guard();
     let home = TempDir::new().unwrap();
     // A Hermes home without a generated plugin must not be installed into.
     std::fs::create_dir_all(home.path().join(".hermes")).unwrap();
@@ -215,6 +231,63 @@ fn cursor_update_plugin_reports_not_installed_without_a_bundle() {
     let outcome = cursor.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
     assert!(!home.path().join(".cursor/plugins").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Codex
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_update_plugin_refreshes_bundle_without_touching_config() {
+    let home = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let plugin_dir = home.path().join("plugins/tracedecay");
+    let codex_config = home.path().join(".codex/config.toml");
+    std::fs::write(&codex_config, "model = \"gpt-5\"\n").unwrap();
+    std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+    let config_before = bytes(&codex_config);
+
+    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the bundle");
+    };
+    assert_eq!(paths, vec![plugin_dir.clone()]);
+
+    assert_eq!(bytes(&codex_config), config_before);
+    assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
+    assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
+    let home = TempDir::new().unwrap();
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "[mcp_servers.tracedecay]\ncommand = \"/old/bin/tracedecay\"\nargs = [\"serve\"]\n",
+    )
+    .unwrap();
+    let before = bytes(&codex_dir.join("config.toml"));
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::ConfigOnly));
+    assert_eq!(bytes(&codex_dir.join("config.toml")), before);
+    assert!(!home.path().join("plugins/tracedecay").exists());
+}
+
+#[test]
+fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
+    let home = TempDir::new().unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert!(!home.path().join("plugins").exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +360,6 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
     let config_only = [
         "claude",
         "opencode",
-        "codex",
         "gemini",
         "copilot",
         "zed",

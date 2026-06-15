@@ -20,10 +20,12 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Map, Value};
 
-use crate::sessions::source::{
+use crate::sessions::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
-    read_changed_with_companion, title_from_messages, ParsedTranscript, SessionDraft, StoredCursor,
-    TranscriptSource,
+    title_from_messages, StoredCursor,
+};
+use crate::sessions::source::{
+    read_changed_with_companion, ParsedTranscript, SessionDraft, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 

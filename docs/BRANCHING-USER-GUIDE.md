@@ -235,3 +235,8 @@ has been indexed (has a `.tracedecay/` directory), multi-branch works independen
 **Can I track branches that only exist on the remote?**
 No. The branch must have a local ref in `.git/refs/heads/`. Run `git checkout` or
 `git switch` to create a local tracking branch first.
+
+**Something went wrong — a branch shows stale results or a missing database.**
+See [MULTI-BRANCH-RECOVERY.md](MULTI-BRANCH-RECOVERY.md) for a step-by-step
+diagnosis-and-recovery runbook (inspect active/serving branch state, rebuild or
+copy a branch DB safely, reset serving-branch fallback).

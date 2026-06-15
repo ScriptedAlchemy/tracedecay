@@ -61,9 +61,6 @@ impl Default for TraceDecayConfig {
                 "target/**".to_string(),
                 ".git/**".to_string(),
                 ".tracedecay/**".to_string(),
-                // Legacy data-dir name — still excluded so pre-rebrand
-                // projects never index their own store.
-                ".tokensave/**".to_string(),
                 "**/node_modules/**".to_string(),
                 "vendor/**".to_string(),
                 "**/*.min.*".to_string(),

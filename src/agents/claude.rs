@@ -38,7 +38,7 @@ impl AgentIntegration for ClaudeIntegration {
 
         install_mcp_server(&claude_json_path, &ctx.tracedecay_bin)?;
 
-        std::fs::create_dir_all(&claude_dir).ok();
+        ensure_claude_dir(&claude_dir)?;
         let mut settings = load_json_file_strict(&settings_path)?;
         install_migrate_old_mcp(&mut settings, &settings_path);
         install_hook(&mut settings, &ctx.tracedecay_bin);
@@ -66,7 +66,7 @@ impl AgentIntegration for ClaudeIntegration {
 
         install_mcp_server(&project_path.join(".mcp.json"), &ctx.tracedecay_bin)?;
 
-        std::fs::create_dir_all(&claude_dir).ok();
+        ensure_claude_dir(&claude_dir)?;
         let mut settings = load_json_file_strict(&settings_path)?;
         install_hook(&mut settings, &ctx.tracedecay_bin);
         install_permissions(&mut settings, &ctx.tool_permissions);
@@ -122,6 +122,15 @@ impl AgentIntegration for ClaudeIntegration {
 // ---------------------------------------------------------------------------
 // Install helpers
 // ---------------------------------------------------------------------------
+
+fn ensure_claude_dir(claude_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(claude_dir).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to create Claude settings directory {}: {e}",
+            claude_dir.display()
+        ),
+    })
+}
 
 /// Register MCP server in ~/.claude.json.
 fn install_mcp_server(claude_json_path: &Path, tracedecay_bin: &str) -> Result<()> {
@@ -329,8 +338,10 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     // Legacy markers from older product/binary names — treat as already present.
     let display_marker = "## MANDATORY: No Explore Agents When TraceDecay Is Available";
     let legacy_marker = "## MANDATORY: No Explore Agents When Tokensave Is Available";
-    let existing_md = if claude_md_path.exists() {
-        std::fs::read_to_string(claude_md_path).unwrap_or_default()
+    let existing_md = if claude_md_path.is_file() {
+        std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to read {}: {e}", claude_md_path.display()),
+        })?
     } else {
         String::new()
     };
@@ -347,7 +358,7 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         .append(true)
         .open(claude_md_path)
         .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open CLAUDE.md: {e}"),
+            message: format!("failed to open {}: {e}", claude_md_path.display()),
         })?;
     write!(
         f,
@@ -392,7 +403,12 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         the relevant code. Follow the call budget in the tool description. \
         Pass `seen_node_ids` from each response to the next call's `exclude_node_ids`.\n"
     )
-    .ok();
+    .map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to append tracedecay rules to {}: {e}",
+            claude_md_path.display()
+        ),
+    })?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
         claude_md_path.display()
@@ -873,13 +889,13 @@ fn doctor_check_settings_json(dc: &mut DoctorCounters, home: &Path) {
     doctor_check_permissions(dc, &settings);
 }
 
-/// Expected subcommand for each hook event.
-fn expected_hook_subcommand(event: &str) -> &'static str {
+/// Expected subcommand for each supported hook event.
+fn expected_hook_subcommand(event: &str) -> Option<&'static str> {
     match event {
-        "PreToolUse" => "hook-pre-tool-use",
-        "UserPromptSubmit" => "hook-prompt-submit",
-        "Stop" => "hook-stop",
-        _ => unreachable!("unexpected hook event: {event}"),
+        "PreToolUse" => Some("hook-pre-tool-use"),
+        "UserPromptSubmit" => Some("hook-prompt-submit"),
+        "Stop" => Some("hook-stop"),
+        _ => None,
     }
 }
 
@@ -898,7 +914,12 @@ fn doctor_check_single_hook(dc: &mut DoctorCounters, settings: &serde_json::Valu
         return;
     };
 
-    let expected_sub = expected_hook_subcommand(event);
+    let Some(expected_sub) = expected_hook_subcommand(event) else {
+        dc.fail(&format!(
+            "Unsupported Claude hook event in settings.json: {event}"
+        ));
+        return;
+    };
     if is_legacy {
         dc.fail(&format!(
             "{event} hook uses legacy single-string shape (breaks on paths with spaces) — will be auto-repaired"
@@ -940,7 +961,12 @@ fn doctor_fix_hooks(dc: &mut DoctorCounters, settings_path: &Path, settings: &se
     let mut repaired = false;
 
     for event in &["PreToolUse", "UserPromptSubmit", "Stop"] {
-        let expected_sub = expected_hook_subcommand(event);
+        let Some(expected_sub) = expected_hook_subcommand(event) else {
+            dc.fail(&format!(
+                "Unsupported Claude hook event during repair: {event}"
+            ));
+            continue;
+        };
 
         let current = find_tracedecay_hook(&settings, event);
         let correct = current
@@ -1346,6 +1372,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn install_ctx(home: &Path) -> InstallContext {
+        InstallContext {
+            home: home.to_path_buf(),
+            tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+            tool_permissions: vec!["mcp__tracedecay__search".to_string()],
+            profile: None,
+            project_root: None,
+            dashboard: true,
+        }
+    }
+
     /// Build a settings value with the three tracedecay hooks installed
     /// (modern `{command, args}` shape).
     fn settings_with_all_hooks(bin: &str) -> serde_json::Value {
@@ -1550,6 +1587,52 @@ mod tests {
         let before = settings.clone();
         install_hook(&mut settings, "/usr/bin/tracedecay");
         assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn install_returns_contextual_error_when_claude_dir_is_not_a_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_path = home.path().join(".claude");
+        std::fs::write(&claude_path, "not a directory").unwrap();
+
+        let err = ClaudeIntegration
+            .install(&install_ctx(home.path()))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to create Claude settings directory")
+                && msg.contains(&claude_path.display().to_string()),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn doctor_check_single_hook_reports_unknown_event_instead_of_panicking() {
+        let mut settings = settings_with_all_hooks("/usr/bin/tracedecay");
+        settings["hooks"]["PostToolUse"] = json!([{
+            "hooks": [{
+                "type": "command",
+                "command": "/usr/bin/tracedecay",
+                "args": ["hook-post-tool-use"]
+            }]
+        }]);
+        let mut dc = DoctorCounters::new();
+
+        doctor_check_single_hook(&mut dc, &settings, "PostToolUse");
+
+        assert_eq!(dc.issues, 1);
+        assert_eq!(dc.warnings, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_claude_md_rules_surfaces_append_failures() {
+        let err = install_claude_md_rules(Path::new("/dev/full")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to append tracedecay rules to /dev/full"),
+            "unexpected error message: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------

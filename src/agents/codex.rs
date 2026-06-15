@@ -12,16 +12,16 @@
 //! until trusted. The installer prints that guidance after writing `hooks.json`.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    backup_config_file, load_json_file_strict, load_toml_file, safe_write_json_file, tool_names,
-    write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
-    InstallScope,
+    backup_config_file, load_json_file, load_json_file_strict, load_toml_file,
+    safe_write_json_file, safe_write_text_file, tool_names, write_toml_file, AgentIntegration,
+    DoctorCounters, HealthcheckContext, InstallContext, InstallScope, UpdatePluginOutcome,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -39,9 +39,7 @@ impl AgentIntegration for CodexIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let codex_dir = ctx.home.join(".codex");
         std::fs::create_dir_all(&codex_dir).ok();
-        let config_path = codex_dir.join("config.toml");
-
-        install_mcp_server(&config_path, &ctx.tracedecay_bin, InstallScope::Global)?;
+        install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         install_prompt_rules(&agents_md)?;
@@ -51,7 +49,8 @@ impl AgentIntegration for CodexIntegration {
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Codex session — tracedecay tools are now available");
+        eprintln!("  2. In Codex, run: codex plugin add tracedecay@personal");
+        eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
         print_hook_trust_guidance();
         Ok(())
     }
@@ -86,6 +85,7 @@ impl AgentIntegration for CodexIntegration {
         let config_path = codex_dir.join("config.toml");
 
         uninstall_mcp_server(&config_path)?;
+        uninstall_codex_plugin(&ctx.home)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
         uninstall_prompt_rules(&agents_md);
@@ -96,6 +96,26 @@ impl AgentIntegration for CodexIntegration {
         eprintln!("Uninstall complete. TraceDecay has been removed from Codex CLI.");
         eprintln!("Start a new Codex session for changes to take effect.");
         Ok(())
+    }
+
+    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        let plugin_dir = codex_plugin_install_dir(&ctx.home);
+        let legacy_dir = codex_plugin_legacy_install_dir(&ctx.home);
+        let target = if codex_plugin_manifest_path(&ctx.home).exists() {
+            Some(plugin_dir)
+        } else if codex_plugin_legacy_manifest_path(&ctx.home).exists() {
+            Some(legacy_dir)
+        } else if Self::has_legacy_config_install(&ctx.home) {
+            return Ok(UpdatePluginOutcome::ConfigOnly);
+        } else {
+            None
+        };
+
+        let Some(target) = target else {
+            return Ok(UpdatePluginOutcome::NotInstalled);
+        };
+        write_codex_plugin_files(&target, &ctx.tracedecay_bin)?;
+        Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -110,8 +130,7 @@ impl AgentIntegration for CodexIntegration {
             doctor_check_hooks(dc, &local_codex_dir.join("hooks.json"));
         } else {
             let codex_dir = ctx.home.join(".codex");
-            let config_path = codex_dir.join("config.toml");
-            doctor_check_config(dc, &config_path);
+            doctor_check_plugin(dc, &ctx.home);
             doctor_check_prompt_file(dc, &codex_dir.join("AGENTS.md"));
             doctor_check_hooks(dc, &codex_dir.join("hooks.json"));
         }
@@ -122,10 +141,19 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(home.join(".codex/config.toml"))
+        Some(codex_plugin_manifest_path(home))
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
+        if codex_plugin_manifest_path(home).exists() {
+            return true;
+        }
+        Self::has_legacy_config_install(home)
+    }
+}
+
+impl CodexIntegration {
+    fn has_legacy_config_install(home: &Path) -> bool {
         let config = home.join(".codex").join("config.toml");
         if !config.exists() {
             return false;
@@ -150,6 +178,260 @@ fn local_agents_md_has_tracedecay(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 // Install helpers
 // ---------------------------------------------------------------------------
+
+const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".codex-plugin/plugin.json",
+        include_str!("../../codex-plugin/.codex-plugin/plugin.json"),
+    ),
+    (".mcp.json", include_str!("../../codex-plugin/.mcp.json")),
+    ("README.md", include_str!("../../codex-plugin/README.md")),
+    (
+        "skills/reading-code-cheaply/SKILL.md",
+        include_str!("../../codex-plugin/skills/reading-code-cheaply/SKILL.md"),
+    ),
+];
+
+fn codex_plugin_install_dir(home: &Path) -> PathBuf {
+    home.join("plugins/tracedecay")
+}
+
+fn codex_plugin_legacy_install_dir(home: &Path) -> PathBuf {
+    home.join("plugins/tokensave")
+}
+
+fn codex_plugin_manifest_path(home: &Path) -> PathBuf {
+    codex_plugin_install_dir(home).join(".codex-plugin/plugin.json")
+}
+
+fn codex_plugin_legacy_manifest_path(home: &Path) -> PathBuf {
+    codex_plugin_legacy_install_dir(home).join(".codex-plugin/plugin.json")
+}
+
+fn codex_personal_marketplace_path(home: &Path) -> PathBuf {
+    home.join(".agents/plugins/marketplace.json")
+}
+
+fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
+    let install_dir = codex_plugin_install_dir(home);
+    if let Some(parent) = install_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to create {}: {e}", parent.display()),
+        })?;
+    }
+    remove_codex_plugin_install(&install_dir)?;
+    remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
+    write_codex_plugin_files(&install_dir, tracedecay_bin)?;
+    install_codex_marketplace_entry(home)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
+        install_dir.display()
+    );
+    Ok(())
+}
+
+fn write_codex_plugin_files(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
+    for &(relative, contents) in CODEX_EMBEDDED_PLUGIN_FILES {
+        let rendered = match relative {
+            ".codex-plugin/plugin.json" => codex_plugin_manifest(contents)?,
+            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin)?,
+            _ => contents.to_string(),
+        };
+        safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
+    }
+    Ok(())
+}
+
+fn codex_plugin_manifest(raw: &str) -> Result<String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
+    manifest["version"] = json!(env!("CARGO_PKG_VERSION"));
+    Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
+}
+
+fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str) -> Result<String> {
+    let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
+    mcp["mcpServers"]["tracedecay"]["command"] = json!(tracedecay_bin);
+    Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
+}
+
+fn install_codex_marketplace_entry(home: &Path) -> Result<()> {
+    let marketplace_path = codex_personal_marketplace_path(home);
+    let mut marketplace = load_json_file_strict(&marketplace_path)?;
+    if !marketplace.is_object() {
+        marketplace = json!({});
+    }
+    if marketplace
+        .get("name")
+        .and_then(|value| value.as_str())
+        .is_none()
+    {
+        marketplace["name"] = json!("personal");
+    }
+    if !marketplace
+        .get("interface")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        marketplace["interface"] = json!({ "displayName": "Personal" });
+    } else if marketplace["interface"]
+        .get("displayName")
+        .and_then(|value| value.as_str())
+        .is_none()
+    {
+        marketplace["interface"]["displayName"] = json!("Personal");
+    }
+    if !marketplace
+        .get("plugins")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        marketplace["plugins"] = json!([]);
+    }
+    let Some(plugins) = marketplace["plugins"].as_array_mut() else {
+        return Err(TraceDecayError::Config {
+            message: "failed to normalize Codex marketplace plugins to an array".to_string(),
+        });
+    };
+    plugins.retain(|entry| {
+        !matches!(
+            entry.get("name").and_then(|value| value.as_str()),
+            Some("tracedecay" | "tokensave")
+        )
+    });
+    plugins.push(json!({
+        "name": "tracedecay",
+        "source": {
+            "source": "local",
+            "path": "./plugins/tracedecay",
+        },
+        "policy": {
+            "installation": "AVAILABLE",
+            "authentication": "ON_INSTALL",
+        },
+        "category": "Productivity",
+    }));
+    safe_write_json_file(&marketplace_path, &marketplace, None)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tracedecay to Codex personal marketplace at {}",
+        marketplace_path.display()
+    );
+    Ok(())
+}
+
+fn uninstall_codex_plugin(home: &Path) -> Result<()> {
+    remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
+    remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
+    remove_codex_marketplace_entry(home)?;
+    Ok(())
+}
+
+fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
+    let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(install_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", install_dir.display()),
+        })?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to replace non-directory Codex plugin path {}",
+                install_dir.display()
+            ),
+        });
+    }
+    if !codex_plugin_dir_is_tracedecay(install_dir) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to replace unmanaged Codex plugin directory {}",
+                install_dir.display()
+            ),
+        });
+    }
+    if codex_plugin_dir_has_only_managed_files(install_dir) {
+        std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", install_dir.display()),
+        })?;
+    } else {
+        for path in codex_plugin_managed_paths(install_dir) {
+            std::fs::remove_file(&path).ok();
+        }
+    }
+    Ok(())
+}
+
+fn codex_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
+    let manifest = load_json_file(&install_dir.join(".codex-plugin/plugin.json"));
+    matches!(
+        manifest.get("name").and_then(|value| value.as_str()),
+        Some("tracedecay" | "tokensave")
+    )
+}
+
+fn codex_plugin_dir_has_only_managed_files(install_dir: &Path) -> bool {
+    let Ok(entries) = collect_regular_files(install_dir) else {
+        return false;
+    };
+    let managed = codex_plugin_managed_paths(install_dir);
+    entries.iter().all(|entry| managed.contains(entry))
+}
+
+fn codex_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
+    CODEX_EMBEDDED_PLUGIN_FILES
+        .iter()
+        .map(|&(relative, _)| install_dir.join(relative))
+        .collect()
+}
+
+fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_regular_files_inner(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_regular_files_inner(&entry.path(), out)?;
+        } else if file_type.is_file() {
+            out.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn remove_codex_marketplace_entry(home: &Path) -> Result<()> {
+    let marketplace_path = codex_personal_marketplace_path(home);
+    if !marketplace_path.exists() {
+        return Ok(());
+    }
+    let mut marketplace = load_json_file_strict(&marketplace_path)?;
+    let Some(plugins) = marketplace
+        .get_mut("plugins")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(());
+    };
+    let before = plugins.len();
+    plugins.retain(|entry| {
+        !matches!(
+            entry.get("name").and_then(|value| value.as_str()),
+            Some("tracedecay" | "tokensave")
+        )
+    });
+    if plugins.len() == before {
+        return Ok(());
+    }
+    safe_write_json_file(&marketplace_path, &marketplace, None)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Removed tracedecay from Codex personal marketplace at {}",
+        marketplace_path.display()
+    );
+    Ok(())
+}
 
 /// Register MCP server and auto-approve tools in ~/.codex/config.toml.
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str, scope: InstallScope) -> Result<()> {
@@ -528,6 +810,86 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
+
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    let plugin_dir = codex_plugin_install_dir(home);
+    let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
+    if !manifest_path.exists() {
+        if CodexIntegration::has_legacy_config_install(home) {
+            doctor_check_config(dc, &home.join(".codex/config.toml"));
+            dc.warn(
+                "Codex uses a legacy config-managed tracedecay install — run `tracedecay install --agent codex` to install the Codex plugin bundle",
+            );
+        } else {
+            dc.warn(&format!(
+                "{} not found — run `tracedecay install --agent codex` if you use Codex CLI",
+                manifest_path.display()
+            ));
+        }
+        return;
+    }
+
+    let manifest = load_json_file(&manifest_path);
+    if manifest.get("name").and_then(|value| value.as_str()) == Some("tracedecay") {
+        dc.pass(&format!(
+            "Codex plugin manifest present in {}",
+            manifest_path.display()
+        ));
+    } else {
+        dc.fail(&format!(
+            "Codex plugin manifest at {} is not a tracedecay plugin",
+            manifest_path.display()
+        ));
+    }
+    match manifest.get("version").and_then(|value| value.as_str()) {
+        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
+        Some(version) => dc.warn(&format!(
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            env!("CARGO_PKG_VERSION")
+        )),
+        None => dc.warn("Codex plugin manifest does not contain a version"),
+    }
+
+    let mcp_path = plugin_dir.join(".mcp.json");
+    let mcp = load_json_file(&mcp_path);
+    if mcp
+        .get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
+    {
+        dc.pass(&format!(
+            "Codex plugin MCP server registered in {}",
+            mcp_path.display()
+        ));
+    } else {
+        dc.fail(&format!(
+            "Codex plugin MCP server missing in {} — run `tracedecay install --agent codex`",
+            mcp_path.display()
+        ));
+    }
+
+    let marketplace_path = codex_personal_marketplace_path(home);
+    let marketplace = load_json_file(&marketplace_path);
+    let has_entry = marketplace
+        .get("plugins")
+        .and_then(|value| value.as_array())
+        .is_some_and(|plugins| {
+            plugins.iter().any(|entry| {
+                entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+            })
+        });
+    if has_entry {
+        dc.pass(&format!(
+            "Codex personal marketplace contains tracedecay in {}",
+            marketplace_path.display()
+        ));
+    } else {
+        dc.warn(&format!(
+            "Codex personal marketplace missing tracedecay in {} — run `tracedecay install --agent codex`",
+            marketplace_path.display()
+        ));
+    }
+}
 
 /// Check config.toml has tracedecay registered.
 fn doctor_check_config(dc: &mut DoctorCounters, config_path: &Path) {

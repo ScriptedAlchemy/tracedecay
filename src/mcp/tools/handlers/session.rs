@@ -11,8 +11,8 @@ use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
-    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort,
-    LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
+    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
+    LcmGrepSort, LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
     LcmSummarizerMode, LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT,
 };
 use crate::sessions::SessionSearchScope;
@@ -106,8 +106,7 @@ fn compact_lcm_expand_query_payload(
             max_synthesis_system_chars: MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS,
             max_synthesis_prompt_chars: MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS,
             compact_chars: None,
-            truncation_reason:
-                "expand-query response compacted to preserve synthesis contract fields",
+            truncation_reason: "expand-query response compacted to preserve synthesis contract fields",
         },
         CompactTier::Minimal { compact_chars } => LcmExpandQueryCompactLimits {
             max_context_blocks: 1,
@@ -667,9 +666,9 @@ fn lcm_load_content_slice(args: &Value) -> Result<(LcmContentSlice, Option<usize
 fn lcm_doctor_mode(args: &Value) -> Result<&str> {
     let mode = string_arg(args, "mode").unwrap_or("diagnose");
     match mode {
-        "diagnose" | "repair" | "retention" | "clean" => Ok(mode),
+        "diagnose" | "repair" | "retention" | "clean" | "gc" => Ok(mode),
         _ => Err(argument_error(
-            "mode must be one of diagnose, repair, retention, clean",
+            "mode must be one of diagnose, repair, retention, clean, gc",
         )),
     }
 }
@@ -683,12 +682,32 @@ fn lcm_doctor_clean_apply_enabled(args: &Value) -> Result<bool> {
     }
 }
 
+fn lcm_gc_apply_enabled(args: &Value) -> Result<bool> {
+    match args.get("lcm_gc_apply_enabled") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| argument_error("lcm_gc_apply_enabled must be a boolean")),
+        None => Ok(crate::global_db::env_flag("LCM_GC_APPLY_ENABLED")),
+    }
+}
+
 fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
     Ok(LcmCleanConfig {
         ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
         stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
         ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
     })
+}
+
+fn lcm_gc_config(args: &Value) -> Result<LcmGcConfig> {
+    match args.get("gc_config") {
+        Some(value) => serde_json::from_value::<LcmGcConfig>(value.clone()).map_err(|err| {
+            argument_error(format!(
+                "gc_config must be a valid LcmGcConfig object: {err}"
+            ))
+        }),
+        None => Ok(LcmGcConfig::default()),
+    }
 }
 
 // By-value so it can be used point-free as a `map_err` adapter.
@@ -928,7 +947,7 @@ async fn open_lcm_storage(
                         Err(message) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
                                 message,
-                            ))
+                            ));
                         }
                     }
                 }
@@ -946,12 +965,12 @@ async fn open_lcm_storage(
                                     "hermes_profile LCM storage requires an existing session database: {}",
                                     db_path.display()
                                 )),
-                            })
+                            });
                         }
                         HermesProfileDbReadOnly::ConfigError(msg) => {
                             return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
                                 msg,
-                            ))
+                            ));
                         }
                     }
                 }
@@ -1178,10 +1197,12 @@ pub(super) async fn handle_lcm_status(
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = string_arg(&args, "session_id");
+    let deep = bool_arg(&args, "deep")?.unwrap_or(false);
+    let gc_config = lcm_gc_config(&args)?;
     let storage = lcm_open_storage_ro!(project_root, &args);
     let mut status = storage
         .db
-        .lcm_status(provider, session_id)
+        .lcm_status_with_options(provider, session_id, deep, &gc_config)
         .await
         .map_err(lcm_error)?;
     status.storage_scope = Some(storage.scope.to_string());
@@ -1191,6 +1212,7 @@ pub(super) async fn handle_lcm_status(
             "status": "ok",
             "provider": provider,
             "session_id": session_id,
+            "deep": deep,
             "lcm": status,
         }),
     ))
@@ -1205,6 +1227,7 @@ pub(super) async fn handle_lcm_doctor(
     let mode = lcm_doctor_mode(&args)?;
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
     let clean_apply_enabled = lcm_doctor_clean_apply_enabled(&args)?;
+    let gc_apply_enabled = lcm_gc_apply_enabled(&args)?;
     if mode == "clean" && apply && !clean_apply_enabled {
         return Ok(tool_json(
             project_root,
@@ -1232,8 +1255,36 @@ pub(super) async fn handle_lcm_doctor(
             }),
         ));
     }
+    if mode == "gc" && apply && !gc_apply_enabled {
+        return Ok(tool_json(
+            project_root,
+            &json!({
+                "status": "denied",
+                "provider": provider,
+                "session_id": session_id,
+                "mode": mode,
+                "dry_run": false,
+                "apply": true,
+                "error": "payload GC apply is disabled by default",
+                "note": "set LCM_GC_APPLY_ENABLED=true only in trusted operator environments",
+                "repairs": {
+                    "planned_actions": [],
+                    "applied_actions": [],
+                    "backup": Value::Null,
+                    "unsafe_actions_skipped": [
+                        {
+                            "kind": "payload_gc",
+                            "safe": false,
+                            "reason": "lcm_gc_apply_disabled"
+                        }
+                    ]
+                }
+            }),
+        ));
+    }
     let clean_config = lcm_clean_config(&args)?;
-    let open_mode = if matches!(mode, "repair" | "clean") && apply {
+    let gc_config = lcm_gc_config(&args)?;
+    let open_mode = if matches!(mode, "repair" | "clean" | "gc") && apply {
         LcmOpenMode::Writable
     } else {
         LcmOpenMode::ReadOnlyExisting
@@ -1244,7 +1295,7 @@ pub(super) async fn handle_lcm_doctor(
     };
     let mut payload = storage
         .db
-        .lcm_doctor(provider, session_id, mode, apply, clean_config)
+        .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
         .await
         .map_err(lcm_error)?;
     if let Some(object) = payload.as_object_mut() {

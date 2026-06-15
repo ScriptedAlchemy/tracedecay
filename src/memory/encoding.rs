@@ -10,6 +10,9 @@ pub struct HolographicEncoder;
 
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
+    pub const SERIALIZED_F32_BYTES: usize = 8 + Self::DIMENSIONS * std::mem::size_of::<f32>();
+    pub const HRR_PRECISION: &'static str = "f32";
+    pub const LEGACY_HRR_PRECISION: &'static str = "f64";
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
@@ -74,12 +77,36 @@ impl HolographicEncoder {
     }
 
     pub fn serialize(coefficients: &[f64]) -> bincode::Result<Vec<u8>> {
-        bincode::serialize(&coefficients.to_vec())
+        let compact: Vec<f32> = coefficients.iter().map(|value| *value as f32).collect();
+        bincode::serialize(&compact)
     }
 
     pub fn deserialize(bytes: &[u8]) -> bincode::Result<Vec<f64>> {
-        bincode::deserialize(bytes)
+        match serialized_vector_precision(bytes) {
+            Some(HolographicEncoder::HRR_PRECISION) => {
+                let compact: Vec<f32> = bincode::deserialize(bytes)?;
+                Ok(compact.into_iter().map(f64::from).collect())
+            }
+            Some(HolographicEncoder::LEGACY_HRR_PRECISION) | None => bincode::deserialize(bytes),
+            Some(_) => unreachable!("precision detector only returns known precision tags"),
+        }
     }
+}
+
+fn serialized_vector_precision(bytes: &[u8]) -> Option<&'static str> {
+    let len_bytes = bytes.get(..8)?;
+    let mut len = [0_u8; 8];
+    len.copy_from_slice(len_bytes);
+    let elements = u64::from_le_bytes(len) as usize;
+    let f32_bytes = 8_usize.checked_add(elements.checked_mul(std::mem::size_of::<f32>())?)?;
+    if bytes.len() == f32_bytes {
+        return Some(HolographicEncoder::HRR_PRECISION);
+    }
+    let f64_bytes = 8_usize.checked_add(elements.checked_mul(std::mem::size_of::<f64>())?)?;
+    if bytes.len() == f64_bytes {
+        return Some(HolographicEncoder::LEGACY_HRR_PRECISION);
+    }
+    None
 }
 
 fn deterministic_coefficients(label: &str) -> Vec<f64> {

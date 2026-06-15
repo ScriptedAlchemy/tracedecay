@@ -41,6 +41,22 @@ fn current_branch_git(project_root: &Path) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
+fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", &format!("{from_ref}..{to_ref}")])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Auto-detects the default branch (main or master).
 ///
 /// Strategy:
@@ -187,7 +203,8 @@ pub fn find_nearest_tracked_ancestor(
         .peel_to_commit()
         .ok()?;
 
-    let mut best: Option<(String, gix::date::Time)> = None;
+    let mut best_ancestor: Option<(String, usize, gix::date::Time)> = None;
+    let mut best_merge_base: Option<(String, gix::date::Time)> = None;
 
     for tracked_name in meta.branches.keys() {
         if tracked_name == branch {
@@ -202,7 +219,7 @@ pub fn find_nearest_tracked_ancestor(
             continue;
         };
 
-        // Find merge-base between branch and tracked branch
+        // Find merge-base between branch and tracked branch.
         let Ok(base_id) = repo.merge_base(branch_commit.id, tracked_commit.id) else {
             continue;
         };
@@ -214,15 +231,38 @@ pub fn find_nearest_tracked_ancestor(
             .time()
             .ok()
             .unwrap_or_else(|| gix::date::Time::new(0, 0));
-        if best
+
+        // Prefer tracked branches that are actual ancestors of the target
+        // branch. Rank them by commit distance so a direct parent wins even
+        // when multiple merge-bases land in the same timestamp second.
+        if base_id == tracked_commit.id {
+            if let Some(distance) = git_rev_list_count(project_root, &tracked_ref, &branch_ref) {
+                let replace = best_ancestor
+                    .as_ref()
+                    .is_none_or(|(_, best_distance, best_time)| {
+                        distance < *best_distance
+                            || (distance == *best_distance && time.seconds > best_time.seconds)
+                    });
+                if replace {
+                    best_ancestor = Some((tracked_name.clone(), distance, time));
+                }
+            }
+            continue;
+        }
+
+        // Fallback for siblings / non-ancestor branches: keep the most recent
+        // common ancestor so seeding still prefers the closest tracked history.
+        if best_merge_base
             .as_ref()
             .is_none_or(|(_, best_time)| time.seconds > best_time.seconds)
         {
-            best = Some((tracked_name.clone(), time));
+            best_merge_base = Some((tracked_name.clone(), time));
         }
     }
 
-    best.map(|(name, _)| name)
+    best_ancestor
+        .map(|(name, _, _)| name)
+        .or_else(|| best_merge_base.map(|(name, _)| name))
 }
 
 /// Outcome of [`add_branch_tracking`].

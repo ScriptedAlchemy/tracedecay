@@ -1,10 +1,16 @@
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::compression_decision::{
+    compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
+    preflight_decision, AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput,
+    PreflightDecisionInput,
+};
 use tracedecay::sessions::lcm::{
-    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest,
-    LcmMaintenanceDebt, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSourceRef,
-    LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
+    LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
+    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPreflightRequest, LcmRawMessage, LcmScope,
+    LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummarizerMode,
+    LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -16,6 +22,14 @@ fn isolated_db_path(tmp: &TempDir) -> std::path::PathBuf {
 
 async fn open_lcm_db(tmp: &TempDir) -> GlobalDb {
     common::open_lcm_db(tmp).await
+}
+
+async fn open_lcm_conn(tmp: &TempDir) -> libsql::Connection {
+    let db = libsql::Builder::new_local(isolated_db_path(tmp))
+        .build()
+        .await
+        .expect("build direct lcm db");
+    db.connect().expect("connect direct lcm db")
 }
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
@@ -211,6 +225,272 @@ fn limited_compress_request(
     }
 }
 
+fn lcm_raw_message(store_id: i64, role: &str, content: &str) -> LcmRawMessage {
+    LcmRawMessage {
+        provider: "cursor".into(),
+        message_id: format!("message-{store_id}"),
+        session_id: "session-1".into(),
+        store_id,
+        role: role.into(),
+        ordinal: store_id,
+        timestamp: Some(1_715_000_000 + store_id),
+        content: content.into(),
+        content_hash: format!("hash-{store_id}"),
+        storage_kind: LcmStorageKind::Inline,
+        payload_ref: None,
+        legacy_source: false,
+        legacy_truncated: false,
+        metadata_json: None,
+    }
+}
+
+fn lifecycle_state_with_debt(maintenance_debt: Vec<LcmMaintenanceDebt>) -> LcmLifecycleState {
+    LcmLifecycleState {
+        provider: "cursor".into(),
+        conversation_id: "session-1".into(),
+        current_session_id: "session-1".into(),
+        current_frontier_store_id: None,
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt,
+    }
+}
+
+// Characterization fixture for `compress_in_transaction` seam extractions.
+// Keep this intentionally table-like: follow-on refactors can move internals
+// behind smaller seams and re-run this single fixture to prove the externally
+// visible decisions, response reasons, replay assembly, and DB writes stayed
+// stable across the main branches.
+#[derive(Clone, Copy)]
+enum CompressBaselineCase {
+    FrontierChanged,
+    BelowLeafThreshold,
+    AuxiliarySummaryRequest,
+    FakeSummaryWrite,
+}
+
+impl CompressBaselineCase {
+    fn name(self) -> &'static str {
+        match self {
+            CompressBaselineCase::FrontierChanged => "frontier_changed",
+            CompressBaselineCase::BelowLeafThreshold => "below_leaf_threshold",
+            CompressBaselineCase::AuxiliarySummaryRequest => "auxiliary_summary_request",
+            CompressBaselineCase::FakeSummaryWrite => "fake_summary_write",
+        }
+    }
+}
+
+async fn assert_compress_baseline_case(case: CompressBaselineCase) {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let session_id = format!("baseline-{}", case.name());
+    let case_name = case.name();
+
+    match case {
+        CompressBaselineCase::FrontierChanged => {
+            let store_ids =
+                insert_raw_messages(&db, "cursor", &session_id, &["one", "two", "three", "four"])
+                    .await;
+            db.lcm_update_lifecycle(LcmLifecycleUpdate {
+                provider: "cursor".into(),
+                conversation_id: session_id.clone(),
+                current_session_id: session_id.clone(),
+                current_frontier_store_id: Some(store_ids[0]),
+                last_finalized_session_id: None,
+                last_finalized_frontier_store_id: None,
+                maintenance_debt: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+            let mut request = compress_request(
+                "cursor",
+                &session_id,
+                LcmSummarizerMode::Fake {
+                    summary_text: "should not be written".into(),
+                },
+            );
+            request.expected_current_frontier_store_id = Some(0);
+            let response = db.lcm_compress(request).await.unwrap();
+
+            assert_eq!(response.status, "ok", "{case_name}");
+            assert_eq!(response.reason, "frontier_changed", "{case_name}");
+            assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            assert!(response.summary_request.is_none(), "{case_name}");
+            assert_eq!(
+                response.frontier.current_frontier_store_id,
+                Some(store_ids[0]),
+                "{case_name}"
+            );
+            assert_eq!(
+                response
+                    .replay_messages
+                    .iter()
+                    .map(|message| message["content"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                vec!["three".to_string(), "four".to_string()],
+                "{case_name}"
+            );
+            assert_eq!(
+                db.lcm_status("cursor", Some(&session_id))
+                    .await
+                    .unwrap()
+                    .summary_node_count,
+                0,
+                "{case_name}"
+            );
+        }
+        CompressBaselineCase::BelowLeafThreshold => {
+            insert_raw_messages(
+                &db,
+                "cursor",
+                &session_id,
+                &["old-1", "old-2", "fresh-1", "fresh-2"],
+            )
+            .await;
+            let response = db
+                .lcm_compress(limited_compress_request(
+                    "cursor",
+                    &session_id,
+                    LcmSummarizerMode::Fake {
+                        summary_text: "should not be written".into(),
+                    },
+                    Some(10),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status, "ok", "{case_name}");
+            assert_eq!(
+                response.reason, "backlog_below_leaf_chunk_threshold",
+                "{case_name}"
+            );
+            assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            assert_eq!(
+                response
+                    .replay_messages
+                    .iter()
+                    .map(|message| message["content"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "old-1".to_string(),
+                    "old-2".to_string(),
+                    "fresh-1".to_string(),
+                    "fresh-2".to_string(),
+                ],
+                "{case_name}"
+            );
+            assert_eq!(
+                response.frontier.current_frontier_store_id, None,
+                "{case_name}"
+            );
+        }
+        CompressBaselineCase::AuxiliarySummaryRequest => {
+            let store_ids = insert_raw_messages(
+                &db,
+                "cursor",
+                &session_id,
+                &["old-1", "old-2", "fresh-1", "fresh-2"],
+            )
+            .await;
+            let response = db
+                .lcm_compress(compress_request(
+                    "cursor",
+                    &session_id,
+                    LcmSummarizerMode::HermesAuxiliary,
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status, "needs_summary", "{case_name}");
+            assert_eq!(
+                response.reason, "hermes_auxiliary_not_available",
+                "{case_name}"
+            );
+            assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            let summary_request = response
+                .summary_request
+                .as_ref()
+                .expect("auxiliary mode should return summary contract");
+            assert_eq!(summary_request.source_range.from_store_id, store_ids[0]);
+            assert_eq!(summary_request.source_range.to_store_id, store_ids[1]);
+            assert_eq!(
+                response
+                    .replay_messages
+                    .iter()
+                    .map(|message| message["content"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                vec!["fresh-1".to_string(), "fresh-2".to_string()],
+                "{case_name}"
+            );
+        }
+        CompressBaselineCase::FakeSummaryWrite => {
+            let store_ids = insert_raw_messages(
+                &db,
+                "cursor",
+                &session_id,
+                &["old-1", "old-2", "fresh-1", "fresh-2"],
+            )
+            .await;
+            let response = db
+                .lcm_compress(compress_request(
+                    "cursor",
+                    &session_id,
+                    LcmSummarizerMode::Fake {
+                        summary_text: "baseline summary".into(),
+                    },
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status, "ok", "{case_name}");
+            assert_eq!(response.reason, "compressed_backlog", "{case_name}");
+            assert_eq!(response.summary_nodes_created, 1, "{case_name}");
+            assert_eq!(
+                response.frontier.current_frontier_store_id,
+                Some(store_ids[1]),
+                "{case_name}"
+            );
+            assert_eq!(
+                response
+                    .replay_messages
+                    .iter()
+                    .map(|message| message["content"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "baseline summary".to_string(),
+                    "fresh-1".to_string(),
+                    "fresh-2".to_string(),
+                ],
+                "{case_name}"
+            );
+            assert_eq!(
+                db.lcm_status("cursor", Some(&session_id))
+                    .await
+                    .unwrap()
+                    .summary_node_count,
+                1,
+                "{case_name}"
+            );
+            let expanded = db
+                .lcm_expand_summary_node("cursor", &session_id, &response.summary_nodes[0].node_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                expanded
+                    .sources
+                    .iter()
+                    .map(|source| source.content.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["old-1", "old-2"],
+                "{case_name}"
+            );
+        }
+    }
+}
+
 fn boundary_request(
     session_id: &str,
     old_session_id: &str,
@@ -269,6 +549,247 @@ fn summary_draft_with_times(
     draft.source_time_start = Some(source_time_start);
     draft.source_time_end = Some(source_time_end);
     draft
+}
+
+#[tokio::test]
+async fn compress_in_transaction_baseline_decision_fixture_preserves_contract() {
+    for case in [
+        CompressBaselineCase::FrontierChanged,
+        CompressBaselineCase::BelowLeafThreshold,
+        CompressBaselineCase::AuxiliarySummaryRequest,
+        CompressBaselineCase::FakeSummaryWrite,
+    ] {
+        assert_compress_baseline_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn compress_frontier_changed_preserves_existing_transaction_state() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-frontier-noop",
+        &["one", "two", "three", "four"],
+    )
+    .await;
+    let existing_debt = vec![LcmMaintenanceDebt::RawBacklog {
+        from_store_id: store_ids[1],
+        to_store_id: store_ids[2],
+    }];
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "session-frontier-noop".into(),
+        current_session_id: "session-frontier-noop".into(),
+        current_frontier_store_id: Some(store_ids[0]),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: existing_debt.clone(),
+    })
+    .await
+    .unwrap();
+
+    let mut request = compress_request(
+        "cursor",
+        "session-frontier-noop",
+        LcmSummarizerMode::Fake {
+            summary_text: "should not be written".into(),
+        },
+    );
+    request.expected_current_frontier_store_id = Some(0);
+
+    let response = db.lcm_compress(request).await.unwrap();
+    assert_eq!(response.reason, "frontier_changed");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-frontier-noop"))
+            .await
+            .unwrap()
+            .summary_node_count,
+        0
+    );
+
+    let state = db
+        .lcm_lifecycle_state("cursor", "session-frontier-noop")
+        .await
+        .unwrap();
+    assert_eq!(state.current_frontier_store_id, Some(store_ids[0]));
+    assert_eq!(state.maintenance_debt, existing_debt);
+}
+
+#[tokio::test]
+async fn compress_persists_summary_frontier_and_remaining_backlog_debt() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-write-success",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let response = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-write-success",
+            LcmSummarizerMode::Fake {
+                summary_text: "writer summary".into(),
+            },
+            None,
+            Some(1),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "compressed_backlog");
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(
+        response.frontier.current_frontier_store_id,
+        Some(store_ids[0])
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-write-success"))
+            .await
+            .unwrap()
+            .summary_node_count,
+        1
+    );
+
+    let state = db
+        .lcm_lifecycle_state("cursor", "session-write-success")
+        .await
+        .unwrap();
+    assert_eq!(state.current_frontier_store_id, Some(store_ids[0]));
+    assert_eq!(
+        state.maintenance_debt,
+        vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: store_ids[1],
+            to_store_id: store_ids[1],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let conn = open_lcm_conn(&tmp).await;
+    conn.execute_batch(
+        "CREATE TRIGGER abort_compression_debt_insert
+         BEFORE INSERT ON lcm_maintenance_debt
+         BEGIN
+            SELECT RAISE(ABORT, 'forced maintenance debt failure');
+         END;",
+    )
+    .await
+    .expect("install maintenance debt trigger");
+    drop(conn);
+
+    insert_raw_messages(
+        &db,
+        "cursor",
+        "session-write-rollback",
+        &["old-1", "old-2", "fresh-1", "fresh-2"],
+    )
+    .await;
+
+    let err = db
+        .lcm_compress(limited_compress_request(
+            "cursor",
+            "session-write-rollback",
+            LcmSummarizerMode::Fake {
+                summary_text: "writer summary".into(),
+            },
+            None,
+            Some(1),
+            None,
+        ))
+        .await
+        .expect_err("trigger should abort maintenance debt write");
+
+    assert!(
+        format!("{err:?}").contains("forced maintenance debt failure"),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-write-rollback"))
+            .await
+            .unwrap()
+            .summary_node_count,
+        0
+    );
+    assert!(
+        db.lcm_lifecycle_state("cursor", "session-write-rollback")
+            .await
+            .is_err(),
+        "failed write should roll back lifecycle state"
+    );
+}
+
+#[test]
+fn compression_decision_seam_preserves_token_budget_contract() {
+    assert_eq!(
+        effective_assembly_token_cap(AssemblyCapInput {
+            max_assembly_tokens: None,
+            context_length: Some(32),
+            reserve_tokens_floor: Some(40),
+        }),
+        None
+    );
+
+    let backlog = vec![lcm_raw_message(1, "assistant", "123456")];
+    let frontier = lifecycle_state_with_debt(vec![LcmMaintenanceDebt::RawBacklog {
+        from_store_id: 1,
+        to_store_id: 1,
+    }]);
+    let mut forced_request = preflight_request(
+        "cursor",
+        "session-1",
+        vec![json!({"role": "user", "content": "active"})],
+        Some(12),
+    );
+    forced_request.max_assembly_tokens = Some(8);
+    let decision = preflight_decision(PreflightDecisionInput {
+        request: &forced_request,
+        frontier: &frontier,
+        backlog: &backlog,
+    });
+    assert!(decision.should_compress);
+    assert_eq!(decision.reason, "forced_overflow_pressure");
+
+    let plan = compression_plan(CompressionPlanInput {
+        request: &limited_compress_request(
+            "cursor",
+            "session-1",
+            LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+            Some(6),
+            Some(1),
+            Some(8),
+        ),
+        backlog: &[
+            lcm_raw_message(1, "assistant", "1234"),
+            lcm_raw_message(2, "assistant", "5678"),
+        ],
+    });
+    assert!(plan.forced_overflow_recovery);
+    assert_eq!(plan.leaf_chunk_tokens, Some(6));
+    assert_eq!(plan.selected_backlog.len(), 1);
+    assert_eq!(plan.selected_backlog[0].store_id, 1);
+
+    assert_eq!(
+        overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
+            current_tokens: Some(18),
+            max_assembly_tokens: Some(10),
+            messages: &[json!({"role": "user", "content": "tiny"})],
+        }),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -354,6 +875,7 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
         .unwrap();
 
     assert_eq!(response.status, "ok");
+    assert_eq!(response.reason, "noop_summarizer");
     assert_eq!(response.summary_nodes_created, 0);
     assert_eq!(response.replay_messages.len(), 1);
     assert_eq!(
@@ -3496,9 +4018,9 @@ async fn compression_reinjects_latest_user_objective_when_tail_is_tool_heavy() {
         .iter()
         .filter_map(|message| message["content"].as_str())
         .collect::<Vec<_>>();
-    assert!(replay_contents.iter().any(
-        |content| content.contains("[Current user objective preserved from compacted history]")
-    ));
+    assert!(replay_contents.iter().any(|content| {
+        content.contains("[Current user objective preserved from compacted history]")
+    }));
     assert!(replay_contents
         .iter()
         .any(|content| content.contains("Ship OAuth login and preserve this objective.")));
@@ -3544,9 +4066,9 @@ async fn overflow_recovery_keeps_preserved_objective_scaffold_when_evicting_tail
         .iter()
         .filter_map(|message| message["content"].as_str())
         .collect::<Vec<_>>();
-    assert!(replay.iter().any(
-        |content| content.contains("[Current user objective preserved from compacted history]")
-    ));
+    assert!(replay.iter().any(|content| {
+        content.contains("[Current user objective preserved from compacted history]")
+    }));
     assert!(replay.contains(&"keep me"));
     assert!(!replay.iter().any(|content| {
         content.contains("bulky derived assistant turn with many filler words")

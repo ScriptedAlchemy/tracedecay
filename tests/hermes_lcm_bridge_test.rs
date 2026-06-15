@@ -80,7 +80,8 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
     let script = format!("{PLUGIN_LOAD_PRELUDE}\n{script}");
     std::fs::write(&script_path, script).unwrap();
 
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(&script_path)
         .arg(plugin_dir)
         // Isolate from the developer's real ~/.hermes: the generated plugin
@@ -88,6 +89,16 @@ fn run_generated_plugin_script(script_name: &str, script: &str, failure_message:
         // config.yaml pin would override the behavior under test.
         .env("HOME", home.path())
         .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE");
+    // Ambient LCM_* vars from the worker shell must not leak into the
+    // generated-plugin subprocess: many scripts set their own knobs and expect
+    // a hermetic starting point.
+    for (key, _) in std::env::vars() {
+        if key.starts_with("LCM_") {
+            command.env_remove(key);
+        }
+    }
+    let output = command
         .output()
         .expect("python3 should run generated Hermes plugin check");
     assert!(
@@ -990,6 +1001,7 @@ plugin.register(legacy)
         .arg(plugin_dir)
         .env("HOME", home.path())
         .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE")
         .output()
         .expect("python3 should run generated Hermes context engine check");
     assert!(
@@ -1116,6 +1128,7 @@ assert args == {
         .arg(plugin_dir)
         .env("HOME", home.path())
         .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE")
         .output()
         .expect("python3 should run generated Hermes preflight bridge check");
     assert!(
@@ -1230,6 +1243,7 @@ assert len(calls) == 1
         .arg(plugin_dir)
         .env("HOME", home.path())
         .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE")
         .output()
         .expect("python3 should run generated Hermes session boundary bridge check");
     assert!(
@@ -1330,7 +1344,7 @@ assert engine.last_compress_result == {"status": "not_implemented", "message": "
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:4] == ["tool", "tracedecay_lcm_compress", "--json"]
+assert argv[1:4] == ["tool", "tracedecay_lcm_compress", "--json"], argv
 assert "--project" not in argv
 args = json.loads(argv[argv.index("--args") + 1])
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
@@ -1358,6 +1372,9 @@ assert args == {
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir)
+        .env("HOME", home.path())
+        .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE")
         .output()
         .expect("python3 should run generated Hermes compress bridge check");
     assert!(
@@ -1605,6 +1622,7 @@ assert explicit_argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_l
         .arg(plugin_dir)
         .env("HOME", home.path())
         .env_remove("HERMES_HOME")
+        .env_remove("HERMES_PROFILE")
         .output()
         .expect("python3 should run generated Hermes project flag bridge check");
     assert!(
@@ -3148,6 +3166,85 @@ with tempfile.TemporaryDirectory() as tmp:
 }
 
 #[test]
+fn generated_plugin_defaults_to_reserve_floor_for_runtime_context_cap() {
+    run_generated_plugin_script(
+        "check_default_reserve_floor.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+for key in [name for name in os.environ if name.startswith("LCM_")]:
+    del os.environ[key]
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_default_reserve_floor"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tracedecay"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    calls.append(json.loads(argv[argv.index("--args") + 1]))
+    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+    return Result(0, json.dumps(outer), "")
+
+plugin.tools.subprocess.run = fake_run
+
+engine = plugin.TraceDecayContextEngine(config={"context_length": 100000})
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.should_compress_preflight(
+    [{"role": "user", "content": "hello"}],
+    current_tokens=96000,
+)
+
+args = calls.pop()
+assert args["context_length"] == 100000
+assert args["max_assembly_tokens"] == 0
+assert args["reserve_tokens_floor"] == 4096
+
+# Explicit config and env still win over the Hermes bridge default.
+engine = plugin.TraceDecayContextEngine(
+    config={"context_length": 100000, "reserve_tokens_floor": 8192}
+)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=96000)
+assert calls.pop()["reserve_tokens_floor"] == 8192
+
+os.environ["LCM_RESERVE_TOKENS_FLOOR"] = "1234"
+engine = plugin.TraceDecayContextEngine(
+    config={"context_length": 100000, "reserve_tokens_floor": 8192}
+)
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=96000)
+assert calls.pop()["reserve_tokens_floor"] == 1234
+"#,
+        "generated plugin should derive a default assembly cap from the runtime context window",
+    );
+}
+
+#[test]
 fn generated_plugin_preserves_zero_value_leaf_and_tail_knobs() {
     run_generated_plugin_script(
         "check_zero_value_knobs.py",
@@ -3300,6 +3397,76 @@ tool, _args = calls.pop()
 assert tool == "tracedecay_lcm_preflight"
 "#,
         "generated plugin should propagate update_model/session_start context windows into preflight/compress",
+    );
+}
+
+#[test]
+fn context_engine_force_compress_sets_backend_overflow_cap() {
+    run_generated_plugin_script(
+        "check_force_compress_sets_backend_cap.py",
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+parent_name = "_hermes_user_force_compress"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tracedecay"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+calls = []
+
+def fake_call_tracedecay_tool(tool, args, **kwargs):
+    calls.append((tool, dict(args), dict(kwargs)))
+    payload = {
+        "status": "ok",
+        "reason": "forced_overflow_recovery",
+        "summary_nodes": [],
+        "replay_messages": [{"role": "user", "content": "compressed"}],
+        "frontier": {
+            "provider": "cursor",
+            "conversation_id": "session-1",
+            "current_session_id": "session-1",
+            "current_frontier_store_id": None,
+            "last_finalized_session_id": None,
+            "last_finalized_frontier_store_id": None,
+            "maintenance_debt": [],
+        },
+    }
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+engine = plugin.TraceDecayContextEngine(config={"context_length": 100000, "context_threshold": 0.8})
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+compressed = engine.compress(
+    [{"role": "user", "content": "compress me"}],
+    current_tokens=90000,
+    force=True,
+)
+
+tool, args, kwargs = calls.pop()
+assert tool == "tracedecay_lcm_compress"
+assert args["max_assembly_tokens"] == 89999
+assert "force" not in kwargs
+assert compressed == [{"role": "user", "content": "compressed"}]
+"#,
+        "generated plugin should translate Hermes force=True into a backend overflow cap",
     );
 }
 

@@ -336,6 +336,15 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum MemoryAction {
+    /// Inspect holographic-memory health and derived-capacity signals.
+    Status {
+        /// Output as JSON instead of a human-readable report.
+        #[arg(long)]
+        json: bool,
+        /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
     /// Similarity-dedup curation (and the LLM-review plan/apply halves),
     /// suitable for a cron job — no dashboard server required.
     ///
@@ -402,4 +411,176 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::{BranchAction, Cli, Commands, MemoryAction};
+    use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn tool_command_preserves_trailing_help_and_reserved_args() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "tool",
+            "--project",
+            "/tmp/project",
+            "search",
+            "--help",
+            "--json",
+            "--args",
+            r#"{"query":"foo"}"#,
+            "@payload.json",
+        ])
+        .expect("tool command should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tool { project, name, args })
+                if project.as_deref() == Some("/tmp/project")
+                    && name.as_deref() == Some("search")
+                    && args
+                        == vec![
+                            "--help".to_string(),
+                            "--json".to_string(),
+                            "--args".to_string(),
+                            r#"{"query":"foo"}"#.to_string(),
+                            "@payload.json".to_string(),
+                        ]
+        ));
+    }
+
+    #[test]
+    fn claude_install_alias_dispatches_to_install_command() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "claude-install",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+            "--project-root",
+            "/tmp/project",
+            "--no-dashboard",
+        ])
+        .expect("install alias should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Install {
+                agent,
+                local,
+                profile,
+                all_profiles,
+                project_root,
+                no_dashboard,
+            }) if agent.as_deref() == Some("hermes")
+                && !local
+                && profile.as_deref() == Some("dev")
+                && !all_profiles
+                && project_root.as_deref() == Some("/tmp/project")
+                && no_dashboard
+        ));
+    }
+
+    #[test]
+    fn update_plugins_alias_dispatches_to_update_plugin_command() {
+        let cli = Cli::try_parse_from(["tracedecay", "update-plugins"])
+            .expect("update-plugin alias should parse");
+
+        assert!(matches!(cli.command, Some(Commands::UpdatePlugin)));
+    }
+
+    #[test]
+    fn status_and_branch_add_commands_dispatch_to_expected_variants() {
+        let status = Cli::try_parse_from([
+            "tracedecay",
+            "status",
+            "/tmp/project",
+            "--json",
+            "--short",
+            "--details",
+            "--runtime",
+        ])
+        .expect("status command should parse");
+        assert!(matches!(
+            status.command,
+            Some(Commands::Status {
+                path,
+                json,
+                short,
+                details,
+                runtime,
+            }) if path.as_deref() == Some("/tmp/project")
+                && json
+                && short
+                && details
+                && runtime
+        ));
+
+        let branch = Cli::try_parse_from([
+            "tracedecay",
+            "branch",
+            "add",
+            "feature/dispatch-tests",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("branch add should parse");
+        assert!(matches!(
+            branch.command,
+            Some(Commands::Branch {
+                action: BranchAction::Add { name, path }
+            }) if name.as_deref() == Some("feature/dispatch-tests")
+                && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn memory_status_command_dispatches_to_expected_variant() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "memory",
+            "status",
+            "--json",
+            "--path",
+            "/tmp/project",
+        ])
+        .expect("memory status command should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Memory {
+                action: MemoryAction::Status { json, path }
+            }) if json && path.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn install_conflicting_profile_flags_fail_during_parse() {
+        let err = match Cli::try_parse_from([
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+            "--all-profiles",
+        ]) {
+            Ok(_) => panic!("conflicting profile flags should fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn branch_remove_requires_a_branch_name() {
+        let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
+            Ok(_) => panic!("branch remove should require a name"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
 }

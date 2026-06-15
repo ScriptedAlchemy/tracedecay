@@ -3,7 +3,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::global_db::GlobalDb;
-use crate::sessions::source::{ingest_source, TranscriptIngestStats, TranscriptSource};
+use crate::sessions::shared::TranscriptIngestStats;
+use crate::sessions::source::{ingest_source, TranscriptSource};
 
 pub mod claude;
 pub mod cline_like;
@@ -12,6 +13,7 @@ pub mod cursor;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;
+pub mod shared;
 pub mod source;
 pub(crate) mod transcript_backfill;
 pub mod vibe;

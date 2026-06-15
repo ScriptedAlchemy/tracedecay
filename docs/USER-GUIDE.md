@@ -202,15 +202,17 @@ tracedecay install --agent kimi        # Moonshot Kimi CLI
 tracedecay install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tracedecay tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tracedecay`; the plugin bundles MCP, hooks, and the tracedecay rule.
+Each agent gets an appropriate configuration: MCP server registration or native plugin tools, tool permissions (where the agent supports them), and prompt rules in the agent's instruction file. Hermes installs a native profile plugin that registers tracedecay tools through Hermes' plugin API. Cursor installs a local Cursor plugin into `~/.cursor/plugins/local/tracedecay`; the plugin bundles MCP, hooks, and the tracedecay rule. Codex installs a Codex plugin source bundle into `~/plugins/tracedecay` and registers it in the personal marketplace at `~/.agents/plugins/marketplace.json`; the plugin owns MCP and skills.
 
-Codex setup registers tracedecay in `~/.codex/config.toml` (MCP server + per-tool
-auto-approval), writes prompt rules to `~/.codex/AGENTS.md`, and installs a
+Codex setup also writes prompt rules to `~/.codex/AGENTS.md` and installs a
 Claude-style lifecycle hook set in `~/.codex/hooks.json` (SessionStart,
-UserPromptSubmit, SubagentStart, and PostToolUse). Codex requires you to **trust**
-new or changed command hooks before they run — run `/hooks` inside Codex to review
-and trust the tracedecay hooks. See "Codex lifecycle hooks" below for what each one
-does and the known blind spots.
+UserPromptSubmit, SubagentStart, and PostToolUse). Hooks remain config-managed
+because the current Codex plugin manifest schema supports MCP servers and skills,
+but not plugin-declared hooks. After install, run
+`codex plugin add tracedecay@personal` so Codex installs the marketplace plugin.
+Codex requires you to **trust** new or changed command hooks before they run —
+run `/hooks` inside Codex to review and trust the tracedecay hooks. See "Codex
+lifecycle hooks" below for what each one does and the known blind spots.
 
 Hermes setup writes a `tracedecay` plugin into the selected Hermes profile and
 enables it in that profile's `config.yaml` under `plugins.enabled`. Without
@@ -296,7 +298,16 @@ ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 
 Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
 
-Codex local install writes `<root>/.codex/config.toml` (MCP), `<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle hooks, using the resolved absolute `tracedecay` path). The hooks are identical to the global Codex install described under "Codex lifecycle hooks" below.
+Codex global install is plugin-based for MCP/skills: it writes
+`~/plugins/tracedecay/` and updates `~/.agents/plugins/marketplace.json`, then
+prints `codex plugin add tracedecay@personal`. It still writes
+`~/.codex/AGENTS.md` and `~/.codex/hooks.json` because those surfaces are not
+currently represented in accepted Codex plugin manifests. Codex local install
+remains project-config based: it writes `<root>/.codex/config.toml` (MCP),
+`<root>/AGENTS.md` (prompt rules), and `<root>/.codex/hooks.json` (lifecycle
+hooks, using the resolved absolute `tracedecay` path). The local hooks are
+identical to the global Codex install described under "Codex lifecycle hooks"
+below.
 
 #### Codex lifecycle hooks
 
@@ -567,7 +578,7 @@ When running as an MCP server, tracedecay exposes more than 70 tools that AI age
 | `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
 | `tracedecay_dependency_depth` | Longest file-level dependency chains — the critical paths where upstream changes ripple through the most layers. |
 | `tracedecay_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |
-| `tracedecay_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" |
+| `tracedecay_test_risk` | Risk-weighted test gaps combining complexity, coupling, git churn, and test coverage. Answers "where should the next test go?" Reports a **static attribution lower bound** (not line/branch coverage): each function is attributed via a direct test edge (`direct_unit`) or a depth-3 transitive path (`closure`), with the weaker `closure` method keeping a higher residual risk. See [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for how to interpret the signal honestly on integration-heavy repos. |
 
 ### Test Coverage Conventions
 
@@ -580,7 +591,7 @@ Mark functions that are genuinely untestable in unit tests (e.g. infrastructure-
 pub async fn produce(&mut self, topic: &str, batch: Bytes) -> io::Result<i64> { ... }
 ```
 
-Marked functions are excluded from `tracedecay_test_risk` coverage calculations, giving you an accurate picture of testable-code coverage. The `skipped` count appears in the summary so you can track how many functions use the annotation.
+Marked functions are excluded from `tracedecay_test_risk` attribution calculations, giving you an accurate picture of testable-code attribution (the `skipped` count appears in the summary). Note this is a **static attribution** signal, not executed coverage — see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md).
 
 **Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_session_start`/`session_end`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
 
@@ -604,7 +615,7 @@ Marked functions are excluded from `tracedecay_test_risk` coverage calculations,
 | `tracedecay_changelog` | Semantic diff between two git refs — which symbols were added, removed, or modified. |
 | `tracedecay_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
 | `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions. |
-| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. |
+| `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one — see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
 
 ### Porting tools
 

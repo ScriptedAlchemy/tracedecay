@@ -10,13 +10,18 @@ mod common;
 use common::EnvVarGuard;
 use serde_json::{json, Value};
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::mcp::response_handles::{
+    cleanup_expired_response_handles, store_response_handle, RESPONSE_HANDLE_TTL_SECS,
+};
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{current_timestamp, TraceDecay};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -86,6 +91,12 @@ fn jsonrpc_notification(method: &str) -> String {
 /// Parses a JSON-RPC response and returns it.
 fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
+}
+
+fn extract_tool_text(value: &Value) -> &str {
+    value["content"][0]["text"]
+        .as_str()
+        .unwrap_or("<missing text>")
 }
 
 fn response_with_id(responses: &[String], id: Value) -> Value {
@@ -620,6 +631,135 @@ async fn test_tools_call_missing_name() {
     );
 }
 
+#[tokio::test]
+async fn test_tracedecay_retrieve_missing_handle_argument_is_invalid_params_with_reason_code() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(61),
+            "tools/call",
+            json!({
+                "name": "tracedecay_retrieve",
+                "arguments": {}
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(61));
+    assert_eq!(resp["error"]["code"], -32602);
+    assert_eq!(
+        resp["error"]["data"]["reason_code"],
+        "missing_handle_argument"
+    );
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("requires the `handle` argument"));
+}
+
+#[tokio::test]
+async fn test_tracedecay_retrieve_invalid_handle_is_invalid_params_with_reason_code() {
+    let (server, _dir) = setup_server().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(62),
+            "tools/call",
+            json!({
+                "name": "tracedecay_retrieve",
+                "arguments": { "handle": "bogus" }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(62));
+    assert_eq!(resp["error"]["code"], -32602);
+    assert_eq!(resp["error"]["data"]["reason_code"], "invalid_handle");
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("invalid response handle"));
+}
+
+#[tokio::test]
+async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_internal_error() {
+    let (server, _dir) = setup_server().await;
+    let cg = server.cg().await;
+    let stored =
+        store_response_handle(cg.project_root(), "{\"items\":[1]}", current_timestamp()).unwrap();
+    fs::write(
+        cg.project_root()
+            .join(".tracedecay/response-handles")
+            .join(format!("{}.json", stored.handle)),
+        "{not-json",
+    )
+    .unwrap();
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(63),
+            "tools/call",
+            json!({
+                "name": "tracedecay_retrieve",
+                "arguments": { "handle": stored.handle }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(63));
+    assert_eq!(resp["error"]["code"], -32603);
+    assert_eq!(
+        resp["error"]["data"]["reason_code"],
+        "corrupt_handle_record"
+    );
+    assert_eq!(resp["error"]["data"]["retryable"], true);
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("cached response handle record is unreadable"));
+}
+
+#[tokio::test]
+async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_internal_error() {
+    let (server, _dir) = setup_server().await;
+    let cg = server.cg().await;
+    let stored =
+        store_response_handle(cg.project_root(), "{\"items\":[2]}", current_timestamp()).unwrap();
+    let handle_path = cg
+        .project_root()
+        .join(".tracedecay/response-handles")
+        .join(format!("{}.json", stored.handle));
+    fs::remove_file(&handle_path).unwrap();
+    fs::create_dir(&handle_path).unwrap();
+
+    let responses = run_server_with_messages(
+        server,
+        vec![jsonrpc_request(
+            json!(64),
+            "tools/call",
+            json!({
+                "name": "tracedecay_retrieve",
+                "arguments": { "handle": stored.handle }
+            }),
+        )],
+    )
+    .await;
+
+    let resp = response_with_id(&responses, json!(64));
+    assert_eq!(resp["error"]["code"], -32603);
+    assert_eq!(resp["error"]["data"]["reason_code"], "handle_read_failed");
+    assert_eq!(resp["error"]["data"]["retryable"], true);
+    assert!(resp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("failed to read cached response handle"));
+}
+
 // ---------------------------------------------------------------------------
 // 10. test_unknown_method
 // ---------------------------------------------------------------------------
@@ -795,6 +935,191 @@ async fn test_server_stats_initial() {
     );
     assert_eq!(stats["tool_calls"], 0, "initial tool_calls should be 0");
     assert_eq!(stats["errors"], 0, "initial errors should be 0");
+}
+
+#[tokio::test]
+async fn test_server_stats_include_response_handle_metrics() {
+    let (server, _dir) = setup_server().await;
+    let baseline = server.server_stats_json().await;
+    let baseline_handles = &baseline["response_handles"];
+    let baseline_counter = |key: &str| baseline_handles[key].as_u64().unwrap_or(0);
+
+    let cg = server.cg().await;
+    let mut last_fact_id = None;
+    for i in 0..35 {
+        let added = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "SERVER_STATS_HANDLE_METRIC_{i:02}: {}",
+                    "response handle telemetry should survive truncation ".repeat(80)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        if i == 34 {
+            let added: Value = serde_json::from_str(extract_tool_text(&added.value)).unwrap();
+            last_fact_id = added["fact"]["fact_id"].as_i64();
+        }
+    }
+
+    let listed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let envelope: Value = serde_json::from_str(extract_tool_text(&listed.value)).unwrap();
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("retrieve handle")
+        .to_string();
+
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value =
+        serde_json::from_str(extract_tool_text(&retrieved.value)).unwrap();
+    assert_eq!(retrieved_payload["expired"], false);
+
+    let missing = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": "rh_0123456789abcdef01234567" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let missing_payload: Value = serde_json::from_str(extract_tool_text(&missing.value)).unwrap();
+    assert_eq!(missing_payload["reason_code"], "handle_not_found");
+
+    let expired = store_response_handle(
+        cg.project_root(),
+        "{\"expired\":true}",
+        current_timestamp() - RESPONSE_HANDLE_TTL_SECS - 5,
+    )
+    .unwrap();
+    let expired_result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": expired.handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expired_payload: Value =
+        serde_json::from_str(extract_tool_text(&expired_result.value)).unwrap();
+    assert_eq!(expired_payload["reason_code"], "handle_expired");
+
+    let broken =
+        store_response_handle(cg.project_root(), "{\"broken\":true}", current_timestamp()).unwrap();
+    let broken_path = cg
+        .project_root()
+        .join(".tracedecay/response-handles")
+        .join(format!("{}.json", broken.handle));
+    fs::remove_file(&broken_path).unwrap();
+    fs::create_dir(&broken_path).unwrap();
+    assert!(
+        handle_tool_call(
+            &cg,
+            "tracedecay_retrieve",
+            json!({ "handle": broken.handle }),
+            None,
+            None,
+        )
+        .await
+        .is_err(),
+        "broken handle fixture should increment retrieve failure telemetry"
+    );
+
+    assert!(
+        store_response_handle(cg.project_root(), "{\"expires\":true}", current_timestamp()).is_ok(),
+        "direct store should succeed so cleanup has something to expire"
+    );
+    let expired_removed = cleanup_expired_response_handles(
+        cg.project_root(),
+        current_timestamp() + RESPONSE_HANDLE_TTL_SECS + 1,
+    )
+    .unwrap();
+    assert!(
+        expired_removed >= 1,
+        "cleanup should remove at least one expired handle"
+    );
+
+    let failure_root = TempDir::new().unwrap();
+    fs::write(failure_root.path().join(".tracedecay"), "not-a-directory").unwrap();
+    assert!(
+        store_response_handle(
+            failure_root.path(),
+            "store failure telemetry",
+            current_timestamp()
+        )
+        .is_err(),
+        "store failure fixture should increment failure telemetry"
+    );
+
+    let after = server.server_stats_json().await;
+    let handles = &after["response_handles"];
+    assert!(
+        handles.is_object(),
+        "server stats should include response_handles section"
+    );
+    assert!(
+        handles["truncation_total"].as_u64().unwrap_or(0) > baseline_counter("truncation_total")
+    );
+    assert!(
+        handles["store_attempts"].as_u64().unwrap_or(0) >= baseline_counter("store_attempts") + 2
+    );
+    assert!(handles["store_success"].as_u64().unwrap_or(0) > baseline_counter("store_success"));
+    assert!(handles["store_failures"].as_u64().unwrap_or(0) > baseline_counter("store_failures"));
+    assert!(handles["retrieve_hits"].as_u64().unwrap_or(0) > baseline_counter("retrieve_hits"));
+    assert!(handles["retrieve_misses"].as_u64().unwrap_or(0) > baseline_counter("retrieve_misses"));
+    assert!(
+        handles["retrieve_expired"].as_u64().unwrap_or(0) > baseline_counter("retrieve_expired")
+    );
+    assert!(
+        handles["retrieve_failures"].as_u64().unwrap_or(0) > baseline_counter("retrieve_failures")
+    );
+    assert!(
+        handles["cleanup_removed_expired_total"]
+            .as_u64()
+            .unwrap_or(0)
+            >= baseline_counter("cleanup_removed_expired_total") + expired_removed as u64
+    );
+    assert!(
+        handles["on_disk"]["file_count"].is_number(),
+        "response handle cache stats should expose on-disk file counts"
+    );
+
+    if let Some(fact_id) = last_fact_id {
+        let _ = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({ "action": "remove", "fact_id": fact_id }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1861,15 +2186,20 @@ fn git(project: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// Drives one `tools/call` of `tracedecay_search` through the JSON-RPC
-/// transport and returns the full response text for the given id.
-async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
+/// Drives one `tools/call` through the JSON-RPC transport and returns the full
+/// parsed response for the given id.
+async fn tool_call_via_transport(
+    server: Arc<McpServer>,
+    id: i64,
+    name: &str,
+    arguments: Value,
+) -> Value {
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
             json!(id),
             "tools/call",
-            json!({ "name": "tracedecay_search", "arguments": { "query": query } }),
+            json!({ "name": name, "arguments": arguments }),
         )],
     )
     .await;
@@ -1880,10 +2210,15 @@ async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> V
     parse_response(resp_str)
 }
 
-#[tokio::test]
-async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
+/// Drives one `tools/call` of `tracedecay_search` through the JSON-RPC
+/// transport and returns the full response text for the given id.
+async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
+    tool_call_via_transport(server, id, "tracedecay_search", json!({ "query": query })).await
+}
+
+async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
     let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    let project = dir.path().to_path_buf();
 
     // main: one committed source file, indexed into the default DB.
     fs::create_dir_all(project.join("src")).unwrap();
@@ -1893,15 +2228,15 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     )
     .unwrap();
     fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
-    git(project, &["init"]);
-    git(project, &["config", "user.email", "test@test.com"]);
-    git(project, &["config", "user.name", "Test"]);
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "initial"]);
-    git(project, &["branch", "-M", "main"]);
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
 
     {
-        let cg = TraceDecay::init(project).await.unwrap();
+        let cg = TraceDecay::init(&project).await.unwrap();
         cg.index_all().await.unwrap();
         cg.checkpoint().await.unwrap();
     }
@@ -1919,24 +2254,24 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     .unwrap();
 
     // feature: add a feature-only symbol and index it into feature's DB.
-    git(project, &["checkout", "-b", "feature"]);
+    git(&project, &["checkout", "-b", "feature"]);
     fs::write(
         project.join("src/feat.rs"),
         "pub fn feature_only() -> u32 { 2 }\n",
     )
     .unwrap();
-    git(project, &["add", "."]);
-    git(project, &["commit", "-m", "feature work"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "feature work"]);
     {
-        let cg = TraceDecay::open(project).await.unwrap();
+        let cg = TraceDecay::open(&project).await.unwrap();
         assert_eq!(cg.serving_branch(), Some("feature"));
         cg.sync().await.unwrap();
         cg.checkpoint().await.unwrap();
     }
 
     // Back on main: start the server pinned to main's DB.
-    git(project, &["checkout", "main"]);
-    let cg = TraceDecay::open(project).await.unwrap();
+    git(&project, &["checkout", "main"]);
+    let cg = TraceDecay::open(&project).await.unwrap();
     assert_eq!(cg.serving_branch(), Some("main"));
     let server = McpServer::new(cg, None).await;
     assert!(
@@ -1945,6 +2280,13 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
             .await,
         "startup catch-up must settle before the mid-test checkout"
     );
+
+    (dir, project, server)
+}
+
+#[tokio::test]
+async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
+    let (_dir, project, server) = setup_branch_drift_fixture().await;
 
     // While on main, the feature-only symbol must be invisible.
     let resp = search_via_transport(server.clone(), 1, "feature_only").await;
@@ -1958,7 +2300,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
     // Mid-session checkout. The next tool call must detect the drift,
     // reopen onto feature's DB, and serve the feature-only symbol.
-    git(project, &["checkout", "feature"]);
+    git(&project, &["checkout", "feature"]);
     let resp = search_via_transport(server.clone(), 2, "feature_only").await;
     assert!(
         resp["error"].is_null(),
@@ -1980,5 +2322,43 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
     assert!(
         !cg_now.branch_drifted(),
         "drift must be cleared after the reopen"
+    );
+}
+
+#[tokio::test]
+async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() {
+    let (_dir, project, server) = setup_branch_drift_fixture().await;
+
+    git(&project, &["checkout", "feature"]);
+
+    let warm = search_via_transport(server.clone(), 1, "feature_only").await;
+    assert!(
+        warm["error"].is_null(),
+        "drift warm-up search should succeed: {warm}"
+    );
+    assert!(
+        warm["result"]["content"]
+            .to_string()
+            .contains("feature_only"),
+        "warm-up search should reopen the server onto the feature DB: {warm}"
+    );
+
+    let main_search = tool_call_via_transport(
+        server.clone(),
+        2,
+        "tracedecay_branch_search",
+        json!({"branch": "main", "query": "feature_only", "limit": 10}),
+    )
+    .await;
+    assert!(
+        main_search["error"].is_null(),
+        "explicit main branch search should not error after drift: {main_search}"
+    );
+    let main_search_text = main_search["result"]["content"][0]["text"]
+        .as_str()
+        .expect("branch_search should return text content");
+    assert!(
+        !main_search_text.contains("feature_only"),
+        "explicit main branch search must ignore the live feature branch DB: {main_search_text}"
     );
 }
