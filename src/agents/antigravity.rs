@@ -134,12 +134,12 @@ impl AgentIntegration for AntigravityIntegration {
     fn has_tracedecay(&self, home: &Path) -> bool {
         let ide_ok = {
             let mcp_path = mcp_config_path(home);
-            if !mcp_path.exists() {
-                false
-            } else {
+            if mcp_path.exists() {
                 let servers = load_json_file(&mcp_path).get("mcpServers").cloned();
                 servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
                     || servers.as_ref().and_then(|v| v.get("tokensave")).is_some()
+            } else {
+                false
             }
         };
         let cli_ok = {

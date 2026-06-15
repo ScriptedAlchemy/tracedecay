@@ -85,7 +85,7 @@ pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesP
 /// site — see rebrand notes). New directories are always created as
 /// `.tracedecay`.
 ///
-/// LEGACY-COMPAT: hermes_home/.tokensave accepted alongside .tracedecay.
+/// LEGACY-COMPAT: `hermes_home/.tokensave` accepted alongside `.tracedecay`.
 fn resolve_hermes_profile_tracedecay_dir(
     hermes_home: &Path,
     create_missing: bool,
@@ -96,13 +96,12 @@ fn resolve_hermes_profile_tracedecay_dir(
     // Pick which directory to use: prefer .tracedecay if it already exists;
     // accept legacy .tokensave for existing installs; default to .tracedecay
     // for new ones so create_missing writes the new name.
-    let brand_dir = match (
-        std::fs::symlink_metadata(&tracedecay_dir),
-        std::fs::symlink_metadata(&legacy_dir),
-    ) {
-        (Ok(_), _) => tracedecay_dir.clone(),
-        (Err(e1), Ok(_)) if e1.kind() == std::io::ErrorKind::NotFound => legacy_dir.clone(),
-        _ => tracedecay_dir.clone(),
+    let brand_dir = if std::fs::symlink_metadata(&tracedecay_dir).is_ok() {
+        tracedecay_dir.clone()
+    } else if std::fs::symlink_metadata(&legacy_dir).is_ok() {
+        legacy_dir.clone()
+    } else {
+        tracedecay_dir.clone()
     };
 
     match std::fs::symlink_metadata(&brand_dir) {

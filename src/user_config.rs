@@ -1,4 +1,4 @@
-//! User-level configuration stored in the TraceDecay user data directory.
+//! User-level configuration stored in the `TraceDecay` user data directory.
 //!
 //! All fields have defaults so a missing file or missing fields are handled
 //! gracefully. Unknown fields are silently ignored for forward compatibility.
