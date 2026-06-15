@@ -52,6 +52,11 @@ const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
     "tracedecay_lcm_compress",
     "tracedecay_lcm_session_boundary",
 ];
+// Maintenance note: this CLI allowlist must match the MCP registry's
+// profile-scoped LCM schemas (tools with `storage_scope` including
+// `hermes_profile`) and `handle_profile_scoped_lcm_tool_call`; update it
+// alongside the handler lockstep tests so profile-scoped calls do not silently
+// route through project initialization.
 /// Profile-store tools the generated Hermes plugin anchors at the Hermes
 /// home (`--project <hermes_home>`). The store is created on first touch —
 /// a fresh profile has no `.tracedecay` until the first fact lands — instead
@@ -855,5 +860,51 @@ mod tests {
             "tracedecay_status",
             &json!({"storage_scope": "hermes_profile"})
         ));
+    }
+
+    // Registry integrity guardrail (companion to the handler lockstep tests in
+    // `mcp::tools::handlers`): the CLI routes profile-scoped LCM calls through
+    // `is_profile_scoped_lcm_dispatch`, which consults the hand-maintained
+    // `PROFILE_SCOPED_LCM_TOOLS` const. Any tool the MCP registry advertises as
+    // profile-scoped (storage_scope enum including `hermes_profile`) must also
+    // appear here, or its CLI invocations silently fall through to project
+    // initialization instead of profile-scoped dispatch. This fails in both
+    // directions when the const drifts from the registry.
+    #[test]
+    fn cli_profile_scoped_lcm_allowlist_matches_registry() {
+        use std::collections::BTreeSet;
+
+        let registry_profile_scoped: BTreeSet<String> = get_tool_definitions()
+            .into_iter()
+            .filter(|tool| {
+                tool.input_schema["properties"]["storage_scope"]["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == "hermes_profile"))
+            })
+            .map(|tool| tool.name)
+            .collect();
+        let cli_allowlist: BTreeSet<String> = PROFILE_SCOPED_LCM_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let missing_from_cli: Vec<String> = registry_profile_scoped
+            .difference(&cli_allowlist)
+            .cloned()
+            .collect();
+        assert!(
+            missing_from_cli.is_empty(),
+            "profile-scoped MCP tools missing from CLI PROFILE_SCOPED_LCM_TOOLS allowlist \
+             (those calls would fall through to project init): {missing_from_cli:?}"
+        );
+        let stale_in_cli: Vec<String> = cli_allowlist
+            .difference(&registry_profile_scoped)
+            .cloned()
+            .collect();
+        assert!(
+            stale_in_cli.is_empty(),
+            "CLI PROFILE_SCOPED_LCM_TOOLS allowlist references tools no longer registered as \
+             profile-scoped in the MCP registry: {stale_in_cli:?}"
+        );
     }
 }

@@ -1219,8 +1219,31 @@ impl GlobalDb {
         provider: &str,
         session_id: Option<&str>,
     ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
-        crate::sessions::lcm::query::status(&self.conn, &self.storage_root, provider, session_id)
-            .await
+        self.lcm_status_with_options(
+            provider,
+            session_id,
+            false,
+            &crate::sessions::lcm::LcmGcConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn lcm_status_with_options(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+        deep: bool,
+        gc_config: &crate::sessions::lcm::LcmGcConfig,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::status(
+            &self.conn,
+            &self.storage_root,
+            provider,
+            session_id,
+            deep,
+            gc_config,
+        )
+        .await
     }
 
     /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
@@ -1231,6 +1254,7 @@ impl GlobalDb {
         mode: &str,
         apply: bool,
         clean_config: crate::sessions::lcm::LcmCleanConfig,
+        gc_config: crate::sessions::lcm::LcmGcConfig,
     ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
         crate::sessions::lcm::doctor::doctor(
             &self.conn,
@@ -1242,6 +1266,7 @@ impl GlobalDb {
                 mode,
                 apply,
                 clean_config,
+                gc_config,
             },
         )
         .await

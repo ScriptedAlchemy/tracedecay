@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 14;
+const LATEST_VERSION: u32 = 15;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -57,9 +57,60 @@ async fn set_version(conn: &Connection, version: u32) -> Result<()> {
     Ok(())
 }
 
+async fn enable_incremental_auto_vacuum(
+    conn: &Connection,
+    operation: &str,
+    vacuum_existing_db: bool,
+) -> Result<()> {
+    let mode: i64 = {
+        let mut rows =
+            conn.query("PRAGMA auto_vacuum", ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("{operation}: failed to read auto_vacuum: {e}"),
+                    operation: operation.to_string(),
+                })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("{operation}: failed to read auto_vacuum row: {e}"),
+                operation: operation.to_string(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: format!("{operation}: auto_vacuum returned no rows"),
+                operation: operation.to_string(),
+            })?;
+        row.get(0).map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to read auto_vacuum value: {e}"),
+            operation: operation.to_string(),
+        })?
+    };
+    if mode == 2 {
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to enable incremental auto_vacuum: {e}"),
+            operation: operation.to_string(),
+        })?;
+    if vacuum_existing_db {
+        conn.execute_batch("VACUUM;")
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("{operation}: failed to rebuild database for auto_vacuum: {e}"),
+                operation: operation.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
 /// Creates the complete latest schema from scratch for a brand-new database.
 /// This avoids running v0→v1→…→v6 migrations sequentially.
 pub async fn create_schema(conn: &Connection) -> Result<()> {
+    enable_incremental_auto_vacuum(conn, "create_schema", true).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY,
@@ -226,6 +277,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         "database version {current} is ahead of code version {LATEST_VERSION}"
     );
     if current >= LATEST_VERSION {
+        enable_incremental_auto_vacuum(conn, "migrate", true).await?;
         return Ok(false);
     }
 
@@ -255,6 +307,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
+            enable_incremental_auto_vacuum(conn, "migrate", true).await?;
             Ok(true)
         }
         Err(e) => {
@@ -294,6 +347,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         12 => migrate_v12(conn).await,
         13 => migrate_v13(conn).await,
         14 => migrate_v14(conn).await,
+        15 => migrate_v15(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -434,6 +488,60 @@ async fn migrate_v14(conn: &Connection) -> Result<()> {
             message: format!("v14: failed to create memory_oplog: {e}"),
             operation: "migrate_v14".to_string(),
         })?;
+    Ok(())
+}
+
+/// v15: compact memory vectors and reclaim pages.
+///
+/// Adds `hrr_precision` so f64 legacy blobs can be identified and re-encoded
+/// once as f32 blobs. The default remains f32 for fresh writes; existing
+/// non-compact blobs are marked f64 before the shared vector repair path runs.
+async fn migrate_v15(conn: &Connection) -> Result<()> {
+    let mut has_precision = false;
+    let mut rows = conn
+        .query("PRAGMA table_info(memory_facts)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v15: failed to read memory_facts columns: {e}"),
+            operation: "migrate_v15".to_string(),
+        })?;
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v15: failed to iterate memory_facts columns: {e}"),
+        operation: "migrate_v15".to_string(),
+    })? {
+        let name: String = row.get(1).map_err(|e| TraceDecayError::Database {
+            message: format!("v15: failed to read memory_facts column name: {e}"),
+            operation: "migrate_v15".to_string(),
+        })?;
+        has_precision |= name == "hrr_precision";
+    }
+
+    if !has_precision {
+        conn.execute(
+            "ALTER TABLE memory_facts ADD COLUMN hrr_precision TEXT NOT NULL DEFAULT 'f32'",
+            (),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v15: failed to add hrr_precision: {e}"),
+            operation: "migrate_v15".to_string(),
+        })?;
+    }
+
+    conn.execute(
+        "UPDATE memory_facts
+         SET hrr_precision = 'f64'
+         WHERE hrr_vector IS NOT NULL
+           AND length(hrr_vector) != ?1",
+        libsql::params![crate::memory::encoding::HolographicEncoder::SERIALIZED_F32_BYTES as i64],
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("v15: failed to mark legacy vector precision: {e}"),
+        operation: "migrate_v15".to_string(),
+    })?;
+
+    backfill_holographic_memory_vectors_and_banks(conn).await?;
     Ok(())
 }
 
@@ -1066,7 +1174,8 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
             metadata TEXT NOT NULL DEFAULT '{}',
             hrr_vector BLOB,
             hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
-            hrr_dim INTEGER NOT NULL DEFAULT 2048
+            hrr_dim INTEGER NOT NULL DEFAULT 2048,
+            hrr_precision TEXT NOT NULL DEFAULT 'f32'
         );
 
         CREATE TABLE IF NOT EXISTS memory_entities (

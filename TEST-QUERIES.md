@@ -436,6 +436,8 @@ Expected: Returns:
 - **test_files**: deduplicated list of all test files providing coverage
 - **covered_symbols** / **uncovered_symbols**: counts
 
+Note: `test_map` finds test callers up to **depth 3**, so a test listed for a symbol may be a **direct** caller or a **transitive** caller reached through up to two intermediate functions. Coverage here means *static attribution* (the symbol is reachable from a test), not executed line/branch coverage. The per-test depth is not currently exposed in this view — use `tracedecay_test_risk`'s `attribution_method` (`direct_unit` vs `closure`) when you need to tell them apart. See [`docs/TEST-MAP-INTERPRETATION.md`](./docs/TEST-MAP-INTERPRETATION.md).
+
 Test by node ID:
 ```
 tracedecay_test_map(node_id="fn:search_nodes")
@@ -740,7 +742,17 @@ Test with limit:
 ```
 tracedecay_test_risk(limit=10)
 ```
-Expected: Returns `{risks: [{symbol, file, line, complexity, fan_in, has_test, risk_score, churn}], summary: {total_functions, tested, coverage_pct, top_risk_untested}}`. Results are sorted by `risk_score` descending; untested symbols appear first by default.
+Expected: Returns `{risks: [{id, name, file, line, complexity, fan_in, has_test, attribution_method, attribution_depth, risk, churn}], summary: {...}}`. Each risk item carries `attribution_method` — `direct_unit` (a test calls it directly, depth 1), `closure` (reachable from a test via 1–2 hops, depth 2–3, broader but weaker evidence), or `none`. `risk` is sorted descending; unattributed symbols appear first by default.
+
+The `summary` block carries the calibrated signal:
+
+- `coverage_pct` — **a static attribution lower bound**, not executed line/branch coverage.
+- `attribution` — breaks the numerator out by method: `direct_unit_attributed`, `closure_attributed`, plus `trait_resolved`/`public_api`/`cli_entry` (designed, currently `0`), and `total_attributed`.
+- `buckets` — `attributed`, `reachable_unattributed` (has callers, no static test path — *likely tested via a boundary we can't see*, never "untested"), `orphan_entry` (no static caller — not necessarily dead code), `excluded`.
+- `confidence: "static_lower_bound"` with a `confidence_note` restating the floor property.
+- `top_risk_unattributed` (`== top_risk_untested`) — the single highest-risk function with no attribution.
+
+See [`docs/TEST-MAP-INTERPRETATION.md`](./docs/TEST-MAP-INTERPRETATION.md) for the full reading guide.
 
 Test with path filter:
 ```

@@ -7,8 +7,7 @@ This is a THIN reverse proxy onto the canonical implementation: a local
 It does not reimplement any data access. The wrapper:
 
 - lazily spawns ``tracedecay dashboard --port 0`` bound to 127.0.0.1 (or uses
-  an externally managed server via ``TRACEDECAY_DASHBOARD_URL``,
-  with ``TOKENSAVE_DASHBOARD_URL`` as a legacy fallback),
+  an externally managed server via ``TRACEDECAY_DASHBOARD_URL``),
 - forwards ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
   ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
   ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
@@ -23,12 +22,12 @@ only listens on loopback.
 Configuration (environment always wins, then deploy-time defaults below):
 
 - ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
-  (legacy fallback: ``TOKENSAVE_DASHBOARD_URL``).
 - ``TRACEDECAY_BIN``                path to the tracedecay binary
-  (legacy fallback: ``TOKENSAVE_BIN``).
 - ``TRACEDECAY_DASHBOARD_PROJECT``  project root to serve (must be
   ``tracedecay init``-ed); defaults to the Hermes process cwd
-  (legacy fallback: ``TOKENSAVE_DASHBOARD_PROJECT``).
+
+Legacy ``TOKENSAVE_*`` aliases remain accepted as fallbacks during the
+TraceDecay rebrand; ``TRACEDECAY_*`` wins when both are present.
 
 Hermes-only extension: ``POST /curation/llm-plan`` layers LLM-based curation
 (ported from the holographic_plus curator's one-shot review tier) on top of
@@ -80,8 +79,7 @@ logger = logging.getLogger(__name__)
 # `tracedecay install --agent hermes` (src/agents/hermes_dashboard.rs in the
 # tracedecay repo): the installer pins the binary that performed the install
 # and the profile's pinned project root. TRACEDECAY_BIN /
-# TRACEDECAY_DASHBOARD_PROJECT (and legacy TOKENSAVE_* fallbacks) always win
-# at runtime.
+# TRACEDECAY_DASHBOARD_PROJECT always wins at runtime.
 DEPLOYED_TRACEDECAY_BIN = None
 DEPLOYED_PROJECT_ROOT = None
 
@@ -89,7 +87,7 @@ _LISTENING_URL_RE = re.compile(r"https?://[^\s]+")
 
 
 def _env(name: str) -> str | None:
-    """Read TRACEDECAY_<name> first, fall back to TOKENSAVE_<name>."""
+    """Read TRACEDECAY_<name>, falling back to legacy TOKENSAVE_<name>."""
     return os.environ.get(f"TRACEDECAY_{name}") or os.environ.get(f"TOKENSAVE_{name}")
 
 _SPAWN_TIMEOUT_SECONDS = 30.0
@@ -168,16 +166,13 @@ def _find_tracedecay_bin() -> str | None:
         return explicit
     if DEPLOYED_TRACEDECAY_BIN and Path(DEPLOYED_TRACEDECAY_BIN).is_file():
         return DEPLOYED_TRACEDECAY_BIN
-    found = shutil.which("tracedecay") or shutil.which("tokensave")
+    found = shutil.which("tracedecay")
     if found:
         return found
     # Vendored engine build inside the hermes_intelligence plugin checkout.
     here = Path(__file__).resolve().parent.parent
     for profile in ("release", "debug"):
-        for engine_dir, binary_name in (
-            ("tracedecay_engine", "tracedecay"),
-            ("tokensave_engine", "tokensave"),
-        ):
+        for engine_dir, binary_name in (("tracedecay_engine", "tracedecay"),):
             candidate = here / engine_dir / "target" / profile / binary_name
             if candidate.is_file():
                 return str(candidate)
@@ -220,7 +215,7 @@ def _spawn_dashboard() -> str:
             detail=(
                 "tracedecay binary not found. Install tracedecay or set "
                 "TRACEDECAY_BIN / TRACEDECAY_DASHBOARD_URL "
-                "(legacy fallbacks: TOKENSAVE_BIN / TOKENSAVE_DASHBOARD_URL)."
+                "(legacy TOKENSAVE_* aliases are also accepted)."
             ),
         )
     project = _project_root()
@@ -255,9 +250,8 @@ def _spawn_dashboard() -> str:
         target=_drain_pipe, args=(process.stderr, stderr_tail), daemon=True
     ).start()
 
-    # The first stdout line is stable: "tracedecay dashboard listening on <url>"
-    # (legacy binaries may still print "tokensave dashboard listening on …").
-    # Extract the URL itself so both prefixes work.
+    # The first stdout line is stable: "tracedecay dashboard listening on <url>".
+    # Extract the URL itself rather than depending on any surrounding text.
     url_ready = threading.Event()
     url_holder: dict[str, str] = {}
 

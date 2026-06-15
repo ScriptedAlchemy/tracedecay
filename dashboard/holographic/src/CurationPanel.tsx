@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, type RefObject, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -9,122 +9,20 @@ import {
 } from "lucide-react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { Spinner } from "./Spinner";
-import { api } from "./api";
+import {
+  describe,
+  diffTags,
+  formatHistoryTime,
+  formatOplogTime,
+  isBookkeepingTag,
+  splitTags,
+} from "./curation/format";
+import { actionRisk, groupActions, riskClass, type ActionRisk } from "./curation/risk";
+import { useCurationData } from "./curation/useCurationData";
 import type {
   MemoryCurateAction,
-  MemoryCurateResponse,
   MemoryCuratorActivityEvent,
-  MemoryCuratorStatusResponse,
-  MemoryOplogEvent,
 } from "./types";
-
-type CurationTab = "plan" | "history" | "activity";
-type ActionRisk = "low" | "medium" | "high" | "review";
-
-interface ActionGroupDef {
-  key: string;
-  label: string;
-  description: string;
-  ops: Set<string>;
-}
-
-const ACTION_GROUPS: ActionGroupDef[] = [
-  {
-    key: "fact_cleanup",
-    label: "Fact cleanup",
-    description: "Delete or merge stale and duplicate facts.",
-    ops: new Set(["delete", "merge"]),
-  },
-  {
-    key: "entity_cleanup",
-    label: "Entity cleanup",
-    description: "Classify, merge, or prune entity records.",
-    ops: new Set(["entity_classify", "entity_merge", "entity_prune"]),
-  },
-  {
-    key: "organization",
-    label: "Organization",
-    description: "Retag and recategorize facts without changing fact content.",
-    ops: new Set(["retag", "recategorize"]),
-  },
-  {
-    key: "reflections",
-    label: "Reflections",
-    description: "Create durable summary facts from related memories.",
-    ops: new Set(["reflect"]),
-  },
-  {
-    key: "other",
-    label: "Other",
-    description: "Actions that need extra review because their operation is unfamiliar.",
-    ops: new Set(),
-  },
-];
-
-function describe(a: MemoryCurateAction): string {
-  switch (a.op) {
-    case "merge":
-      return `Merge #${a.loser} → #${a.winner}${a.similarity != null ? ` (sim ${a.similarity})` : ""}`;
-    case "entity_merge": {
-      const loser = a.loser_entity ?? a.loser ?? a.entity_id;
-      const winner = a.winner_entity ?? a.winner ?? a.keep;
-      const from = a.loser_name ? `${a.loser_name} (#${loser})` : `#${loser}`;
-      const winnerName = a.winner_name ?? a.name;
-      const to = winnerName ? `${winnerName} (#${winner})` : `#${winner}`;
-      return `Merge entity ${from} → ${to}`;
-    }
-    case "entity_prune": {
-      const entityId = a.entity_id ?? a.loser ?? a.fact_id;
-      return a.name
-        ? `Prune junk entity ${a.name} (#${entityId})`
-        : `Prune junk entity #${entityId}`;
-    }
-    case "entity_classify": {
-      const entityId = a.entity_id ?? a.fact_id;
-      return a.name
-        ? `Classify entity ${a.name} (#${entityId}) → ${a.entity_type}`
-        : `Classify entity #${entityId} → ${a.entity_type}`;
-    }
-    case "delete":
-      return a.duplicate_of != null
-        ? `Delete #${a.fact_id} (duplicate of #${a.duplicate_of})`
-        : `Delete #${a.fact_id}`;
-    case "retag":
-      return `Retag #${a.fact_id}`;
-    case "recategorize":
-      return `Recategorize #${a.fact_id} → ${a.category}`;
-    case "reflect":
-      return `Reflect (replaces ${(a.supersedes ?? []).map((s) => `#${s}`).join(", ")})`;
-    default:
-      return a.op;
-  }
-}
-
-function splitTags(s?: string): string[] {
-  return (s || "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
-}
-
-/** Compute tag buckets so the card shows what stays, not just what changes. */
-function diffTags(oldStr?: string, newStr?: string) {
-  const oldTags = splitTags(oldStr);
-  const newTags = splitTags(newStr);
-  const oldSet = new Set(oldTags);
-  const newSet = new Set(newTags);
-  return {
-    oldTags,
-    newTags,
-    kept: oldTags.filter((t) => newSet.has(t)),
-    removed: oldTags.filter((t) => !newSet.has(t)),
-    added: newTags.filter((t) => !oldSet.has(t)),
-  };
-}
-
-function isBookkeepingTag(tag: string): boolean {
-  return tag.startsWith("cat:") || tag.startsWith("target:");
-}
 
 const DIAGNOSTIC_COUNT_KEYS = new Set([
   "contradictions_detected",
@@ -152,42 +50,6 @@ const COUNT_LABELS: Record<string, string> = {
 
 function countLabel(key: string): string {
   return COUNT_LABELS[key] ?? key;
-}
-
-function actionRisk(op: string): ActionRisk {
-  if (op === "retag" || op === "entity_prune" || op === "entity_classify") return "low";
-  if (op === "entity_merge" || op === "recategorize") {
-    return "medium";
-  }
-  // Fact removal is permanent (no archive/restore), so anything that deletes
-  // or rewrites facts is high risk.
-  if (op === "delete" || op === "merge" || op === "reflect") {
-    return "high";
-  }
-  return "review";
-}
-
-function riskClass(risk: ActionRisk): string {
-  switch (risk) {
-    case "low":
-      return "border-success/30 bg-success/10 text-success";
-    case "medium":
-      return "border-warning/30 bg-warning/10 text-warning";
-    case "high":
-      return "border-destructive/30 bg-destructive/10 text-destructive";
-    default:
-      return "border-border bg-secondary/50 text-text-tertiary";
-  }
-}
-
-function groupActions(actions: MemoryCurateAction[]) {
-  return ACTION_GROUPS.map((group) => ({
-    ...group,
-    actions:
-      group.key === "other"
-        ? actions.filter((action) => !ACTION_GROUPS.some((g) => g.key !== "other" && g.ops.has(action.op)))
-        : actions.filter((action) => group.ops.has(action.op)),
-  }));
 }
 
 function formatCounts(counts: Array<[string, number]>): string {
@@ -273,25 +135,6 @@ function activityStatusClass(status: string): string {
  * (plan "saved" chip, history rows, preview metadata). Falls back to the raw
  * value when it is not a parseable date.
  */
-function formatHistoryTime(ts?: string | null): string {
-  if (!ts) return "";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return String(ts);
-  return date.toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-/** Oplog timestamps are unix seconds. */
-function formatOplogTime(ts: number): string {
-  if (!ts) return "";
-  return formatHistoryTime(new Date(ts * 1000).toISOString());
-}
-
 /** Compact one-line summary of an oplog row's detail payload. */
 function oplogDetailSummary(event: MemoryOplogEvent): string {
   const detail = event.detail ?? {};
@@ -696,198 +539,32 @@ export default function CurationPanel({
 }: {
   onApplied?: () => void;
 }) {
-  const [report, setReport] = useState<MemoryCurateResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [applying, setApplying] = useState(false);
-  const [previewSavedAt, setPreviewSavedAt] = useState<string | null>(null);
-  const [previewStale, setPreviewStale] = useState(false);
-  const [previewStaleReason, setPreviewStaleReason] = useState("");
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [error, setError] = useState("");
-  const [activeTab, setActiveTab] = useState<CurationTab>("plan");
-  const [status, setStatus] = useState<MemoryCuratorStatusResponse | null>(null);
-  const [statusLoading, setStatusLoading] = useState(false);
-  const [statusError, setStatusError] = useState("");
-  const [oplog, setOplog] = useState<MemoryOplogEvent[]>([]);
-  const [oplogError, setOplogError] = useState("");
-  const [activity, setActivity] = useState<MemoryCuratorActivityEvent[]>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
-  const [activityError, setActivityError] = useState("");
-  const activityRef = useRef<HTMLDivElement>(null);
-  const previewSavedAtRef = useRef<string | null>(null);
-  // Anchor for visibility checks: keep-mounted hosts (the standalone shell)
-  // hide inactive tab panels with `display: none` instead of unmounting them,
-  // and a hidden panel must not keep polling the server.
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const applySavedPreview = useCallback((
-    savedReport: MemoryCurateResponse,
-    savedAt?: string | null,
-    stale = false,
-    staleReason = "",
-  ) => {
-    previewSavedAtRef.current = savedAt ?? null;
-    setReport(savedReport);
-    setPreviewSavedAt(savedAt ?? null);
-    setPreviewStale(stale);
-    setPreviewStaleReason(staleReason);
-  }, []);
-
-  const loadSavedPreview = useCallback((force = false) => {
-    return api
-      .getMemoryCuratorPreview()
-      .then((r) => {
-        if (r.report && (force || r.saved_at !== previewSavedAtRef.current)) {
-          applySavedPreview(
-            r.report,
-            r.saved_at ?? null,
-            Boolean(r.stale),
-            r.stale_reason || "",
-          );
-        } else if (!r.report && !loading && !applying) {
-          previewSavedAtRef.current = null;
-          setReport(null);
-          setPreviewSavedAt(null);
-          setPreviewStale(false);
-          setPreviewStaleReason("");
-        }
-        return r;
-      })
-      .catch(() => {});
-  }, [applySavedPreview, applying, loading]);
-
-  const loadActivity = useCallback((showSpinner = false) => {
-    if (showSpinner) setActivityLoading(true);
-    setActivityError("");
-    api
-      .getMemoryCuratorActivity({ limit: 120 })
-      .then((r) => {
-        const events = r.events || [];
-        setActivity(events);
-        const latestFinish = [...events]
-          .reverse()
-          .find((event) => event.phase === "finish" && !event.synthetic);
-        if (latestFinish?.dry_run) {
-          loadSavedPreview(false);
-        }
-      })
-      .catch((e) => setActivityError(e instanceof Error ? e.message : String(e)))
-      .finally(() => {
-        if (showSpinner) setActivityLoading(false);
-      });
-  }, [loadSavedPreview]);
-
-  useEffect(() => {
-    loadSavedPreview(true);
-  }, [loadSavedPreview]);
-
-  const preview = () => {
-    setLoading(true);
-    setError("");
-    setActiveTab("activity");
-    loadActivity(true);
-    api
-      .postMemoryCurate({ dry_run: true })
-      .then((r) => {
-        setReport(r);
-        const savedAt = new Date().toISOString();
-        previewSavedAtRef.current = savedAt;
-        setPreviewSavedAt(savedAt);
-        setPreviewStale(false);
-        setPreviewStaleReason("");
-        loadSavedPreview(true);
-        loadActivity();
-        loadStatus();
-        // Land on the plan once the dry run finishes — the activity tab only
-        // matters while the run is in flight.
-        setActiveTab("plan");
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false));
-  };
-
-  const apply = () => {
-    setApplying(true);
-    setError("");
-    setActiveTab("activity");
-    loadActivity(true);
-    api
-      .postMemoryCurate({ dry_run: false })
-      .then((r) => {
-        setReport(r);
-        setPreviewSavedAt(null);
-        setPreviewStale(false);
-        setPreviewStaleReason("");
-        setConfirmOpen(false);
-        loadActivity();
-        loadStatus();
-        onApplied?.();
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setApplying(false));
-  };
-
-  const loadStatus = useCallback(() => {
-    setStatusLoading(true);
-    setStatusError("");
-    api
-      .getMemoryCuratorStatus()
-      .then((r) => setStatus(r))
-      .catch((e) => setStatusError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setStatusLoading(false));
-  }, []);
-
-  const loadOplog = useCallback(() => {
-    setOplogError("");
-    api
-      .getMemoryOplog({ limit: 30 })
-      .then((r) => {
-        setOplog(r.events || []);
-        if (r.error) setOplogError(r.error);
-      })
-      .catch((e) => setOplogError(e instanceof Error ? e.message : String(e)));
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === "plan" && !loading && !applying) {
-      loadSavedPreview(false);
-    }
-  }, [activeTab, applying, loadSavedPreview, loading]);
-
-  useEffect(() => {
-    if (activeTab === "history" && !status && !statusLoading) {
-      loadStatus();
-    }
-  }, [activeTab, loadStatus, status, statusLoading]);
-
-  useEffect(() => {
-    if (activeTab === "history") {
-      loadOplog();
-    }
-  }, [activeTab, loadOplog]);
-
-  useEffect(() => {
-    if (activeTab === "activity" && activity.length === 0) {
-      loadActivity(true);
-    }
-  }, [activeTab, activity.length, loadActivity]);
-
-  useEffect(() => {
-    if (activeTab !== "activity" && !loading && !applying) return undefined;
-    const interval = window.setInterval(() => {
-      // Suspend polling while the panel is hidden (offsetParent is null under
-      // a display:none ancestor); the next tick after re-show refreshes.
-      if (panelRef.current?.offsetParent === null) return;
-      loadActivity(false);
-    }, loading || applying ? 900 : 2500);
-    return () => window.clearInterval(interval);
-  }, [activeTab, applying, loadActivity, loading]);
-
-  useEffect(() => {
-    const el = activityRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [activity]);
+  const {
+    report,
+    loading,
+    applying,
+    previewSavedAt,
+    previewStale,
+    previewStaleReason,
+    confirmOpen,
+    error,
+    activeTab,
+    status,
+    statusLoading,
+    statusError,
+    oplog,
+    oplogError,
+    activity,
+    activityLoading,
+    activityError,
+    activityRef,
+    panelRef,
+    setConfirmOpen,
+    setActiveTab,
+    preview,
+    apply,
+    loadActivity,
+  } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];
   const counts = report?.counts ?? {};

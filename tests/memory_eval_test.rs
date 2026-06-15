@@ -111,6 +111,20 @@ enum Assertion {
         #[serde(default)]
         phase: AssertionPhase,
     },
+    SearchRank {
+        name: String,
+        query: String,
+        top_fact_source: String,
+        min_rank_gap: usize,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+        #[serde(default)]
+        phase: AssertionPhase,
+    },
+}
+
+fn default_search_limit() -> usize {
+    5
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -151,6 +165,29 @@ struct AssertionOutcome {
     name: String,
     passed: bool,
     detail: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResultsEnvelope {
+    #[serde(default)]
+    results: Vec<SearchResultRow>,
+    #[serde(default)]
+    facts: Vec<SearchResultRow>,
+}
+
+#[derive(Deserialize)]
+struct SearchResultRow {
+    fact: SearchResultFact,
+    score: f64,
+    #[serde(default)]
+    why: String,
+}
+
+#[derive(Deserialize)]
+struct SearchResultFact {
+    fact_id: i64,
+    source: String,
+    content: String,
 }
 
 fn scenario_path(id: &str) -> PathBuf {
@@ -443,6 +480,47 @@ fn curate_delete_ids(report: &Value) -> HashSet<i64> {
     ids
 }
 
+fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<SearchResultRow> {
+    let args = serde_json::json!({
+        "action": "search",
+        "query": query,
+        "limit": limit,
+    });
+    let output = run_ok(
+        fixture,
+        &["tool", "fact_store", "--args", &args.to_string()],
+    );
+    let response: SearchResultsEnvelope = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("search output was not JSON for `{query}`: {e}"));
+    if response.results.is_empty() {
+        response.facts
+    } else {
+        response.results
+    }
+}
+
+fn format_search_results(results: &[SearchResultRow]) -> String {
+    if results.is_empty() {
+        return "<no results>".to_string();
+    }
+    results
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            format!(
+                "#{} source=`{}` fact_id={} score={:.6} content=`{}` why={}",
+                idx + 1,
+                row.fact.source,
+                row.fact.fact_id,
+                row.score,
+                row.fact.content,
+                row.why
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn evaluate_assertions(
     scenario: &Scenario,
     fixture: &Fixture,
@@ -499,6 +577,62 @@ fn evaluate_assertions(
                         "delete ops touching source `{source}`: {} (expected: {expected})",
                         any_deleted
                     ),
+                });
+            }
+            Assertion::SearchRank {
+                name,
+                query,
+                top_fact_source,
+                min_rank_gap,
+                limit,
+                phase: assertion_phase,
+            } => {
+                if should_skip_assertion(phase, *assertion_phase) {
+                    continue;
+                }
+                let results = run_search(fixture, query, *limit);
+                let expected_rank = results
+                    .iter()
+                    .position(|row| row.fact.source == *top_fact_source);
+                let closest_other_rank = results
+                    .iter()
+                    .enumerate()
+                    .find(|(_, row)| row.fact.source != *top_fact_source)
+                    .map(|(idx, _)| idx);
+                let rendered = format_search_results(&results);
+                let (passed, detail) = match (expected_rank, closest_other_rank) {
+                    (Some(target_rank), Some(other_rank)) => {
+                        let rank_gap = other_rank as isize - target_rank as isize;
+                        (
+                            rank_gap >= *min_rank_gap as isize,
+                            format!(
+                                "query=`{query}` expected source `{top_fact_source}` rank={} nearest rival rank={} gap={} required>={} results: {rendered}",
+                                target_rank + 1,
+                                other_rank + 1,
+                                rank_gap,
+                                min_rank_gap
+                            ),
+                        )
+                    }
+                    (Some(target_rank), None) => (
+                        false,
+                        format!(
+                            "query=`{query}` only returned source `{top_fact_source}` at rank {}; cannot compute rank gap {} without a rival. results: {rendered}",
+                            target_rank + 1,
+                            min_rank_gap
+                        ),
+                    ),
+                    (None, _) => (
+                        false,
+                        format!(
+                            "query=`{query}` never returned source `{top_fact_source}`. results: {rendered}"
+                        ),
+                    ),
+                };
+                outcomes.push(AssertionOutcome {
+                    name: name.clone(),
+                    passed,
+                    detail,
                 });
             }
         }
@@ -644,6 +778,21 @@ fn eval_memory_curation_conservatism() {
     run_scenario("memory-curation-conservatism");
 }
 
+#[test]
+fn eval_memory_ranking_trust_bias() {
+    run_scenario("memory-ranking-trust-bias");
+}
+
+#[test]
+fn eval_memory_ranking_supersession() {
+    run_scenario("memory-ranking-supersession");
+}
+
+#[test]
+fn eval_memory_ranking_morphology() {
+    run_scenario("memory-ranking-morphology");
+}
+
 /// Every scenario file must have a matching `#[test]` above; this guards
 /// against silently-unwired scenarios.
 #[test]
@@ -655,6 +804,9 @@ fn every_scenario_file_is_wired() {
         "memory-supersede-without-dup",
         "memory-multiturn-continuity",
         "memory-curation-conservatism",
+        "memory-ranking-trust-bias",
+        "memory-ranking-supersession",
+        "memory-ranking-morphology",
     ]
     .into_iter()
     .collect();

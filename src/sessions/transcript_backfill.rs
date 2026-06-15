@@ -32,7 +32,7 @@ use serde_json::Value;
 
 use crate::sessions::codex::{merge_usage_counters, CodexTurnUsage};
 use crate::sessions::cursor::TimestampCarry;
-use crate::sessions::source::usage_counters_from;
+use crate::sessions::shared::usage_counters_from;
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;

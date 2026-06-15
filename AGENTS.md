@@ -33,3 +33,11 @@ Before reading source files or scanning the codebase, use the tracedecay MCP too
 If a code analysis question cannot be fully answered by tracedecay MCP tools, try querying the SQLite database directly at `.tracedecay/tracedecay.db` (tables: `nodes`, `edges`, `files`). Use SQL to answer complex structural queries that go beyond what the built-in tools expose.
 
 If you discover a gap where an extractor, schema, or tracedecay tool could be improved to answer a question natively, propose to the user that they open an issue at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. **Remind the user to strip any sensitive or proprietary code from the bug description before submitting.**
+
+## Cargo contention (concurrent Kanban workers)
+
+Cargo holds an exclusive lock on its target dir for the whole build; concurrent workers hitting the same dir block (`Blocking waiting for file lock on build directory`) and look stale to the dispatcher. Every cargo-heavy card must export, **before its first cargo command**:
+
+    export CARGO_TARGET_DIR="$HERMES_KANBAN_WORKSPACE/.tracedecay/target/$HERMES_KANBAN_TASK"
+
+Never run bare `cargo` against the repo `target/` — it is the user's ~399 GB interactive dir and is contended. Leave `.tracedecay/target/` (no suffix) to the tracedecay MCP diagnostic tools. Full-workspace integration checks use the serialized `.tracedecay/target/integration/` lane (one at a time). Reclaim disk with `rm -rf "$CARGO_TARGET_DIR"` before completing. Full policy: `docs/CARGO-CONTENTION-POLICY.md`.

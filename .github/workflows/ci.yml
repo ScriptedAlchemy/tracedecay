@@ -56,7 +56,6 @@ jobs:
     name: Clippy
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +75,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
+      - name: Run blocking Clippy policy
+        run: cargo clippy --workspace --all-targets
 
   fmt:
     name: Format
@@ -118,6 +118,10 @@ jobs:
       - name: Build dashboard assets
         working-directory: dashboard
         run: npm run build
+
+      - name: Run dashboard unit tests
+        working-directory: dashboard
+        run: npm test
 
       - name: Verify embedded dist artifacts
         working-directory: dashboard
@@ -178,6 +182,15 @@ jobs:
           done
           echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
           exit 1
+
+      - name: Run dashboard mobile smoke
+        working-directory: dashboard
+        env:
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
+        run: |
+          set -euo pipefail
+          rm -f "$TRACEDECAY_GLOBAL_DB"
+          npm run smoke:mobile -- --expect-lcm=empty
 
   hermes-integration:
     name: Hermes integration (stock)

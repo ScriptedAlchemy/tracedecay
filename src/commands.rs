@@ -10,6 +10,7 @@ pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::er
     use tracedecay::dashboard::memory_curate::{run_memory_curate, MemoryCurateOptions};
 
     match action {
+        MemoryAction::Status { .. } => unreachable!("memory status is handled in main.rs dispatch"),
         MemoryAction::Curate {
             apply,
             llm,
@@ -72,33 +73,80 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         BranchAction::List { path } => {
             let project_path = tracedecay::config::resolve_path(path);
             let tracedecay_dir = get_tracedecay_dir(&project_path);
-            let Some(meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
+            let Some(_meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
                 return Ok(());
             };
-            let current = branch::current_branch(&project_path);
-            eprintln!("Default branch: {}", meta.default_branch);
-            eprintln!();
-            for (name, entry) in &meta.branches {
-                let db_path = tracedecay_dir.join(&entry.db_file);
-                let size = if db_path.exists() {
-                    let bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-                    tracedecay::display::format_bytes(bytes)
-                } else {
-                    "missing".to_string()
-                };
-                let marker = if current.as_deref() == Some(name.as_str()) {
-                    " *"
+            let diagnostics = TraceDecay::project_branch_diagnostics(&project_path);
+            eprintln!(
+                "Default branch: {}",
+                diagnostics.default_branch.as_deref().unwrap_or("<unknown>")
+            );
+            eprintln!(
+                "Current branch: {}",
+                diagnostics
+                    .current_branch
+                    .as_deref()
+                    .unwrap_or("<detached HEAD>")
+            );
+            if let Some(serving) = diagnostics.serving_branch.as_deref() {
+                let suffix = if diagnostics.is_fallback {
+                    " (fallback)"
                 } else {
                     ""
                 };
-                let parent = entry
+                eprintln!("Serving branch: {serving}{suffix}");
+            }
+            if diagnostics.branch_drifted {
+                eprintln!(
+                    "Opened branch: {}",
+                    diagnostics
+                        .open_active_branch
+                        .as_deref()
+                        .unwrap_or("<detached HEAD>")
+                );
+            }
+            eprintln!();
+            for branch in &diagnostics.branches {
+                let size = if branch.db_exists {
+                    tracedecay::display::format_bytes(branch.size_bytes)
+                } else {
+                    "missing".to_string()
+                };
+                let parent = branch
                     .parent
                     .as_deref()
                     .map(|p| format!(" (from {p})"))
                     .unwrap_or_default();
-                let synced = branch_meta::format_timestamp(&entry.last_synced_at);
-                eprintln!("  {name}{marker} — {size}{parent}, synced {synced}");
+                let synced = branch_meta::format_timestamp(&branch.last_synced_at);
+                let mut flags = Vec::new();
+                if branch.is_default {
+                    flags.push("default");
+                }
+                if branch.is_current {
+                    flags.push("current");
+                }
+                if branch.is_serving {
+                    flags.push("serving");
+                }
+                if !branch.db_exists {
+                    flags.push("missing-db");
+                }
+                let flags = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", flags.join(", "))
+                };
+                eprintln!(
+                    "  {}{} — {}{}, synced {}",
+                    branch.name, flags, size, parent, synced
+                );
+            }
+            if !diagnostics.warnings.is_empty() {
+                eprintln!();
+                for warning in diagnostics.warnings {
+                    eprintln!("warning: {warning}");
+                }
             }
         }
         BranchAction::Add { name, path } => {
@@ -532,6 +580,221 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
         init_and_index(&project_path, &[], false).await?;
     }
     Ok(())
+}
+
+pub(crate) async fn handle_init(
+    path: Option<String>,
+    skip_folders: Vec<String>,
+) -> tracedecay::errors::Result<()> {
+    let project_path = tracedecay::config::resolve_path(path);
+    if TraceDecay::is_initialized(&project_path) {
+        eprintln!(
+            "\x1b[31merror:\x1b[0m TraceDecay is already initialized at '{}'.\n\
+             Use \x1b[1mtracedecay sync\x1b[0m to update the index, or \
+             \x1b[1mtracedecay sync --force\x1b[0m to rebuild it.",
+            project_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
+    init_and_index(&project_path, &skip_folders, false).await?;
+    maybe_print_parallel_update_notice(version_handle);
+    Ok(())
+}
+
+pub(crate) async fn handle_sync(
+    path: Option<String>,
+    force: bool,
+    skip_folders: Vec<String>,
+    doctor: bool,
+    verbose: bool,
+) -> tracedecay::errors::Result<()> {
+    let project_path = tracedecay::config::resolve_path_with_discovery(path);
+    if !TraceDecay::is_initialized(&project_path) {
+        eprintln!(
+            "\x1b[31merror:\x1b[0m no TraceDecay index found at '{}'.\n\
+             Run \x1b[1mtracedecay init\x1b[0m to create one first.",
+            project_path.display()
+        );
+        std::process::exit(1);
+    }
+    if project_path.join(".codegraph").is_dir() {
+        eprintln!(
+            "warning: found legacy .codegraph/ directory at '{}'. \
+             tracedecay now uses .tracedecay/ — the old directory can be safely deleted.",
+            project_path.display()
+        );
+    }
+
+    let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
+
+    if force {
+        init_and_index(&project_path, &skip_folders, verbose).await?;
+    } else {
+        let mut cg = TraceDecay::open(&project_path).await?;
+        cg.add_skip_folders(&skip_folders);
+        let spinner = Spinner::new();
+        let sync_start = std::time::Instant::now();
+        let result = cg
+            .sync_with_progress_verbose(
+                |current, total, detail| {
+                    if current == 0 {
+                        spinner.set_message(detail);
+                    } else {
+                        let elapsed = sync_start.elapsed().as_secs_f64();
+                        let eta = if current > 1 {
+                            let per_file = elapsed / (current - 1) as f64;
+                            let remaining = per_file * (total - current) as f64;
+                            if remaining >= 1.0 {
+                                format!(" (ETA: {remaining:.0}s)")
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        spinner.set_message(&format!("[{current}/{total}] syncing {detail}{eta}"));
+                    }
+                },
+                |msg| {
+                    if verbose {
+                        eprintln!("  \x1b[2m[verbose]\x1b[0m {msg}");
+                    }
+                },
+            )
+            .await?;
+        let skipped_msg = if result.skipped_paths.is_empty() {
+            String::new()
+        } else {
+            format!(", {} skipped", result.skipped_paths.len())
+        };
+        spinner.done(&format!(
+            "sync done — {} added, {} modified, {} removed{skipped_msg} in {}ms",
+            result.files_added, result.files_modified, result.files_removed, result.duration_ms
+        ));
+        if !result.skipped_paths.is_empty() {
+            eprintln!();
+            eprintln!(
+                "\x1b[33mSkipped ({}) — files found but not readable:\x1b[0m",
+                result.skipped_paths.len()
+            );
+            for (path, reason) in &result.skipped_paths {
+                eprintln!("  ! {path}: {reason}");
+            }
+        }
+        if doctor {
+            print_sync_doctor(&result);
+        }
+        global::update_global_db(&cg).await;
+    }
+
+    maybe_print_parallel_update_notice(version_handle);
+    Ok(())
+}
+
+pub(crate) fn handle_upload_counter(enable: bool) {
+    let mut config = tracedecay::user_config::UserConfig::load();
+    config.upload_enabled = enable;
+    config.save();
+    if enable {
+        eprintln!("Worldwide counter upload enabled.");
+    } else {
+        eprintln!(
+            "Worldwide counter upload disabled. You can re-enable with `tracedecay enable-upload-counter`."
+        );
+    }
+}
+
+pub(crate) fn handle_gitignore(
+    path: Option<String>,
+    action: Option<String>,
+) -> tracedecay::errors::Result<()> {
+    let project_path = tracedecay::config::resolve_path(path);
+    let mut config = tracedecay::config::load_config(&project_path)?;
+    match action.as_deref() {
+        Some("on") => {
+            config.git_ignore = true;
+            tracedecay::config::save_config(&project_path, &config)?;
+            eprintln!("gitignore enabled — .gitignore rules will be respected during indexing.");
+            eprintln!("Run `tracedecay sync` to re-index with the new setting.");
+        }
+        Some("off") => {
+            config.git_ignore = false;
+            tracedecay::config::save_config(&project_path, &config)?;
+            eprintln!("gitignore disabled — .gitignore rules will be ignored during indexing.");
+            eprintln!("Run `tracedecay sync` to re-index with the new setting.");
+        }
+        Some(other) => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!("unknown action '{other}': expected 'on' or 'off'"),
+            });
+        }
+        None => {
+            let status = if config.git_ignore { "on" } else { "off" };
+            eprintln!("gitignore: {status}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn handle_bench(
+    queries: Option<String>,
+    json: bool,
+    path: Option<String>,
+    max_nodes: usize,
+) -> tracedecay::errors::Result<()> {
+    let project_path = tracedecay::config::resolve_path(path);
+    let cg = crate::serve::ensure_initialized(&project_path).await?;
+
+    let opts = tracedecay::bench::BenchOptions {
+        format: if json {
+            tracedecay::bench::OutputFormat::Json
+        } else {
+            tracedecay::bench::OutputFormat::Markdown
+        },
+        max_nodes,
+    };
+
+    let report = match queries {
+        Some(path) => tracedecay::bench::run_bench(&cg, std::path::Path::new(&path), opts).await?,
+        None => {
+            tracedecay::bench::run_bench_with_toml(
+                &cg,
+                tracedecay::bench::DEFAULT_QUERIES_TOML,
+                opts,
+            )
+            .await?
+        }
+    };
+
+    if json {
+        println!("{}", tracedecay::bench::format_report_json(&report));
+    } else {
+        print!("{}", tracedecay::bench::format_report_console(&report));
+    }
+    Ok(())
+}
+
+fn maybe_print_parallel_update_notice(version_handle: std::thread::JoinHandle<Option<String>>) {
+    if let Ok(Some(latest)) = version_handle.join() {
+        let current_version = env!("CARGO_PKG_VERSION");
+        let now = crate::current_unix_timestamp();
+        let mut config = tracedecay::user_config::UserConfig::load();
+        config.cached_latest_version = latest.clone();
+        config.last_version_check_at = now;
+        config.save_if_exists();
+        if tracedecay::cloud::is_newer_version(current_version, &latest)
+            && now - config.last_version_warning_at >= 900
+        {
+            eprintln!(
+                "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
+                current_version, latest
+            );
+            config.last_version_warning_at = now;
+            config.save_if_exists();
+        }
+    }
 }
 
 /// Initializes a new project (if needed) and runs a full index.

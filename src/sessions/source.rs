@@ -27,7 +27,9 @@
 //!   with a greater `rowid`.
 //!
 //! All three are fail-open: any I/O or parse error yields "nothing new" rather
-//! than propagating, so ingestion never blocks an agent.
+//! than propagating, so ingestion never blocks an agent. Shared cursor/title/
+//! content helpers live in [`crate::sessions::shared`] so the Hermes `SQLite`
+//! sweep can reuse them without importing from this driver module.
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -36,41 +38,31 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::global_db::{GlobalDb, ParseOffset};
+#[allow(unused_imports)]
+pub(crate) use crate::sessions::shared::{
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
+    usage_counters_from,
+};
+pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
-/// Counters returned by an ingestion pass.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct TranscriptIngestStats {
-    pub sessions_upserted: u64,
-    pub messages_upserted: u64,
+fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
+    tracing::debug!(
+        transcript_path = %path.display(),
+        action,
+        error = %error,
+        "skipping transcript source input"
+    );
 }
 
-impl TranscriptIngestStats {
-    /// Accumulate another pass's counters into this one.
-    #[must_use]
-    pub fn merge(self, other: Self) -> Self {
-        Self {
-            sessions_upserted: self
-                .sessions_upserted
-                .saturating_add(other.sessions_upserted),
-            messages_upserted: self
-                .messages_upserted
-                .saturating_add(other.messages_upserted),
-        }
-    }
-}
-
-/// The incremental position persisted between ingestion runs.
-///
-/// `position` is interpreted per cursor kind: a byte offset (`ByteOffset`), a
-/// stable 64-bit content hash prefix (`ContentHash`), or a last-seen `rowid`
-/// (`RowCursor`). `mtime` is the file modification time in epoch seconds, used
-/// to detect rewrites and to skip unchanged files cheaply.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StoredCursor {
-    pub position: u64,
-    pub mtime: u64,
-    pub file_id: u64,
+fn log_jsonl_decode_skip(path: &Path, offset: u64, error: &serde_json::Error) {
+    tracing::debug!(
+        transcript_path = %path.display(),
+        line_offset = offset,
+        error = %error,
+        "skipping undecodable transcript jsonl line"
+    );
 }
 
 /// Provider-neutral session metadata an adapter derives while parsing.
@@ -273,7 +265,13 @@ pub fn stream_new_jsonl(
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
 ) -> Option<NewJsonl> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) => {
+            log_source_skip(path, "stat jsonl transcript", &error);
+            return None;
+        }
+    };
     let file_size = meta.len();
     let mtime = file_mtime_secs(&meta);
     let file_id = stable_jsonl_file_id(path, &meta).unwrap_or(0);
@@ -298,14 +296,29 @@ pub fn stream_new_jsonl(
 
     if let Some(cap) = max_new_bytes {
         if file_size.saturating_sub(seek_to) > cap {
+            tracing::debug!(
+                transcript_path = %path.display(),
+                unread_bytes = file_size.saturating_sub(seek_to),
+                max_new_bytes = cap,
+                "deferring transcript source backlog beyond configured cap"
+            );
             return None;
         }
     }
 
-    let file = std::fs::File::open(path).ok()?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            log_source_skip(path, "open jsonl transcript", &error);
+            return None;
+        }
+    };
     let mut reader = BufReader::new(file);
-    if seek_to > 0 && reader.seek(SeekFrom::Start(seek_to)).is_err() {
-        return None;
+    if seek_to > 0 {
+        if let Err(error) = reader.seek(SeekFrom::Start(seek_to)) {
+            log_source_skip(path, "seek jsonl transcript", &error);
+            return None;
+        }
     }
 
     let mut lines = Vec::new();
@@ -314,7 +327,11 @@ pub fn stream_new_jsonl(
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(error) => {
+                log_source_skip(path, "read jsonl transcript line", &error);
+                break;
+            }
             Ok(n) => {
                 // A line without a trailing newline is a partial write at EOF:
                 // stop without consuming it so the next call re-reads it whole.
@@ -327,11 +344,12 @@ pub fn stream_new_jsonl(
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-                    lines.push(JsonlLine {
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(value) => lines.push(JsonlLine {
                         offset: line_offset as i64,
                         value,
-                    });
+                    }),
+                    Err(error) => log_jsonl_decode_skip(path, line_offset, &error),
                 }
             }
         }
@@ -361,9 +379,21 @@ pub struct ChangedFile {
 /// a no-op. Returns `None` when the file cannot be read or is unchanged since
 /// the last run.
 pub fn read_changed_file(path: &Path, prev: StoredCursor) -> Option<ChangedFile> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) => {
+            log_source_skip(path, "stat transcript file", &error);
+            return None;
+        }
+    };
     let mtime = file_mtime_secs(&meta);
-    let contents = std::fs::read_to_string(path).ok()?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            log_source_skip(path, "read transcript file", &error);
+            return None;
+        }
+    };
     let hash = content_hash64(&contents);
 
     // Unchanged since last run (we have read it before and neither content hash
@@ -391,15 +421,39 @@ pub(crate) fn read_changed_with_companion(
     companion: &Path,
     prev: StoredCursor,
 ) -> Option<ChangedFile> {
-    let meta = std::fs::metadata(primary).ok()?;
+    let meta = match std::fs::metadata(primary) {
+        Ok(meta) => meta,
+        Err(error) => {
+            log_source_skip(primary, "stat primary transcript file", &error);
+            return None;
+        }
+    };
     let mtime = file_mtime_secs(&meta);
-    let contents = std::fs::read_to_string(primary).ok()?;
+    let contents = match std::fs::read_to_string(primary) {
+        Ok(contents) => contents,
+        Err(error) => {
+            log_source_skip(primary, "read primary transcript file", &error);
+            return None;
+        }
+    };
     let primary_hash = content_hash64(&contents);
     let (companion_hash, companion_mtime) = companion
         .is_file()
         .then(|| {
-            let companion_meta = std::fs::metadata(companion).ok()?;
-            let companion_contents = std::fs::read_to_string(companion).ok()?;
+            let companion_meta = match std::fs::metadata(companion) {
+                Ok(meta) => meta,
+                Err(error) => {
+                    log_source_skip(companion, "stat companion transcript file", &error);
+                    return None;
+                }
+            };
+            let companion_contents = match std::fs::read_to_string(companion) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    log_source_skip(companion, "read companion transcript file", &error);
+                    return None;
+                }
+            };
             Some((
                 content_hash64(&companion_contents),
                 file_mtime_secs(&companion_meta),
@@ -422,60 +476,6 @@ pub(crate) fn read_changed_with_companion(
         new_cursor: StoredCursor {
             position: combined_hash,
             mtime: combined_mtime,
-            file_id: 0,
-        },
-    })
-}
-
-/// Mapped rows read past the stored cursor, plus the advanced cursor.
-pub struct NewRows<T> {
-    pub items: Vec<T>,
-    pub new_cursor: StoredCursor,
-}
-
-/// **`RowCursor`** reader for SQLite-backed transcript stores (Zed, Copilot CLI
-/// `session-store.db`).
-///
-/// Selects rows whose rowid is greater than `prev.position` (the last-seen
-/// rowid), ordered ascending, mapping each through `map_row` *during* iteration
-/// (libsql rows must not outlive the cursor) and advancing the stored cursor to
-/// the maximum rowid seen. `select_sql` must select the rowid as its first
-/// column and accept a single `?` bound to the previous rowid, e.g.
-/// `"SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid"`.
-/// Fail-open: any query error yields `None`; `map_row` returning `None` skips
-/// that row while still advancing the cursor.
-pub async fn read_new_rows<T>(
-    conn: &libsql::Connection,
-    select_sql: &str,
-    prev: StoredCursor,
-    mut map_row: impl FnMut(i64, &libsql::Row) -> Option<T>,
-) -> Option<NewRows<T>> {
-    let mut result_rows = conn
-        .query(select_sql, libsql::params![prev.position as i64])
-        .await
-        .ok()?;
-
-    let mut items = Vec::new();
-    let mut max_rowid = prev.position;
-    while let Ok(Some(row)) = result_rows.next().await {
-        let Ok(rowid) = row.get::<i64>(0) else {
-            continue;
-        };
-        if rowid as u64 > max_rowid {
-            max_rowid = rowid as u64;
-        }
-        if let Some(item) = map_row(rowid, &row) {
-            items.push(item);
-        }
-    }
-
-    Some(NewRows {
-        items,
-        new_cursor: StoredCursor {
-            position: max_rowid,
-            // Row stores have no single file mtime; the rowid alone is the
-            // monotonic cursor, so mtime is left as a sentinel.
-            mtime: 0,
             file_id: 0,
         },
     })
@@ -505,17 +505,6 @@ fn collect_files_inner(dir: &Path, ext: &str, max_depth: u8, depth: u8, out: &mu
         } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
             out.push(path);
         }
-    }
-}
-
-/// Compare two paths for equality, canonicalizing when possible so that
-/// symlinks/`..`/trailing differences do not cause false mismatches. Falls back
-/// to a literal comparison when canonicalization fails (e.g. a path that no
-/// longer exists).
-pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
     }
 }
 
@@ -583,172 +572,6 @@ pub(crate) fn content_hash64(contents: &str) -> u64 {
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(bytes)
-}
-
-/// Collapse whitespace and clip to a short preview suitable for a session title.
-pub(crate) fn preview_title(text: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 80;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_TITLE_CHARS {
-        collapsed
-    } else {
-        collapsed.chars().take(MAX_TITLE_CHARS).collect()
-    }
-}
-
-/// Return the storage representation used by LCM raw ingest for provider
-/// transcript content. This intentionally matches the active-message path:
-/// strings stay strings, structured content is compact JSON.
-pub(crate) fn message_storage_text(content: &Value) -> String {
-    if let Some(text) = content.as_str() {
-        return text.to_string();
-    }
-    serde_json::to_string(content).unwrap_or_else(|_| content.to_string())
-}
-
-/// Return lossless storage text plus tool names discovered in either structured
-/// content blocks or a sibling `tool_calls` field.
-pub(crate) fn content_storage_text_and_tools(
-    content: &Value,
-    tool_calls: Option<&Value>,
-) -> (String, Vec<String>) {
-    let mut tools = Vec::new();
-    collect_tool_names(content, &mut tools);
-    if let Some(tool_calls) = tool_calls {
-        collect_tool_names(tool_calls, &mut tools);
-    }
-    tools.sort();
-    tools.dedup();
-    (message_storage_text(content), tools)
-}
-
-pub(crate) fn append_tool_calls_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    message: &Value,
-) {
-    if let Some(tool_calls) = message.get("tool_calls") {
-        map.insert("tool_calls".to_string(), tool_calls.clone());
-    }
-}
-
-/// Token-usage counter keys recognized by the savings dashboard
-/// (`dashboard/savings_api.rs` `MESSAGE_TOKENS_CTE`): both the Anthropic
-/// (`input_tokens`/`output_tokens`/`cache_*`) and `OpenAI`
-/// (`prompt_tokens`/`completion_tokens`) shapes, plus `total_tokens` for
-/// reference.
-const USAGE_COUNTER_KEYS: [&str; 7] = [
-    "input_tokens",
-    "output_tokens",
-    "prompt_tokens",
-    "completion_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-    "total_tokens",
-];
-
-/// Extracts a `usage` counters object from a transcript record/message,
-/// keeping only recognized numeric token counters (so arbitrarily large or
-/// provider-private payloads never bloat `metadata_json`). Returns `None`
-/// when the value has no `usage` object or it carries no recognized counters.
-pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
-    let usage = value.get("usage")?.as_object()?;
-    let mut counters = serde_json::Map::new();
-    for key in USAGE_COUNTER_KEYS {
-        if let Some(count) = usage.get(key).and_then(Value::as_i64) {
-            counters.insert(key.to_string(), Value::from(count));
-        }
-    }
-    (!counters.is_empty()).then_some(Value::Object(counters))
-}
-
-/// Inserts transcript-recorded token usage into message metadata under the
-/// `usage` key the savings dashboard reads. Probes each candidate value in
-/// order and keeps the first recognized counters object.
-pub(crate) fn append_usage_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    candidates: &[&Value],
-) {
-    if map.contains_key("usage") {
-        return;
-    }
-    if let Some(usage) = candidates
-        .iter()
-        .find_map(|value| usage_counters_from(value))
-    {
-        map.insert("usage".to_string(), usage);
-    }
-}
-
-fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                collect_tool_names(item, tools);
-            }
-        }
-        Value::Object(map) => {
-            if matches!(
-                map.get("type").and_then(Value::as_str),
-                Some("tool_use" | "tool_call" | "function_call")
-            ) {
-                if let Some(name) = map.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
-            }
-            for key in ["tool_call", "functionCall", "function_call", "function"] {
-                if let Some(name) = map
-                    .get(key)
-                    .and_then(Value::as_object)
-                    .and_then(|nested| nested.get("name"))
-                    .and_then(Value::as_str)
-                {
-                    tools.push(name.to_string());
-                }
-            }
-            if let Some(tool_calls) = map.get("tool_calls") {
-                collect_tool_names(tool_calls, tools);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn title_text_from_stored_content(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| visible_text_from_content(&value))
-        .unwrap_or_else(|| text.to_string())
-}
-
-fn visible_text_from_content(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(items) => {
-            let parts = items
-                .iter()
-                .filter_map(visible_text_from_content)
-                .filter(|text| !text.trim().is_empty())
-                .collect::<Vec<_>>();
-            (!parts.is_empty()).then(|| parts.join("\n\n"))
-        }
-        Value::Object(map) => {
-            for key in ["text", "content", "message"] {
-                if let Some(text) = map.get(key).and_then(Value::as_str) {
-                    return Some(text.to_string());
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Build a session title from the first user message, if any.
-pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
-    messages
-        .iter()
-        .find(|message| message.role == "user")
-        .map(|message| preview_title(&title_text_from_stored_content(&message.text)))
 }
 
 #[cfg(test)]
@@ -829,6 +652,33 @@ mod tests {
         assert!(read_changed_file(&path, changed.new_cursor).is_none());
     }
 
+    #[test]
+    fn stream_new_jsonl_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonl");
+
+        assert!(stream_new_jsonl(&path, StoredCursor::default(), None).is_none());
+    }
+
+    #[test]
+    fn stream_new_jsonl_skips_invalid_json_lines_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.jsonl");
+        std::fs::write(&path, "not-json\n{\"a\":2}\n").unwrap();
+
+        let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+        assert_eq!(read.lines.len(), 1);
+        assert_eq!(read.lines[0].value["a"], 2);
+    }
+
+    #[test]
+    fn read_changed_file_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.json");
+
+        assert!(read_changed_file(&path, StoredCursor::default()).is_none());
+    }
+
     #[tokio::test]
     async fn read_new_rows_tracks_last_rowid() {
         // A synthetic SQLite-backed source exercises the RowCursor kind.
@@ -872,5 +722,24 @@ mod tests {
             .unwrap();
         assert_eq!(third.items, vec!["again".to_string()]);
         assert_eq!(third.new_cursor.position, 3);
+    }
+
+    #[tokio::test]
+    async fn read_new_rows_returns_none_for_invalid_query() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+
+        let rows = read_new_rows(
+            &conn,
+            "SELECT not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
+            StoredCursor::default(),
+            |_rowid: i64, row: &libsql::Row| row.get::<String>(0).ok(),
+        )
+        .await;
+
+        assert!(rows.is_none());
     }
 }

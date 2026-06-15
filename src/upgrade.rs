@@ -277,6 +277,42 @@ fn install_binary(src: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn retarget_homebrew_symlink(
+    symlink_path: &Path,
+    old_version: &str,
+    new_version: &str,
+) -> Result<()> {
+    let old_target =
+        std::fs::read_link(symlink_path).map_err(io_err("cannot read Homebrew symlink target"))?;
+    let new_target = std::path::PathBuf::from(old_target.to_string_lossy().replacen(
+        old_version,
+        new_version,
+        1,
+    ));
+    std::fs::remove_file(symlink_path).map_err(io_err("cannot remove Homebrew symlink"))?;
+    std::os::unix::fs::symlink(&new_target, symlink_path)
+        .map_err(io_err("cannot recreate Homebrew symlink"))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn rewrite_homebrew_install_receipt(
+    receipt: &Path,
+    old_version: &str,
+    new_version: &str,
+) -> Result<()> {
+    let text =
+        std::fs::read_to_string(receipt).map_err(io_err("cannot read INSTALL_RECEIPT.json"))?;
+    std::fs::write(receipt, text.replace(old_version, new_version))
+        .map_err(io_err("cannot rewrite INSTALL_RECEIPT.json"))?;
+    Ok(())
+}
+
+fn warn_best_effort(step: &str, error: &TraceDecayError) {
+    eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
+}
+
 // ── Homebrew ────────────────────────────────────────────────────────────
 
 /// Replace the binary inside the Homebrew Cellar, then rename the version
@@ -330,14 +366,10 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
                 let symlink_path = prefix.join("bin").join(bin_name);
                 if let Ok(meta) = std::fs::symlink_metadata(&symlink_path) {
                     if meta.file_type().is_symlink() {
-                        if let Ok(old_target) = std::fs::read_link(&symlink_path) {
-                            let new_target = std::path::PathBuf::from(
-                                old_target
-                                    .to_string_lossy()
-                                    .replacen(&old_version, new_version, 1),
-                            );
-                            let _ = std::fs::remove_file(&symlink_path);
-                            let _ = std::os::unix::fs::symlink(&new_target, &symlink_path);
+                        if let Err(error) =
+                            retarget_homebrew_symlink(&symlink_path, &old_version, new_version)
+                        {
+                            warn_best_effort("could not update Homebrew symlink", &error);
                         }
                     }
                 }
@@ -345,8 +377,10 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<()> {
                 // Step 4: patch INSTALL_RECEIPT.json so `brew info` is accurate.
                 let receipt = new_version_dir.join("INSTALL_RECEIPT.json");
                 if receipt.exists() {
-                    if let Ok(text) = std::fs::read_to_string(&receipt) {
-                        let _ = std::fs::write(&receipt, text.replace(&old_version, new_version));
+                    if let Err(error) =
+                        rewrite_homebrew_install_receipt(&receipt, &old_version, new_version)
+                    {
+                        warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
                     }
                 }
             }
@@ -491,7 +525,8 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<()> {
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
     let tag = release_tag(version);
     let candidates = asset_name_candidates(version, is_beta);
-    eprintln!("  Asset: {}", candidates[0]);
+    let [primary_candidate, _legacy_candidate] = &candidates;
+    eprintln!("  Asset: {primary_candidate}");
     fetch_asset_url(&tag, &candidates)
 }
 
@@ -678,6 +713,8 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
     clippy::redundant_closure_for_method_calls
 )]
 mod tests {
+    // All remaining unwrap/expect usage in this module is test-only fixture or
+    // assertion setup; production upgrade code above is kept panic-free.
     use super::*;
 
     #[test]
@@ -1114,14 +1151,7 @@ mod tests {
             fs::rename(version_dir, &new_version_dir).unwrap();
 
             // Update the symlink
-            let old_target = fs::read_link(&link).unwrap();
-            let new_target = PathBuf::from(old_target.to_string_lossy().replacen(
-                "4.1.1-beta.1",
-                "5.0.0",
-                1,
-            ));
-            fs::remove_file(&link).unwrap();
-            symlink(&new_target, &link).unwrap();
+            super::super::retarget_homebrew_symlink(&link, "4.1.1-beta.1", "5.0.0").unwrap();
 
             // Verify: symlink resolves and has the new content
             assert!(link.exists(), "symlink must resolve after dir rename");
@@ -1160,9 +1190,9 @@ mod tests {
             let new_dir = tmp.path().join("Cellar/tracedecay/4.0.4");
             fs::rename(&cellar, &new_dir).unwrap();
 
-            let text = fs::read_to_string(new_dir.join("INSTALL_RECEIPT.json")).unwrap();
-            let updated = text.replace("4.0.3", "4.0.4");
-            fs::write(new_dir.join("INSTALL_RECEIPT.json"), &updated).unwrap();
+            let receipt = new_dir.join("INSTALL_RECEIPT.json");
+            super::super::rewrite_homebrew_install_receipt(&receipt, "4.0.3", "4.0.4").unwrap();
+            let updated = fs::read_to_string(&receipt).unwrap();
 
             assert!(updated.contains("\"stable\": \"4.0.4\""));
             assert!(updated.contains("/4.0.4/INSTALL_RECEIPT.json"));

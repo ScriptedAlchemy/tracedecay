@@ -208,3 +208,40 @@ fn deployed_bundles_match_embedded_standalone_assets() {
     assert!(css.starts_with("/* Wrapper chrome"));
     assert!(css.contains(".tsiw-tab"));
 }
+
+#[test]
+fn deployed_wrapper_preserves_canonical_api_proxy_surface() {
+    // The Hermes dashboard wrapper must remain a thin proxy over the standalone
+    // tracedecay dashboard API. This text-level contract catches accidental
+    // route rewrites even when the Python wrapper is not executed by cargo test.
+    let home = tempfile::tempdir().unwrap();
+    HermesIntegration
+        .install(&make_ctx(home.path(), true))
+        .unwrap();
+
+    let api = read(&dashboard_dir(home.path()).join("plugin_api.py"));
+    for required in [
+        r#"@router.get("/capabilities")"#,
+        r#"_proxy("GET", "/api/capabilities", _DummyRequest(), None)"#,
+        r#"@router.get("/holographic")"#,
+        r#"@router.get("/holographic/")"#,
+        r#"@router.get("/holographic/{path:path}")"#,
+        r#"@router.post("/holographic/{path:path}")"#,
+        r#"/api/plugins/holographic/"#,
+        r#"@router.get("/lcm/{path:path}")"#,
+        r#"@router.post("/lcm/{path:path}")"#,
+        r#"/api/plugins/hermes-lcm/{path}"#,
+        r#"@router.get("/graph/{path:path}")"#,
+        r#"@router.post("/graph/{path:path}")"#,
+        r#"/api/plugins/graph/{path}"#,
+        r#"@router.get("/savings/{path:path}")"#,
+        r#"@router.post("/savings/{path:path}")"#,
+        r#"/api/plugins/savings/{path}"#,
+        "url = f\"{base}{upstream_path}\" + (f\"?{query}\" if query else \"\")",
+    ] {
+        assert!(
+            api.contains(required),
+            "deployed plugin_api.py lost required proxy contract: {required}"
+        );
+    }
+}

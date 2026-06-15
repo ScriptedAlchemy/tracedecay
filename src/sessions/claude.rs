@@ -16,10 +16,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
+use crate::sessions::shared::{
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
+    title_from_messages, StoredCursor,
+};
 use crate::sessions::source::{
-    append_tool_calls_metadata, append_usage_metadata, collect_files_with_ext,
-    content_storage_text_and_tools, paths_equal, stream_new_jsonl, title_from_messages,
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    collect_files_with_ext, stream_new_jsonl, ParsedTranscript, SessionDraft, TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 

@@ -118,3 +118,109 @@ async fn sync_allowed_in_single_db_mode_without_git() {
         .await
         .expect("single-DB mode sync must never be blocked by the drift guard");
 }
+
+#[tokio::test]
+async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    init_repo_on_main(project);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let meta = BranchMeta::new("main");
+    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+
+    let cg = TraceDecay::open(project).await.unwrap();
+    git(project, &["checkout", "-b", "feature"]);
+
+    let diagnostics = cg.branch_diagnostics();
+    assert_eq!(diagnostics.open_active_branch.as_deref(), Some("main"));
+    assert_eq!(diagnostics.current_branch.as_deref(), Some("feature"));
+    assert_eq!(diagnostics.serving_branch.as_deref(), Some("main"));
+    assert!(diagnostics.branch_drifted);
+    assert_eq!(diagnostics.branch_resolution, "stale_serving_branch");
+    assert!(
+        diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("feature") && warning.contains("main")),
+        "expected branch-drift warning naming both branches, got: {:?}",
+        diagnostics.warnings
+    );
+}
+
+#[tokio::test]
+async fn branch_diagnostics_reports_fallback_target_and_nearest_ancestor() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    init_repo_on_main(project);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let meta = BranchMeta::new("main");
+    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+
+    git(project, &["checkout", "-b", "feature/untracked"]);
+
+    let cg = TraceDecay::open(project).await.unwrap();
+    let diagnostics = cg.branch_diagnostics();
+    assert!(diagnostics.is_fallback);
+    assert_eq!(diagnostics.branch_resolution, "fallback_ancestor");
+    assert_eq!(
+        diagnostics.current_branch.as_deref(),
+        Some("feature/untracked")
+    );
+    assert_eq!(diagnostics.fallback_target.as_deref(), Some("main"));
+    assert_eq!(
+        diagnostics.nearest_tracked_ancestor.as_deref(),
+        Some("main")
+    );
+    assert_eq!(diagnostics.serving_branch.as_deref(), Some("main"));
+    assert!(!diagnostics.live_branch_tracked);
+}
+
+#[tokio::test]
+async fn branch_diagnostics_flags_missing_tracked_branch_db() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    init_repo_on_main(project);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let meta = BranchMeta::new("main");
+    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+
+    git(project, &["checkout", "-b", "feature/tracked"]);
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "feature"]);
+
+    tracedecay::branch::add_branch_tracking(project, "feature/tracked")
+        .await
+        .unwrap();
+
+    let tracedecay_dir = project.join(".tracedecay");
+    let meta = tracedecay::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let feature_db =
+        tracedecay::branch::resolve_branch_db_path(&tracedecay_dir, "feature/tracked", &meta)
+            .unwrap();
+    fs::remove_file(&feature_db).unwrap();
+
+    let cg = TraceDecay::open(project).await.unwrap();
+    let diagnostics = cg.branch_diagnostics();
+    assert!(diagnostics.live_branch_tracked);
+    assert_eq!(diagnostics.live_branch_db_exists, Some(false));
+    assert!(diagnostics.is_fallback);
+    assert_eq!(diagnostics.fallback_target.as_deref(), Some("main"));
+    assert!(
+        diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("feature/tracked") && warning.contains("missing")),
+        "expected missing-db warning for tracked branch, got: {:?}",
+        diagnostics.warnings
+    );
+}

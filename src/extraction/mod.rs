@@ -13,7 +13,9 @@ mod svelte_extractor;
 mod swift_extractor;
 mod typescript_extractor;
 
+pub(crate) mod annotations;
 pub mod complexity;
+pub(crate) mod traversal;
 pub mod ts_provider;
 
 #[cfg(feature = "lang-bash")]

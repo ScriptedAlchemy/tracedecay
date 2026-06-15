@@ -33,6 +33,7 @@ import type {
   HolographicFact,
   MemoryDashboardResponse,
   MemorySimilarityPair,
+  MemoryStatusResponse,
 } from "./types";
 import SemanticMap, { type SemanticMapFocus } from "./SemanticMap";
 import SimilarityPanel from "./SimilarityPanel";
@@ -235,6 +236,101 @@ function SystemStrip({
         </div>
       </div>
     </div>
+  );
+}
+
+function MemoryHealthCard({
+  overview,
+  status,
+  error,
+}: {
+  overview: NonNullable<MemoryDashboardResponse["holographic"]["overview"]>;
+  status: MemoryStatusResponse | null;
+  error: string;
+}) {
+  if (!status && !error) return null;
+  if (!status) {
+    return <PanelError error={`Memory Health unavailable: ${error}`} />;
+  }
+
+  const memory = status.memory;
+  const largestBank = overview.memory_banks.reduce(
+    (best, bank) => (bank.fact_count > best.fact_count ? bank : best),
+    overview.memory_banks[0] ?? {
+      bank_id: 0,
+      bank_name: "n/a",
+      dim: memory.hrr_dim,
+      fact_count: 0,
+      updated_at: "",
+    },
+  );
+  const utilizationPct = Number.isFinite(status.largest_bank_utilization_pct)
+    ? status.largest_bank_utilization_pct
+    : 0;
+  const repairSummary = `vectors ${memory.repair.missing_vectors_repaired} · banks ${memory.repair.banks_rebuilt}`;
+  const trustSummary =
+    `<0.25 ${memory.trust_0_025_count} · ` +
+    `0.25-0.50 ${memory.trust_025_050_count} · ` +
+    `0.50-0.75 ${memory.trust_050_075_count} · ` +
+    `0.75-1.00 ${memory.trust_075_100_count}`;
+
+  return (
+    <Card className="overflow-hidden min-w-0">
+      <CardHeader className="flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <CardTitle>Memory Health</CardTitle>
+          <p className="mt-1 text-xs leading-relaxed text-text-tertiary">
+            Live memory-store status from <span className="font-mono-ui text-text-secondary">memory_status()</span>
+            : capacity, trust-floor pressure, missing vectors, and repair results.
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2 text-[11px] text-text-tertiary">
+          <Badge tone="outline" className={NUM_BADGE}>
+            {memory.algebra_name}
+          </Badge>
+          <Badge tone="outline" className={NUM_BADGE}>
+            dim {memory.hrr_dim}
+          </Badge>
+          <Badge tone="outline" className={NUM_BADGE}>
+            backfill {memory.legacy_backfill_complete ? "complete" : "pending"}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="grid min-w-0 gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
+          <Stat label="facts" value={memory.fact_count} />
+          <Stat label="entities" value={memory.entity_count} />
+          <Stat label="banks" value={memory.bank_count} />
+          <Stat label="capacity / bank" value={memory.estimated_capacity} />
+          <Stat
+            label="largest bank utilization"
+            value={`${status.largest_bank_fact_count}/${memory.estimated_capacity} (${utilizationPct.toFixed(1)}%)`}
+            hint={`Largest bank: ${largestBank.bank_name}`}
+          />
+          <Stat label="missing vectors" value={memory.missing_vector_count} />
+          <Stat
+            label="below recall floor"
+            value={memory.below_default_recall_threshold_count}
+            hint="Facts currently below the default recall trust threshold (0.30)."
+          />
+          <Stat
+            label="feedback"
+            value={`${memory.helpful_count}/${memory.unhelpful_count}`}
+            hint="Helpful vs unhelpful feedback events recorded against stored facts."
+          />
+        </div>
+        <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+          <div className="border border-border bg-background/30 px-3 py-2">
+            <div className="text-xs tracking-[0.08em] text-text-tertiary">trust buckets</div>
+            <div className="mt-1 text-sm text-foreground">{trustSummary}</div>
+          </div>
+          <div className="border border-border bg-background/30 px-3 py-2">
+            <div className="text-xs tracking-[0.08em] text-text-tertiary">repair summary</div>
+            <div className="mt-1 text-sm text-foreground">{repairSummary}</div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -782,12 +878,16 @@ function HolographicView({
   query,
   refreshing,
   setQuery,
+  memoryStatus,
+  memoryStatusError,
   onApplied,
 }: {
   data: MemoryDashboardResponse;
   query: string;
   refreshing: boolean;
   setQuery: (value: string) => void;
+  memoryStatus: MemoryStatusResponse | null;
+  memoryStatusError: string;
   onApplied?: () => void;
 }) {
   const overview = data.holographic.overview;
@@ -859,13 +959,11 @@ function HolographicView({
       {data.holographic.error && <PanelError error={data.holographic.error} />}
 
       {overview && (
-        <>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Stat label="facts" value={overview.facts} />
-            <Stat label="entities" value={overview.entities} />
-            <Stat label="banks" value={overview.banks} />
-          </div>
-        </>
+        <MemoryHealthCard
+          overview={overview}
+          status={memoryStatus}
+          error={memoryStatusError}
+        />
       )}
 
       {data.query && (
@@ -922,31 +1020,53 @@ function HolographicView({
 
 export default function HolographicMemoryPage() {
   const [data, setData] = useState<MemoryDashboardResponse | null>(null);
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResponse | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [memoryStatusError, setMemoryStatusError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipFirstQueryEffectRef = useRef(true);
   const loadSeqRef = useRef(0);
 
-  const load = useCallback((q = query, quiet = false) => {
+  const load = useCallback((q: string, quiet = false) => {
     if (quiet) setRefreshing(true);
     else setLoading(true);
     setError("");
+    setMemoryStatusError("");
     const seq = ++loadSeqRef.current;
-    api
-      .getMemoryDashboard({
+    Promise.allSettled([
+      api.getMemoryDashboard({
         q,
         limit: INSPECTOR_ROW_LIMIT,
         graphLimit: GRAPH_ROW_LIMIT,
-      })
-      .then((resp) => {
-        if (seq === loadSeqRef.current) setData(resp);
-      })
-      .catch((err) => {
-        if (seq === loadSeqRef.current)
-          setError(err instanceof Error ? err.message : String(err));
+      }),
+      api.getMemoryStatus(),
+    ])
+      .then(([dashboardResult, statusResult]) => {
+        if (seq !== loadSeqRef.current) return;
+
+        if (dashboardResult.status === "fulfilled") {
+          setData(dashboardResult.value);
+        } else {
+          setError(
+            dashboardResult.reason instanceof Error
+              ? dashboardResult.reason.message
+              : String(dashboardResult.reason),
+          );
+        }
+
+        if (statusResult.status === "fulfilled") {
+          setMemoryStatus(statusResult.value);
+        } else {
+          setMemoryStatus(null);
+          setMemoryStatusError(
+            statusResult.reason instanceof Error
+              ? statusResult.reason.message
+              : String(statusResult.reason),
+          );
+        }
       })
       .finally(() => {
         if (seq === loadSeqRef.current) {
@@ -954,31 +1074,11 @@ export default function HolographicMemoryPage() {
           setRefreshing(false);
         }
       });
-  }, [query]);
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    api
-      .getMemoryDashboard({
-        q: "",
-        limit: INSPECTOR_ROW_LIMIT,
-        graphLimit: GRAPH_ROW_LIMIT,
-      })
-      .then((resp) => {
-        if (!cancelled) setData(resp);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    load("", false);
+  }, [load]);
 
   useEffect(() => {
     if (skipFirstQueryEffectRef.current) {
@@ -1000,10 +1100,12 @@ export default function HolographicMemoryPage() {
         query={query}
         refreshing={refreshing}
         setQuery={setQuery}
+        memoryStatus={memoryStatus}
+        memoryStatusError={memoryStatusError}
         onApplied={() => load(query, true)}
       />
     );
-  }, [data, query, refreshing, load]);
+  }, [data, query, refreshing, memoryStatus, memoryStatusError, load]);
 
   if (loading && !data) {
     return (

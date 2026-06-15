@@ -20,6 +20,7 @@ import type {
   MemoryOplogResponse,
   MemoryProjectionResponse,
   MemorySimilarityResponse,
+  MemoryStatusResponse,
 } from "./types";
 
 const BASE = "/api/plugins/holographic";
@@ -38,6 +39,9 @@ export const api = {
       `${BASE}/${suffix ? `?${suffix}` : ""}`,
     );
   },
+
+  /** Rich health/status surface for the holographic memory store (GET /status). */
+  getMemoryStatus: () => fetchJSON<MemoryStatusResponse>(`${BASE}/status`),
 
   /** Full fact content + linked entities (GET /fact/{id}). */
   getMemoryFact: (factId: number) =>

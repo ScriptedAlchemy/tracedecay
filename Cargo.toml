@@ -26,6 +26,7 @@ include = [
     "/examples/**",
     "/benchmarks/queries/default.toml",
     "/cursor-plugin/**",
+    "/codex-plugin/**",
     "/vendor/**",
     "/dashboard/shell/dist/**",
     "/dashboard/holographic/dist/**",

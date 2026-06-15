@@ -62,6 +62,16 @@ impl JsonRpcResponse {
 
     /// Creates an error JSON-RPC response.
     pub fn error(id: serde_json::Value, code: ErrorCode, message: String) -> Self {
+        Self::error_with_data(id, code, message, None)
+    }
+
+    /// Creates an error JSON-RPC response with optional structured data.
+    pub fn error_with_data(
+        id: serde_json::Value,
+        code: ErrorCode,
+        message: String,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
@@ -69,7 +79,7 @@ impl JsonRpcResponse {
             error: Some(JsonRpcError {
                 code: code.as_i32(),
                 message,
-                data: None,
+                data,
             }),
         }
     }

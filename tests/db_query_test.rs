@@ -1,5 +1,6 @@
 use tempfile::TempDir;
-use tracedecay::db::Database;
+use tracedecay::db::{Database, StoredFingerprint};
+use tracedecay::redundancy::Fingerprint;
 use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir).
@@ -71,6 +72,42 @@ async fn assert_can_start_new_transaction(db: &Database) {
         .execute("ROLLBACK", ())
         .await
         .expect("test transaction rollback should succeed");
+}
+
+// -------------------------------------------------------------------------
+// public db module exports
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_db_module_reexports_database_and_stored_fingerprint() {
+    let (db, _dir) = setup_db().await;
+    let node = sample_node("fp-node", "fingerprinted", "src/lib.rs");
+    db.insert_node(&node).await.expect("insert_node failed");
+
+    let fingerprint = Fingerprint {
+        ast_hash: "ast-hash".to_string(),
+        cfg_hash: "cfg-hash".to_string(),
+        call_seq_hash: "call-seq-hash".to_string(),
+        shingles: vec![0xabcddcba, 0x12345678],
+        body_tokens: 42,
+        source_hash: "source-hash".to_string(),
+    };
+    db.upsert_fingerprint("fp-node", &fingerprint)
+        .await
+        .expect("upsert_fingerprint failed");
+
+    let stored: StoredFingerprint = db
+        .get_fingerprint("fp-node")
+        .await
+        .expect("get_fingerprint failed")
+        .expect("fingerprint should exist");
+    assert_eq!(stored.node_id, "fp-node");
+    assert_eq!(stored.ast_hash, fingerprint.ast_hash);
+    assert_eq!(stored.cfg_hash, fingerprint.cfg_hash);
+    assert_eq!(stored.call_seq_hash, fingerprint.call_seq_hash);
+    assert_eq!(stored.shingles, fingerprint.shingles);
+    assert_eq!(stored.body_tokens, fingerprint.body_tokens as u32);
+    assert_eq!(stored.source_hash, fingerprint.source_hash);
 }
 
 // -------------------------------------------------------------------------
@@ -609,6 +646,39 @@ async fn test_insert_all_bulk() {
     assert_eq!(all_files.len(), 2);
 }
 
+#[tokio::test]
+async fn test_insert_all_sql_literal_helpers_preserve_payloads() {
+    let (db, _dir) = setup_db().await;
+
+    let payload = "quoted ' value; -- comment\nnext line */";
+    let mut node = sample_node("bulk-sql-1", payload, "src/bulk'sql.rs");
+    node.qualified_name = format!("crate::{payload}");
+    node.docstring = Some(payload.to_string());
+    node.signature = Some(format!("fn {payload}()"));
+
+    let file = FileRecord {
+        path: "src/bulk'sql.rs".to_string(),
+        content_hash: payload.to_string(),
+        size: 42,
+        modified_at: 1000,
+        indexed_at: 2000,
+        node_count: 1,
+    };
+
+    db.insert_all(&[node], &[], &[file])
+        .await
+        .expect("insert_all should safely quote value literals");
+
+    let nodes = db.get_all_nodes().await.expect("get_all_nodes failed");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].name, payload);
+    assert_eq!(nodes[0].docstring.as_deref(), Some(payload));
+
+    let files = db.get_all_files().await.expect("get_all_files failed");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].content_hash, payload);
+}
+
 // -------------------------------------------------------------------------
 // delete_edges_by_source
 // -------------------------------------------------------------------------
@@ -891,6 +961,30 @@ async fn test_get_file_coupling_fan_out() {
     assert_eq!(coupling[0].1, 2);
 }
 
+#[tokio::test]
+async fn test_get_file_coupling_binds_path_prefix() {
+    let (db, _dir) = setup_db().await;
+
+    let n1 = sample_node("fc-sql-1", "f1", "src/a.rs");
+    let n2 = sample_node("fc-sql-2", "f2", "src/b.rs");
+    db.insert_nodes(&[n1, n2])
+        .await
+        .expect("insert_nodes failed");
+    db.insert_edges(&[sample_edge("fc-sql-2", "fc-sql-1", EdgeKind::Calls)])
+        .await
+        .expect("insert_edges failed");
+
+    let coupling = db
+        .get_file_coupling(true, Some("src/missing' OR 1=1 --"), 10)
+        .await
+        .expect("get_file_coupling should bind path_prefix");
+
+    assert!(
+        coupling.is_empty(),
+        "quoted path_prefix must be treated as a literal prefix, not SQL"
+    );
+}
+
 // -------------------------------------------------------------------------
 // get_inheritance_depth
 // -------------------------------------------------------------------------
@@ -941,6 +1035,33 @@ async fn test_get_inheritance_depth() {
     assert_eq!(depths[0].1, 2);
     assert_eq!(depths[1].0.id, "ih-p");
     assert_eq!(depths[1].1, 1);
+}
+
+#[tokio::test]
+async fn test_get_inheritance_depth_binds_path_prefix() {
+    let (db, _dir) = setup_db().await;
+
+    let mut parent = sample_node("ih-sql-p", "Parent", "src/lib.rs");
+    parent.kind = NodeKind::Class;
+    let mut child = sample_node("ih-sql-c", "Child", "src/lib.rs");
+    child.kind = NodeKind::Class;
+
+    db.insert_nodes(&[parent, child])
+        .await
+        .expect("insert_nodes failed");
+    db.insert_edges(&[sample_edge("ih-sql-c", "ih-sql-p", EdgeKind::Extends)])
+        .await
+        .expect("insert_edges failed");
+
+    let depths = db
+        .get_inheritance_depth(Some("src/missing' OR 1=1 --"), 10)
+        .await
+        .expect("get_inheritance_depth should bind path_prefix");
+
+    assert!(
+        depths.is_empty(),
+        "quoted path_prefix must be treated as a literal prefix, not SQL"
+    );
 }
 
 /// Regression: `get_inheritance_depth` previously had no cycle detection.
@@ -1392,6 +1513,37 @@ async fn test_get_god_classes() {
     assert_eq!(*fields, 1);
     // total: 4
     assert_eq!(*total, 4);
+}
+
+#[tokio::test]
+async fn test_get_god_classes_binds_path_prefix() {
+    let (db, _dir) = setup_db().await;
+
+    let mut class_node = sample_node("gc-sql-class", "GodClass", "src/lib.rs");
+    class_node.kind = NodeKind::Class;
+    let mut method = sample_node("gc-sql-method", "method", "src/lib.rs");
+    method.kind = NodeKind::Method;
+
+    db.insert_nodes(&[class_node, method])
+        .await
+        .expect("insert_nodes failed");
+    db.insert_edges(&[sample_edge(
+        "gc-sql-class",
+        "gc-sql-method",
+        EdgeKind::Contains,
+    )])
+    .await
+    .expect("insert_edges failed");
+
+    let god_classes = db
+        .get_god_classes(Some("src/missing' OR 1=1 --"), 10)
+        .await
+        .expect("get_god_classes should bind path_prefix");
+
+    assert!(
+        god_classes.is_empty(),
+        "quoted path_prefix must be treated as a literal prefix, not SQL"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -2578,6 +2730,39 @@ async fn test_get_test_annotated_node_ids_empty_input() {
         .await
         .expect("should not fail on empty input");
     assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_test_annotated_node_ids_chunks_large_candidate_sets() {
+    let (db, _dir) = setup_db().await;
+
+    let test_fn = sample_node("fn_test_large", "test_large_candidate_set", "src/lib.rs");
+    let mut annot = sample_node("annot_test_large", "test", "src/lib.rs");
+    annot.kind = NodeKind::AnnotationUsage;
+
+    db.insert_nodes(&[test_fn, annot])
+        .await
+        .expect("insert_nodes failed");
+    db.insert_edges(&[sample_edge(
+        "annot_test_large",
+        "fn_test_large",
+        EdgeKind::Annotates,
+    )])
+    .await
+    .expect("insert_edges failed");
+
+    let mut candidates: Vec<String> = (0..33_000)
+        .map(|i| format!("missing_candidate_{i}"))
+        .collect();
+    candidates.push("fn_test_large".to_string());
+
+    let result = db
+        .get_test_annotated_node_ids(&candidates)
+        .await
+        .expect("query should chunk candidates below SQLite variable limits");
+
+    assert_eq!(result.len(), 1);
+    assert!(result.contains("fn_test_large"));
 }
 
 #[tokio::test]

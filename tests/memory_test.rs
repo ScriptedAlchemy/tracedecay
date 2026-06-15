@@ -5,7 +5,7 @@ use tracedecay::memory::entities::{extract_entities, normalize_entity};
 use tracedecay::memory::retrieval::FactRetriever;
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::{
-    apply_feedback, clamp_trust, temporal_decay, trust_bucket, trust_distribution, DEFAULT_TRUST,
+    apply_feedback, clamp_trust, trust_bucket, trust_distribution, DEFAULT_TRUST,
 };
 use tracedecay::memory::types::{
     AddFactDiffKind, AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
@@ -25,6 +25,28 @@ async fn make_memory_store() -> (Database, TempDir) {
     let db_path = tmp.path().join("tracedecay.db");
     let (db, _) = Database::initialize(&db_path).await.unwrap();
     (db, tmp)
+}
+
+async fn scalar_i64(db: &Database, sql: &str) -> i64 {
+    let mut rows = db.conn().query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+async fn fact_hrr_blob(db: &Database, fact_id: i64) -> Vec<u8> {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT hrr_vector FROM memory_facts WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<Vec<u8>>(0)
+        .unwrap()
 }
 
 fn fact_request(content: &str, category: MemoryCategory, trust: f64) -> AddFactRequest {
@@ -154,6 +176,23 @@ async fn fact_hrr_vector(db: &Database, fact_id: i64) -> Vec<f64> {
     HolographicEncoder::deserialize(&bytes).unwrap()
 }
 
+fn assert_vector_matches_with_f32_tolerance(actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len());
+    let max_abs_error = actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_abs_error <= 3.0e-8,
+        "stored f32 vector drifted from f64 baseline; max_abs_error={max_abs_error:e}"
+    );
+    assert!(
+        HolographicEncoder.similarity(actual, expected) > 0.999_999_999,
+        "stored f32 vector should preserve phase-cosine similarity"
+    );
+}
+
 #[test]
 fn core_memory_types_use_stable_json_strings() {
     assert_eq!(MemoryCategory::UserPref.to_string(), "user_pref");
@@ -259,8 +298,6 @@ fn trust_feedback_clamps_buckets_and_decays() {
     assert_eq!(trust_bucket(0.5), "medium");
     assert_eq!(trust_bucket(0.8), "high");
     assert_eq!(trust_distribution(&[0.2, 0.31, 0.6, 0.8]), (1, 2, 1));
-    assert!(temporal_decay(0.9, 30.0) < 0.9);
-    assert!(temporal_decay(0.1, 30.0) > 0.1);
 }
 
 #[test]
@@ -354,9 +391,40 @@ fn holographic_encoding_is_deterministic_and_round_trips() {
     assert_eq!(encoder.similarity(&[], &first), 0.0);
 
     let bytes = HolographicEncoder::serialize(&first).unwrap();
+    assert_eq!(
+        bytes.len(),
+        8200,
+        "2048-dimensional FHRR vectors must serialize as bincode Vec<f32> (8-byte length + 2048×4 bytes)"
+    );
     let decoded = HolographicEncoder::deserialize(&bytes).unwrap();
-    assert_eq!(decoded, first);
+    let max_abs_error = decoded
+        .iter()
+        .zip(&first)
+        .map(|(decoded, baseline)| (decoded - baseline).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_abs_error <= 3.0e-8,
+        "f32 round-trip max_abs_error={max_abs_error:e} exceeded measured tolerance"
+    );
+    assert!(
+        encoder.similarity(&decoded, &first) > 0.999_999_999,
+        "phase-cosine similarity should be preserved across f32 serialization"
+    );
     assert!(HolographicEncoder::deserialize(b"not bincode").is_err());
+}
+
+#[test]
+fn vector_deserialize_accepts_legacy_f64_blobs_for_forward_compatibility_and_backfill() {
+    let encoder = HolographicEncoder;
+    let baseline = encoder.encode_fact(
+        "Legacy f64 vectors remain readable during precision backfill",
+        &["ForwardCompatibility".to_string()],
+    );
+    let legacy_bytes = bincode::serialize(&baseline).unwrap();
+    assert_eq!(legacy_bytes.len(), 16_392);
+
+    let decoded = HolographicEncoder::deserialize(&legacy_bytes).unwrap();
+    assert_eq!(decoded, baseline);
 }
 
 #[tokio::test]
@@ -519,7 +587,10 @@ async fn memory_store_add_list_get_and_deduplicates_by_content() {
 
     assert_eq!(duplicate.fact_id, first.fact_id);
     assert_eq!(first.tags, vec!["storage"]);
-    assert_eq!(first.entities, vec!["SQLite"]);
+    // "SQLite-backed" is auto-extracted from the content by the same verb-led
+    // remainder rule that recovers "Tokio" from "Prefers Tokio" ("Use" is a
+    // leading verb, so the remainder noun is kept as an entity).
+    assert_eq!(first.entities, vec!["SQLite", "SQLite-backed"]);
 
     let fetched = store.get_fact(first.fact_id).await.unwrap().unwrap();
     assert_eq!(fetched, first);
@@ -551,9 +622,9 @@ async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
         .unwrap()
         .fact
         .unwrap();
-    assert_eq!(
-        fact_hrr_vector(&db, first.fact_id).await,
-        encoder.encode_fact(content, &["FirstEntity".to_string()])
+    assert_vector_matches_with_f32_tolerance(
+        &fact_hrr_vector(&db, first.fact_id).await,
+        &encoder.encode_fact(content, &["FirstEntity".to_string()]),
     );
 
     let mut duplicate_request = fact_request(content, MemoryCategory::Project, 0.8);
@@ -568,12 +639,12 @@ async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
     assert_eq!(duplicate.fact_id, first.fact_id);
     assert!(duplicate.entities.contains(&"FirstEntity".to_string()));
     assert!(duplicate.entities.contains(&"SecondEntity".to_string()));
-    assert_eq!(
-        fact_hrr_vector(&db, first.fact_id).await,
-        encoder.encode_fact(
+    assert_vector_matches_with_f32_tolerance(
+        &fact_hrr_vector(&db, first.fact_id).await,
+        &encoder.encode_fact(
             content,
-            &["FirstEntity".to_string(), "SecondEntity".to_string()]
-        )
+            &["FirstEntity".to_string(), "SecondEntity".to_string()],
+        ),
     );
 }
 
@@ -726,7 +797,7 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     let vector_len: i64 = row.get(0).unwrap();
-    assert!(vector_len > 0);
+    assert_eq!(vector_len, 8200);
 
     db.conn()
         .execute(
@@ -748,6 +819,15 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         .unwrap();
     let hrr_dim: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(hrr_dim, HolographicEncoder::DIMENSIONS as i64);
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_facts WHERE hrr_precision = 'f32' AND length(hrr_vector) = 8200",
+        )
+        .await,
+        2,
+        "fresh and recomputed vectors should be marked as f32 precision with compact blobs"
+    );
 
     db.conn()
         .execute(
@@ -775,6 +855,161 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
             .await
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let fact = store
+        .add_fact(
+            fact_request(
+                "Legacy vector precision should be repaired without changing recall ordering",
+                MemoryCategory::Project,
+                0.8,
+            ),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let baseline_vector = fact_hrr_vector(&db, fact.fact_id).await;
+    let legacy_bytes = bincode::serialize(&baseline_vector).unwrap();
+    assert_eq!(legacy_bytes.len(), 16_392);
+
+    db.conn()
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = ?1, hrr_precision = 'f64'
+             WHERE fact_id = ?2",
+            libsql::params![legacy_bytes, fact.fact_id],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
+    assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
+    assert_eq!(fact_hrr_blob(&db, fact.fact_id).await.len(), 8200);
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_facts WHERE hrr_precision = 'f32' AND length(hrr_vector) = 8200",
+        )
+        .await,
+        1
+    );
+
+    let compact_vector = fact_hrr_vector(&db, fact.fact_id).await;
+    let similarity = HolographicEncoder.similarity(&baseline_vector, &compact_vector);
+    assert!(
+        similarity > 0.999_999_999,
+        "legacy f64→f32 backfill should preserve phase-cosine ordering; similarity={similarity}"
+    );
+}
+
+#[tokio::test]
+async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let retriever = FactRetriever::new(db.conn());
+    for (content, trust) in [
+        (
+            "Alpha recall fixture prefers compact Rust FHRR vectors",
+            0.95,
+        ),
+        (
+            "Alpha recall fixture mentions compact Rust vectors second",
+            0.75,
+        ),
+        ("Unrelated gardening note for ordering control", 0.95),
+    ] {
+        store
+            .add_fact(
+                fact_request(content, MemoryCategory::Project, trust),
+                DEFAULT_TRUST,
+            )
+            .await
+            .unwrap()
+            .fact
+            .unwrap();
+    }
+
+    let before: Vec<String> = retriever
+        .search(
+            "Alpha compact Rust FHRR",
+            Some(MemoryCategory::Project),
+            Some(0.1),
+            10,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.fact.content)
+        .collect();
+
+    assert!(store.rebuild_all_banks().await.unwrap() >= 1);
+
+    let after: Vec<String> = retriever
+        .search(
+            "Alpha compact Rust FHRR",
+            Some(MemoryCategory::Project),
+            Some(0.1),
+            10,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.fact.content)
+        .collect();
+    assert_eq!(
+        after, before,
+        "compact bank rebuild must preserve recall ordering"
+    );
+}
+
+#[tokio::test]
+async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
+    let (db, tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let db_path = tmp.path().join("tracedecay.db");
+    let mut fact_ids = Vec::new();
+
+    for idx in 0..96 {
+        let fact = store
+            .add_fact(
+                fact_request(
+                    &format!("incremental vacuum blob reclamation fixture {idx}"),
+                    MemoryCategory::Project,
+                    0.8,
+                ),
+                DEFAULT_TRUST,
+            )
+            .await
+            .unwrap()
+            .fact
+            .unwrap();
+        fact_ids.push(fact.fact_id);
+    }
+    db.conn()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .await
+        .unwrap();
+    let size_after_insert = std::fs::metadata(&db_path).unwrap().len();
+
+    for fact_id in fact_ids {
+        assert!(store.remove_fact(fact_id).await.unwrap());
+    }
+    db.conn()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .await
+        .unwrap();
+    let size_after_delete = std::fs::metadata(&db_path).unwrap().len();
+
+    assert!(
+        size_after_delete < size_after_insert,
+        "incremental_vacuum should shrink the DB file after deleting compact HRR blobs; before={size_after_insert}, after={size_after_delete}"
     );
 }
 
@@ -860,6 +1095,24 @@ async fn memory_store_records_feedback_audit_and_retrieval_counts() {
     assert_eq!(updated.helpful_count, 1);
     assert_eq!(updated.unhelpful_count, 1);
     assert!(updated.last_feedback_at.is_some());
+
+    let trust_history = store.fact_trust_history(fact.fact_id).await.unwrap();
+    assert_eq!(trust_history.len(), 2);
+    assert_eq!(trust_history[0].action, FeedbackAction::Helpful);
+    assert!((trust_history[0].old_trust - 0.5).abs() < f64::EPSILON);
+    assert!((trust_history[0].new_trust - 0.55).abs() < f64::EPSILON);
+    assert!((trust_history[0].delta - 0.05).abs() < f64::EPSILON);
+    assert_eq!(trust_history[0].source, "test");
+    assert_eq!(trust_history[0].note.as_deref(), Some("useful"));
+    assert_eq!(trust_history[1].action, FeedbackAction::Unhelpful);
+    assert!((trust_history[1].old_trust - 0.55).abs() < f64::EPSILON);
+    assert!((trust_history[1].new_trust - 0.45).abs() < f64::EPSILON);
+    assert!((trust_history[1].delta + 0.10).abs() < f64::EPSILON);
+    assert_eq!(trust_history[1].source, "mcp");
+    assert_eq!(trust_history[1].note, None);
+
+    let empty_history = store.fact_trust_history(other_fact.fact_id).await.unwrap();
+    assert!(empty_history.is_empty());
 }
 
 #[tokio::test]
@@ -1256,7 +1509,7 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
     let store = MemoryStore::new(db.conn());
 
     let mut request = fact_request(
-        "Hard delete cascade fixture fact",
+        "hard delete cascade fixture fact",
         MemoryCategory::Project,
         0.8,
     );
@@ -1456,9 +1709,9 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
         updated_vector, original_vector,
         "normalized-equivalent entity merge must refresh the stored vector"
     );
-    assert_eq!(
-        updated_vector,
-        encoder.encode_fact(&skipped_fact.content, &skipped_fact.entities)
+    assert_vector_matches_with_f32_tolerance(
+        &updated_vector,
+        &encoder.encode_fact(&skipped_fact.content, &skipped_fact.entities),
     );
     assert!(
         dirty_bank_names(&db).await.contains(&"tool".to_string()),

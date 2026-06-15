@@ -251,6 +251,20 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
+        "get" => {
+            let id = fact_id(&args)?;
+            let fact = cg
+                .get_fact(id)
+                .await?
+                .ok_or_else(|| config_error(format!("fact {id} not found")))?;
+            let trust_history = cg.fact_trust_history(id).await?;
+            json!({
+                "action": action,
+                "fact": fact,
+                "trust_history": trust_history,
+                "count": 1,
+            })
+        }
         "update" => {
             let id = fact_id(&args)?;
             let update = UpdateFactRequest {

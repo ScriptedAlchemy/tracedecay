@@ -199,6 +199,55 @@ fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
 }
 
+fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join("plugins/tracedecay")
+}
+
+fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {
+    home.join(".agents/plugins/marketplace.json")
+}
+
+fn assert_codex_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+    let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["license"], "MIT");
+    assert_eq!(manifest["skills"], "./skills/");
+    assert_eq!(manifest["mcpServers"], "./.mcp.json");
+    assert!(
+        manifest.get("hooks").is_none(),
+        "Codex plugin manifests must not declare hooks until that field is supported"
+    );
+
+    let mcp = read_json(&plugin_dir.join(".mcp.json"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], expected_command);
+    assert_eq!(server["args"], serde_json::json!(["serve"]));
+    assert_eq!(server["env"]["TRACEDECAY_ENABLE_GLOBAL_DB"], "1");
+
+    let skill = std::fs::read_to_string(plugin_dir.join("skills/reading-code-cheaply/SKILL.md"))
+        .expect("Codex plugin should ship tracedecay steering skills");
+    assert!(skill.contains("tracedecay"));
+}
+
+fn assert_codex_marketplace_entry(home: &Path) {
+    let marketplace = read_json(&codex_personal_marketplace_path(home));
+    assert_eq!(marketplace["name"], "personal");
+    let plugins = marketplace["plugins"]
+        .as_array()
+        .expect("marketplace plugins should be an array");
+    let entry = plugins
+        .iter()
+        .find(|entry| entry["name"] == "tracedecay")
+        .expect("personal marketplace should contain tracedecay");
+    assert_eq!(entry["source"]["source"], "local");
+    assert_eq!(entry["source"]["path"], "./plugins/tracedecay");
+    assert_eq!(entry["policy"]["installation"], "AVAILABLE");
+    assert_eq!(entry["policy"]["authentication"], "ON_INSTALL");
+    assert_eq!(entry["category"], "Productivity");
+}
+
 fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
@@ -561,9 +610,11 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
     assert!(schemas_py.contains("json.load"));
     let schemas_json = read_json(&plugin_dir.join("schemas.json"));
-    assert!(schemas_json.as_array().is_some_and(|schemas| schemas
-        .iter()
-        .any(|schema| schema["name"] == "tracedecay_context")));
+    assert!(schemas_json.as_array().is_some_and(|schemas| {
+        schemas
+            .iter()
+            .any(|schema| schema["name"] == "tracedecay_context")
+    }));
 
     let tools_py = std::fs::read_to_string(plugin_dir.join("tools.py")).unwrap();
     assert!(tools_py.contains(&expected_tracedecay_bin()));
@@ -622,6 +673,29 @@ fn test_hermes_local_install_writes_profile_plugin() {
             .any(|path| stderr.contains(&format!("HERMES_HOME={}", path.display()))),
         "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
     );
+}
+
+#[test]
+fn test_hermes_generated_plugin_templates_live_outside_installer() {
+    let installer_source = include_str!("../src/agents/hermes.rs");
+    let template_source = include_str!("../src/agents/hermes/templates.rs");
+
+    for marker in [
+        r#""""Generated tracedecay tool handlers for Hermes.""""#,
+        "def register(ctx):",
+        "class TracedecayMemoryProvider",
+        "def tracedecay_command(args):",
+        "name: tracedecay\\n\\",
+    ] {
+        assert!(
+            !installer_source.contains(marker),
+            "large generated plugin template marker should not live in src/agents/hermes.rs: {marker}"
+        );
+        assert!(
+            template_source.contains(marker),
+            "generated plugin template module should contain marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -2543,17 +2617,44 @@ fn test_gemini_install_creates_config() {
 }
 
 #[test]
-fn test_codex_install_creates_config() {
+fn test_codex_install_creates_plugin_bundle_and_marketplace() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
-    // Check ~/.codex/config.toml
+    let plugin_dir = codex_plugin_install_dir(home);
+    assert_codex_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin);
+    assert_codex_marketplace_entry(home);
+
+    // Global Codex installs still own hooks and AGENTS.md directly because
+    // the current Codex plugin manifest schema accepts MCP/skills but not
+    // hook declarations.
+    assert!(
+        !home.join(".codex/config.toml").exists(),
+        "global Codex install should rely on the plugin MCP config, not mutate config.toml"
+    );
+
+    // Check AGENTS.md
+    let agents_md = home.join(".codex/AGENTS.md");
+    assert!(agents_md.exists(), "AGENTS.md should exist after install");
+    let md_content = std::fs::read_to_string(&agents_md).unwrap();
+    assert!(md_content.contains("tracedecay"));
+}
+
+#[test]
+fn test_codex_local_install_still_creates_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    assert_local_install_success("codex", project.path(), home.path());
+
+    // Check <project>/.codex/config.toml
+    let home = project.path();
     let config_path = home.join(".codex/config.toml");
     assert!(
         config_path.exists(),
-        "config.toml should exist after install"
+        "config.toml should exist after local install"
     );
     // Verify the file contains the expected content as text (the TOML output from
     // toml::to_string_pretty uses dotted headers which may not round-trip through
@@ -2564,8 +2665,8 @@ fn test_codex_install_creates_config() {
         "config.toml should contain [mcp_servers.tracedecay]"
     );
     assert!(
-        content.contains("TRACEDECAY_ENABLE_GLOBAL_DB = \"1\""),
-        "global Codex config should opt into user-level global accounting"
+        !content.contains("TRACEDECAY_ENABLE_GLOBAL_DB"),
+        "local Codex config should not opt into user-level global accounting"
     );
     assert!(
         content.contains("\"serve\""),
@@ -2586,7 +2687,7 @@ fn test_codex_install_creates_config() {
     }
 
     // Check AGENTS.md
-    let agents_md = home.join(".codex/AGENTS.md");
+    let agents_md = home.join("AGENTS.md");
     assert!(agents_md.exists(), "AGENTS.md should exist after install");
     let md_content = std::fs::read_to_string(&agents_md).unwrap();
     assert!(md_content.contains("tracedecay"));
@@ -3177,17 +3278,22 @@ fn test_codex_install_then_uninstall() {
     let ctx = make_install_ctx(home);
 
     CodexIntegration.install(&ctx).unwrap();
-    let config_path = home.join(".codex/config.toml");
-    assert!(config_path.exists());
+    let plugin_dir = codex_plugin_install_dir(home);
+    assert!(plugin_dir.exists());
+    assert_codex_marketplace_entry(home);
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
-    // After uninstall, the config (which only contained tracedecay) becomes
-    // empty and is removed; or, if other content existed, the tracedecay
-    // server is dropped but the rest is preserved.
     assert!(
-        !config_path.exists(),
-        "config.toml with only tracedecay should be removed on uninstall"
+        !plugin_dir.exists(),
+        "Codex plugin bundle should be removed on uninstall"
+    );
+    let marketplace = read_json(&codex_personal_marketplace_path(home));
+    assert!(
+        marketplace["plugins"]
+            .as_array()
+            .is_none_or(|plugins| plugins.iter().all(|entry| entry["name"] != "tracedecay")),
+        "Codex marketplace entry should be removed on uninstall"
     );
 
     let agents_md = home.join(".codex/AGENTS.md");
@@ -3222,41 +3328,22 @@ args = [\"--flag\"]
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
-    // A backup of the original must exist.
-    let backup = home.join(".codex/config.toml.bak");
-    assert!(backup.exists(), "install must back up the existing config");
-    assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
-
-    // The new config must keep the user's settings.
-    let new_contents = std::fs::read_to_string(&config_path).unwrap();
-    let parsed: toml::Table = toml::from_str(&new_contents).unwrap();
     assert_eq!(
-        parsed.get("model").and_then(|v| v.as_str()),
-        Some("o4-mini"),
-        "top-level user keys must be preserved"
-    );
-    assert_eq!(
-        parsed.get("approval_policy").and_then(|v| v.as_str()),
-        Some("on-failure"),
-    );
-    let servers = parsed
-        .get("mcp_servers")
-        .and_then(|v| v.as_table())
-        .expect("mcp_servers should still be a table");
-    assert!(
-        servers.contains_key("other"),
-        "pre-existing mcp_servers entries must be preserved"
+        std::fs::read_to_string(&config_path).unwrap(),
+        original,
+        "global Codex plugin install must leave user config.toml byte-identical"
     );
     assert!(
-        servers.contains_key("tracedecay"),
-        "tracedecay should be registered alongside existing servers"
+        !home.join(".codex/config.toml.bak").exists(),
+        "global Codex plugin install should not back up config.toml because it does not rewrite it"
     );
+    assert_codex_plugin_bundle(&codex_plugin_install_dir(home), &ctx.tracedecay_bin);
 }
 
 #[test]
-fn test_codex_install_refuses_unparseable_config() {
-    // Issue #63 guard: if the existing config can't be parsed, refuse to
-    // overwrite rather than silently replacing the user's content.
+fn test_codex_install_leaves_unparseable_config_untouched() {
+    // Global Codex installs no longer rewrite config.toml, so even a broken
+    // user config must be left byte-identical while the plugin bundle installs.
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     std::fs::create_dir_all(home.join(".codex")).unwrap();
@@ -3267,8 +3354,8 @@ fn test_codex_install_refuses_unparseable_config() {
     let ctx = make_install_ctx(home);
     let result = CodexIntegration.install(&ctx);
     assert!(
-        result.is_err(),
-        "install must fail when existing config.toml is unparseable"
+        result.is_ok(),
+        "global Codex plugin install should not parse or rewrite config.toml"
     );
     assert_eq!(
         std::fs::read_to_string(&config_path).unwrap(),
@@ -4371,7 +4458,9 @@ fn test_has_tracedecay_codex() {
 
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
-    assert!(home.join(".codex/config.toml").exists());
+    assert!(codex_plugin_install_dir(home)
+        .join(".codex-plugin/plugin.json")
+        .exists());
     assert!(
         CodexIntegration.has_tracedecay(home),
         "has_tracedecay should detect tracedecay after a clean install"
@@ -4931,7 +5020,8 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
     );
     let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        config.contains("  tracedecay:") && config.contains("    project_root: \"/pinned/project\""),
+        config.contains("  tracedecay:")
+            && config.contains("    project_root: \"/pinned/project\""),
         "install --project-root must write the pin into the conventional plugins.tracedecay config block:\n{config}"
     );
 

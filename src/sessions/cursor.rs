@@ -3,10 +3,13 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::global_db::GlobalDb;
+use crate::sessions::shared::{
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools, paths_equal,
+    title_from_messages, StoredCursor,
+};
 use crate::sessions::source::{
-    append_tool_calls_metadata, append_usage_metadata, collect_files_with_ext,
-    content_storage_text_and_tools, ingest_source, paths_equal, stream_new_jsonl,
-    title_from_messages, ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
+    collect_files_with_ext, ingest_source, stream_new_jsonl, ParsedTranscript, SessionDraft,
+    TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
 
@@ -96,12 +99,12 @@ fn resolve_hermes_profile_tracedecay_dir(
     // Pick which directory to use: prefer .tracedecay if it already exists;
     // accept legacy .tokensave for existing installs; default to .tracedecay
     // for new ones so create_missing writes the new name.
-    let brand_dir = if std::fs::symlink_metadata(&tracedecay_dir).is_ok() {
-        tracedecay_dir.clone()
-    } else if std::fs::symlink_metadata(&legacy_dir).is_ok() {
-        legacy_dir.clone()
-    } else {
-        tracedecay_dir.clone()
+    let brand_dir = match (
+        std::fs::symlink_metadata(&tracedecay_dir),
+        std::fs::symlink_metadata(&legacy_dir),
+    ) {
+        (Err(e1), Ok(_)) if e1.kind() == std::io::ErrorKind::NotFound => legacy_dir.clone(),
+        _ => tracedecay_dir.clone(),
     };
 
     match std::fs::symlink_metadata(&brand_dir) {

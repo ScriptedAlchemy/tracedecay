@@ -844,35 +844,14 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
 
 /// Handles `tracedecay_branch_list` tool calls.
 pub(super) fn handle_branch_list(cg: &TraceDecay) -> ToolResult {
-    let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
-    let current = cg.active_branch();
-
-    let meta = crate::branch_meta::load_branch_meta(&tracedecay_dir);
-    let branches: Vec<Value> = match meta {
-        Some(ref meta) => meta
-            .branches
-            .iter()
-            .map(|(name, entry)| {
-                let db_path = tracedecay_dir.join(&entry.db_file);
-                let size_bytes = db_path.metadata().map_or(0, |m| m.len());
-                json!({
-                    "name": name,
-                    "parent": entry.parent,
-                    "size_bytes": size_bytes,
-                    "last_synced_at": entry.last_synced_at,
-                    "is_current": current == Some(name.as_str()),
-                    "is_default": Some(name.as_str()) == meta.default_branch.as_str().into(),
-                })
-            })
-            .collect(),
-        None => vec![],
-    };
-
-    let result = json!({
-        "branch_count": branches.len(),
-        "current_branch": current,
-        "branches": branches,
-    });
+    let diagnostics = cg.branch_diagnostics();
+    let mut result = serde_json::to_value(&diagnostics).unwrap_or(json!({}));
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "branch_count".to_string(),
+            json!(diagnostics.tracked_branch_count),
+        );
+    }
 
     let output = serde_json::to_string_pretty(&result).unwrap_or_default();
     ToolResult {

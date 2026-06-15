@@ -25,10 +25,16 @@
 pub(crate) mod assets;
 mod curate_preview_store;
 mod graph_api;
+mod graph_queries;
+mod graph_service;
 mod lcm_api;
+mod lcm_queries;
+mod lcm_service;
 mod memory_analysis;
 mod memory_api;
 pub mod memory_curate;
+mod memory_queries;
+mod memory_service;
 mod savings_api;
 mod savings_pricing;
 mod token_count;
@@ -256,9 +262,14 @@ pub(crate) fn router(state: DashboardState) -> Router {
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
         .route("/api/plugins/holographic/", get(memory_api::overview))
         .route("/api/plugins/holographic", get(memory_api::overview))
+        .route("/api/plugins/holographic/status", get(memory_api::status))
         .route(
             "/api/plugins/holographic/fact/{fact_id}",
             get(memory_api::fact_detail),
+        )
+        .route(
+            "/api/plugins/holographic/fact/{fact_id}/trust-history",
+            get(memory_api::fact_trust_history),
         )
         .route(
             "/api/plugins/holographic/projection",
@@ -299,6 +310,14 @@ pub(crate) fn router(state: DashboardState) -> Router {
             "/api/plugins/hermes-lcm/compression",
             get(lcm_api::compression),
         )
+        .route(
+            "/api/plugins/hermes-lcm/payloads/health",
+            get(lcm_api::payloads_health),
+        )
+        .route(
+            "/api/plugins/hermes-lcm/payloads/gc",
+            get(lcm_api::payloads_gc_preview).post(lcm_api::payloads_gc_apply),
+        )
         // Code graph explorer API (project-local nodes / edges / files tables)
         .route("/api/plugins/graph/overview", get(graph_api::overview))
         .route("/api/plugins/graph/search", get(graph_api::search))
@@ -332,6 +351,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "features": {
             "memory": true,
             "lcm": state.lcm_conn.is_some(),
+            "lcm_gc": state.lcm_conn.is_some(),
+            "lcm_payload_health": state.lcm_conn.is_some(),
             "graph": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side

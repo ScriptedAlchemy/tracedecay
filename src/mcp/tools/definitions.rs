@@ -1093,7 +1093,7 @@ fn def_test_map() -> ToolDefinition {
     def(
         "tracedecay_test_map",
         "Test Map",
-        "Map source symbols to their test functions. Shows which tests cover which source code.",
+        "Map source symbols to their test functions by walking the call graph up to depth 3. A listed test may be a direct caller or a transitive caller reached through up to two intermediate functions; coverage here is static attribution (the symbol is reachable from a test), not executed line/branch coverage. Pair with tracedecay_test_risk to see the direct-vs-closure attribution_method distinction per symbol.",
         json!({
             "type": "object",
             "properties": {
@@ -1469,7 +1469,7 @@ fn def_test_risk() -> ToolDefinition {
     def(
         "tracedecay_test_risk",
         "Test Risk",
-        "Find high-risk source symbols with weak or no test coverage. Risk = (complexity + 1) × (fan_in + 1) × untested_multiplier. Answers: where should the next test go?",
+        "Find high-risk source symbols with weak or no static test attribution. Reports both direct test-call coverage and conservative depth-3 closure attribution so integration-heavy repos do not look artificially uncovered. Each risk item carries an attribution_method (direct_unit vs closure); coverage_pct is a static attribution lower bound, not executed line/branch coverage. Answers: where should the next test go, and what only has broad behavioral evidence today?",
         json!({
             "type": "object",
             "properties": {
@@ -1592,7 +1592,7 @@ fn memory_fact_properties() -> Value {
     json!({
         "action": {
             "type": "string",
-            "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+            "enum": ["add", "search", "probe", "related", "reason", "contradict", "get", "update", "remove", "list"],
             "description": "Fact-store action to perform."
         },
         "content": {
@@ -1663,18 +1663,74 @@ fn memory_fact_properties() -> Value {
     })
 }
 
+fn fact_store_action_requirements() -> Value {
+    json!([
+        {
+            "if": {
+                "properties": { "action": { "const": "add" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["content"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "search" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["query"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "probe" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["entity"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "related" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["entity"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "get" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["fact_id"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "update" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["fact_id"] }
+        },
+        {
+            "if": {
+                "properties": { "action": { "const": "remove" } },
+                "required": ["action"]
+            },
+            "then": { "required": ["fact_id"] }
+        }
+    ])
+}
+
 fn def_fact_store() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_store",
         "Fact Store",
-        "Add, search, probe, relate, reason over, update, remove, or list holographic memory facts. The action field selects the operation. \
+        "Add, search, probe, relate, reason over, get, update, remove, or list holographic memory facts. The action field selects the operation. \
          The add result carries a write-time diff report (diff/closest_fact_id/similarity/reason): near_duplicate = a very similar fact exists \
          (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
-         rejected_secret_like = credential-like content was NOT stored. Calibrate trust on add instead of defaulting high \
+         rejected_secret_like = credential-like content was NOT stored. The get action returns the full fact plus trust_history so operators can answer \
+         why a trust score changed. Calibrate trust on add instead of defaulting high \
          (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups.",
         json!({
             "type": "object",
             "properties": memory_fact_properties(),
+            "allOf": fact_store_action_requirements(),
             "required": ["action"]
         }),
     )
@@ -1722,6 +1778,17 @@ fn def_fact_feedback() -> ToolDefinition {
                     "description": "Optional feedback note."
                 }
             },
+            "anyOf": [
+                { "required": ["action"] },
+                {
+                    "properties": { "helpful": { "const": true } },
+                    "required": ["helpful"]
+                },
+                {
+                    "properties": { "unhelpful": { "const": true } },
+                    "required": ["unhelpful"]
+                }
+            ],
             "required": ["fact_id"]
         }),
     )
@@ -1731,7 +1798,7 @@ fn def_memory_status() -> ToolDefinition {
     def_rw(
         "tracedecay_memory_status",
         "Memory Status",
-        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, and repair stats.",
+        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
         json!({
             "type": "object",
             "properties": {}
@@ -1824,7 +1891,7 @@ fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, and effective engine config defaults from project-local or Hermes profile sessions.db storage.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, payload byte totals, and payload GC status from project-local or Hermes profile sessions.db storage.",
         json!({
             "type": "object",
             "properties": {
@@ -1835,6 +1902,10 @@ fn def_lcm_status() -> ToolDefinition {
                 "session_id": {
                     "type": "string",
                     "description": "Optional provider-local session id filter."
+                },
+                "deep": {
+                    "type": "boolean",
+                    "description": "When true, include an on-disk payload integrity sweep and populate integrity_mismatch_count. Defaults to false."
                 },
                 "storage_scope": lcm_storage_scope_schema(),
                 "hermes_home": lcm_hermes_home_schema()
@@ -1848,7 +1919,7 @@ fn def_lcm_doctor() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_doctor",
         "LCM Doctor",
-        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs, and report retention candidates without payload body exposure.",
+        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs or payload GC, and report retention candidates without payload body exposure.",
         json!({
             "type": "object",
             "properties": {
@@ -1862,16 +1933,34 @@ fn def_lcm_doctor() -> ToolDefinition {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["diagnose", "repair", "retention", "clean"],
-                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup."
+                    "enum": ["diagnose", "repair", "retention", "clean", "gc"],
+                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup, gc previews or applies payload garbage collection."
                 },
                 "apply": {
                     "type": "boolean",
-                    "description": "When mode=repair or mode=clean, apply safe repairs/cleanup. Defaults to false for dry-run."
+                    "description": "When mode=repair, mode=clean, or mode=gc, apply the requested action. Defaults to false for dry-run."
                 },
                 "doctor_clean_apply_enabled": {
                     "type": "boolean",
                     "description": "Safety gate for mode=clean + apply. Defaults to false unless LCM_DOCTOR_CLEAN_APPLY_ENABLED is set."
+                },
+                "lcm_gc_apply_enabled": {
+                    "type": "boolean",
+                    "description": "Safety gate for mode=gc + apply. Defaults to false unless LCM_GC_APPLY_ENABLED is set."
+                },
+                "gc_config": {
+                    "type": "object",
+                    "description": "Optional payload GC config overrides (grace_seconds, reap_missing_after, reap_missing_enabled, max_batch_size, backup_before_reap, interval_seconds, gc_enabled).",
+                    "additionalProperties": false,
+                    "properties": {
+                        "grace_seconds": {"type": "integer", "minimum": 0},
+                        "reap_missing_after": {"type": "integer", "minimum": 0},
+                        "reap_missing_enabled": {"type": "boolean"},
+                        "max_batch_size": {"type": "integer", "minimum": 1},
+                        "backup_before_reap": {"type": "boolean"},
+                        "interval_seconds": {"type": "integer", "minimum": 0},
+                        "gc_enabled": {"type": "boolean"}
+                    }
                 },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),

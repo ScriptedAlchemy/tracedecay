@@ -152,6 +152,17 @@ pub struct FeedbackResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrustHistoryEntry {
+    pub timestamp: i64,
+    pub action: FeedbackAction,
+    pub old_trust: f64,
+    pub new_trust: f64,
+    pub delta: f64,
+    pub source: String,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRepairStats {
     pub missing_vectors_repaired: usize,
     pub banks_rebuilt: usize,

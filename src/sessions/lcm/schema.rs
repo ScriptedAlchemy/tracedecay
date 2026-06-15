@@ -1,10 +1,10 @@
 use libsql::{params, Connection};
 
-use super::{raw, LcmRawMessage, LcmStorageKind};
+use super::{raw, LcmError, LcmRawMessage, LcmStorageKind};
 
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 4;
+pub const LCM_SCHEMA_VERSION: i64 = 5;
 
 const MIGRATION_NAME: &str = "lcm";
 const LEGACY_TRUNCATION_MARKERS: &[&str] =
@@ -147,6 +147,16 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Option<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner
             ON lcm_external_payloads(provider, session_id);
+        CREATE TABLE IF NOT EXISTS lcm_gc_marks (
+            payload_ref TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK(state IN ('unreferenced', 'missing')),
+            first_seen_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE TABLE IF NOT EXISTS lcm_gc_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS lcm_summary_nodes (
             node_id TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -292,6 +302,34 @@ pub(crate) async fn schema_version(conn: &Connection) -> Option<i64> {
         .await
         .ok()?;
     rows.next().await.ok()??.get(0).ok()
+}
+
+#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
+pub(crate) async fn get_gc_meta(conn: &Connection, key: &str) -> Result<Option<String>, LcmError> {
+    let mut rows = conn
+        .query("SELECT value FROM lcm_gc_meta WHERE key = ?1", params![key])
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
+pub(crate) async fn set_gc_meta(conn: &Connection, key: &str, value: &str) -> Result<(), LcmError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO lcm_gc_meta (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
+pub(crate) async fn clear_gc_meta(conn: &Connection, key: &str) -> Result<(), LcmError> {
+    conn.execute("DELETE FROM lcm_gc_meta WHERE key = ?1", params![key])
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn load_raw_message(

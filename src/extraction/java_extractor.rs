@@ -5,7 +5,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-use crate::extraction::complexity::{count_complexity, JAVA_COMPLEXITY};
+use crate::extraction::{
+    annotations::{
+        emit_annotation_usage, scan_children_for_annotation_kinds, AnnotationEmitterState,
+    },
+    complexity::{count_complexity, JAVA_COMPLEXITY},
+};
 use crate::types::{
     generate_node_id, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility,
 };
@@ -69,6 +74,40 @@ impl ExtractionState {
         node.utf8_text(&self.source)
             .unwrap_or("<invalid utf8>")
             .to_string()
+    }
+}
+
+impl AnnotationEmitterState for ExtractionState {
+    fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String {
+        JavaExtractor::extract_annotation_name(self, annotation_node)
+    }
+
+    fn file_path(&self) -> &str {
+        &self.file_path
+    }
+
+    fn qualified_prefix(&self) -> String {
+        ExtractionState::qualified_prefix(self)
+    }
+
+    fn node_text(&self, node: TsNode<'_>) -> String {
+        ExtractionState::node_text(self, node)
+    }
+
+    fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    fn push_node(&mut self, node: Node) {
+        self.nodes.push(node);
+    }
+
+    fn push_edge(&mut self, edge: Edge) {
+        self.edges.push(edge);
+    }
+
+    fn push_unresolved_ref(&mut self, unresolved_ref: UnresolvedRef) {
+        self.unresolved_refs.push(unresolved_ref);
     }
 }
 
@@ -1194,94 +1233,9 @@ impl JavaExtractor {
         node: TsNode<'_>,
         target_id: &str,
     ) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "modifiers" {
-                    Self::extract_annotations_from_node(state, child, target_id);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Search inside a modifiers node for `marker_annotation` and annotation nodes.
-    fn extract_annotations_from_node(
-        state: &mut ExtractionState,
-        node: TsNode<'_>,
-        target_id: &str,
-    ) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "marker_annotation" || child.kind() == "annotation" {
-                    let annot_name = Self::extract_annotation_name(state, child);
-                    let start_line = child.start_position().row as u32;
-                    let end_line = child.end_position().row as u32;
-                    let start_column = child.start_position().column as u32;
-                    let end_column = child.end_position().column as u32;
-                    let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-                    let id = generate_node_id(
-                        &state.file_path,
-                        &NodeKind::AnnotationUsage,
-                        &annot_name,
-                        start_line,
-                    );
-
-                    let graph_node = Node {
-                        id: id.clone(),
-                        kind: NodeKind::AnnotationUsage,
-                        name: annot_name.clone(),
-                        qualified_name,
-                        file_path: state.file_path.clone(),
-                        start_line,
-                        attrs_start_line: start_line,
-                        end_line,
-                        start_column,
-                        end_column,
-                        signature: Some(state.node_text(child).trim().to_string()),
-                        docstring: None,
-                        visibility: Visibility::Private,
-                        is_async: false,
-                        branches: 0,
-                        loops: 0,
-                        returns: 0,
-                        max_nesting: 0,
-                        unsafe_blocks: 0,
-                        unchecked_calls: 0,
-                        assertions: 0,
-                        updated_at: state.timestamp,
-                        parent_id: None,
-                    };
-                    state.nodes.push(graph_node);
-
-                    // Annotates unresolved ref (annotation → target method/class).
-                    state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: id.clone(),
-                        reference_name: annot_name,
-                        reference_kind: EdgeKind::Annotates,
-                        line: start_line,
-                        column: start_column,
-                        file_path: state.file_path.clone(),
-                    });
-
-                    // Also create a direct Annotates edge from the annotation to the target.
-                    state.edges.push(Edge {
-                        source: id,
-                        target: target_id.to_string(),
-                        kind: EdgeKind::Annotates,
-                        line: Some(start_line),
-                    });
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        scan_children_for_annotation_kinds(node, &["marker_annotation", "annotation"], |child| {
+            emit_annotation_usage(state, child, target_id, child.start_position().row as u32);
+        });
     }
 
     /// Extract the name from an annotation node (e.g., "Override" from "@Override").

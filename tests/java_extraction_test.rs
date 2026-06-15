@@ -278,6 +278,44 @@ public class Foo {
 }
 
 #[test]
+fn test_java_extract_marker_and_regular_annotations() {
+    let source = r#"
+public class Foo {
+    @Deprecated
+    @SuppressWarnings("unchecked")
+    public void oldMethod() {}
+}
+"#;
+    let extractor = JavaExtractor;
+    let result = extractor.extract("Foo.java", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let annots: Vec<_> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::AnnotationUsage)
+        .collect();
+    assert_eq!(
+        annots.len(),
+        2,
+        "expected one marker and one regular annotation"
+    );
+    assert!(annots.iter().any(|n| n.name == "Deprecated"));
+    assert!(annots.iter().any(|n| n.name == "SuppressWarnings"));
+
+    let annotates_edges: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Annotates)
+        .collect();
+    assert_eq!(
+        annotates_edges.len(),
+        2,
+        "expected direct annotates edges for both annotations"
+    );
+}
+
+#[test]
 fn test_java_extract_inner_class() {
     let source = r#"
 public class Outer {

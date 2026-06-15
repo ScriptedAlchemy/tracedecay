@@ -3,13 +3,36 @@ use std::path::Path;
 use crate::current_unix_timestamp;
 use tracedecay::tracedecay::TraceDecay;
 
+/// Returns how many seconds have elapsed since a persisted timestamp.
+///
+/// User config timestamps can land in the future because of clock skew,
+/// manual edits, or state copied across machines. Clamp those cases to zero so
+/// cooldown/version-cache logic degrades gracefully instead of getting stuck on
+/// a negative delta.
+fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
+    if recorded_at >= now {
+        0
+    } else {
+        now - recorded_at
+    }
+}
+
 /// Best-effort: register this project in the user-level global DB and
 /// accumulate the token-saved delta into the pending upload counter.
 pub(crate) async fn update_global_db(cg: &TraceDecay) {
     if !tracedecay::user_config::UserConfig::exists() {
         return;
     }
-    let tokens = cg.get_tokens_saved().await.unwrap_or(0);
+    let tokens = match cg.get_tokens_saved().await {
+        Ok(tokens) => tokens,
+        Err(err) => {
+            eprintln!(
+                "[tracedecay] failed to read tokens-saved counter for {}: {err}",
+                cg.project_root().display()
+            );
+            return;
+        }
+    };
     if let Some(gdb) = tracedecay::global_db::GlobalDb::open().await {
         let previous = gdb.get_project_tokens(cg.project_root()).await;
         gdb.upsert(cg.project_root(), tokens).await;
@@ -34,13 +57,13 @@ pub(crate) fn try_flush(config: &mut tracedecay::user_config::UserConfig, force:
 
     // Cooldown: skip if last flush attempt failed less than 60s ago
     if config.last_flush_attempt_at > config.last_upload_at
-        && now - config.last_flush_attempt_at < 60
+        && elapsed_since(now, config.last_flush_attempt_at) < 60
     {
         return;
     }
 
     // Staleness check for non-force commands
-    if !force && now - config.last_upload_at < 30 {
+    if !force && elapsed_since(now, config.last_upload_at) < 30 {
         return;
     }
 
@@ -65,7 +88,7 @@ pub(crate) fn check_for_update(
     let current_version = env!("CARGO_PKG_VERSION");
     let now = current_unix_timestamp();
 
-    let latest = if !skip_cache && now - config.last_version_check_at < 300 {
+    let latest = if !skip_cache && elapsed_since(now, config.last_version_check_at) < 300 {
         // Use cached value
         if config.cached_latest_version.is_empty() {
             return;
@@ -88,7 +111,8 @@ pub(crate) fn check_for_update(
         tracedecay::cloud::is_newer_minor_version(current_version, &latest)
     };
 
-    if dominated && (skip_suppression || now - config.last_version_warning_at >= 900) {
+    if dominated && (skip_suppression || elapsed_since(now, config.last_version_warning_at) >= 900)
+    {
         eprintln!(
             "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
             current_version, latest
@@ -355,6 +379,8 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
     eprintln!();
 }
 
+// Test-only fixtures intentionally use unwrap/expect so setup failures abort the
+// test immediately instead of smearing the failure across later assertions.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod gather_tests {
@@ -523,5 +549,12 @@ mod gather_tests {
         let cwd = dir.path().canonicalize().unwrap();
         let out = gather_local_projects_from(&cwd, &None);
         assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn elapsed_since_clamps_future_timestamps() {
+        assert_eq!(elapsed_since(100, 40), 60);
+        assert_eq!(elapsed_since(100, 100), 0);
+        assert_eq!(elapsed_since(100, 140), 0);
     }
 }

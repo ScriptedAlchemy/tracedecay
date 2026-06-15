@@ -6,9 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::hermes::ingest_homes;
+use tracedecay::sessions::lcm::LcmPreflightRequest;
+use tracedecay::sessions::SessionRecord;
 
 const SESSION_ID: &str = "20260101_000000_abc123";
 
@@ -254,6 +257,90 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
             .await
             .is_none());
     }
+}
+
+#[tokio::test]
+async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "hermes".to_string(),
+            session_id: SESSION_ID.to_string(),
+            project_key: project.to_string_lossy().to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            title: Some("Runtime-owned raw session".to_string()),
+            started_at: Some(1_780_629_300),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: Some(r#"{"source":"runtime_preflight"}"#.to_string()),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+
+    let raw_message_id = format!("{SESSION_ID}:3");
+    let runtime_owned_raw = "runtime-owned raw message from active replay";
+    db.lcm_preflight(LcmPreflightRequest {
+        provider: "hermes".into(),
+        session_id: SESSION_ID.into(),
+        messages: vec![json!({
+            "id": raw_message_id,
+            "role": "assistant",
+            "content": runtime_owned_raw,
+        })],
+        current_tokens: Some(12),
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        incremental_max_depth: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let raw_before = db
+        .lcm_load_raw_message("hermes", &raw_message_id)
+        .await
+        .expect("runtime-owned raw message should exist before the sweep");
+    assert_eq!(raw_before.content, runtime_owned_raw);
+
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    assert_eq!(stats.messages_upserted, 4);
+
+    // If the Hermes sweep ever switches back to full transcript writes, this
+    // message id would overwrite the runtime-owned raw turn with the assistant
+    // tool-call JSON from `state.db` row 3.
+    let raw_after = db
+        .lcm_load_raw_message("hermes", &raw_message_id)
+        .await
+        .expect("projection-only ingest must leave runtime-owned raw turns intact");
+    assert_eq!(raw_after.store_id, raw_before.store_id);
+    assert_eq!(raw_after.content, runtime_owned_raw);
+    assert_eq!(raw_after.content_hash, raw_before.content_hash);
+
+    let projection = db
+        .get_session_message("hermes", &raw_message_id)
+        .await
+        .expect("projection row should still be searchable");
+    assert_eq!(projection.role, "assistant");
+    assert!(projection.text.contains("call_FBvwGfCC9lJrXPvOqpDHcjYn"));
+    assert_eq!(projection.tool_names.as_deref(), Some("terminal"));
 }
 
 #[tokio::test]

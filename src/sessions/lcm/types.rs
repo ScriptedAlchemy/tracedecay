@@ -447,6 +447,7 @@ pub struct LcmStatus {
     pub dag: LcmDagStatus,
     pub config: LcmConfigStatus,
     pub payload: LcmPayloadStatus,
+    pub payload_gc: LcmPayloadGcStatus,
     pub lifecycle: LcmLifecycleStatus,
     pub redaction: LcmRedactionStatus,
 }
@@ -515,6 +516,106 @@ pub struct LcmCleanConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmGcConfig {
+    #[serde(
+        default = "default_lcm_gc_grace_seconds",
+        deserialize_with = "deserialize_lcm_gc_grace_seconds"
+    )]
+    pub grace_seconds: u64,
+    #[serde(default = "default_lcm_gc_reap_missing_after")]
+    pub reap_missing_after: u64,
+    #[serde(default = "default_lcm_gc_reap_missing_enabled")]
+    pub reap_missing_enabled: bool,
+    #[serde(default = "default_lcm_gc_max_batch_size")]
+    pub max_batch_size: usize,
+    #[serde(default = "default_lcm_gc_backup_before_reap")]
+    pub backup_before_reap: bool,
+    #[serde(default = "default_lcm_gc_interval_seconds")]
+    pub interval_seconds: u64,
+    #[serde(default = "default_lcm_gc_enabled")]
+    pub gc_enabled: bool,
+}
+
+impl LcmGcConfig {
+    pub const MIN_GRACE_SECONDS: u64 = 300;
+
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.grace_seconds = Self::clamp_grace_seconds(self.grace_seconds);
+        self
+    }
+
+    fn clamp_grace_seconds(value: u64) -> u64 {
+        value.max(Self::MIN_GRACE_SECONDS)
+    }
+}
+
+impl Default for LcmGcConfig {
+    fn default() -> Self {
+        Self {
+            grace_seconds: default_lcm_gc_grace_seconds(),
+            reap_missing_after: default_lcm_gc_reap_missing_after(),
+            reap_missing_enabled: default_lcm_gc_reap_missing_enabled(),
+            max_batch_size: default_lcm_gc_max_batch_size(),
+            backup_before_reap: default_lcm_gc_backup_before_reap(),
+            interval_seconds: default_lcm_gc_interval_seconds(),
+            gc_enabled: default_lcm_gc_enabled(),
+        }
+        .normalized()
+    }
+}
+
+fn default_lcm_gc_grace_seconds() -> u64 {
+    86_400
+}
+
+fn default_lcm_gc_reap_missing_after() -> u64 {
+    604_800
+}
+
+fn default_lcm_gc_reap_missing_enabled() -> bool {
+    false
+}
+
+fn default_lcm_gc_max_batch_size() -> usize {
+    500
+}
+
+fn default_lcm_gc_backup_before_reap() -> bool {
+    true
+}
+
+fn default_lcm_gc_interval_seconds() -> u64 {
+    21_600
+}
+
+fn default_lcm_gc_enabled() -> bool {
+    true
+}
+
+fn deserialize_lcm_gc_grace_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<u64> as serde::Deserialize>::deserialize(deserializer)?
+        .unwrap_or_else(default_lcm_gc_grace_seconds);
+    Ok(LcmGcConfig::clamp_grace_seconds(value))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadGcStatus {
+    pub last_gc_at: Option<i64>,
+    pub last_gc_duration_ms: Option<u64>,
+    pub last_gc_status: Option<String>,
+    pub last_gc_error: Option<String>,
+    pub last_reaped_refs: Option<i64>,
+    pub last_reaped_bytes: Option<u64>,
+    pub grace_seconds: i64,
+    pub reap_missing_metadata_after_seconds: i64,
+    pub next_run_eligible_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadStatus {
     pub externalized_count: i64,
     pub missing_count: i64,
@@ -524,6 +625,15 @@ pub struct LcmPayloadStatus {
     pub missing_placeholder_file_count: i64,
     pub gc_candidate_count: i64,
     pub root_contained: bool,
+    pub orphan_file_count: i64,
+    pub tombstoned_count: i64,
+    pub referenced_count: i64,
+    pub total_bytes: u64,
+    pub referenced_bytes: u64,
+    pub orphan_file_bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub reclaimable_bytes_after_grace: u64,
+    pub integrity_mismatch_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -728,7 +838,9 @@ pub enum LcmError {
     PayloadNotFound,
     PayloadNotOwnedBySession,
     PayloadMissing,
+    PayloadGcd,
     PayloadIntegrityMismatch,
+    StillReferenced,
     SummaryNodeNotFound,
     SummarySourceNotOwnedBySession,
     LifecycleStateNotFound,
@@ -749,7 +861,9 @@ impl std::fmt::Display for LcmError {
             Self::PayloadNotFound => write!(f, "payload not found"),
             Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
             Self::PayloadMissing => write!(f, "payload file missing"),
+            Self::PayloadGcd => write!(f, "payload already garbage collected"),
             Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
+            Self::StillReferenced => write!(f, "payload still referenced"),
             Self::SummaryNodeNotFound => write!(f, "summary node not found"),
             Self::SummarySourceNotOwnedBySession => {
                 write!(f, "summary source not owned by session")
@@ -786,5 +900,73 @@ impl LcmStorageKind {
             "external" => Some(Self::External),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gc_config_clamps_grace_floor_from_serde() {
+        let config: LcmGcConfig = serde_json::from_str(
+            r#"{"grace_seconds":10,"reap_missing_after":0,"gc_enabled":false}"#,
+        )
+        .expect("gc config should deserialize");
+
+        assert_eq!(config.grace_seconds, 300);
+        assert_eq!(config.reap_missing_after, 0);
+        assert!(!config.gc_enabled);
+    }
+
+    #[test]
+    fn gc_config_defaults_match_spec() {
+        let config = LcmGcConfig::default();
+
+        assert_eq!(config.grace_seconds, 86_400);
+        assert_eq!(config.reap_missing_after, 604_800);
+        assert!(!config.reap_missing_enabled);
+        assert_eq!(config.max_batch_size, 500);
+        assert!(config.backup_before_reap);
+        assert_eq!(config.interval_seconds, 21_600);
+        assert!(config.gc_enabled);
+    }
+
+    #[test]
+    fn gc_config_round_trips_with_serde_defaults() {
+        let config: LcmGcConfig =
+            serde_json::from_str("{}").expect("empty gc config should deserialize with defaults");
+        let value = serde_json::to_value(&config).expect("gc config should serialize");
+
+        assert_eq!(value["grace_seconds"], 86_400);
+        assert_eq!(value["reap_missing_after"], 604_800);
+        assert_eq!(value["reap_missing_enabled"], false);
+        assert_eq!(value["max_batch_size"], 500);
+        assert_eq!(value["backup_before_reap"], true);
+        assert_eq!(value["interval_seconds"], 21_600);
+        assert_eq!(value["gc_enabled"], true);
+    }
+
+    #[test]
+    fn gc_config_reap_missing_zero_means_never() {
+        let config: LcmGcConfig =
+            serde_json::from_str(r#"{"reap_missing_enabled":true,"reap_missing_after":0}"#)
+                .expect("missing reap config should deserialize");
+
+        assert!(config.reap_missing_enabled);
+        assert_eq!(config.reap_missing_after, 0);
+    }
+
+    #[test]
+    fn lcm_error_display_includes_gc_variants() {
+        assert_eq!(
+            LcmError::PayloadGcd.to_string(),
+            "payload already garbage collected"
+        );
+        assert_eq!(
+            LcmError::StillReferenced.to_string(),
+            "payload still referenced"
+        );
     }
 }

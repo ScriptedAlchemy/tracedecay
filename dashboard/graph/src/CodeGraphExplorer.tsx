@@ -6,12 +6,20 @@ import OverviewPanel from "./OverviewPanel";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, cn } from "../../lib/sdk";
 import { fmt, short } from "../../lib/format";
 import { makeSequence } from "../../lib/sequence";
+import { useGraphInspection } from "./useGraphInspection";
+import { useGraphSearch } from "./useGraphSearch";
+import {
+  appendFocusHistory,
+  applyGraphFilters,
+  deriveChipOptions,
+  mergeEdgesInto,
+  mergeNodesInto,
+  toggleStringSet,
+} from "./explorerState";
 import {
   colorForKind,
   KIND_FAMILY_COLORS,
   KIND_FAMILY_LABELS,
-  kindFamily,
-  languageForPath,
 } from "./types";
 import type {
   GraphEdge,
@@ -23,10 +31,6 @@ import type {
 
 /** Soft cap on accumulated canvas nodes; expansion pauses above this. */
 const CANVAS_NODE_CAP = 600;
-
-function edgeKey(edge: GraphEdge) {
-  return `${edge.source}>${edge.target}:${edge.kind}`;
-}
 
 const EDGE_LEGEND: Array<{ kind: string; label: string; className: string }> = [
   { kind: "calls", label: "calls", className: "tsg-legend-calls" },
@@ -134,9 +138,6 @@ export default function CodeGraphExplorer() {
   // so tab entry shows the graph immediately (Overview stays one click away).
   const [view, setView] = useState<"overview" | "canvas">("canvas");
   const [overview, setOverview] = useState<GraphOverview | null>(null);
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<GraphNode[]>([]);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -145,8 +146,6 @@ export default function CodeGraphExplorer() {
   const [graphEdges, setGraphEdges] = useState<Map<string, GraphEdge>>(new Map());
   const [focusId, setFocusId] = useState<string | null>(null);
   const [fitSignal, setFitSignal] = useState(0);
-  const [selected, setSelected] = useState<GraphNode | null>(null);
-  const [neighbors, setNeighbors] = useState<GraphNeighborsResponse | null>(null);
   const [history, setHistory] = useState<Array<{ id: string; name: string }>>([]);
 
   // Filters.
@@ -160,31 +159,31 @@ export default function CodeGraphExplorer() {
   const [pathTo, setPathTo] = useState<GraphNode | null>(null);
   const [pathResult, setPathResult] = useState<GraphPathResponse | null>(null);
 
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const searchSeq = useRef(makeSequence()).current;
-  const searchBoxRef = useRef<HTMLDivElement | null>(null);
-
   // True while the canvas shows the untouched seedless default view; the
   // first search-to-focus replaces it instead of merging into it.
   const defaultViewRef = useRef(false);
   // Invalidates an in-flight default load once the user takes over the canvas.
   const defaultSeq = useRef(makeSequence()).current;
 
+  const {
+    selected,
+    neighbors,
+    setSelected,
+    setNeighbors,
+    inspect,
+  } = useGraphInspection({
+    loadNode: api.node,
+    loadNeighbors: (id: string) => api.neighbors(id, { limit: 60 }),
+    onError: setError,
+  });
+
   useEffect(() => {
     api.overview().then(setOverview).catch((err) => setError(String(err)));
   }, []);
 
   const mergeGraph = useCallback((nodes: GraphNode[], edges: GraphEdge[]) => {
-    setGraphNodes((prev) => {
-      const next = new Map(prev);
-      for (const node of nodes) next.set(node.id, { ...next.get(node.id), ...node });
-      return next;
-    });
-    setGraphEdges((prev) => {
-      const next = new Map(prev);
-      for (const edge of edges) next.set(edgeKey(edge), edge);
-      return next;
-    });
+    setGraphNodes((prev) => mergeNodesInto(prev, nodes));
+    setGraphEdges((prev) => mergeEdgesInto(prev, edges));
   }, []);
 
   /** Loads the seedless default slice (top-connected hubs + their edges). */
@@ -250,25 +249,6 @@ export default function CodeGraphExplorer() {
     [graphNodes.size, mergeGraph],
   );
 
-  // Sequenced like the search dropdown: rapid clicks can resolve out of
-  // order, and a stale response must not repoint the Inspector (and the
-  // "Show callers/callees" actions) at the wrong node.
-  const inspectSeq = useRef(makeSequence()).current;
-  const inspect = useCallback(async (id: string) => {
-    const ticket = inspectSeq.next();
-    try {
-      const [detail, nextNeighbors] = await Promise.all([
-        api.node(id),
-        api.neighbors(id, { limit: 60 }),
-      ]);
-      if (!inspectSeq.isCurrent(ticket)) return;
-      setSelected(detail.node);
-      setNeighbors(nextNeighbors);
-    } catch (err) {
-      if (inspectSeq.isCurrent(ticket)) setError(String(err));
-    }
-  }, [inspectSeq]);
-
   const runPath = useCallback(
     async (from: GraphNode, to: GraphNode) => {
       setLoading(true);
@@ -327,103 +307,35 @@ export default function CodeGraphExplorer() {
         setPathFrom(null);
         setPathTo(null);
       }
-      setHistory((prev) => {
-        const trimmed = prev.filter((entry) => entry.id !== node.id);
-        return [...trimmed.slice(-7), { id: node.id, name: node.name }];
-      });
+      setHistory((prev) => appendFocusHistory(prev, node));
       void expandNode(node.id, { focus: true });
       void inspect(node.id);
     },
     [defaultSeq, expandNode, inspect],
   );
 
-  /** Keyboard support for the search dropdown: Enter opens the top hit, arrows
-   *  move focus through the results, Escape closes the popup. */
-  const onSearchKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLElement>) => {
-      const box = searchBoxRef.current;
-      if (!box) return;
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSearchOpen(false);
-        box.querySelector<HTMLInputElement>("input")?.focus();
-        return;
-      }
-      if (!searchOpen || results.length === 0) return;
-      const buttons = Array.from(
-        box.querySelectorAll<HTMLButtonElement>(".tsg-search-pop button"),
-      );
-      const active = document.activeElement as HTMLElement | null;
-      const index = buttons.indexOf(active as HTMLButtonElement);
-      if (event.key === "Enter") {
-        // Enter from the input jumps to the top result; from a focused row it
-        // opens that row.
-        event.preventDefault();
-        if (index >= 0 && index < results.length) focusSymbol(results[index]);
-        else focusSymbol(results[0]);
-      } else if (event.key === "ArrowDown") {
-        event.preventDefault();
-        const next = index < 0 ? buttons[0] : buttons[Math.min(index + 1, buttons.length - 1)];
-        next?.focus();
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        if (index <= 0) box.querySelector<HTMLInputElement>("input")?.focus();
-        else buttons[index - 1]?.focus();
-      }
-    },
-    [searchOpen, results, focusSymbol],
-  );
-
-  const onQueryChange = useCallback((value: string) => {
-    setQuery(value);
-    setSearchOpen(true);
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      const ticket = searchSeq.next();
-      api.search({ q: value, limit: 20 })
-        .then((payload) => {
-          // Drop stale responses that resolve after a newer query.
-          if (searchSeq.isCurrent(ticket)) setResults(payload.results);
-        })
-        .catch((err) => setError(String(err)));
-    }, 180);
-  }, [searchSeq]);
+  const {
+    query,
+    results,
+    searchOpen,
+    searchBoxRef,
+    setSearchOpen,
+    onQueryChange,
+    onSearchKeyDown,
+  } = useGraphSearch({
+    search: api.search,
+    focusSymbol,
+    onError: setError,
+  });
 
   // Visible (filtered) slice of the accumulated canvas graph.
-  const visible = useMemo(() => {
-    const nodes: GraphNode[] = [];
-    const keep = new Set<string>();
-    for (const node of graphNodes.values()) {
-      if (kindFilters.size > 0 && !kindFilters.has(kindFamily(node.kind))) continue;
-      if (langFilters.size > 0 && !langFilters.has(languageForPath(node.file_path))) continue;
-      if (dirScope && !node.file_path.startsWith(dirScope)) continue;
-      nodes.push(node);
-      keep.add(node.id);
-    }
-    const edges: GraphEdge[] = [];
-    for (const edge of graphEdges.values()) {
-      if (keep.has(edge.source) && keep.has(edge.target)) edges.push(edge);
-    }
-    return { nodes, edges };
-  }, [graphNodes, graphEdges, kindFilters, langFilters, dirScope]);
+  const visible = useMemo(
+    () => applyGraphFilters(graphNodes.values(), graphEdges.values(), { kindFilters, langFilters, dirScope }),
+    [graphNodes, graphEdges, kindFilters, langFilters, dirScope],
+  );
 
   // Filter chip options derived from what is actually loaded.
-  const chipOptions = useMemo(() => {
-    const families = new Set<string>();
-    const languages = new Set<string>();
-    for (const node of graphNodes.values()) {
-      families.add(kindFamily(node.kind));
-      languages.add(languageForPath(node.file_path));
-    }
-    return { families: [...families].sort(), languages: [...languages].sort() };
-  }, [graphNodes]);
-
-  const toggleSet = (set: Set<string>, value: string) => {
-    const next = new Set(set);
-    if (next.has(value)) next.delete(value);
-    else next.add(value);
-    return next;
-  };
+  const chipOptions = useMemo(() => deriveChipOptions(graphNodes.values()), [graphNodes]);
 
   // The canvas self-populates with the default view, so opening a filter
   // from Overview only needs to set the chips and switch views.
@@ -579,7 +491,7 @@ export default function CodeGraphExplorer() {
                 <button
                   key={family}
                   className={cn("tsg-chip", kindFilters.has(family) && "tsg-chip-active")}
-                  onClick={() => setKindFilters((prev) => toggleSet(prev, family))}
+                  onClick={() => setKindFilters((prev) => toggleStringSet(prev, family))}
                 >
                   <i style={{ background: KIND_FAMILY_COLORS[family] }} />
                   {KIND_FAMILY_LABELS[family] || family}
@@ -590,7 +502,7 @@ export default function CodeGraphExplorer() {
                 <button
                   key={language}
                   className={cn("tsg-chip", langFilters.has(language) && "tsg-chip-active")}
-                  onClick={() => setLangFilters((prev) => toggleSet(prev, language))}
+                  onClick={() => setLangFilters((prev) => toggleStringSet(prev, language))}
                 >
                   {language}
                 </button>
