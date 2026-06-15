@@ -1,4 +1,4 @@
-//! Self-update for the tokensave binary.
+//! Self-update for the tracedecay binary.
 //!
 //! Downloads the latest release asset directly from GitHub, extracts the
 //! binary, and replaces the running executable using `self_replace`.
@@ -8,31 +8,33 @@
 use std::path::Path;
 
 use crate::cloud::{self, InstallMethod};
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::user_config::UserConfig;
 
-const GITHUB_REPO: &str = "aovestdipaperino/tokensave";
+const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
 // Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use crate::cloud::asset_name;
+use crate::cloud::asset_name_candidates;
 #[cfg(test)]
-use crate::cloud::current_platform;
+use crate::cloud::{asset_name, current_platform, legacy_asset_name};
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
     format!("v{version}")
 }
 
-fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TokenSaveError + '_ {
-    move |e| TokenSaveError::Config {
+fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
+    move |e| TraceDecayError::Config {
         message: format!("{msg}: {e}"),
     }
 }
 
-/// Fetches the `browser_download_url` for a specific asset in a GitHub release.
-fn fetch_asset_url(tag: &str, expected_asset: &str) -> Result<String> {
+/// Fetches the `browser_download_url` for the first matching asset name in a
+/// GitHub release. Candidates are probed in order, so the post-rebrand
+/// `tracedecay-v*` name wins over the legacy `tokensave-v*` fallback.
+fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Asset {
         name: String,
@@ -51,36 +53,37 @@ fn fetch_asset_url(tag: &str, expected_asset: &str) -> Result<String> {
 
     let release: Release = agent
         .get(&url)
-        .header("User-Agent", "tokensave")
+        .header("User-Agent", "tracedecay")
         .call()
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("failed to reach GitHub: {e}"),
         })?
         .body_mut()
         .read_json()
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("failed to parse release info: {e}"),
         })?;
 
-    release
-        .assets
-        .into_iter()
-        .find(|a| a.name == expected_asset)
-        .map(|a| a.browser_download_url)
-        .ok_or_else(|| TokenSaveError::Config {
-            message: format!(
-                "release {tag} exists but asset '{expected_asset}' is not yet available.\n  \
-                 CI build may still be in progress — try again in a few minutes.\n  \
-                 https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
-            ),
-        })
+    for candidate in candidates {
+        if let Some(asset) = release.assets.iter().find(|a| a.name == *candidate) {
+            return Ok(asset.browser_download_url.clone());
+        }
+    }
+    let expected = candidates.join("' or '");
+    Err(TraceDecayError::Config {
+        message: format!(
+            "release {tag} exists but asset '{expected}' is not yet available.\n  \
+             CI build may still be in progress — try again in a few minutes.\n  \
+             https://github.com/{GITHUB_REPO}/releases/tag/{tag}",
+        ),
+    })
 }
 
-/// Downloads the archive from `url` into memory, then extracts `bin_name`
-/// to a temp path. Returns the temp path.
-fn download_and_extract(url: &str, bin_name: &str) -> Result<std::path::PathBuf> {
+/// Downloads the archive from `url` into memory, then extracts the first
+/// entry matching any of `bin_names` to a temp path. Returns the temp path.
+fn download_and_extract(url: &str, bin_names: &[&str]) -> Result<std::path::PathBuf> {
     let tmp_path = std::env::temp_dir().join(format!(
-        "tokensave_upgrade_{}{}",
+        "tracedecay_upgrade_{}{}",
         std::process::id(),
         if cfg!(windows) { ".exe" } else { "" }
     ));
@@ -99,9 +102,9 @@ fn download_and_extract(url: &str, bin_name: &str) -> Result<std::path::PathBuf>
         let mut buf = Vec::new();
         agent
             .get(url)
-            .header("User-Agent", "tokensave")
+            .header("User-Agent", "tracedecay")
             .call()
-            .map_err(|e| TokenSaveError::Config {
+            .map_err(|e| TraceDecayError::Config {
                 message: format!("download failed: {e}"),
             })?
             .body_mut()
@@ -115,18 +118,19 @@ fn download_and_extract(url: &str, bin_name: &str) -> Result<std::path::PathBuf>
     eprint!("  Extracting...");
 
     #[cfg(not(windows))]
-    extract_targz(&raw, bin_name, &tmp_path)?;
+    extract_targz(&raw, bin_names, &tmp_path)?;
 
     #[cfg(windows)]
-    extract_zip(&raw, bin_name, &tmp_path)?;
+    extract_zip(&raw, bin_names, &tmp_path)?;
 
     eprintln!(" Done");
     Ok(tmp_path)
 }
 
-/// Extracts `bin_name` from a `.tar.gz` archive (Unix).
+/// Extracts the first entry matching any of `bin_names` from a `.tar.gz`
+/// archive (Unix).
 #[cfg(not(windows))]
-fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
+fn extract_targz(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use flate2::read::GzDecoder;
     use std::io::Cursor;
     use tar::Archive;
@@ -141,7 +145,8 @@ fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
             .map_err(io_err("archive path error"))?
             .to_path_buf();
 
-        if path.file_name().and_then(|n| n.to_str()) == Some(bin_name) {
+        let file_name = path.file_name().and_then(|n| n.to_str());
+        if file_name.is_some_and(|n| bin_names.contains(&n)) {
             entry.unpack(dest).map_err(io_err("extract failed"))?;
 
             #[cfg(unix)]
@@ -158,35 +163,37 @@ fn extract_targz(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
         }
     }
 
-    Err(TokenSaveError::Config {
-        message: format!("binary '{bin_name}' not found in archive"),
+    Err(TraceDecayError::Config {
+        message: format!("binary '{}' not found in archive", bin_names.join("' or '")),
     })
 }
 
-/// Extracts `bin_name` from a `.zip` archive (Windows).
+/// Extracts the first entry matching any of `bin_names` from a `.zip`
+/// archive (Windows).
 #[cfg(windows)]
-fn extract_zip(data: &[u8], bin_name: &str, dest: &Path) -> Result<()> {
+fn extract_zip(data: &[u8], bin_names: &[&str], dest: &Path) -> Result<()> {
     use std::io::Cursor;
 
     let mut archive =
-        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| TokenSaveError::Config {
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| TraceDecayError::Config {
             message: format!("zip open failed: {e}"),
         })?;
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| TokenSaveError::Config {
+        let mut file = archive.by_index(i).map_err(|e| TraceDecayError::Config {
             message: format!("zip entry error: {e}"),
         })?;
 
-        if Path::new(file.name()).file_name().and_then(|n| n.to_str()) == Some(bin_name) {
+        let file_name = Path::new(file.name()).file_name().and_then(|n| n.to_str());
+        if file_name.is_some_and(|n| bin_names.contains(&n)) {
             let mut out = std::fs::File::create(dest).map_err(io_err("create temp file failed"))?;
             std::io::copy(&mut file, &mut out).map_err(io_err("extract failed"))?;
             return Ok(());
         }
     }
 
-    Err(TokenSaveError::Config {
-        message: format!("binary '{bin_name}' not found in zip"),
+    Err(TraceDecayError::Config {
+        message: format!("binary '{}' not found in zip", bin_names.join("' or '")),
     })
 }
 
@@ -218,7 +225,7 @@ fn replace_default(new_exe: &Path) -> Result<()> {
         }
     }
 
-    self_replace::self_replace(new_exe).map_err(|e| TokenSaveError::Config {
+    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
         message: format!(
             "binary replacement failed: {e}\n  \
              The old version is still in place.\n  \
@@ -234,6 +241,8 @@ enum UpgradeStatus<'a> {
 }
 
 fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
+    // Plain semver is safe across the version-epoch reset: `cloud::fetch_latest_*`
+    // never yields pre-reset releases (see `release_has_current_platform_asset`).
     if cloud::is_newer_version(current, latest) {
         UpgradeStatus::UpgradeAvailable(latest)
     } else {
@@ -247,10 +256,10 @@ fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
 /// writing into the running executable).
 #[cfg(unix)]
 fn install_binary(src: &Path, target: &Path) -> Result<()> {
-    let dir = target.parent().ok_or_else(|| TokenSaveError::Config {
+    let dir = target.parent().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine target directory".into(),
     })?;
-    let temp = dir.join(format!(".tokensave_upgrade_{}", std::process::id()));
+    let temp = dir.join(format!(".tracedecay_upgrade_{}", std::process::id()));
 
     std::fs::copy(src, &temp).map_err(io_err("cannot copy new binary"))?;
 
@@ -365,7 +374,7 @@ fn replace_for_brew(new_exe: &Path, _new_version: &str) -> Result<()> {
 /// `scoop status` reports the new version.
 #[cfg(windows)]
 fn replace_for_scoop(new_exe: &Path, new_version: &str) -> Result<()> {
-    self_replace::self_replace(new_exe).map_err(|e| TokenSaveError::Config {
+    self_replace::self_replace(new_exe).map_err(|e| TraceDecayError::Config {
         message: format!(
             "binary replacement failed: {e}\n  \
              The old version is still in place.\n  \
@@ -481,9 +490,9 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<()> {
 /// release yet.
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
     let tag = release_tag(version);
-    let expected = asset_name(version, is_beta);
-    eprintln!("  Asset: {expected}");
-    fetch_asset_url(&tag, &expected)
+    let candidates = asset_name_candidates(version, is_beta);
+    eprintln!("  Asset: {}", candidates[0]);
+    fetch_asset_url(&tag, &candidates)
 }
 
 /// Record the *currently running* binary's version in user config just before
@@ -501,19 +510,21 @@ fn record_previous_version() {
     if !cfg.save() {
         eprintln!(
             "  \x1b[33mwarning:\x1b[0m could not record previous version; \
-             run `tokensave reinstall` manually if new tools aren't registered"
+             run `tracedecay reinstall` manually if new tools aren't registered"
         );
     }
 }
 
 fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Result<()> {
-    let bin_name = if cfg!(windows) {
-        "tokensave.exe"
+    // Post-rebrand archives ship a `tracedecay` binary; legacy archives a
+    // `tokensave` one. Probe new name first.
+    let bin_names: &[&str] = if cfg!(windows) {
+        &["tracedecay.exe", "tokensave.exe"]
     } else {
-        "tokensave"
+        &["tracedecay", "tokensave"]
     };
 
-    let tmp = download_and_extract(asset_url, bin_name)?;
+    let tmp = download_and_extract(asset_url, bin_names)?;
 
     let label = match method {
         InstallMethod::Brew => " (Homebrew Cellar)",
@@ -528,7 +539,7 @@ fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Re
 }
 
 fn brew_upgrade_command() -> (&'static str, [&'static str; 2]) {
-    ("brew", ["upgrade", "tokensave"])
+    ("brew", ["upgrade", "tracedecay"])
 }
 
 fn run_brew_upgrade(current: &str) -> Result<String> {
@@ -556,7 +567,7 @@ fn run_brew_upgrade(current: &str) -> Result<String> {
         record_previous_version();
         Ok(current.to_string())
     } else {
-        Err(TokenSaveError::Config {
+        Err(TraceDecayError::Config {
             message: format!("Homebrew upgrade failed with status: {status}"),
         })
     }
@@ -585,7 +596,7 @@ pub fn run_upgrade() -> Result<String> {
 
     eprintln!("Checking for updates...");
 
-    let latest = cloud::fetch_latest_version().ok_or_else(|| TokenSaveError::Config {
+    let latest = cloud::fetch_latest_version().ok_or_else(|| TraceDecayError::Config {
         message: "failed to check for updates — could not reach GitHub".to_string(),
     })?;
 
@@ -625,7 +636,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
         "beta" => true,
         "stable" => false,
         other => {
-            return Err(TokenSaveError::Config {
+            return Err(TraceDecayError::Config {
                 message: format!("unknown channel '{other}'. Valid channels: stable, beta"),
             });
         }
@@ -633,7 +644,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
 
     if target_is_beta == current_is_beta {
         eprintln!("Already on the {current_channel} channel (v{current}).");
-        eprintln!("Run `tokensave upgrade` to check for updates within this channel.");
+        eprintln!("Run `tracedecay upgrade` to check for updates within this channel.");
         return Ok(current.to_string());
     }
 
@@ -644,7 +655,7 @@ pub fn switch_channel(target_channel: &str) -> Result<String> {
     } else {
         cloud::fetch_latest_stable_version()
     }
-    .ok_or_else(|| TokenSaveError::Config {
+    .ok_or_else(|| TraceDecayError::Config {
         message: format!("failed to find latest {target_channel} release — could not reach GitHub"),
     })?;
 
@@ -672,7 +683,7 @@ mod tests {
     #[test]
     fn test_asset_name_stable() {
         let name = asset_name("3.3.3", false);
-        assert!(name.starts_with("tokensave-v3.3.3-"));
+        assert!(name.starts_with("tracedecay-v3.3.3-"));
         assert!(!name.contains("beta"));
         if cfg!(windows) {
             assert!(name.ends_with(".zip"));
@@ -684,12 +695,27 @@ mod tests {
     #[test]
     fn test_asset_name_beta() {
         let name = asset_name("4.0.2-beta.1", true);
-        assert!(name.starts_with("tokensave-beta-v4.0.2-beta.1-"));
+        assert!(name.starts_with("tracedecay-beta-v4.0.2-beta.1-"));
         if cfg!(windows) {
             assert!(name.ends_with(".zip"));
         } else {
             assert!(name.ends_with(".tar.gz"));
         }
+    }
+
+    #[test]
+    fn test_legacy_asset_name_keeps_tokensave_prefix() {
+        let stable = legacy_asset_name("3.3.3", false);
+        assert!(stable.starts_with("tokensave-v3.3.3-"));
+        let beta = legacy_asset_name("4.0.2-beta.1", true);
+        assert!(beta.starts_with("tokensave-beta-v4.0.2-beta.1-"));
+    }
+
+    #[test]
+    fn test_asset_name_candidates_probe_new_then_legacy() {
+        let candidates = asset_name_candidates("3.3.3", false);
+        assert!(candidates[0].starts_with("tracedecay-v3.3.3-"));
+        assert!(candidates[1].starts_with("tokensave-v3.3.3-"));
     }
 
     #[test]
@@ -708,7 +734,7 @@ mod tests {
         let (program, args) = brew_upgrade_command();
 
         assert_eq!(program, "brew");
-        assert_eq!(args, ["upgrade", "tokensave"]);
+        assert_eq!(args, ["upgrade", "tracedecay"]);
     }
 
     #[test]
@@ -716,18 +742,21 @@ mod tests {
         let stable = asset_name("3.3.3", false);
         let platform = current_platform();
         if cfg!(windows) {
-            assert_eq!(stable, format!("tokensave-v3.3.3-{platform}.zip"));
+            assert_eq!(stable, format!("tracedecay-v3.3.3-{platform}.zip"));
         } else {
-            assert_eq!(stable, format!("tokensave-v3.3.3-{platform}.tar.gz"));
+            assert_eq!(stable, format!("tracedecay-v3.3.3-{platform}.tar.gz"));
         }
 
         let beta = asset_name("4.0.2-beta.1", true);
         if cfg!(windows) {
-            assert_eq!(beta, format!("tokensave-beta-v4.0.2-beta.1-{platform}.zip"));
+            assert_eq!(
+                beta,
+                format!("tracedecay-beta-v4.0.2-beta.1-{platform}.zip")
+            );
         } else {
             assert_eq!(
                 beta,
-                format!("tokensave-beta-v4.0.2-beta.1-{platform}.tar.gz")
+                format!("tracedecay-beta-v4.0.2-beta.1-{platform}.tar.gz")
             );
         }
     }
@@ -779,17 +808,21 @@ mod tests {
         /// Returns (cellar_binary_path, symlink_path, tmp_guard).
         fn homebrew_layout() -> (PathBuf, PathBuf, tempfile::TempDir) {
             let tmp = tempfile::tempdir().unwrap();
-            // Cellar/tokensave/4.1.1-beta.1/bin/tokensave
-            let cellar_bin_dir = tmp.path().join("Cellar/tokensave/4.1.1-beta.1/bin");
+            // Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
+            let cellar_bin_dir = tmp.path().join("Cellar/tracedecay/4.1.1-beta.1/bin");
             fs::create_dir_all(&cellar_bin_dir).unwrap();
-            let real_binary = cellar_bin_dir.join("tokensave");
+            let real_binary = cellar_bin_dir.join("tracedecay");
             fs::write(&real_binary, b"fake-binary").unwrap();
 
-            // bin/tokensave -> ../Cellar/tokensave/4.1.1-beta.1/bin/tokensave
+            // bin/tracedecay -> ../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay
             let bin_dir = tmp.path().join("bin");
             fs::create_dir_all(&bin_dir).unwrap();
-            let link_path = bin_dir.join("tokensave");
-            symlink("../Cellar/tokensave/4.1.1-beta.1/bin/tokensave", &link_path).unwrap();
+            let link_path = bin_dir.join("tracedecay");
+            symlink(
+                "../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay",
+                &link_path,
+            )
+            .unwrap();
 
             (real_binary, link_path, tmp)
         }
@@ -804,7 +837,7 @@ mod tests {
             );
             assert_eq!(
                 target,
-                PathBuf::from("../Cellar/tokensave/4.1.1-beta.1/bin/tokensave")
+                PathBuf::from("../Cellar/tracedecay/4.1.1-beta.1/bin/tracedecay")
             );
         }
 
@@ -867,7 +900,7 @@ mod tests {
             // returns the same path, so self_replace is still used — no
             // behavior change for non-symlink installs.
             let tmp = tempfile::tempdir().unwrap();
-            let binary = tmp.path().join("tokensave");
+            let binary = tmp.path().join("tracedecay");
             fs::write(&binary, b"fake-binary").unwrap();
 
             let canonical = binary.canonicalize().unwrap();
@@ -881,12 +914,12 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let real_dir = tmp.path().join("lib");
             fs::create_dir_all(&real_dir).unwrap();
-            let real_binary = real_dir.join("tokensave");
+            let real_binary = real_dir.join("tracedecay");
             fs::write(&real_binary, b"fake-binary").unwrap();
 
             let bin_dir = tmp.path().join("bin");
             fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tokensave");
+            let link = bin_dir.join("tracedecay");
             symlink(&real_binary, &link).unwrap();
 
             let canonical = link.canonicalize().unwrap();
@@ -917,11 +950,11 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let deep = tmp.path().join("a/b/c");
             fs::create_dir_all(&deep).unwrap();
-            let real = deep.join("tokensave");
+            let real = deep.join("tracedecay");
             fs::write(&real, b"fake-binary").unwrap();
 
             // Construct a path with ".." that still reaches the same file
-            let dotdot_path = tmp.path().join("a/b/c/../c/tokensave");
+            let dotdot_path = tmp.path().join("a/b/c/../c/tracedecay");
             let canonical = dotdot_path.canonicalize().unwrap();
             assert_eq!(canonical, real.canonicalize().unwrap());
             assert!(
@@ -937,7 +970,7 @@ mod tests {
             let (real, link, _tmp) = homebrew_layout();
 
             // "New binary" in a temp location (same filesystem)
-            let new_binary = real.parent().unwrap().join(".tokensave.__temp__");
+            let new_binary = real.parent().unwrap().join(".tracedecay.__temp__");
             fs::write(&new_binary, b"upgraded-binary").unwrap();
 
             // Rename new binary over the real path (what Move does)
@@ -985,8 +1018,8 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let bin_dir = tmp.path().join("bin");
             fs::create_dir_all(&bin_dir).unwrap();
-            let link = bin_dir.join("tokensave");
-            symlink("../Cellar/tokensave/old/bin/tokensave", &link).unwrap();
+            let link = bin_dir.join("tracedecay");
+            symlink("../Cellar/tracedecay/old/bin/tracedecay", &link).unwrap();
             // Target doesn't exist — dangling symlink
             assert!(
                 link.canonicalize().is_err(),
@@ -1008,7 +1041,7 @@ mod tests {
 
             // Case 2: direct file — canonical matches
             let tmp2 = tempfile::tempdir().unwrap();
-            let direct = tmp2.path().join("tokensave");
+            let direct = tmp2.path().join("tracedecay");
             fs::write(&direct, b"binary").unwrap();
             let canonical = direct.canonicalize().unwrap();
             // After canonicalization of the tmpdir itself, they match
@@ -1017,8 +1050,8 @@ mod tests {
             // Case 3: dangling symlink — canonical fails, we skip setting
             // bin_install_path and let self_update use its default
             let tmp3 = tempfile::tempdir().unwrap();
-            let dangling = tmp3.path().join("tokensave");
-            symlink("/nonexistent/path/tokensave", &dangling).unwrap();
+            let dangling = tmp3.path().join("tracedecay");
+            symlink("/nonexistent/path/tracedecay", &dangling).unwrap();
             assert!(dangling.canonicalize().is_err());
         }
 
@@ -1027,7 +1060,7 @@ mod tests {
         #[test]
         fn install_binary_replaces_target_atomically() {
             let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tokensave");
+            let target = tmp.path().join("tracedecay");
             fs::write(&target, b"old-binary").unwrap();
 
             let src = tmp.path().join("new-binary");
@@ -1039,7 +1072,7 @@ mod tests {
             // Temp file should be cleaned up
             assert!(!tmp
                 .path()
-                .join(format!(".tokensave_upgrade_{}", std::process::id()))
+                .join(format!(".tracedecay_upgrade_{}", std::process::id()))
                 .exists());
         }
 
@@ -1048,7 +1081,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
 
             let tmp = tempfile::tempdir().unwrap();
-            let target = tmp.path().join("tokensave");
+            let target = tmp.path().join("tracedecay");
             fs::write(&target, b"old").unwrap();
 
             let src = tmp.path().join("new");
@@ -1111,20 +1144,20 @@ mod tests {
         #[test]
         fn brew_upgrade_updates_install_receipt() {
             let tmp = tempfile::tempdir().unwrap();
-            let cellar = tmp.path().join("Cellar/tokensave/4.0.3");
+            let cellar = tmp.path().join("Cellar/tracedecay/4.0.3");
             fs::create_dir_all(cellar.join("bin")).unwrap();
-            fs::write(cellar.join("bin/tokensave"), b"binary").unwrap();
+            fs::write(cellar.join("bin/tracedecay"), b"binary").unwrap();
 
             let receipt_content = r#"{
   "source": {
     "versions": { "stable": "4.0.3" }
   },
-  "tabfile": "/opt/homebrew/Cellar/tokensave/4.0.3/INSTALL_RECEIPT.json"
+  "tabfile": "/opt/homebrew/Cellar/tracedecay/4.0.3/INSTALL_RECEIPT.json"
 }"#;
             fs::write(cellar.join("INSTALL_RECEIPT.json"), receipt_content).unwrap();
 
             // Simulate rename + receipt update
-            let new_dir = tmp.path().join("Cellar/tokensave/4.0.4");
+            let new_dir = tmp.path().join("Cellar/tracedecay/4.0.4");
             fs::rename(&cellar, &new_dir).unwrap();
 
             let text = fs::read_to_string(new_dir.join("INSTALL_RECEIPT.json")).unwrap();

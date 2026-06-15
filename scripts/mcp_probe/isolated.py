@@ -6,10 +6,10 @@ tools genuinely hang vs. which only appear to hang because they're queued
 behind an earlier slow call.
 
   python3 isolated.py <repo-name>           # uses repos.toml
-  python3 isolated.py <repo-name> --tools tokensave_inheritance_depth
+  python3 isolated.py <repo-name> --tools tracedecay_inheritance_depth
 
-Output goes to /tmp/tokensave_isolated.log (override with
-$TOKENSAVE_PROBE_LOG_ISO). Per-tool: spawn fresh server, init handshake,
+Output goes to /tmp/tracedecay_isolated.log (override with
+$TRACEDECAY_PROBE_LOG_ISO). Per-tool: spawn fresh server, init handshake,
 run the 5 queries from the language probe set, abort on first TIMEOUT
 (server is busy, no point queuing more), restart for next tool.
 """
@@ -29,8 +29,8 @@ from probe import (  # noqa: E402  pylint: disable=wrong-import-position
     McpClient, classify, discover, load_repos,
 )
 
-LOG_PATH = os.environ.get("TOKENSAVE_PROBE_LOG_ISO", "/tmp/tokensave_isolated.log")
-TIMEOUT = float(os.environ.get("TOKENSAVE_PROBE_TIMEOUT_ISO", "60"))
+LOG_PATH = os.environ.get("TRACEDECAY_PROBE_LOG_ISO", "/tmp/tracedecay_isolated.log")
+TIMEOUT = float(os.environ.get("TRACEDECAY_PROBE_TIMEOUT_ISO", "60"))
 
 
 def run_tool_fresh(repo_name: str, repo_path: str, tool: str, queries: list[dict], log) -> None:

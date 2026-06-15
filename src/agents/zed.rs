@@ -1,7 +1,7 @@
 //! Zed agent integration.
 //!
-//! Handles registration of the tokensave MCP server in Zed's `settings.json`
-//! under the `context_servers.tokensave` key.
+//! Handles registration of the tracedecay MCP server in Zed's `settings.json`
+//! under the `context_servers.tracedecay` key.
 
 use std::path::{Path, PathBuf};
 
@@ -41,12 +41,12 @@ impl AgentIntegration for ZedIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         let config_dir = zed_config_dir(&ctx.home);
         let settings_path = config_dir.join("settings.json");
-        install_context_server(&settings_path, &ctx.tokensave_bin)?;
+        install_context_server(&settings_path, &ctx.tracedecay_bin)?;
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tokensave init");
-        eprintln!("  2. Restart Zed — tokensave tools are now available");
+        eprintln!("  1. cd into your project and run: tracedecay init");
+        eprintln!("  2. Restart Zed — tracedecay tools are now available");
         Ok(())
     }
 
@@ -55,7 +55,10 @@ impl AgentIntegration for ZedIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_context_server(&project_path.join(".zed/settings.json"), &ctx.tokensave_bin)
+        install_context_server(
+            &project_path.join(".zed/settings.json"),
+            &ctx.tracedecay_bin,
+        )
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -63,7 +66,7 @@ impl AgentIntegration for ZedIntegration {
         uninstall_context_server(&settings_path);
 
         eprintln!();
-        eprintln!("Uninstall complete. Tokensave has been removed from Zed.");
+        eprintln!("Uninstall complete. Tracedecay has been removed from Zed.");
         eprintln!("Restart Zed for changes to take effect.");
         Ok(())
     }
@@ -81,15 +84,15 @@ impl AgentIntegration for ZedIntegration {
         Some(zed_config_dir(home).join("settings.json"))
     }
 
-    fn has_tokensave(&self, home: &Path) -> bool {
+    fn has_tracedecay(&self, home: &Path) -> bool {
         let settings_path = zed_config_dir(home).join("settings.json");
         if !settings_path.exists() {
             return false;
         }
         let json = load_jsonc_file(&settings_path);
-        json.get("context_servers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some()
+        let servers = json.get("context_servers");
+        servers.and_then(|v| v.get("tracedecay")).is_some()
+            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -97,7 +100,7 @@ impl AgentIntegration for ZedIntegration {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn install_context_server(settings_path: &Path, tokensave_bin: &str) -> Result<()> {
+fn install_context_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -112,16 +115,16 @@ fn install_context_server(settings_path: &Path, tokensave_bin: &str) -> Result<(
             return Err(e);
         }
     };
-    settings["context_servers"]["tokensave"] = json!({
+    settings["context_servers"]["tracedecay"] = json!({
         "command": {
-            "path": tokensave_bin,
+            "path": tracedecay_bin,
             "args": ["serve"]
         }
     });
 
     safe_write_json_file(settings_path, &settings, backup.as_deref())?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tokensave context server to {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay context server to {}",
         settings_path.display()
     );
     Ok(())
@@ -137,15 +140,20 @@ fn uninstall_context_server(settings_path: &Path) {
 
     let mut settings = load_jsonc_file(settings_path);
 
-    let removed = settings
+    let removed = if let Some(map) = settings
         .get_mut("context_servers")
         .and_then(|v| v.as_object_mut())
-        .and_then(|map| map.remove("tokensave"))
-        .is_some();
+    {
+        let removed_new = map.remove("tracedecay").is_some();
+        let removed_legacy = map.remove("tokensave").is_some();
+        removed_new || removed_legacy
+    } else {
+        false
+    };
 
     if !removed {
         eprintln!(
-            "  No tokensave context server in {}, skipping",
+            "  No tracedecay/tokensave context server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -166,7 +174,7 @@ fn uninstall_context_server(settings_path: &Path) {
     // backup_and_write_json leaves a .bak so any mistake is recoverable (issue #63).
     if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tokensave context server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave context server from {}",
             settings_path.display()
         );
     }
@@ -176,13 +184,13 @@ fn uninstall_context_server(settings_path: &Path) {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check Zed settings.json has tokensave context server registered.
+/// Check Zed settings.json has tracedecay context server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = zed_config_dir(home).join("settings.json");
 
     if !settings_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tokensave install --agent zed` if you use Zed",
+            "{} not found — run `tracedecay install --agent zed` if you use Zed",
             settings_path.display()
         ));
         return;
@@ -191,7 +199,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings = load_jsonc_file(&settings_path);
     let server = settings
         .get("context_servers")
-        .and_then(|v| v.get("tokensave"));
+        .and_then(|v| v.get("tracedecay"));
 
     if server.and_then(|v| v.as_object()).is_some() {
         dc.pass(&format!(
@@ -200,7 +208,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.fail(&format!(
-            "Context server NOT registered in {} — run `tokensave install --agent zed`",
+            "Context server NOT registered in {} — run `tracedecay install --agent zed`",
             settings_path.display()
         ));
     }

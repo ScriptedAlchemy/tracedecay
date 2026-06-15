@@ -3,7 +3,16 @@
 //! Provides serialization and deserialization of JSON-RPC 2.0 messages
 //! used to communicate between the MCP client and server over stdio.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_request_id<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
 
 /// A JSON-RPC 2.0 request received from the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,8 +21,12 @@ pub struct JsonRpcRequest {
     pub jsonrpc: String,
     /// Request identifier. May be a number, string, or null.
     /// Absent for notifications.
-    #[serde(default)]
-    pub id: serde_json::Value,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_request_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id: Option<serde_json::Value>,
     /// The RPC method name.
     pub method: String,
     /// Optional parameters for the method.
@@ -227,7 +240,7 @@ mod tests {
 
         let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
         assert_eq!(request.method, "tools/list");
-        assert_eq!(request.id, serde_json::Value::Number(1.into()));
+        assert_eq!(request.id, Some(serde_json::Value::Number(1.into())));
     }
 
     #[test]
@@ -239,7 +252,7 @@ mod tests {
 
         let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
         assert_eq!(request.method, "initialized");
-        assert!(request.id.is_null());
+        assert!(request.id.is_none());
         assert!(request.params.is_none());
     }
 
@@ -286,6 +299,9 @@ mod tests {
         });
 
         let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
-        assert_eq!(request.id, serde_json::Value::String("abc-123".to_string()));
+        assert_eq!(
+            request.id,
+            Some(serde_json::Value::String("abc-123".to_string()))
+        );
     }
 }

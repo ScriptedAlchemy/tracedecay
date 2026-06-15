@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Drive `tokensave serve` over stdio against every repo listed in repos.toml
+"""Drive `tracedecay serve` over stdio against every repo listed in repos.toml
 and exercise every tool with 5 query variants per language.
 
-Per-call status lines go to /tmp/tokensave_matrix.log (override with
-$TOKENSAVE_PROBE_LOG). Run build_matrix.py afterwards to render the table.
+Per-call status lines go to /tmp/tracedecay_matrix.log (override with
+$TRACEDECAY_PROBE_LOG). Run build_matrix.py afterwards to render the table.
 
 The driver:
   * spawns one MCP server per repo (cwd=repo), initialize handshake,
   * runs a `discover` pass to harvest real node ids / qualified names /
-    files from `tokensave_search` + `tokensave_node`,
+    files from `tracedecay_search` + `tracedecay_node`,
   * pulls per-language probe sets from `tools/<lang>.py::probes_for(discovered)`,
   * matches responses by JSON-RPC id (so a slow call cannot poison later ones),
   * times each call, classifies the response, logs.
@@ -34,16 +34,16 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
-DEFAULT_BIN = REPO_ROOT / "target" / "release" / "tokensave"
-DEFAULT_LOG = "/tmp/tokensave_matrix.log"
+DEFAULT_BIN = REPO_ROOT / "target" / "release" / "tracedecay"
+DEFAULT_LOG = "/tmp/tracedecay_matrix.log"
 DEFAULT_REPOS = ROOT / "repos.toml"
-DEFAULT_STDERR_DIR = "/tmp/tokensave_matrix_stderr"
+DEFAULT_STDERR_DIR = "/tmp/tracedecay_matrix_stderr"
 
-BIN = Path(os.environ.get("TOKENSAVE_PROBE_BIN", str(DEFAULT_BIN)))
-LOG_PATH = os.environ.get("TOKENSAVE_PROBE_LOG", DEFAULT_LOG)
-REPOS_CONF = Path(os.environ.get("TOKENSAVE_PROBE_REPOS", str(DEFAULT_REPOS)))
-TIMEOUT = float(os.environ.get("TOKENSAVE_PROBE_TIMEOUT", "25"))
-STDERR_DIR = Path(os.environ.get("TOKENSAVE_PROBE_STDERR_DIR", DEFAULT_STDERR_DIR))
+BIN = Path(os.environ.get("TRACEDECAY_PROBE_BIN", str(DEFAULT_BIN)))
+LOG_PATH = os.environ.get("TRACEDECAY_PROBE_LOG", DEFAULT_LOG)
+REPOS_CONF = Path(os.environ.get("TRACEDECAY_PROBE_REPOS", str(DEFAULT_REPOS)))
+TIMEOUT = float(os.environ.get("TRACEDECAY_PROBE_TIMEOUT", "25"))
+STDERR_DIR = Path(os.environ.get("TRACEDECAY_PROBE_STDERR_DIR", DEFAULT_STDERR_DIR))
 
 
 class McpInitError(RuntimeError):
@@ -68,7 +68,7 @@ class McpClient:
         # Capture stderr per-repo. Earlier revisions piped to DEVNULL, which
         # made server crashes during init look like a BrokenPipeError from
         # the probe driver — totally unactionable. Real causes (missing
-        # .tokensave/tokensave.db, unreadable DB, OOM on large repos like
+        # .tracedecay/tracedecay.db, unreadable DB, OOM on large repos like
         # chromium) showed up on stderr but were silently discarded.
         STDERR_DIR.mkdir(parents=True, exist_ok=True)
         self.stderr_path = STDERR_DIR / f"{repo_name}.stderr"
@@ -97,7 +97,7 @@ class McpClient:
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "tokensave-probe", "version": "1"},
+                    "clientInfo": {"name": "tracedecay-probe", "version": "1"},
                 },
                 "id": self._next(),
             })
@@ -241,7 +241,7 @@ def discover(cli: McpClient) -> dict:
     """Harvest real ids / qualified names / files for the open repo."""
     out: dict = {"ids": [], "qnames": [], "names": [], "files": []}
     for query in ["main", "new", "Error", "Config", "Display"]:
-        resp, _ = cli.call("tokensave_search", {"query": query}, timeout=15)
+        resp, _ = cli.call("tracedecay_search", {"query": query}, timeout=15)
         txt = text_of(resp)
         if not txt:
             continue
@@ -271,11 +271,11 @@ def discover(cli: McpClient) -> dict:
     for key in out:
         out[key] = list(dict.fromkeys(out[key]))[:5]
 
-    # Fill qualified names from `tokensave_node` if search didn't expose them.
+    # Fill qualified names from `tracedecay_node` if search didn't expose them.
     for nid in list(out["ids"]):
         if len(out["qnames"]) >= 5:
             break
-        resp, _ = cli.call("tokensave_node", {"node_id": nid}, timeout=10)
+        resp, _ = cli.call("tracedecay_node", {"node_id": nid}, timeout=10)
         txt = text_of(resp)
         if not txt:
             continue
@@ -346,7 +346,7 @@ def load_probe_set(languages: list[str], discovered: dict) -> dict:
 
 def main() -> int:
     if not BIN.exists():
-        print(f"error: tokensave binary not found at {BIN}", file=sys.stderr)
+        print(f"error: tracedecay binary not found at {BIN}", file=sys.stderr)
         print(f"hint: run `cargo build --release` first", file=sys.stderr)
         return 2
 

@@ -2,7 +2,7 @@
 //!
 //! Queries are constructed once after the repo is indexed: the `QueryContext`
 //! is sampled from real graph state (top-ranked nodes, real qualified names,
-//! file directory prefixes) so calls like `tokensave_callers` receive valid
+//! file directory prefixes) so calls like `tracedecay_callers` receive valid
 //! `node_id`s.
 //!
 //! Write queries (`str_replace`, `multi_str_replace`, `insert_at`,
@@ -14,8 +14,8 @@
 
 use serde_json::{json, Value};
 
-use tokensave::tokensave::TokenSave;
-use tokensave::types::NodeKind;
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::NodeKind;
 
 /// Distinguishes read-only queries from queries that mutate a scratch file.
 #[derive(Clone)]
@@ -97,7 +97,7 @@ impl QueryContext {
     }
 }
 
-pub async fn build_context(cg: &TokenSave) -> QueryContext {
+pub async fn build_context(cg: &TraceDecay) -> QueryContext {
     let all = cg.get_all_nodes().await.unwrap_or_default();
 
     let mut function_ids = Vec::new();
@@ -161,7 +161,7 @@ fn dir(ctx: &QueryContext, i: usize) -> String {
 /// Root directory (relative to the project root) where all write-query
 /// scratch files live. Kept on a single path so `git stash --include-untracked`
 /// at end-of-bench reverts everything in one shot.
-pub const SCRATCH_DIR: &str = ".tokensave-bench-scratch";
+pub const SCRATCH_DIR: &str = ".tracedecay-bench-scratch";
 
 fn scratch(name: &str) -> String {
     format!("{SCRATCH_DIR}/{name}")
@@ -190,128 +190,128 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     let mut groups: Vec<ToolGroup> = Vec::new();
 
     groups.push(ToolGroup {
-        tool: "tokensave_search",
+        tool: "tracedecay_search",
         queries: five(|i| {
             Query::read(
                 "term",
-                "tokensave_search",
+                "tracedecay_search",
                 json!({ "query": search_terms[i], "limit": 20 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_context",
+        tool: "tracedecay_context",
         queries: five(|i| {
             Query::read(
                 "task",
-                "tokensave_context",
+                "tracedecay_context",
                 json!({ "task": context_tasks[i], "max_nodes": 20 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_callers",
+        tool: "tracedecay_callers",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_callers",
+                "tracedecay_callers",
                 json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_callees",
+        tool: "tracedecay_callees",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_callees",
+                "tracedecay_callees",
                 json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_node",
+        tool: "tracedecay_node",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_node",
+                "tracedecay_node",
                 json!({ "id": QueryContext::pick(&ctx.any_ids, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_by_qualified_name",
+        tool: "tracedecay_by_qualified_name",
         queries: five(|i| {
             Query::read(
                 "qname",
-                "tokensave_by_qualified_name",
+                "tracedecay_by_qualified_name",
                 json!({ "qualified_name": QueryContext::pick(&ctx.function_qnames, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_signature",
+        tool: "tracedecay_signature",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_signature",
+                "tracedecay_signature",
                 json!({ "id": QueryContext::pick(&ctx.function_ids, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_impact",
+        tool: "tracedecay_impact",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_impact",
+                "tracedecay_impact",
                 json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 2 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_body",
+        tool: "tracedecay_body",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_body",
+                "tracedecay_body",
                 json!({ "id": QueryContext::pick(&ctx.function_ids, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_files",
+        tool: "tracedecay_files",
         queries: five(|i| {
             Query::read(
                 "glob",
-                "tokensave_files",
+                "tracedecay_files",
                 json!({ "pattern": file_globs[i] }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_complexity",
+        tool: "tracedecay_complexity",
         queries: {
             let mut v = Vec::with_capacity(5);
             v.push(Query::read(
                 "all",
-                "tokensave_complexity",
+                "tracedecay_complexity",
                 json!({ "limit": 20 }),
             ));
             for i in 0..4 {
                 v.push(Query::read(
                     "scoped",
-                    "tokensave_complexity",
+                    "tracedecay_complexity",
                     json!({ "path": dir(ctx, i), "limit": 20 }),
                 ));
             }
@@ -320,13 +320,13 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_doc_coverage",
+        tool: "tracedecay_doc_coverage",
         queries: {
-            let mut v = vec![Query::read("all", "tokensave_doc_coverage", json!({}))];
+            let mut v = vec![Query::read("all", "tracedecay_doc_coverage", json!({}))];
             for i in 0..4 {
                 v.push(Query::read(
                     "scoped",
-                    "tokensave_doc_coverage",
+                    "tracedecay_doc_coverage",
                     json!({ "path": dir(ctx, i) }),
                 ));
             }
@@ -335,99 +335,99 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_largest",
+        tool: "tracedecay_largest",
         queries: five(|i| {
             Query::read(
                 "by_kind",
-                "tokensave_largest",
+                "tracedecay_largest",
                 json!({ "kinds": kinds_for_largest[i].clone(), "limit": 20 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_hotspots",
+        tool: "tracedecay_hotspots",
         queries: five(|i| {
             Query::read(
                 "limit",
-                "tokensave_hotspots",
+                "tracedecay_hotspots",
                 json!({ "limit": 10 + (i as u32) * 10 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_god_class",
+        tool: "tracedecay_god_class",
         queries: five(|i| {
             Query::read(
                 "threshold",
-                "tokensave_god_class",
+                "tracedecay_god_class",
                 json!({ "min_methods": 5 + (i as u32) * 5 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_module_api",
+        tool: "tracedecay_module_api",
         queries: five(|i| {
             Query::read(
                 "scoped",
-                "tokensave_module_api",
+                "tracedecay_module_api",
                 json!({ "path": dir(ctx, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_derives",
+        tool: "tracedecay_derives",
         queries: five(|i| {
             Query::read(
                 "by_id",
-                "tokensave_derives",
+                "tracedecay_derives",
                 json!({ "id": QueryContext::pick(&ctx.struct_ids, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_dead_code",
+        tool: "tracedecay_dead_code",
         queries: five(|i| {
             Query::read(
                 "scoped",
-                "tokensave_dead_code",
+                "tracedecay_dead_code",
                 json!({ "path": dir(ctx, i) }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_rank",
+        tool: "tracedecay_rank",
         queries: five(|i| {
             Query::read(
                 "by_kind",
-                "tokensave_rank",
+                "tracedecay_rank",
                 json!({ "kind": rank_kinds[i], "limit": 20 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_coupling",
+        tool: "tracedecay_coupling",
         queries: five(|i| {
             Query::read(
                 "scoped",
-                "tokensave_coupling",
+                "tracedecay_coupling",
                 json!({ "path": dir(ctx, i), "limit": 20 }),
             )
         }),
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_circular",
+        tool: "tracedecay_circular",
         queries: five(|i| {
             Query::read(
                 "depth",
-                "tokensave_circular",
+                "tracedecay_circular",
                 json!({ "max_depth": 4 + (i as u32) * 2 }),
             )
         }),
@@ -441,7 +441,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     // (via `iter_batched`).
 
     groups.push(ToolGroup {
-        tool: "tokensave_str_replace",
+        tool: "tracedecay_str_replace",
         queries: five(|i| {
             let path = scratch(&format!("str_replace_{i}.txt"));
             // Body grows with `i` so the 5 cases sweep small → larger payloads.
@@ -449,7 +449,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             let content = format!("{body}TARGET_{i}\nTAIL\n");
             Query::write(
                 "vary_size",
-                "tokensave_str_replace",
+                "tracedecay_str_replace",
                 json!({
                     "path": path,
                     "old_str": format!("TARGET_{i}"),
@@ -462,7 +462,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_multi_str_replace",
+        tool: "tracedecay_multi_str_replace",
         queries: five(|i| {
             let path = scratch(&format!("multi_{i}.txt"));
             let n = i + 1; // 1..=5 replacements
@@ -474,7 +474,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             }
             Query::write(
                 "n_repls",
-                "tokensave_multi_str_replace",
+                "tracedecay_multi_str_replace",
                 json!({ "path": path, "replacements": replacements }),
                 path.clone(),
                 content,
@@ -483,7 +483,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     });
 
     groups.push(ToolGroup {
-        tool: "tokensave_insert_at",
+        tool: "tracedecay_insert_at",
         queries: five(|i| {
             let path = scratch(&format!("insert_{i}.txt"));
             // 5 distinct anchor lines; each iter inserts after the matching line.
@@ -491,7 +491,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             let content = format!("{}\n", lines.join("\n"));
             Query::write(
                 "by_anchor",
-                "tokensave_insert_at",
+                "tracedecay_insert_at",
                 json!({
                     "path": path,
                     "anchor": format!("LINE_{i}"),
@@ -506,7 +506,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
 
     if ast_grep_on_path() {
         groups.push(ToolGroup {
-            tool: "tokensave_ast_grep_rewrite",
+            tool: "tracedecay_ast_grep_rewrite",
             queries: five(|i| {
                 let path = scratch(&format!("ast_grep_{i}.rs"));
                 // Provide a small rust source with a function whose name we'll
@@ -514,7 +514,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                 let content = format!("pub fn bench_target_{i}() {{\n    let _ = {i};\n}}\n");
                 Query::write(
                     "rename_fn",
-                    "tokensave_ast_grep_rewrite",
+                    "tracedecay_ast_grep_rewrite",
                     json!({
                         "path": path,
                         "pattern": format!("fn bench_target_{i}() {{ $$$BODY }}"),
@@ -530,7 +530,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
     groups
 }
 
-/// Mirrors `tokensave::mcp::tools::ast_grep_available` without depending on
+/// Mirrors `tracedecay::mcp::tools::ast_grep_available` without depending on
 /// internal-module visibility: shells out to `ast-grep --version`. Cached
 /// for the lifetime of the bench process.
 fn ast_grep_on_path() -> bool {

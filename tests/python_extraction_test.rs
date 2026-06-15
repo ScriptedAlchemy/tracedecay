@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::PythonExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::PythonExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_py_file_node_is_root() {

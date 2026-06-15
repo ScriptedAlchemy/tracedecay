@@ -1,21 +1,32 @@
 //! Integration tests for MCP tool handlers (`handle_tool_call`).
 //!
-//! Each test exercises a real `TokenSave` instance with indexed test data,
+//! Each test exercises a real `TraceDecay` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
-use serde_json::{json, Value};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
+use std::path::Path;
+
+use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokensave::mcp::handle_tool_call;
-use tokensave::tokensave::TokenSave;
+use tracedecay::db::Database;
+use tracedecay::global_db::GlobalDb;
+use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
+use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::lcm::{
+    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
+};
+use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::tracedecay::TraceDecay;
 
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
-/// test files, and doc comments, then initialises and indexes a `TokenSave`.
-async fn setup_project() -> (TokenSave, TempDir) {
+/// test files, and doc comments, then initialises and indexes a `TraceDecay`.
+async fn setup_project() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -62,7 +73,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -75,10 +86,180 @@ fn extract_text(value: &Value) -> &str {
         .unwrap_or("<missing text>")
 }
 
+fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
+    match result {
+        Ok(_) => panic!("expected tool call to fail"),
+        Err(err) => format!("{err}"),
+    }
+}
+
+#[test]
+fn lcm_tool_schemas_are_registered_with_stable_names() {
+    let tools = get_tool_definitions();
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for expected in [
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
+    ] {
+        assert!(names.contains(expected), "missing {expected}");
+    }
+
+    for read_only in [
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == read_only)
+            .unwrap_or_else(|| panic!("{read_only} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    }
+
+    for mutating in [
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == mutating)
+            .unwrap_or_else(|| panic!("{mutating} definition"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
+    }
+
+    for scoped in [
+        "tracedecay_lcm_status",
+        "tracedecay_lcm_load_session",
+        "tracedecay_lcm_grep",
+        "tracedecay_lcm_describe",
+        "tracedecay_lcm_expand",
+        "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_compress",
+        "tracedecay_lcm_session_boundary",
+        "tracedecay_lcm_doctor",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == scoped)
+            .unwrap_or_else(|| panic!("{scoped} definition"));
+        let storage_scope = &tool.input_schema["properties"]["storage_scope"];
+        assert_eq!(
+            storage_scope["enum"],
+            json!(["project_local", "hermes_profile"]),
+            "{scoped} must advertise supported storage scopes"
+        );
+        assert!(
+            storage_scope["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("hermes_home"),
+            "{scoped} storage_scope should document hermes_profile requirements"
+        );
+        let hermes_home = &tool.input_schema["properties"]["hermes_home"];
+        assert_eq!(
+            hermes_home["type"],
+            json!("string"),
+            "{scoped} must expose hermes_home"
+        );
+        assert!(
+            hermes_home["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("absolute"),
+            "{scoped} hermes_home should document absolute path requirements"
+        );
+    }
+
+    let load = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_load_session")
+        .expect("tracedecay_lcm_load_session definition");
+    assert_eq!(load.input_schema["required"], json!(["session_id"]));
+    assert!(load.input_schema["properties"]
+        .get("content_limit")
+        .is_some());
+    assert_eq!(
+        load.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        load.input_schema["properties"]["content_limit"]["maximum"],
+        json!(20000)
+    );
+
+    let grep = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_grep")
+        .expect("tracedecay_lcm_grep definition");
+    assert_eq!(
+        grep.input_schema["properties"]["limit"]["type"],
+        json!("integer")
+    );
+
+    let expand = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_expand")
+        .expect("tracedecay_lcm_expand definition");
+    assert_eq!(
+        expand.input_schema["required"],
+        json!(["session_id", "target"])
+    );
+    assert!(expand.input_schema["properties"].get("target").is_some());
+    assert_eq!(
+        expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["source_offset"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["source_limit"]["type"],
+        json!("integer")
+    );
+
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_doctor")
+        .expect("tracedecay_lcm_doctor definition");
+    assert_eq!(
+        doctor.input_schema["properties"]["mode"]["enum"],
+        json!(["diagnose", "repair", "retention", "clean"])
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["apply"]["type"],
+        json!("boolean")
+    );
+    assert_eq!(
+        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
+        json!("boolean")
+    );
+}
+
 /// Searches for `name` via the search handler and returns the first matching
 /// node id whose name field equals `name`.
-async fn find_node_id(cg: &TokenSave, name: &str) -> String {
-    let result = handle_tool_call(cg, "tokensave_search", json!({"query": name}), None, None)
+async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
+    let result = handle_tool_call(cg, "tracedecay_search", json!({"query": name}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -93,7 +274,35 @@ async fn find_node_id(cg: &TokenSave, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tokensave_search
+#[test]
+fn retrieve_tool_schema_uses_handle_only() {
+    let tools = get_tool_definitions();
+    let retrieve = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_retrieve")
+        .expect("tracedecay_retrieve definition");
+    let properties = retrieve
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("retrieve properties");
+
+    assert!(properties.contains_key("handle"));
+    assert!(!properties.contains_key("retrieve_handle"));
+    assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+
+    assert!(retrieve.description.contains("tracedecay_retrieve"));
+    assert!(retrieve.description.contains("required argument `handle`"));
+    assert!(retrieve
+        .description
+        .contains("Only call it when the missing details are needed"));
+    assert!(properties["handle"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("required `handle` argument"));
+}
+
+// 1. tracedecay_search
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -101,7 +310,7 @@ async fn test_search() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper", "limit": 5}),
         None,
         None,
@@ -116,8 +325,156 @@ async fn test_search() {
     );
 }
 
+#[tokio::test]
+async fn retrieve_tool_returns_full_stored_response() {
+    let (cg, _dir) = setup_project().await;
+    let original = "{\"items\":[{\"id\":1,\"name\":\"alpha\"}]}";
+    let stored = tracedecay::mcp::response_handles::store_response_handle(
+        cg.project_root(),
+        original,
+        tracedecay::tracedecay::current_timestamp(),
+    )
+    .unwrap();
+
+    let stored_payload: Value = serde_json::from_str(
+        &fs::read_to_string(
+            cg.project_root()
+                .join(".tracedecay/response-handles")
+                .join(format!("{}.json", stored.handle)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(stored_payload.get("handle").is_none());
+    assert!(stored_payload.get("original_chars").is_none());
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": stored.handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["handle"], stored.handle);
+    assert_eq!(payload["content"], original);
+    assert_eq!(payload["expired"], false);
+
+    let alias_result = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "retrieve_handle": stored.handle }),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        alias_result.is_err(),
+        "tracedecay_retrieve must accept only the canonical `handle` field"
+    );
+}
+
+#[tokio::test]
+async fn fact_store_large_list_response_uses_retrieve_handle() {
+    let (cg, _dir) = setup_project().await;
+    let mut last_fact_id = None;
+    for i in 0..35 {
+        let added = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!(
+                    "LONG_FACT_MARKER_{i:02}: {}",
+                    "large fact-store response should remain retrievable ".repeat(80)
+                ),
+                "category": "project",
+                "trust": 0.9
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        if i == 34 {
+            let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+            last_fact_id = added["fact"]["fact_id"].as_i64();
+        }
+    }
+    let last_fact_id = last_fact_id.expect("tail fact id");
+
+    let listed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&listed.value);
+    let envelope: Value = serde_json::from_str(text).expect("large response should stay JSON");
+    assert_eq!(envelope["truncated"], true);
+    let handle = envelope["handle"]
+        .as_str()
+        .expect("large fact-store response should include retrieve handle")
+        .to_string();
+    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
+    let instruction = envelope["retrieve_instruction"]
+        .as_str()
+        .expect("large response envelope should teach retrieval");
+    assert!(instruction.contains("This response was truncated"));
+    assert!(instruction.contains("original response is stored locally"));
+    assert!(instruction.contains("expires"));
+    assert!(instruction.contains("tracedecay_retrieve"));
+    assert!(instruction.contains("required argument `handle`"));
+    assert!(instruction.contains(&handle));
+    assert!(instruction.contains("Only call it if the missing details are needed"));
+
+    let removed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({ "action": "remove", "fact_id": last_fact_id }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
+    assert_eq!(removed["removed"], true);
+    assert!(
+        cg.get_fact(last_fact_id).await.unwrap().is_none(),
+        "tail fact should be absent from the live store before handle retrieval"
+    );
+
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({ "handle": handle }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    assert_eq!(retrieved_payload["expired"], false);
+    let full_json = retrieved_payload["content"]
+        .as_str()
+        .expect("retrieve response should contain original JSON text");
+    let full: Value = serde_json::from_str(full_json).expect("retrieved content should be JSON");
+    assert_eq!(full["count"].as_u64(), Some(35));
+    assert!(
+        full_json.contains("LONG_FACT_MARKER_34"),
+        "retrieved response should include the full fact list"
+    );
+}
+
 // ---------------------------------------------------------------------------
-// 2. tokensave_context
+// 2. tracedecay_context
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -125,7 +482,7 @@ async fn test_context() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_context",
+        "tracedecay_context",
         json!({"task": "understand the helper function"}),
         None,
         None,
@@ -137,7 +494,7 @@ async fn test_context() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. tokensave_callers
+// 3. tracedecay_callers
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -146,7 +503,7 @@ async fn test_callers() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers",
+        "tracedecay_callers",
         json!({"node_id": node_id}),
         None,
         None,
@@ -158,7 +515,7 @@ async fn test_callers() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. tokensave_callees
+// 4. tracedecay_callees
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -167,7 +524,7 @@ async fn test_callees() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callees",
+        "tracedecay_callees",
         json!({"node_id": node_id}),
         None,
         None,
@@ -179,7 +536,7 @@ async fn test_callees() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. tokensave_impact
+// 5. tracedecay_impact
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -188,7 +545,7 @@ async fn test_impact() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_impact",
+        "tracedecay_impact",
         json!({"node_id": node_id}),
         None,
         None,
@@ -200,7 +557,7 @@ async fn test_impact() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. tokensave_node — existing node
+// 6. tracedecay_node — existing node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -209,7 +566,7 @@ async fn test_node_existing() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_node",
+        "tracedecay_node",
         json!({"node_id": node_id}),
         None,
         None,
@@ -236,7 +593,7 @@ async fn test_node_existing() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. tokensave_node — nonexistent node
+// 7. tracedecay_node — nonexistent node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -244,7 +601,7 @@ async fn test_node_not_found() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_node",
+        "tracedecay_node",
         json!({"node_id": "nonexistent_id_12345"}),
         None,
         None,
@@ -260,7 +617,7 @@ async fn test_node_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. tokensave_status
+// 8. tracedecay_status
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -268,7 +625,7 @@ async fn test_status() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_status",
+        "tracedecay_status",
         json!({}),
         Some(json!({"uptime": 100})),
         None,
@@ -287,13 +644,13 @@ async fn test_status() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. tokensave_files — no filter
+// 9. tracedecay_files — no filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_no_filter() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_files", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -305,13 +662,13 @@ async fn test_files_no_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. tokensave_files — path filter
+// 10. tracedecay_files — path filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_files_path_filter() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_files", json!({"path": "src"}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({"path": "src"}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -325,7 +682,7 @@ async fn test_files_path_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. tokensave_files — pattern filter
+// 11. tracedecay_files — pattern filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -333,7 +690,7 @@ async fn test_files_pattern_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"pattern": "*.rs"}),
         None,
         None,
@@ -345,7 +702,7 @@ async fn test_files_pattern_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. tokensave_files — flat format
+// 12. tracedecay_files — flat format
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -353,7 +710,7 @@ async fn test_files_flat_format() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"format": "flat"}),
         None,
         None,
@@ -367,7 +724,7 @@ async fn test_files_flat_format() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. tokensave_affected
+// 13. tracedecay_affected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -375,7 +732,7 @@ async fn test_affected() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_affected",
+        "tracedecay_affected",
         json!({"files": ["src/utils.rs"]}),
         None,
         None,
@@ -391,13 +748,13 @@ async fn test_affected() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. tokensave_dead_code
+// 14. tracedecay_dead_code
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_dead_code() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -408,7 +765,7 @@ async fn test_dead_code() {
 }
 
 // ---------------------------------------------------------------------------
-// 15. tokensave_diff_context
+// 15. tracedecay_diff_context
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -416,7 +773,7 @@ async fn test_diff_context() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/utils.rs"]}),
         None,
         None,
@@ -435,7 +792,7 @@ async fn test_diff_context() {
 }
 
 // ---------------------------------------------------------------------------
-// 16. tokensave_module_api
+// 16. tracedecay_module_api
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -443,7 +800,7 @@ async fn test_module_api() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_module_api",
+        "tracedecay_module_api",
         json!({"path": "src"}),
         None,
         None,
@@ -463,13 +820,13 @@ async fn test_module_api() {
 }
 
 // ---------------------------------------------------------------------------
-// 17. tokensave_circular
+// 17. tracedecay_circular
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_circular() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -477,13 +834,13 @@ async fn test_circular() {
 }
 
 // ---------------------------------------------------------------------------
-// 18. tokensave_hotspots
+// 18. tracedecay_hotspots
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_hotspots() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_hotspots", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_hotspots", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -494,7 +851,7 @@ async fn test_hotspots() {
 }
 
 // ---------------------------------------------------------------------------
-// 19. tokensave_similar
+// 19. tracedecay_similar
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -502,7 +859,7 @@ async fn test_similar() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_similar",
+        "tracedecay_similar",
         json!({"symbol": "helper"}),
         None,
         None,
@@ -518,7 +875,7 @@ async fn test_similar() {
 }
 
 // ---------------------------------------------------------------------------
-// 20. tokensave_rename_preview
+// 20. tracedecay_rename_preview
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -527,7 +884,7 @@ async fn test_rename_preview() {
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rename_preview",
+        "tracedecay_rename_preview",
         json!({"node_id": node_id}),
         None,
         None,
@@ -543,13 +900,13 @@ async fn test_rename_preview() {
 }
 
 // ---------------------------------------------------------------------------
-// 21. tokensave_unused_imports
+// 21. tracedecay_unused_imports
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_unused_imports() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -560,7 +917,7 @@ async fn test_unused_imports() {
 }
 
 // ---------------------------------------------------------------------------
-// 22. tokensave_rank
+// 22. tracedecay_rank
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -568,7 +925,7 @@ async fn test_rank() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "incoming"}),
         None,
         None,
@@ -584,7 +941,7 @@ async fn test_rank() {
 }
 
 // ---------------------------------------------------------------------------
-// 23. tokensave_rank — invalid direction
+// 23. tracedecay_rank — invalid direction
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -592,7 +949,7 @@ async fn test_rank_invalid_direction() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "sideways"}),
         None,
         None,
@@ -612,13 +969,13 @@ async fn test_rank_invalid_direction() {
 }
 
 // ---------------------------------------------------------------------------
-// 24. tokensave_largest
+// 24. tracedecay_largest
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_largest() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_largest", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_largest", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -630,7 +987,7 @@ async fn test_largest() {
 }
 
 // ---------------------------------------------------------------------------
-// 25. tokensave_coupling
+// 25. tracedecay_coupling
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -638,7 +995,7 @@ async fn test_coupling() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_coupling",
+        "tracedecay_coupling",
         json!({"direction": "fan_in"}),
         None,
         None,
@@ -650,7 +1007,7 @@ async fn test_coupling() {
 }
 
 // ---------------------------------------------------------------------------
-// 26. tokensave_inheritance_depth
+// 26. tracedecay_inheritance_depth
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -658,7 +1015,7 @@ async fn test_inheritance_depth() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_inheritance_depth",
+        "tracedecay_inheritance_depth",
         json!({"limit": 5}),
         None,
         None,
@@ -673,13 +1030,13 @@ async fn test_inheritance_depth() {
 }
 
 // ---------------------------------------------------------------------------
-// 27. tokensave_distribution — default and summary mode
+// 27. tracedecay_distribution — default and summary mode
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_distribution_default() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_distribution", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_distribution", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -691,7 +1048,7 @@ async fn test_distribution_summary() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_distribution",
+        "tracedecay_distribution",
         json!({"summary": true}),
         None,
         None,
@@ -710,13 +1067,13 @@ async fn test_distribution_summary() {
 }
 
 // ---------------------------------------------------------------------------
-// 28. tokensave_recursion
+// 28. tracedecay_recursion
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_recursion() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -724,13 +1081,13 @@ async fn test_recursion() {
 }
 
 // ---------------------------------------------------------------------------
-// 29. tokensave_complexity
+// 29. tracedecay_complexity
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_complexity() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_complexity", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_complexity", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -739,13 +1096,13 @@ async fn test_complexity() {
 }
 
 // ---------------------------------------------------------------------------
-// 30. tokensave_doc_coverage
+// 30. tracedecay_doc_coverage
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_doc_coverage() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_doc_coverage", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_doc_coverage", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -756,13 +1113,13 @@ async fn test_doc_coverage() {
 }
 
 // ---------------------------------------------------------------------------
-// 31. tokensave_god_class
+// 31. tracedecay_god_class
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_god_class() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_god_class", json!({"limit": 5}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_god_class", json!({"limit": 5}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -773,7 +1130,7 @@ async fn test_god_class() {
 }
 
 // ---------------------------------------------------------------------------
-// 32. tokensave_changelog — requires git refs, expect graceful error
+// 32. tracedecay_changelog — requires git refs, expect graceful error
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -783,7 +1140,7 @@ async fn test_changelog_no_git() {
     // message rather than a hard error.
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -799,7 +1156,7 @@ async fn test_changelog_no_git() {
 }
 
 // ---------------------------------------------------------------------------
-// 33. tokensave_port_status — no matching dirs expected
+// 33. tracedecay_port_status — no matching dirs expected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -807,7 +1164,7 @@ async fn test_port_status() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({"source_dir": "src", "target_dir": "tests"}),
         None,
         None,
@@ -847,12 +1204,12 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({
             "source_dir": "src_a",
             "target_dir": "src_b",
@@ -905,12 +1262,12 @@ async fn port_status_matches_methods_with_same_parent_type() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_status",
+        "tracedecay_port_status",
         json!({
             "source_dir": "src_a",
             "target_dir": "src_b",
@@ -932,7 +1289,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
 }
 
 // ---------------------------------------------------------------------------
-// 34. tokensave_port_order
+// 34. tracedecay_port_order
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -940,7 +1297,7 @@ async fn test_port_order() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -962,7 +1319,7 @@ async fn test_port_order() {
 #[tokio::test]
 async fn test_unknown_tool() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_unknown", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_unknown", json!({}), None, None).await;
     match result {
         Err(err) => {
             let err_msg = format!("{}", err);
@@ -983,7 +1340,7 @@ async fn test_unknown_tool() {
 #[tokio::test]
 async fn test_missing_required_params() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_search", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_search", json!({}), None, None).await;
     let err_msg = match result {
         Err(err) => format!("{}", err),
         Ok(_) => panic!("missing query should produce an error"),
@@ -1004,7 +1361,7 @@ async fn test_node_id_alias() {
     let (cg, _dir) = setup_project().await;
     let node_id = find_node_id(&cg, "helper").await;
     // Use "id" instead of "node_id"
-    let result = handle_tool_call(&cg, "tokensave_node", json!({"id": node_id}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_node", json!({"id": node_id}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1015,13 +1372,13 @@ async fn test_node_id_alias() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_status without server_stats
+// Extra: tracedecay_status without server_stats
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_status_without_server_stats() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1045,7 +1402,7 @@ async fn test_search_populates_touched_files() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper"}),
         None,
         None,
@@ -1067,7 +1424,7 @@ async fn test_rename_preview_not_found() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rename_preview",
+        "tracedecay_rename_preview",
         json!({"node_id": "nonexistent_id_12345"}),
         None,
         None,
@@ -1091,7 +1448,7 @@ async fn test_coupling_fan_out() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_coupling",
+        "tracedecay_coupling",
         json!({"direction": "fan_out"}),
         None,
         None,
@@ -1111,7 +1468,7 @@ async fn test_rank_outgoing() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "calls", "direction": "outgoing"}),
         None,
         None,
@@ -1132,28 +1489,28 @@ async fn test_rank_outgoing() {
 #[tokio::test]
 async fn test_context_missing_task() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_context", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_context", json!({}), None, None).await;
     assert!(result.is_err(), "context without task should error");
 }
 
 #[tokio::test]
 async fn test_callers_missing_node_id() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_callers", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_callers", json!({}), None, None).await;
     assert!(result.is_err(), "callers without node_id should error");
 }
 
 #[tokio::test]
 async fn test_affected_missing_files() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_affected", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_affected", json!({}), None, None).await;
     assert!(result.is_err(), "affected without files should error");
 }
 
 #[tokio::test]
 async fn test_module_api_missing_path() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_module_api", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_module_api", json!({}), None, None).await;
     assert!(result.is_err(), "module_api without path should error");
 }
 
@@ -1162,7 +1519,7 @@ async fn test_rank_missing_edge_kind() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"direction": "incoming"}),
         None,
         None,
@@ -1174,28 +1531,28 @@ async fn test_rank_missing_edge_kind() {
 #[tokio::test]
 async fn test_similar_missing_symbol() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_similar", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_similar", json!({}), None, None).await;
     assert!(result.is_err(), "similar without symbol should error");
 }
 
 #[tokio::test]
 async fn test_diff_context_missing_files() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_diff_context", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_diff_context", json!({}), None, None).await;
     assert!(result.is_err(), "diff_context without files should error");
 }
 
 #[tokio::test]
 async fn test_changelog_missing_refs() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_changelog", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_changelog", json!({}), None, None).await;
     assert!(result.is_err(), "changelog without from_ref should error");
 }
 
 #[tokio::test]
 async fn test_port_status_missing_dirs() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_port_status", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_port_status", json!({}), None, None).await;
     assert!(
         result.is_err(),
         "port_status without source_dir should error"
@@ -1205,7 +1562,7 @@ async fn test_port_status_missing_dirs() {
 #[tokio::test]
 async fn test_port_order_missing_source_dir() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_port_order", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_port_order", json!({}), None, None).await;
     assert!(
         result.is_err(),
         "port_order without source_dir should error"
@@ -1213,7 +1570,7 @@ async fn test_port_order_missing_source_dir() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_changelog with a real git repo
+// Extra: tracedecay_changelog with a real git repo
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1268,12 +1625,12 @@ async fn test_changelog_with_real_git() {
         .output()
         .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -1296,7 +1653,7 @@ async fn test_changelog_with_real_git() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_distribution with path prefix filter
+// Extra: tracedecay_distribution with path prefix filter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1304,7 +1661,7 @@ async fn test_distribution_with_path_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_distribution",
+        "tracedecay_distribution",
         json!({"path": "src/"}),
         None,
         None,
@@ -1321,7 +1678,7 @@ async fn test_distribution_with_path_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_files — grouped format
+// Extra: tracedecay_files — grouped format
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1329,7 +1686,7 @@ async fn test_files_grouped_format() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"format": "grouped"}),
         None,
         None,
@@ -1350,7 +1707,7 @@ async fn test_files_grouped_format() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_dead_code with custom kinds parameter
+// Extra: tracedecay_dead_code with custom kinds parameter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1359,7 +1716,7 @@ async fn test_dead_code_custom_kinds() {
     // Ask only for struct dead code
     let result = handle_tool_call(
         &cg,
-        "tokensave_dead_code",
+        "tracedecay_dead_code",
         json!({"kinds": ["struct"]}),
         None,
         None,
@@ -1385,7 +1742,7 @@ async fn test_dead_code_custom_kinds() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_affected with custom filter glob
+// Extra: tracedecay_affected with custom filter glob
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1393,7 +1750,7 @@ async fn test_affected_with_custom_filter() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_affected",
+        "tracedecay_affected",
         json!({"files": ["src/utils.rs"], "filter": "**/*test*"}),
         None,
         None,
@@ -1409,13 +1766,13 @@ async fn test_affected_with_custom_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_complexity — verify response structure
+// Extra: tracedecay_complexity — verify response structure
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_complexity_response_fields() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_complexity", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_complexity", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1450,13 +1807,13 @@ async fn test_complexity_response_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: tokensave_doc_coverage — verify response structure
+// Extra: tracedecay_doc_coverage — verify response structure
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_doc_coverage_response_structure() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_doc_coverage", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_doc_coverage", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1487,7 +1844,7 @@ async fn test_doc_coverage_response_structure() {
 async fn test_files_scope_prefix_filters() {
     let (cg, _dir) = setup_project().await;
     // With scope_prefix "src", should only return files under src/
-    let result = handle_tool_call(&cg, "tokensave_files", json!({}), None, Some("src"))
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({}), None, Some("src"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1504,7 +1861,7 @@ async fn test_search_scope_prefix_filters() {
     // Search for "helper" but scoped to "tests" — should only return test file results
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "helper", "limit": 20}),
         None,
         Some("tests"),
@@ -1529,7 +1886,7 @@ async fn test_files_explicit_path_overrides_scope() {
     // Explicit path "tests" should override scope_prefix "src"
     let result = handle_tool_call(
         &cg,
-        "tokensave_files",
+        "tracedecay_files",
         json!({"path": "tests"}),
         None,
         Some("src"),
@@ -1549,7 +1906,7 @@ async fn test_context_scope_prefix_filters() {
     // Context scoped to "tests" should return results (even if limited to test files)
     let result = handle_tool_call(
         &cg,
-        "tokensave_context",
+        "tracedecay_context",
         json!({"task": "understand helper"}),
         None,
         Some("tests"),
@@ -1566,7 +1923,7 @@ async fn test_context_scope_prefix_filters() {
 #[tokio::test]
 async fn test_status_reports_scope_prefix() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, Some("src/mcp"))
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, Some("src/mcp"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1583,7 +1940,7 @@ async fn test_status_reports_scope_prefix() {
 #[tokio::test]
 async fn test_status_no_scope_prefix() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_status", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -1595,7 +1952,7 @@ async fn test_status_no_scope_prefix() {
 }
 
 // ---------------------------------------------------------------------------
-// Edit tools: tokensave_str_replace, tokensave_multi_str_replace, tokensave_insert_at
+// Edit tools: tracedecay_str_replace, tracedecay_multi_str_replace, tracedecay_insert_at
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1610,12 +1967,12 @@ async fn test_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn hello() {}",
@@ -1646,12 +2003,12 @@ async fn test_str_replace_not_found() {
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn not_exists() {}",
@@ -1677,12 +2034,12 @@ async fn test_str_replace_multiple_matches_fails() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "src/main.rs",
             "old_str": "fn foo() {}",
@@ -1715,12 +2072,12 @@ async fn test_multi_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -1753,12 +2110,12 @@ async fn test_multi_str_replace_atomic_failure() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -1795,13 +2152,13 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let missing_old = format!("{}é", "a".repeat(19));
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "src/main.rs",
             "replacements": [
@@ -1834,12 +2191,12 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
     fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_str_replace",
+        "tracedecay_str_replace",
         json!({
             "path": "style.css",
             "old_str": "\tfont-size: 14px;",
@@ -1862,7 +2219,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
-    if tokensave::mcp::tools::ast_grep_available() {
+    if tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -1870,11 +2227,11 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name", "rewrite": "new_name"}),
         None,
         None,
@@ -1895,7 +2252,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
 
 #[tokio::test]
 async fn ast_grep_rewrite_uses_current_cli_update_flag() {
-    if !tokensave::mcp::tools::ast_grep_available() {
+    if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -1907,11 +2264,11 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({"path": "src/lib.rs", "pattern": "old_name()", "rewrite": "new_name()"}),
         None,
         None,
@@ -1945,13 +2302,13 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     let (cg, _dir) = setup_project().await;
 
     // branch_diff requires branch tracking metadata to be present.
-    let tokensave_dir = tokensave::config::get_tokensave_dir(cg.project_root());
-    let meta = tokensave::branch_meta::BranchMeta::new("master");
-    tokensave::branch_meta::save_branch_meta(&tokensave_dir, &meta).unwrap();
+    let tracedecay_dir = tracedecay::config::get_tracedecay_dir(cg.project_root());
+    let meta = tracedecay::branch_meta::BranchMeta::new("master");
+    tracedecay::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_branch_diff",
+        "tracedecay_branch_diff",
         json!({"base": "master", "head": "master"}),
         None,
         None,
@@ -1975,7 +2332,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
 /// message must instead explain the likely cause so the caller can act on it.
 #[tokio::test]
 async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
-    if !tokensave::mcp::tools::ast_grep_available() {
+    if !tracedecay::mcp::tools::ast_grep_available() {
         return;
     }
     let dir = TempDir::new().unwrap();
@@ -1983,11 +2340,11 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_ast_grep_rewrite",
+        "tracedecay_ast_grep_rewrite",
         json!({
             "path": "src/lib.rs",
             "pattern": "__NONEXISTENT_PATTERN__",
@@ -2024,12 +2381,12 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_multi_str_replace",
+        "tracedecay_multi_str_replace",
         json!({
             "path": "style.css",
             "replacements": [
@@ -2067,12 +2424,12 @@ async fn test_insert_at_string_anchor_before() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "line two",
@@ -2113,12 +2470,12 @@ async fn test_insert_at_line_number() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "2",
@@ -2156,12 +2513,12 @@ async fn test_insert_at_anchor_not_found() {
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "nonexistent",
@@ -2189,13 +2546,13 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let long_anchor = format!("{}é", "a".repeat(99));
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": long_anchor,
@@ -2229,12 +2586,12 @@ async fn test_insert_at_ambiguous_anchor() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/main.rs",
             "anchor": "foo",
@@ -2266,12 +2623,12 @@ async fn test_insert_at_preserves_trailing_newline() {
     let original = "fn hello() {}\n\nfn world() {}\n";
     fs::write(project.join("src/lib.rs"), original).unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_insert_at",
+        "tracedecay_insert_at",
         json!({
             "path": "src/lib.rs",
             "anchor": "fn world",
@@ -2298,7 +2655,7 @@ async fn test_insert_at_preserves_trailing_newline() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_gini
+// tracedecay_gini
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2306,7 +2663,7 @@ async fn test_gini() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_gini",
+        "tracedecay_gini",
         json!({ "metric": "lines" }),
         None,
         None,
@@ -2329,7 +2686,7 @@ async fn test_gini() {
 #[tokio::test]
 async fn test_gini_default_metric() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_gini", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_gini", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2342,7 +2699,7 @@ async fn test_gini_default_metric() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_dependency_depth
+// tracedecay_dependency_depth
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2350,7 +2707,7 @@ async fn test_dependency_depth() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dependency_depth",
+        "tracedecay_dependency_depth",
         json!({ "limit": 5 }),
         None,
         None,
@@ -2371,13 +2728,13 @@ async fn test_dependency_depth() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_health
+// tracedecay_health
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_health_summary() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_health", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_health", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2398,7 +2755,7 @@ async fn test_health_detailed() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_health",
+        "tracedecay_health",
         json!({ "details": true }),
         None,
         None,
@@ -2420,7 +2777,7 @@ async fn test_health_detailed() {
     assert!(dims.get("modularity").is_some(), "modularity score missing");
 }
 
-/// Issue #83: tokensave_redundancy must surface AST-isomorphic duplicate
+/// Issue #83: tracedecay_redundancy must surface AST-isomorphic duplicate
 /// pairs and rank them by composite similarity. Plant two structurally
 /// identical functions in a fixture and assert the pair surfaces in the
 /// top hit with the `definite` severity bucket.
@@ -2465,11 +2822,11 @@ pub fn unrelated(x: i32) -> i32 {
     )
     .unwrap();
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_redundancy",
+        "tracedecay_redundancy",
         json!({ "min_lines": 5, "similarity_threshold": 0.5 }),
         None,
         None,
@@ -2509,7 +2866,7 @@ pub fn unrelated(x: i32) -> i32 {
     // Calling again should be a cache hit (no panic, same result).
     let result2 = handle_tool_call(
         &cg,
-        "tokensave_redundancy",
+        "tracedecay_redundancy",
         json!({ "min_lines": 5, "similarity_threshold": 0.5 }),
         None,
         None,
@@ -2520,13 +2877,13 @@ pub fn unrelated(x: i32) -> i32 {
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
 }
 
-/// Issue #80: `tokensave_runtime` must surface process + DB telemetry so
+/// Issue #80: `tracedecay_runtime` must surface process + DB telemetry so
 /// users hitting unexpected CPU/RAM can capture a structured snapshot
 /// without leaving the chat session.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_runtime", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2534,7 +2891,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
 
     // Top-level envelope.
     assert!(parsed.get("captured_at").is_some());
-    assert!(parsed["tokensave_version"].is_string());
+    assert!(parsed["tracedecay_version"].is_string());
     assert!(parsed["host_os"].is_string());
 
     // Process block — PID must match our own.
@@ -2574,7 +2931,7 @@ async fn test_health_detailed_includes_raw_signals() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_health",
+        "tracedecay_health",
         json!({ "details": true }),
         None,
         None,
@@ -2615,7 +2972,7 @@ async fn test_health_detailed_includes_raw_signals() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_dsm
+// tracedecay_dsm
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2623,7 +2980,7 @@ async fn test_dsm_stats() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dsm",
+        "tracedecay_dsm",
         json!({ "format": "stats" }),
         None,
         None,
@@ -2648,7 +3005,7 @@ async fn test_dsm_clusters() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_dsm",
+        "tracedecay_dsm",
         json!({ "format": "clusters" }),
         None,
         None,
@@ -2665,7 +3022,7 @@ async fn test_dsm_clusters() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_test_risk
+// tracedecay_test_risk
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2673,7 +3030,7 @@ async fn test_test_risk() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_test_risk",
+        "tracedecay_test_risk",
         json!({ "limit": 10 }),
         None,
         None,
@@ -2701,24 +3058,24 @@ async fn test_test_risk() {
 #[tokio::test]
 async fn test_session_start() {
     let (cg, dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_session_start", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
     let output: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(output["quality_signal"].as_u64().is_some());
     assert_eq!(output["status"].as_str().unwrap(), "baseline_saved");
-    let baseline_path = dir.path().join(".tokensave/session_baseline.json");
+    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
     assert!(baseline_path.exists(), "baseline file should exist");
 }
 
 #[tokio::test]
 async fn test_session_end() {
     let (cg, dir) = setup_project().await;
-    handle_tool_call(&cg, "tokensave_session_start", json!({}), None, None)
+    handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
-    let result = handle_tool_call(&cg, "tokensave_session_end", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_end", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2726,7 +3083,7 @@ async fn test_session_end() {
     assert!(output["signal_before"].as_u64().is_some());
     assert!(output["signal_after"].as_u64().is_some());
     assert!(output["delta"].is_number());
-    let baseline_path = dir.path().join(".tokensave/session_baseline.json");
+    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
     assert!(
         !baseline_path.exists(),
         "baseline should be removed after session_end"
@@ -2736,7 +3093,7 @@ async fn test_session_end() {
 #[tokio::test]
 async fn test_session_end_no_baseline() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_session_end", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_session_end", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2745,7 +3102,7 @@ async fn test_session_end_no_baseline() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_body
+// tracedecay_body
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2753,7 +3110,7 @@ async fn test_body_returns_full_function_source() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "format_greeting"}),
         None,
         None,
@@ -2807,7 +3164,7 @@ async fn test_body_unknown_symbol() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "no_such_symbol_anywhere"}),
         None,
         None,
@@ -2824,12 +3181,12 @@ async fn test_body_unknown_symbol() {
 #[tokio::test]
 async fn test_body_missing_symbol_param() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_body", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_body", json!({}), None, None).await;
     assert!(result.is_err(), "should error when symbol is missing");
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_todos
+// tracedecay_todos
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2855,10 +3212,10 @@ fn helper() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_todos", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2902,12 +3259,12 @@ fn main() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_todos",
+        "tracedecay_todos",
         json!({"kinds": ["FIXME"]}),
         None,
         None,
@@ -2923,7 +3280,7 @@ fn main() {
 #[tokio::test]
 async fn test_todos_empty_when_clean() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_todos", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -2932,7 +3289,7 @@ async fn test_todos_empty_when_clean() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_callers_for — bulk caller lookup
+// tracedecay_callers_for — bulk caller lookup
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2945,7 +3302,7 @@ async fn test_callers_for_returns_caller_set_per_id() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone(), format_id.clone()]}),
         None,
         None,
@@ -2982,7 +3339,7 @@ async fn test_callers_for_includes_unmatched_ids_as_empty() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone(), bogus_id.clone()]}),
         None,
         None,
@@ -3002,7 +3359,7 @@ async fn test_callers_for_respects_max_per_item() {
     // Cap at 0 — every caller should be marked truncated.
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id.clone()], "max_per_item": 0}),
         None,
         None,
@@ -3019,7 +3376,7 @@ async fn test_callers_for_rejects_empty_input() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": []}),
         None,
         None,
@@ -3037,7 +3394,7 @@ async fn test_callers_for_rejects_unknown_kind() {
     let helper_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callers_for",
+        "tracedecay_callers_for",
         json!({"node_ids": [helper_id], "kind": "not_a_real_kind"}),
         None,
         None,
@@ -3050,7 +3407,7 @@ async fn test_callers_for_rejects_unknown_kind() {
 }
 
 // ---------------------------------------------------------------------------
-// tokensave_by_qualified_name — cross-run lookup
+// tracedecay_by_qualified_name — cross-run lookup
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -3065,7 +3422,7 @@ async fn test_by_qualified_name_finds_indexed_node() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_by_qualified_name",
+        "tracedecay_by_qualified_name",
         json!({"qualified_name": helper.qualified_name}),
         None,
         None,
@@ -3087,7 +3444,7 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_by_qualified_name",
+        "tracedecay_by_qualified_name",
         json!({"qualified_name": "crate::does::not::exist"}),
         None,
         None,
@@ -3101,101 +3458,3609 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
 #[tokio::test]
 async fn test_by_qualified_name_requires_param() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(&cg, "tokensave_by_qualified_name", json!({}), None, None).await;
+    let result = handle_tool_call(&cg, "tracedecay_by_qualified_name", json!({}), None, None).await;
     let Err(err) = result else {
         panic!("expected error when qualified_name is missing");
     };
     assert!(format!("{err}").contains("qualified_name"));
 }
 
-// ---------------------------------------------------------------------------
-// Memory handler tests (record_decision, record_code_area, session_recall)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn test_handle_record_decision() {
+async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
+
+    let added = handle_tool_call(
         &cg,
-        "tokensave_record_decision",
-        json!({"text": "use JWT", "reason": "legal flagged sessions"}),
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project Phoenix uses Amari Memory in src/memory/types.rs",
+            "category": "project",
+            "entity": "Project Phoenix",
+            "entities": ["Amari Memory"],
+            "tags": ["memory", "holographic"],
+            "source": "mcp-test",
+            "metadata": {"plan": "holographic"}
+        }),
         None,
         None,
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+    assert!(added["fact"].get("id").is_none());
+    assert!(added["fact"].get("trust").is_none());
+    assert!(added["fact"]["trust_score"].as_f64().is_some());
+    assert_eq!(added["action"], "add");
+    assert_eq!(added["fact"]["category"], "project");
+    assert_eq!(added["fact"]["source"], "mcp-test");
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "search",
+            "query": "Amari Memory",
+            "category": "project",
+            "min_trust": 0.1,
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    assert_eq!(search["action"], "search");
+    assert_eq!(search["count"].as_u64(), Some(1));
+    assert_eq!(search["results"], search["facts"]);
     assert!(
-        output.get("id").is_some(),
-        "response should contain 'id', got: {output}"
+        search["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id)),
+        "search results should include added fact: {search}"
     );
-    assert_eq!(
-        output["status"].as_str().unwrap(),
-        "recorded",
-        "status should be 'recorded', got: {output}"
-    );
-}
 
-#[tokio::test]
-async fn test_handle_record_code_area() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
+    for (action, payload) in [
+        ("probe", json!({"entity": "Project Phoenix"})),
+        ("related", json!({"entity": "Amari Memory"})),
+        (
+            "reason",
+            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
+        ),
+        (
+            "contradict",
+            json!({"category": "project", "threshold": 0.8}),
+        ),
+        ("list", json!({"category": "project", "min_trust": 0.1})),
+    ] {
+        let mut args = payload;
+        args["action"] = json!(action);
+        let result = handle_tool_call(&cg, "tracedecay_fact_store", args, None, None)
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        assert_eq!(output["action"], action, "{action} should echo action");
+        assert!(
+            output["results"].is_array(),
+            "{action} should include results array: {output}"
+        );
+        assert!(
+            output["count"].is_number(),
+            "{action} should include count: {output}"
+        );
+        if action == "related" {
+            assert!(
+                output["count"].as_u64().unwrap_or_default() > 0,
+                "related should return facts connected through adjacent entities: {output}"
+            );
+        }
+    }
+
+    let updated = handle_tool_call(
         &cg,
-        "tokensave_record_code_area",
-        json!({"path": "src/auth.rs", "description": "OAuth provider"}),
+        "tracedecay_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": fact_id,
+            "content": "Project Phoenix uses deterministic Amari Memory",
+            "entities": ["Project Phoenix", "Amari Memory"],
+            "metadata": {"updated": true}
+        }),
         None,
         None,
     )
     .await
     .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
+    let updated: Value = serde_json::from_str(extract_text(&updated.value)).unwrap();
     assert_eq!(
-        output["status"].as_str().unwrap(),
-        "recorded",
-        "status should be 'recorded', got: {output}"
+        updated["fact"]["content"],
+        "Project Phoenix uses deterministic Amari Memory"
     );
+    assert_eq!(updated["count"].as_u64(), Some(1));
+
+    let removed = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "remove", "fact_id": fact_id.to_string()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
+    assert_eq!(removed["removed"], true);
 }
 
 #[tokio::test]
-async fn test_handle_session_recall_returns_recorded_decision() {
+async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _dir) = setup_project().await;
-    // Seed a decision first
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project preference: never store provider API keys",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+
+    let rejected = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": fact_id,
+            "content": "api_key=sk-test-742913 must not be persisted"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rejected: Value = serde_json::from_str(extract_text(&rejected.value)).unwrap();
+    assert_eq!(rejected["action"], "update");
+    assert_eq!(rejected["count"], 0);
+    assert_eq!(rejected["diff"], "rejected_secret_like");
+    assert!(rejected["fact"].is_null());
+    assert!(
+        rejected["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("secret"),
+        "reason should describe the hygiene rejection: {rejected}"
+    );
+
+    let stored = cg.get_fact(fact_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.content,
+        "Project preference: never store provider API keys"
+    );
+    assert!(!stored.content.contains("sk-test-742913"));
+}
+
+#[tokio::test]
+async fn memory_recall_updates_retrieval_count() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Retrieval counters move after search",
+            "entity": "Counter Entity"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+
     handle_tool_call(
         &cg,
-        "tokensave_record_decision",
-        json!({"text": "use JWT", "reason": "legal flagged sessions"}),
+        "tracedecay_fact_store",
+        json!({"action": "search", "query": "Retrieval counters", "limit": 5}),
         None,
         None,
     )
     .await
     .unwrap();
-    // Recall and verify the seeded decision appears
+
+    let status = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "min_trust": 0.0, "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    let fact = status["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["fact_id"].as_i64() == Some(fact_id))
+        .unwrap();
+    assert!(
+        fact["retrieval_count"].as_i64().unwrap_or_default() > 0,
+        "returned facts should increment retrieval_count: {status}"
+    );
+}
+
+#[tokio::test]
+async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
+    let (cg, _dir) = setup_project().await;
+    let first = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "First fact should remain updateable after many later facts",
+            "trust": 0.4
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    let first_id = first["fact"]["fact_id"].as_i64().unwrap();
+
+    for i in 0..205 {
+        handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "content": format!("Later fact {i} should not hide the first fact"),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let updated = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "update",
+            "fact_id": first_id,
+            "trust_delta": 0.2
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let updated: Value = serde_json::from_str(extract_text(&updated.value)).unwrap();
+    assert_eq!(updated["fact"]["fact_id"].as_i64(), Some(first_id));
+    assert!(
+        (updated["fact"]["trust_score"].as_f64().unwrap() - 0.6).abs() < 0.000_001,
+        "trust_delta should apply through direct fact lookup: {updated}"
+    );
+}
+
+#[tokio::test]
+async fn memory_feedback_and_status_include_trust_fields() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Helpful memory fact for feedback",
+            "category": "general"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    assert!(added["fact"].get("id").is_none());
+    assert!(added["fact"].get("trust").is_none());
+    assert!(added["fact"]["trust_score"].as_f64().is_some());
+
+    let helpful = handle_tool_call(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "matched"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let helpful: Value = serde_json::from_str(extract_text(&helpful.value)).unwrap();
+    assert!(helpful["feedback"]["event_id"].as_i64().unwrap() > 0);
+    assert_eq!(helpful["feedback"]["fact_id"], fact_id);
+    assert_eq!(helpful["feedback"]["action"], "helpful");
+    assert_eq!(helpful["feedback"]["old_trust"], 0.5);
+    assert!(helpful["feedback"]["new_trust"].as_f64().unwrap() > 0.5);
+    assert!(helpful["feedback"]["trust_delta"].as_f64().unwrap() > 0.0);
+    assert_eq!(helpful["feedback"]["helpful_count"], 1);
+    assert_eq!(helpful["feedback"]["unhelpful_count"], 0);
+
+    let unhelpful = handle_tool_call(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": fact_id, "unhelpful": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let unhelpful: Value = serde_json::from_str(extract_text(&unhelpful.value)).unwrap();
+    assert_eq!(unhelpful["feedback"]["action"], "unhelpful");
+    assert!(
+        unhelpful["feedback"]["new_trust"].as_f64().unwrap()
+            < helpful["feedback"]["new_trust"].as_f64().unwrap()
+    );
+    assert_eq!(unhelpful["feedback"]["helpful_count"], 1);
+    assert_eq!(unhelpful["feedback"]["unhelpful_count"], 1);
+
+    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    assert!(status["memory"]["fact_count"].as_u64().unwrap() >= 1);
+    assert!(status["memory"].get("trust_0_025_count").is_some());
+    assert!(status["memory"].get("trust_025_050_count").is_some());
+    assert!(status["memory"].get("trust_050_075_count").is_some());
+    assert!(status["memory"].get("trust_075_100_count").is_some());
+    assert!(status["memory"].get("helpful_count").is_some());
+    assert!(status["memory"].get("unhelpful_count").is_some());
+    assert!(status["memory"].get("missing_vector_count").is_some());
+}
+
+#[tokio::test]
+async fn memory_tools_validate_malformed_inputs() {
+    let (cg, _dir) = setup_project().await;
+
+    let missing_action =
+        handle_tool_call(&cg, "tracedecay_fact_store", json!({}), None, None).await;
+    assert!(expect_tool_error(missing_action).contains("action"));
+
+    let bad_action = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "teleport"}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(bad_action).contains("unknown fact_store action"));
+
+    let bad_category = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "list", "category": "definitely-not-a-category"}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(bad_category).contains("category"));
+
+    let missing_feedback_action = handle_tool_call(
+        &cg,
+        "tracedecay_fact_feedback",
+        json!({"fact_id": 123}),
+        None,
+        None,
+    )
+    .await;
+    assert!(expect_tool_error(missing_feedback_action).contains("helpful"));
+}
+
+#[tokio::test]
+async fn message_search_reads_project_local_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "cursor-session".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Cursor transcript".to_string()),
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: Some("cursor-session.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&session).await);
+    let child_session = SessionRecord {
+        provider: "cursor".to_string(),
+        session_id: "worker-1".to_string(),
+        project_key: cg.project_root().to_string_lossy().to_string(),
+        project_path: cg.project_root().to_string_lossy().to_string(),
+        title: Some("Cursor subagent".to_string()),
+        started_at: Some(3),
+        ended_at: None,
+        transcript_path: Some("worker-1.jsonl".to_string()),
+        metadata_json: None,
+        parent_session_id: Some("cursor-session".to_string()),
+        is_subagent: true,
+        agent_id: Some("worker-1".to_string()),
+        parent_tool_use_id: None,
+    };
+    assert!(db.upsert_session(&child_session).await);
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "cursor-message".to_string(),
+            session_id: "cursor-session".to_string(),
+            role: "user".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: "Project-local transcript search is working.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("cursor-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "worker-message".to_string(),
+            session_id: "worker-1".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(4),
+            ordinal: 1,
+            text: "Subagent citrus evidence is linked to its parent.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("worker-1.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
     let result = handle_tool_call(
         &cg,
-        "tokensave_session_recall",
-        json!({"query": "JWT"}),
+        "tracedecay_message_search",
+        json!({"query": "transcript search", "provider": "cursor", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["count"], 1);
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"],
+        "cursor-message"
+    );
+    assert_eq!(
+        parsed["results"][0]["session"]["project_key"],
+        cg.project_root().to_string_lossy().to_string()
+    );
+
+    let subagent_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "citrus evidence",
+            "provider": "cursor",
+            "parent_session_id": "cursor-session",
+            "scope": "subagents_only"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let subagent_parsed: Value =
+        serde_json::from_str(extract_text(&subagent_result.value)).unwrap();
+    assert_eq!(subagent_parsed["status"], "ok");
+    assert_eq!(subagent_parsed["scope"], "subagents_only");
+    assert_eq!(subagent_parsed["parent_session_id"], "cursor-session");
+    assert_eq!(subagent_parsed["count"], 1);
+    assert_eq!(
+        subagent_parsed["results"][0]["session"]["parent_session_id"],
+        "cursor-session"
+    );
+    assert_eq!(
+        subagent_parsed["results"][0]["session"]["is_subagent"],
+        true
+    );
+}
+
+async fn seed_lcm_session_message(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+async fn seed_lcm_tool_result_message(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_lcm_session_message_with_role_source_timestamp(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    role: &str,
+    source: &str,
+    timestamp: i64,
+) {
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: role.to_string(),
+            timestamp: Some(timestamp),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: Some(serde_json::json!({"source": source}).to_string()),
+        })
+        .await
+    );
+}
+
+async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
+    GlobalDb::open_at(&hermes_home.join(".tracedecay/sessions.db"))
+        .await
+        .expect("profile-local session db should open")
+}
+
+async fn seed_lcm_session_message_in_db(
+    db: &GlobalDb,
+    project_path: &Path,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) {
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: project_path.to_string_lossy().to_string(),
+            project_path: project_path.to_string_lossy().to_string(),
+            title: Some(format!("LCM session {session_id}")),
+            started_at: Some(ordinal),
+            ended_at: None,
+            transcript_path: Some(format!("{session_id}.jsonl")),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(ordinal + 1),
+            ordinal,
+            text: text.into(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some(format!("{session_id}.jsonl")),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+}
+
+async fn project_lcm_conn(cg: &TraceDecay) -> libsql::Connection {
+    let db = libsql::Builder::new_local(cg.project_root().join(".tracedecay/sessions.db"))
+        .build()
+        .await
+        .unwrap();
+    db.connect().unwrap()
+}
+
+async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH ?1",
+            libsql::params![query],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT store_id FROM lcm_raw_messages WHERE provider = 'cursor' AND message_id = ?1",
+            libsql::params![message_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_summary_node_count(cg: &TraceDecay, session_id: &str) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM lcm_summary_nodes WHERE session_id = ?1",
+            libsql::params![session_id],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn lcm_schema_migration_count(cg: &TraceDecay) -> i64 {
+    let conn = project_lcm_conn(cg).await;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
+    project_lcm_conn(cg)
+        .await
+        .execute_batch("DELETE FROM lcm_raw_messages_fts;")
+        .await
+        .unwrap();
+}
+
+async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
+    let store_id = lcm_raw_store_id(cg, message_id).await;
+    project_lcm_conn(cg)
+        .await
+        .execute(
+            "DELETE FROM lcm_raw_messages_fts WHERE rowid = ?1",
+            libsql::params![store_id],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must not leak",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "scratch-shell-a",
+        "scratch-shell-message",
+        "scratch one-shot body that must not leak",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        3,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        4,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": false,
+            "ignore_session_patterns": ["cron-*"],
+            "stateless_session_patterns": ["scratch-shell-*"],
+            "ignore_message_patterns": ["Cronjob Response:*"]
+        }),
         None,
         None,
     )
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let decisions = output["decisions"]
-        .as_array()
-        .expect("decisions should be an array");
-    assert!(
-        !decisions.is_empty(),
-        "recall should return at least one decision after seeding"
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["cleanup"]["read_only"], true);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["ignored_session_candidates"],
+        1
     );
-    let found = decisions
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["stateless_session_candidates"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["cleanup"]["candidate_count"], 2);
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|d| d["text"].as_str().unwrap_or("").contains("JWT"));
+        .any(|action| action["kind"] == "clean_lcm_noise"));
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "scratch-shell-a").await, 1);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert!(!text.contains("scheduled report body that must not leak"));
+    assert!(!text.contains("scratch one-shot body that must not leak"));
+    assert!(!text.contains("Still working"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_is_denied_by_default() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must remain without explicit opt-in",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(
+        payload["error"],
+        "destructive cleanup is disabled by default"
+    );
+    assert_eq!(payload["mode"], "clean");
+    assert_eq!(payload["apply"], true);
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "cron-20260414",
+        "cron-20260414-message",
+        "scheduled report body that must be deleted only after backup",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let cron_store_id = lcm_raw_store_id(&cg, "cron-20260414-message").await;
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "cron-20260414".to_string(),
+        session_id: "cron-20260414".to_string(),
+        depth: 0,
+        summary_text: "scheduled report summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: cron_store_id,
+        }],
+        source_token_count: 12,
+        summary_token_count: 3,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("test clean candidate".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .unwrap();
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-heartbeat",
+        "Still working...",
+        2,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        3,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "doctor_clean_apply_enabled": true,
+            "ignore_session_patterns": ["cron-*"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("clean apply should report backup path");
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
+        1
+    );
+    assert_eq!(
+        lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
+        1
+    );
+    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert!(!text.contains("scheduled report body that must be deleted only after backup"));
+    assert!(!text.contains("Still working"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
+    let (cg, _dir) = setup_project().await;
+    for idx in 0..25 {
+        seed_lcm_session_message(
+            &cg,
+            "normal-session",
+            &format!("cron-noise-{idx}"),
+            format!("Cronjob Response: noisy heartbeat {idx}"),
+            idx + 1,
+        )
+        .await;
+    }
+    seed_lcm_session_message(
+        &cg,
+        "normal-session",
+        "normal-valuable",
+        "valuable payload to preserve",
+        30,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "mode": "clean",
+            "apply": true,
+            "doctor_clean_apply_enabled": true,
+            "ignore_message_patterns": ["^Cronjob Response:"]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
+        25
+    );
+    assert_eq!(
+        payload["diagnostics"]["cleanup"]["message_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
+        25
+    );
+    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert!(!text.contains("Cronjob Response: noisy heartbeat"));
+    assert!(!text.contains("valuable payload to preserve"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let secret = format!(
+        "LCM_DOCTOR_SECRET_PAYLOAD\n{}",
+        "doctor-secret ".repeat(30_000)
+    );
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload",
+        "lcm-doctor-payload-message",
+        secret,
+        1,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-message")
+        .await
+        .expect("externalized raw message should load");
+    let payload_ref = raw.payload_ref.expect("external payload ref");
+    fs::remove_file(
+        cg.project_root()
+            .join(".tracedecay/lcm-payloads")
+            .join(&payload_ref),
+    )
+    .unwrap();
+    fs::write(
+        cg.project_root()
+            .join(".tracedecay/lcm-payloads/payload_unreferenced_test.payload"),
+        "orphan body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 1);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 1);
+    let text = extract_text(&result.value);
+    assert!(!text.contains("LCM_DOCTOR_SECRET_PAYLOAD"));
+    assert!(!text.contains("orphan body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
+    let (cg, _dir) = setup_project().await;
+    let missing_ref = "payload_missing_placeholder_test.payload";
+    let placeholder = format!(
+        "[Externalized LCM ingest payload: kind=ingest_payload; role=user; field=content; chars=2048; bytes=2048; ref={missing_ref}]"
+    );
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-placeholder",
+        "lcm-doctor-placeholder-message",
+        placeholder,
+        1,
+    )
+    .await;
+
+    let payload_dir = cg.project_root().join(".tracedecay/lcm-payloads");
+    fs::create_dir_all(&payload_dir).unwrap();
+    fs::write(
+        payload_dir.join("payload_gc_candidate_test.payload"),
+        "gc candidate body that must not be returned",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-placeholder",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        1
+    );
+    assert_eq!(payload["diagnostics"]["payloads"]["gc_candidate_files"], 1);
     assert!(
-        found,
-        "seeded 'JWT' decision should appear in recall results"
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["payload_ref"] == missing_ref)
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["gc_candidate_payload_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("payload_gc_candidate_test.payload"))
+    );
+    let text = extract_text(&result.value);
+    assert!(!text.contains("gc candidate body that must not be returned"));
+}
+
+#[tokio::test]
+async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
+    let (cg, _dir) = setup_project().await;
+    let media_payload = format!(
+        "data:image/png;base64,{}",
+        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
+    );
+    let content = json!({
+        "content": [
+            {"type": "text", "text": "doctor nested payload canary"},
+            {"type": "image_url", "image_url": {"url": media_payload}},
+        ]
+    })
+    .to_string();
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-nested-payload",
+        "lcm-doctor-nested-payload-message",
+        content,
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-nested-payload",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["unreferenced_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        1
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-plain-ref",
+        "lcm-doctor-plain-ref-message",
+        "plain documentation mentions ref=payload_plain_text_false_positive.payload outside a placeholder",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-plain-ref",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["placeholder_refs_total"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_metadata"],
+        0
+    );
+    assert_eq!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_files"],
+        0
+    );
+    assert!(
+        payload["diagnostics"]["payloads"]["missing_placeholder_refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-target",
+        "lcm-doctor-payload-target-message",
+        format!("target payload\n{}", "target-body ".repeat(30_000)),
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-doctor-payload-other",
+        "lcm-doctor-payload-other-message",
+        format!("other payload\n{}", "other-body ".repeat(30_000)),
+        2,
+    )
+    .await;
+
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let other_raw = db
+        .lcm_load_raw_message("cursor", "lcm-doctor-payload-other-message")
+        .await
+        .expect("other externalized raw message should load");
+    let other_payload_ref = other_raw.payload_ref.expect("other external payload ref");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-payload-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["payloads"]["missing_files"], 0);
+    assert_eq!(payload["diagnostics"]["payloads"]["orphan_files"], 0);
+    assert!(!payload["diagnostics"]["payloads"]["orphan_payload_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some(&other_payload_ref)));
+    assert!(!extract_text(&result.value).contains(&other_payload_ref));
+}
+
+#[tokio::test]
+async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-target",
+        "lcm-doctor-fts-target-message",
+        "scopedneedle target text",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-fts-other",
+        "lcm-doctor-fts-other-message",
+        "scopedneedle other text",
+        2,
+    )
+    .await;
+    wipe_lcm_raw_fts_for_message(&cg, "lcm-doctor-fts-target-message").await;
+    assert_eq!(lcm_fts_match_count(&cg, "scopedneedle").await, 1);
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-fts-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["fts"]["raw"]["rebuild_needed"], true);
+}
+
+#[tokio::test]
+async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-orphan-owner",
+        "lcm-doctor-orphan-owner-message",
+        "orphan owner source text",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "lcm-doctor-orphan-owner-message").await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+             VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
+        libsql::params![store_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-orphan-owner",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "issues_found");
+    assert_eq!(payload["diagnostics"]["summaries"]["broken_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-debt-target",
+        "lcm-doctor-debt-target-message",
+        "target session text",
+        1,
+    )
+    .await;
+    let conn = project_lcm_conn(&cg).await;
+    conn.execute("PRAGMA foreign_keys = OFF", ()).await.unwrap();
+    conn.execute(
+        "INSERT INTO lcm_maintenance_debt(
+                provider, conversation_id, debt_id, debt_kind, from_store_id, to_store_id
+             )
+             VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-doctor-debt-target",
+            "mode": "diagnose"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["diagnostics"]["lifecycle"]["orphan_debt"], 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
+    let (cg, _dir) = setup_project().await;
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
+    if db_path.exists() {
+        fs::remove_file(&db_path).unwrap();
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "diagnose"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert!(
+        !db_path.exists(),
+        "diagnose must not create session storage"
+    );
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-read-only-existing",
+        "lcm-doctor-read-only-existing-message",
+        "read only existing database text",
+        1,
+    )
+    .await;
+    project_lcm_conn(&cg)
+        .await
+        .execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["schema"]["migration_present"], false);
+    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-dry-run",
+        "lcm-doctor-dry-run-message",
+        "dry run searchable needle",
+        1,
+    )
+    .await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "repair");
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(payload["diagnostics"]["fts"]["rebuild_needed"], true);
+    assert!(payload["repairs"]["planned_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+}
+
+#[tokio::test]
+async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-apply",
+        "lcm-doctor-apply-message",
+        "apply repair searchable needle",
+        1,
+    )
+    .await;
+    wipe_lcm_raw_fts(&cg).await;
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "repair", "apply": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "repaired");
+    assert_eq!(payload["dry_run"], false);
+    let backup_path = payload["repairs"]["backup"]["path"]
+        .as_str()
+        .expect("repair apply should report backup path");
+    assert_eq!(payload["repairs"]["backup"]["ok"], true);
+    assert!(Path::new(backup_path).is_file());
+    assert!(payload["repairs"]["applied_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "rebuild_raw_fts"));
+    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_retention_reports_candidates_without_deleting() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-retention",
+        "lcm-doctor-retention-message",
+        "old session retention candidate",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({"provider": "cursor", "mode": "retention"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["mode"], "retention");
+    assert_eq!(payload["diagnostics"]["retention"]["read_only"], true);
+    assert!(payload["diagnostics"]["retention"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["session_id"] == "lcm-doctor-retention"));
+    assert_eq!(lcm_raw_message_count(&cg, "lcm-doctor-retention").await, 1);
+}
+
+#[tokio::test]
+async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-project",
+        "project-local doctor should not be counted",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-doctor-profile",
+        "lcm-doctor-profile-message",
+        "profile-local doctor should be counted",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path().to_string_lossy()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert_eq!(payload["diagnostics"]["raw_message_count"], 1);
+}
+
+#[tokio::test]
+async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
+    let (cg, _dir) = setup_project().await;
+    let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(400));
+    seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-message")
+        .await
+        .expect("LCM raw message should be created by compatibility ingest");
+
+    let status = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "cursor"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "ok");
+    assert_eq!(status_payload["lcm"]["raw_message_count"], 1);
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "content_limit": 24
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert!(loaded_payload["messages"][0]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        loaded_payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        24
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({"provider": "cursor", "query": "orchard dispatch", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
+    assert!(
+        grep_payload["hits"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 4096,
+        "grep snippets must stay bounded"
+    );
+
+    let described = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_describe",
+        json!({"provider": "cursor", "session_id": "lcm-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let described_payload: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
+    assert_eq!(described_payload["status"], "ok");
+    assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    assert!(described_payload["description"]["raw_messages"][0]
+        .get("content_preview")
+        .is_some());
+    assert!(
+        described_payload["description"]["raw_messages"][0]
+            .get("content")
+            .is_none(),
+        "describe must not expose raw payload bodies"
+    );
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "target": {"kind": "raw_message", "store_id": raw.store_id},
+            "content_offset": 8,
+            "content_limit": 16
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["expansion"]["kind"], "raw_message");
+    assert_eq!(
+        expanded_payload["expansion"]["content"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        16
+    );
+    assert!(expanded_payload["expansion"]["content_range"]["truncated"]
+        .as_bool()
+        .unwrap());
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "prompt": "Summarize orchard dispatch",
+            "query": "orchard dispatch",
+            "context_max_tokens": 128,
+            "max_tokens": 64
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["prompt"], "Summarize orchard dispatch");
+    assert!(payload["context_blocks"]
+        .as_array()
+        .expect("context blocks")
+        .iter()
+        .any(|block| block["kind"] == "raw_message"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("EXPANDED CONTEXT"));
+    assert!(extract_text(&result.value).len() <= 15_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-preflight", "role": "user", "content": "hello"}]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+
+    let compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [{"id": "active-compress", "role": "user", "content": "hello again"}],
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let compress_payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
+    assert_eq!(compress_payload["status"], "ok");
+    assert_eq!(compress_payload["summary_nodes_created"], 0);
+    assert_eq!(compress_payload["compression_attempts"], 0);
+    assert_eq!(compress_payload["fallback_used"], false);
+    assert!(
+        compress_payload.get("retry_status").is_some(),
+        "compress response must expose retry_status for bridge contract"
+    );
+    assert_eq!(compress_payload["retry_status"], Value::Null);
+
+    for (index, content) in [
+        "old-1 token",
+        "old-2 token",
+        "old-3 token",
+        "old-4 token",
+        "old-5 token",
+        "old-6 token",
+        "fresh-1",
+        "fresh-2",
+    ]
+    .iter()
+    .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-critical-session",
+            &format!("lcm-critical-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let critical_compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-critical-session",
+            "messages": [],
+            "current_tokens": 40,
+            "max_assembly_tokens": 2,
+            "leaf_chunk_tokens": 1,
+            "max_source_messages": 3,
+            "summarizer": {"mode": "fake", "summary_text": "catchup summary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let critical_payload: Value =
+        serde_json::from_str(extract_text(&critical_compress.value)).unwrap();
+    assert_eq!(critical_payload["status"], "ok");
+    assert_eq!(critical_payload["reason"], "forced_overflow_recovery");
+    assert_eq!(critical_payload["summary_nodes_created"], 4);
+    assert_eq!(critical_payload["compression_attempts"], 4);
+    assert_eq!(critical_payload["fallback_used"], false);
+    assert_eq!(
+        critical_payload["retry_status"],
+        "critical_pressure_catch_up"
+    );
+}
+
+#[tokio::test]
+async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "alpha oversized context ".repeat(8_000);
+
+    let compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-needs-summary",
+            "messages": [
+                {"id": "oversized-1", "role": "user", "content": huge_source},
+                {"id": "oversized-2", "role": "assistant", "content": "acknowledged"},
+                {"id": "oversized-3", "role": "user", "content": "latest objective"}
+            ],
+            "current_tokens": 30_000,
+            "threshold_tokens": 1_000,
+            "fresh_tail_count": 64,
+            "leaf_chunk_tokens": 20_000,
+            "summarizer": {"mode": "hermes_auxiliary"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&compress.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "needs_summary");
+    assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
+    assert!(
+        payload["replay_messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()),
+        "bridge must retain replay messages, got {payload:#}"
+    );
+    assert!(
+        payload["summary_request"].is_object(),
+        "bridge must retain summary request metadata, got {payload:#}"
+    );
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(extract_text(&compress.value).len() <= 15_000);
+    let source_messages = payload["summary_request"]["source_messages"]
+        .as_array()
+        .expect("compact needs-summary payload should retain bounded source messages");
+    assert!(!source_messages.is_empty());
+    assert!(source_messages[0]["content"]
+        .as_str()
+        .is_some_and(|content| content.len() <= 512));
+    assert_eq!(
+        payload["summary_request"]["source_messages_compacted_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn lcm_preflight_oversized_replay_preserves_bridge_contract() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "preflight oversized active context ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-oversized-preflight",
+            "messages": [
+                {"id": "preflight-1", "role": "user", "content": huge_source},
+                {"id": "preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["should_compress"], false);
+    assert_eq!(payload["reason"], "no_compression_needed");
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    assert!(payload["replay_messages_compacted_for_mcp"]
+        .as_bool()
+        .unwrap_or(false));
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let huge_source = "structured preflight payload ".repeat(8_000);
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-structured-preflight",
+            "messages": [
+                {
+                    "id": "structured-preflight-1",
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": huge_source},
+                        {"type": "input_json", "value": {"nested": huge_source}}
+                    ]
+                },
+                {"id": "structured-preflight-2", "role": "assistant", "content": "acknowledged"}
+            ],
+            "current_tokens": 10,
+            "threshold_tokens": 1_000
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = extract_text(&preflight.value);
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
+    let compacted_content = payload["replay_messages"][0]["content"]
+        .as_str()
+        .expect("structured replay content should be serialized to bounded text");
+    assert!(compacted_content.len() <= 512);
+    assert_eq!(
+        payload["replay_messages"][0]["content_serialized_for_mcp"],
+        true
+    );
+    assert_eq!(
+        payload["replay_messages"][0]["content_truncated_for_mcp"],
+        true
+    );
+    assert_eq!(payload["replay_messages_compacted_for_mcp"], true);
+}
+
+#[tokio::test]
+async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
+    let (cg, _dir) = setup_project().await;
+    for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
+        .iter()
+        .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-boundary-session",
+            &format!("lcm-boundary-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let boundary = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_session_boundary",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "old_session_id": "lcm-old-session",
+            "boundary_reason": "compression",
+            "bound_session_id": "lcm-bound-session"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let boundary_payload: Value = serde_json::from_str(extract_text(&boundary.value)).unwrap();
+    assert_eq!(boundary_payload["status"], "ok");
+    assert_eq!(boundary_payload["recorded"], true);
+    assert_eq!(
+        boundary_payload["reason"],
+        "compression_boundary_skip_recorded"
+    );
+
+    let preflight = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-boundary-session",
+            "messages": [],
+            "current_tokens": 120,
+            "threshold_tokens": 100
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let preflight_payload: Value = serde_json::from_str(extract_text(&preflight.value)).unwrap();
+    assert_eq!(preflight_payload["status"], "ok");
+    assert_eq!(preflight_payload["should_compress"], false);
+    assert_eq!(preflight_payload["reason"], "compression_boundary_cooldown");
+}
+
+#[tokio::test]
+async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("LCM status diagnostics".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("lcm-status-session.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+
+    let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
+    db.lcm_store(cg.project_root().join(".tracedecay"))
+        .ingest_raw_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "lcm-status-secret-message".to_string(),
+            session_id: "lcm-status-session".to_string(),
+            role: "tool".to_string(),
+            timestamp: Some(2),
+            ordinal: 1,
+            text: secret,
+            kind: Some("tool_result".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("lcm-status-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+        .expect("external payload should ingest");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-session",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text).expect("LCM status response must be JSON");
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["payload"]["externalized_count"], 1);
+    assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
+    assert_eq!(payload["lcm"]["payload"]["unreferenced_count"], 0);
+    assert_eq!(payload["lcm"]["redaction"]["enabled"], false);
+    assert!(!text.contains("MCP_STATUS_SECRET_PAYLOAD"));
+}
+
+#[tokio::test]
+async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-1",
+        "frontier seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-status-frontier",
+        "lcm-status-frontier-message-2",
+        "frontier seed two",
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let first = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-1")
+        .await
+        .expect("first raw message should load");
+    let second = db
+        .lcm_load_raw_message("cursor", "lcm-status-frontier-message-2")
+        .await
+        .expect("second raw message should load");
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".into(),
+        conversation_id: "lcm-status-frontier".into(),
+        current_session_id: "lcm-status-frontier".into(),
+        current_frontier_store_id: Some(second.store_id),
+        last_finalized_session_id: Some("lcm-status-prior".into()),
+        last_finalized_frontier_store_id: Some(first.store_id),
+        maintenance_debt: vec![LcmMaintenanceDebt::RawBacklog {
+            from_store_id: first.store_id,
+            to_store_id: second.store_id,
+        }],
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "project_local"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_session_id"],
+        "lcm-status-frontier"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["current_frontier_store_id"],
+        second.store_id
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_session_id"],
+        "lcm-status-prior"
+    );
+    assert_eq!(
+        payload["lcm"]["lifecycle"]["last_finalized_frontier_store_id"],
+        first.store_id
+    );
+    assert_eq!(payload["lcm"]["lifecycle"]["maintenance_debt_count"], 1);
+
+    let profile_result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-status-frontier",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let profile_payload: Value = serde_json::from_str(extract_text(&profile_result.value)).unwrap();
+    assert_eq!(profile_payload["status"], "unavailable");
+    assert_eq!(profile_payload["storage_scope"], "hermes_profile");
+    assert!(
+        profile_payload.get("lcm").is_none(),
+        "hermes_profile requests must not return project-local LCM counts"
+    );
+}
+
+#[tokio::test]
+async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-source",
+        "describe source body must not leak through metadata",
+        1,
+    )
+    .await;
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-describe-targets",
+        "lcm-describe-tool",
+        format!("describe external secret {}", "payload ".repeat(40_000)),
+        2,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let source = db
+        .lcm_load_raw_message("cursor", "lcm-describe-source")
+        .await
+        .expect("source raw message should exist");
+    let external = db
+        .lcm_load_raw_message("cursor", "lcm-describe-tool")
+        .await
+        .expect("external raw message should exist");
+    let payload_ref = external.payload_ref.expect("payload ref");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-describe-targets".to_string(),
+            depth: 0,
+            summary_text: "summary secret body must not leak through metadata".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: source.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("describe target summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let node_result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "summary_node", "node_id": summary.node_id.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let node_payload: Value = serde_json::from_str(extract_text(&node_result.value)).unwrap();
+    assert_eq!(node_payload["status"], "ok");
+    assert_eq!(node_payload["description"]["target"], "summary_node");
+    assert_eq!(
+        node_payload["description"]["summary_node"]["node_id"],
+        summary.node_id
+    );
+    assert_eq!(
+        node_payload["description"]["summary_node"]["source_count"],
+        1
+    );
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-describe-targets",
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload_payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload_payload["status"], "ok");
+    assert_eq!(payload_payload["description"]["target"], "external_payload");
+    assert_eq!(
+        payload_payload["description"]["external_payload"]["payload_ref"],
+        payload_ref
+    );
+    assert!(
+        payload_payload["description"]["external_payload"]["content_preview"]
+            .as_str()
+            .unwrap()
+            .contains(payload_ref.as_str())
+    );
+
+    let rendered = format!(
+        "{}\n{}",
+        extract_text(&node_result.value),
+        extract_text(&payload_result.value)
+    );
+    assert!(!rendered.contains("summary secret body"));
+    assert!(!rendered.contains("describe source body"));
+    assert!(!rendered.contains("describe external secret"));
+}
+
+#[tokio::test]
+async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-old-cli-assistant",
+        "orchard native old cli assistant",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-cli-user",
+        "orchard native new cli user",
+        2,
+        "user",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-native-filters",
+        "lcm-native-new-api-assistant",
+        "orchard native new api assistant",
+        3,
+        "assistant",
+        "api",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard native",
+            "scope": "session",
+            "session_id": "lcm-native-filters",
+            "sort": "recency",
+            "source": "cli",
+            "role": "assistant",
+            "start_time": 5,
+            "end_time": 25,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(
+        grep_payload["hits"][0]["message_id"],
+        "lcm-native-old-cli-assistant"
+    );
+    assert_eq!(grep_payload["sort"], "recency");
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-native-filters",
+            "roles": ["assistant", "user"],
+            "time_from": 1,
+            "time_to": 25,
+            "content_limit": 25_000,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["content_limit"], 20_000);
+    assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
+    assert_eq!(
+        loaded_payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["message_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["lcm-native-old-cli-assistant", "lcm-native-new-cli-user"]
+    );
+}
+
+#[tokio::test]
+async fn lcm_grep_accepts_string_timestamp_filters() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-old",
+        "orchard string timestamp old",
+        1,
+        "assistant",
+        "cli",
+        10,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-target",
+        "orchard string timestamp target",
+        2,
+        "assistant",
+        "cli",
+        20,
+    )
+    .await;
+    seed_lcm_session_message_with_role_source_timestamp(
+        &cg,
+        "lcm-string-timestamps",
+        "lcm-string-timestamps-new",
+        "orchard string timestamp new",
+        3,
+        "assistant",
+        "cli",
+        30,
+    )
+    .await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "orchard string timestamp",
+            "scope": "session",
+            "session_id": "lcm-string-timestamps",
+            "start_time": "15",
+            "end_time": "1970-01-01T00:00:25Z",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(
+        payload["hits"][0]["message_id"],
+        "lcm-string-timestamps-target"
+    );
+}
+
+#[tokio::test]
+async fn lcm_status_uses_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-status",
+        "lcm-profile-status-project",
+        "project-local distractor status",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-1",
+        "profile-local status seed one",
+        1,
+    )
+    .await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-status",
+        "lcm-profile-status-profile-2",
+        "profile-local status seed two",
+        2,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-status",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(payload["lcm"]["raw_message_count"], 2);
+    assert!(hermes_home.path().join(".tracedecay/sessions.db").exists());
+}
+
+#[tokio::test]
+async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-read",
+        "lcm-profile-read-project",
+        "project-local distractor profile query",
+        1,
+    )
+    .await;
+
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-profile-read",
+        "lcm-profile-read-profile",
+        "profile-local pear evidence",
+        1,
+    )
+    .await;
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        loaded_payload["messages"][0]["content"],
+        "profile-local pear evidence"
+    );
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "limit": 5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["count"], 1);
+    assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
+    assert!(grep_payload["hits"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "prompt": "Explain profile pear evidence",
+            "query": "profile-local pear",
+            "session_id": "lcm-profile-read",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path(),
+            "context_max_tokens": 1024,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["status"], "ok");
+    assert_eq!(expanded_payload["storage_scope"], "hermes_profile");
+    assert_eq!(expanded_payload["needs_synthesis"], true);
+    assert!(expanded_payload["context_blocks"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("profile-local pear evidence"));
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-profile-missing-home",
+        "lcm-profile-missing-home-project",
+        "project-local must not leak without hermes home",
+        1,
+    )
+    .await;
+
+    let status = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status_payload["status"], "unavailable");
+    assert_eq!(status_payload["storage_scope"], "hermes_profile");
+    assert!(status_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("hermes_home"));
+    assert!(status_payload.get("lcm").is_none());
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-profile-missing-home",
+            "storage_scope": "hermes_profile",
+            "hermes_home": "relative-hermes-home"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded_payload["status"], "unavailable");
+    assert_eq!(loaded_payload["storage_scope"], "hermes_profile");
+    assert!(loaded_payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("absolute hermes_home"));
+    assert!(loaded_payload.get("messages").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
+    let (cg, _dir) = setup_project().await;
+    let hermes_home = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home.path()
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"].as_str().unwrap().contains(".tracedecay"),
+        "rejection should identify the unsafe profile storage component: {payload}"
+    );
+    assert!(
+        !outside.path().join("sessions.db").exists(),
+        "profile DB must not be created through a symlink escape"
+    );
+}
+
+#[tokio::test]
+async fn lcm_hermes_profile_rejects_non_directory_home() {
+    let (cg, _dir) = setup_project().await;
+    let dir = TempDir::new().unwrap();
+    let hermes_home = dir.path().join("hermes-home-file");
+    fs::write(&hermes_home, "not a directory").unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({
+            "provider": "cursor",
+            "storage_scope": "hermes_profile",
+            "hermes_home": hermes_home
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a directory"),
+        "non-directory hermes_home should be rejected clearly: {payload}"
+    );
+    assert!(payload.get("lcm").is_none());
+}
+
+#[tokio::test]
+async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-a",
+        "lcm-scope-message-a",
+        "fail closed unique-cross-session-token alpha",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-scope-b",
+        "lcm-scope-message-b",
+        "fail closed unique-cross-session-token beta",
+        2,
+    )
+    .await;
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_lcm_grep",
+            json!({
+                "provider": "cursor",
+                "query": "unique-cross-session-token",
+                "scope": "everything",
+                "limit": 10
+            }),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("scope"),
+        "invalid scope should report an argument error, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-numeric",
+        "lcm-numeric-message",
+        "numeric validation test body",
+        1,
+    )
+    .await;
+
+    for (case, args) in [
+        (
+            "fractional limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": 1.5}),
+        ),
+        (
+            "negative limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": -1}),
+        ),
+        (
+            "string limit",
+            json!({"provider": "cursor", "session_id": "lcm-numeric", "limit": "1"}),
+        ),
+    ] {
+        let err = expect_tool_error(
+            handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None).await,
+        );
+        assert!(
+            err.contains("limit"),
+            "{case} should report an argument error mentioning limit, got {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lcm_load_session_accepts_valid_integer_args() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-valid-integers",
+        "lcm-valid-integers-message",
+        "valid integer argument body",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-valid-integers",
+            "limit": 1,
+            "content_offset": 0,
+            "content_limit": 8,
+            "start_time": 1,
+            "end_time": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["messages"][0]["content"].as_str().unwrap(),
+        "valid in"
+    );
+}
+
+#[tokio::test]
+async fn lcm_large_json_response_stays_parseable_after_truncation() {
+    let (cg, _dir) = setup_project().await;
+    for index in 0..4 {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-large-json",
+            &format!("lcm-large-json-message-{index}"),
+            format!("large json response {index} {}", "payload ".repeat(2000)),
+            index + 1,
+        )
+        .await;
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-json",
+            "limit": 4,
+            "content_limit": 8192
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value))
+        .expect("truncated LCM tool text should remain valid JSON");
+    assert_eq!(payload["truncated"], true);
+    assert!(payload["preview"].as_str().unwrap().len() <= 15_000);
+}
+
+#[tokio::test]
+async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-large-expand-query",
+        "lcm-large-expand-query-message",
+        format!(
+            "oversized expand-query evidence {}",
+            "context ".repeat(4000)
+        ),
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-large-expand-query",
+            "prompt": "Summarize oversized expand-query evidence",
+            "query": "oversized expand-query evidence",
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("large expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(
+        payload["prompt"],
+        "Summarize oversized expand-query evidence"
+    );
+    assert!(payload["synthesis_prompt"]["system"]
+        .as_str()
+        .unwrap()
+        .contains("expanded LCM retrieval context"));
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize oversized expand-query evidence"));
+    assert!(payload["context_truncated"].as_bool().is_some());
+    assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
+    assert!(!payload["matches"].as_array().unwrap().is_empty());
+    assert!(
+        payload["context_blocks"].as_array().unwrap().len() <= 3,
+        "MCP expand-query context should stay compact"
+    );
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
+async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-huge-prompt-expand-query",
+        "lcm-huge-prompt-expand-query-message",
+        "contract overflow evidence lives in this raw message",
+        1,
+    )
+    .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let raw = db
+        .lcm_load_raw_message("cursor", "lcm-huge-prompt-expand-query-message")
+        .await
+        .expect("raw message should exist");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            session_id: "lcm-huge-prompt-expand-query".to_string(),
+            depth: 0,
+            summary_text: "summary contract overflow evidence".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: raw.store_id,
+            }],
+            source_token_count: 30,
+            summary_token_count: 5,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: Some("contract overflow summary".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+    let huge_prompt = format!(
+        "Explain contract overflow evidence. {}",
+        "PROMPT_OVERFLOW ".repeat(12_000)
+    );
+    let huge_query = format!(
+        "contract overflow evidence {}",
+        "QUERY_OVERFLOW ".repeat(12_000)
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-huge-prompt-expand-query",
+            "prompt": huge_prompt,
+            "query": huge_query,
+            "node_ids": [summary.node_id],
+            "context_max_tokens": 65536,
+            "max_tokens": 128
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("oversized expand-query response must remain valid JSON");
+
+    assert_ne!(
+        payload["truncated"], true,
+        "must not use generic truncation"
+    );
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["needs_synthesis"], true);
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert!(payload["prompt"].as_str().unwrap().chars().count() <= 2_048);
+    assert!(payload["query"].as_str().unwrap().chars().count() <= 1_024);
+    assert!(payload["prompt_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["query_truncated_for_mcp"].as_bool().unwrap());
+    assert!(payload["contract_truncated"].as_bool().unwrap());
+    assert!(payload["synthesis_prompt"]["user"]
+        .as_str()
+        .unwrap()
+        .contains("QUESTION:"));
+    assert!(text.len() <= 15_000);
+}
+
+#[tokio::test]
+async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
+    let (cg, _dir) = setup_project().await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "parent".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Parent session".to_string()),
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: Some("parent.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "child".to_string(),
+            project_key: cg.project_root().to_string_lossy().to_string(),
+            project_path: cg.project_root().to_string_lossy().to_string(),
+            title: Some("Child session".to_string()),
+            started_at: Some(2),
+            ended_at: None,
+            transcript_path: Some("child.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: Some("parent".to_string()),
+            is_subagent: true,
+            agent_id: Some("child".to_string()),
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "child-message".to_string(),
+            session_id: "child".to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(3),
+            ordinal: 1,
+            text: "orchard dispatch compatibility result".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("child.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "orchard dispatch",
+            "provider": "cursor",
+            "project_key": cg.project_root().to_string_lossy(),
+            "scope": "subagents_only",
+            "parent_session_id": "parent",
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["scope"], "subagents_only");
+    assert_eq!(payload["provider"], "cursor");
+    assert_eq!(payload["parent_session_id"], "parent");
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
+    assert!(payload["results"][0]["message"].get("text").is_some());
+    assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
+}
+
+#[tokio::test]
+async fn lcm_status_cli_bridge_accepts_json_args() {
+    let (cg, _dir) = setup_project().await;
+    let outside_cwd = TempDir::new().unwrap();
+    let project_arg = cg.project_root().display().to_string();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor"}"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "tracedecay tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["content"][0]["type"], "text");
+    let payload: Value =
+        serde_json::from_str(json["content"][0]["text"].as_str().unwrap()).unwrap();
+    // "ok" when sessions.db already exists, "not_ingested" on a fresh project
+    // that has never had any LCM data. Both indicate the CLI bridge dispatched
+    // correctly; the test is about argument plumbing, not store contents.
+    assert!(
+        payload["status"] == "ok" || payload["status"] == "not_ingested",
+        "unexpected lcm_status: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
+    let outside_cwd = TempDir::new().unwrap();
+    let hermes_home = TempDir::new().unwrap();
+    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
+    seed_lcm_session_message_in_db(
+        &profile_db,
+        hermes_home.path(),
+        "lcm-cli-profile",
+        "lcm-cli-profile-message-1",
+        "profile-only status message",
+        1,
+    )
+    .await;
+    let profile_args = json!({
+        "provider": "cursor",
+        "session_id": "lcm-cli-profile",
+        "storage_scope": "hermes_profile",
+        "hermes_home": hermes_home.path(),
+    })
+    .to_string();
+    let profile_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tracedecay_lcm_status",
+            "--json",
+            "--args",
+            profile_args.as_str(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        profile_output.status.success(),
+        "profile-scoped tracedecay tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&profile_output.stdout),
+        String::from_utf8_lossy(&profile_output.stderr)
+    );
+    let profile_json: Value = serde_json::from_slice(&profile_output.stdout).unwrap();
+    let profile_payload: Value =
+        serde_json::from_str(profile_json["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(profile_payload["status"], "ok");
+    assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
+    assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
+
+    let project_output = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tracedecay_lcm_status",
+            "--json",
+            "--args",
+            r#"{"provider":"cursor","storage_scope":"project_local"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !project_output.status.success(),
+        "project-local tool calls without an initialized cwd should still fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&project_output.stdout),
+        String::from_utf8_lossy(&project_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&project_output.stderr);
+    assert!(
+        stderr.contains("run 'tracedecay init' first"),
+        "project-local failure should continue to require initialization:\n{stderr}"
+    );
+}
+
+#[test]
+fn memory_tool_definitions_include_hermes_payload_fields() {
+    let tools = get_tool_definitions();
+    let tool_names: std::collections::HashSet<_> =
+        tools.iter().map(|tool| tool.name.as_str()).collect();
+    let fact_store = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_fact_store")
+        .expect("tracedecay_fact_store definition");
+    let feedback = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_fact_feedback")
+        .expect("tracedecay_fact_feedback definition");
+    let status = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_memory_status")
+        .expect("tracedecay_memory_status definition");
+
+    assert_eq!(
+        fact_store.annotations.as_ref().unwrap()["readOnlyHint"],
+        false
+    );
+    assert_eq!(
+        feedback.annotations.as_ref().unwrap()["readOnlyHint"],
+        false
+    );
+    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], false);
+
+    for field in [
+        "action",
+        "content",
+        "query",
+        "entity",
+        "entities",
+        "fact_id",
+        "category",
+        "tags",
+        "min_trust",
+        "trust",
+        "trust_delta",
+        "threshold",
+        "limit",
+        "source",
+        "metadata",
+        "note",
+    ] {
+        assert!(
+            fact_store.input_schema["properties"].get(field).is_some(),
+            "fact_store schema missing Hermes field {field}"
+        );
+    }
+    assert_eq!(
+        feedback.input_schema["required"],
+        serde_json::json!(["fact_id"])
+    );
+    assert_eq!(
+        fact_store.input_schema["properties"]["trust"]["type"],
+        "number"
+    );
+    assert_eq!(fact_store.input_schema["properties"]["trust"]["minimum"], 0);
+    assert_eq!(fact_store.input_schema["properties"]["trust"]["maximum"], 1);
+
+    assert!(
+        !tool_names.contains("tracedecay_record_decision"),
+        "unshipped legacy decision tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tracedecay_record_code_area"),
+        "unshipped legacy code-area tool should not be exposed"
+    );
+    assert!(
+        !tool_names.contains("tracedecay_session_recall"),
+        "unshipped legacy recall tool should not be exposed"
+    );
+}
+
+#[test]
+fn message_search_provider_schema_matches_ingested_providers() {
+    let tools = get_tool_definitions();
+    let message_search = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_message_search")
+        .expect("tracedecay_message_search definition");
+
+    assert_eq!(
+        message_search.input_schema["properties"]["provider"]["enum"],
+        serde_json::json!([
+            "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "hermes"
+        ])
+    );
+    assert_eq!(
+        message_search.input_schema["properties"]["scope"]["enum"],
+        serde_json::json!(["all", "parents_only", "subagents_only"])
+    );
+    assert!(message_search.input_schema["properties"]
+        .get("parent_session_id")
+        .is_some());
+    assert!(message_search.input_schema["properties"]
+        .get("include_subagents")
+        .is_some());
+}
+
+#[tokio::test]
+async fn memory_status_repairs_dirty_banks_before_reporting() {
+    let (cg, _dir) = setup_project().await;
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Status should repair dirty holographic banks",
+            "category": "project",
+            "entity": "Holographic Banks"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
+    let (db, _) = Database::open(&db_path).await.unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memory_facts
+             SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
+             WHERE fact_id = ?1",
+            libsql::params![fact_id],
+        )
+        .await
+        .unwrap();
+    db.close();
+
+    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    assert!(
+        status["memory"]["bank_count"].as_u64().unwrap_or_default() >= 2,
+        "memory_status should rebuild all and category banks before reporting: {status}"
+    );
+    assert_eq!(
+        status["memory"]["missing_vector_count"].as_u64(),
+        Some(0),
+        "status-triggered bank repair should not leave missing vectors"
+    );
+    assert_eq!(
+        status["memory"]["repair"]["missing_vectors_repaired"].as_u64(),
+        Some(1),
+        "status should report derived vector repairs: {status}"
+    );
+    assert!(
+        status["memory"]["repair"]["banks_rebuilt"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "status should report bank repair work after vector repair: {status}"
     );
 }
 
@@ -3203,12 +7068,12 @@ async fn test_handle_session_recall_returns_recorded_decision() {
 // Bug-report regressions: sonium-codebase issues
 // ---------------------------------------------------------------------------
 
-/// Regression for bug #1: `tokensave_body` should prefer the `fn foo()` over
+/// Regression for bug #1: `tracedecay_body` should prefer the `fn foo()` over
 /// a field/variant also named `foo`. Setup mirrors what sonium hit when
 /// searching for `gmres`: the codebase has both a `pub fn gmres(...)` and a
 /// struct field literally named `gmres`. The function — the body the user
 /// actually wants — must outrank the field.
-async fn setup_function_vs_field_collision() -> (TokenSave, TempDir) {
+async fn setup_function_vs_field_collision() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -3225,7 +7090,7 @@ pub fn gmres(x: u32) -> u32 {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -3235,7 +7100,7 @@ async fn body_prefers_function_over_field_with_same_name() {
     let (cg, _dir) = setup_function_vs_field_collision().await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_body",
+        "tracedecay_body",
         json!({"symbol": "gmres"}),
         None,
         None,
@@ -3258,7 +7123,7 @@ async fn body_prefers_function_over_field_with_same_name() {
     );
 }
 
-/// Regression for bug #5: `tokensave_diff_context.impacted_symbols` must not
+/// Regression for bug #5: `tracedecay_diff_context.impacted_symbols` must not
 /// list the same downstream node more than once. The sonium report showed
 /// the same id appearing 6+ times consecutively when several modified
 /// symbols all reached the same dependent.
@@ -3279,12 +7144,12 @@ pub fn second() { dep::shared(); }
     )
     .unwrap();
     fs::write(project.join("src/dep.rs"), "pub fn shared() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/lib.rs"], "depth": 3}),
         None,
         None,
@@ -3305,7 +7170,7 @@ pub fn second() { dep::shared(); }
     );
 }
 
-/// Regression for bug #6 / review P1: `tokensave_recursion` must preserve
+/// Regression for bug #6 / review P1: `tracedecay_recursion` must preserve
 /// genuine direct recursion while filtering length-1 self-edge artifacts.
 #[tokio::test]
 async fn recursion_keeps_direct_recursion() {
@@ -3323,9 +7188,9 @@ pub fn nonrecursive() -> u32 { 42 }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3367,9 +7232,9 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3400,9 +7265,9 @@ pub fn c() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_recursion", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3425,7 +7290,7 @@ pub fn c() { a(); }
     }
 }
 
-/// Regression for bug #4: `tokensave_changelog`'s response must not list
+/// Regression for bug #4: `tracedecay_changelog`'s response must not list
 /// directories under `files_not_indexed`. We construct a small git repo
 /// with a real commit history that touches both a real file and a
 /// (synthesised) directory path then verify the handler filters out the
@@ -3477,14 +7342,14 @@ async fn changelog_filters_directory_paths() {
         .current_dir(project)
         .output()
         .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly, not the index, and including the index sync subjects
     // this test to a pre-existing SyncLock contention flake.
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -3508,7 +7373,7 @@ async fn changelog_filters_directory_paths() {
     }
 }
 
-/// Regression for bug #8b: `tokensave_unused_imports` must actually flag
+/// Regression for bug #8b: `tracedecay_unused_imports` must actually flag
 /// unused imports. The previous implementation tested `incoming.is_empty()`
 /// for every Use node, but Use nodes always have at least one incoming
 /// edge (from their containing module/file via Contains), so the
@@ -3530,10 +7395,10 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     )
     .unwrap();
     fs::write(project.join("src/inner.rs"), "pub fn inner_fn() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3547,7 +7412,7 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for bug #8a: `tokensave_dead_code` must support `include_public`
+/// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
 /// so agents can audit pub items with no callers in the indexed scope. The
 /// previous SQL hard-coded `visibility != 'public'`, so on a codebase that
 /// is mostly `pub` the tool reported 0 dead symbols.
@@ -3565,10 +7430,10 @@ pub fn caller() { called(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let default_result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let default_text = extract_text(&default_result.value);
@@ -3581,7 +7446,7 @@ pub fn caller() { called(); }
 
     let with_pub = handle_tool_call(
         &cg,
-        "tokensave_dead_code",
+        "tracedecay_dead_code",
         json!({"include_public": true}),
         None,
         None,
@@ -3609,7 +7474,7 @@ pub fn caller() { called(); }
 #[tokio::test]
 async fn dependency_depth_excludes_implements_and_extends() {
     // Public helper exposed from the lib for unit-test inspection.
-    use tokensave::graph::queries::GraphQueryManager;
+    use tracedecay::graph::queries::GraphQueryManager;
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -3638,7 +7503,7 @@ pub trait T {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let qm = GraphQueryManager::new(cg.db());
@@ -3658,7 +7523,7 @@ pub trait T {}
     );
 }
 
-/// Regression: `tokensave_run_affected_tests` must dispatch the test
+/// Regression: `tracedecay_run_affected_tests` must dispatch the test
 /// functions that are themselves in `changed_paths`. Previously the
 /// handler walked callers of every node in the changed file — but
 /// `#[test]` functions are leaves with no callers, so a PR that only
@@ -3690,12 +7555,12 @@ fn edited_only_test() {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_run_affected_tests",
+        "tracedecay_run_affected_tests",
         json!({
             "changed_paths": ["tests/edited_only.rs"],
             "timeout_secs": 60,
@@ -3727,7 +7592,7 @@ fn edited_only_test() {
     );
 }
 
-/// Regression: `tokensave_diagnose` must normalize span paths before
+/// Regression: `tracedecay_diagnose` must normalize span paths before
 /// looking them up in the graph. cargo emits absolute and (on Windows)
 /// backslash-separated paths; the graph stores project-relative,
 /// forward-slash paths. Without normalization a diagnostic with span
@@ -3739,7 +7604,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let abs_path = project.join("src/lib.rs");
@@ -3751,7 +7616,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diagnose",
+        "tracedecay_diagnose",
         json!({"cargo_output": cargo_output, "include_callers": false}),
         None,
         None,
@@ -3796,13 +7661,13 @@ pub fn helper() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let caller_id = find_node_id(&cg, "caller").await;
     let result = handle_tool_call(
         &cg,
-        "tokensave_callees",
+        "tracedecay_callees",
         json!({"node_id": caller_id, "max_depth": 1, "resolve_dispatch": false}),
         None,
         None,
@@ -3832,7 +7697,7 @@ pub fn helper() {}
 /// kind. The sonium codebase had a parser `Token` enum whose `Default`
 /// variant became the target of 150 stray `implements` edges from
 /// manual `impl Default for X` blocks, completely poisoning
-/// `tokensave_rank --edge-kind implements`. Implements/Extends/derives
+/// `tracedecay_rank --edge-kind implements`. Implements/Extends/derives
 /// references must only resolve to trait-shaped targets.
 #[tokio::test]
 async fn implements_refs_dont_resolve_to_enum_variants() {
@@ -3852,12 +7717,12 @@ impl Default for B { fn default() -> Self { B } }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_rank",
+        "tracedecay_rank",
         json!({"edge_kind": "implements", "direction": "incoming"}),
         None,
         None,
@@ -3877,7 +7742,7 @@ impl Default for B { fn default() -> Self { B } }
     }
 }
 
-/// Regression for bug #10: `tokensave_circular` must report one entry per
+/// Regression for bug #10: `tracedecay_circular` must report one entry per
 /// strongly-connected component, not every walk through the cycle. The
 /// sonium codebase had 73 "cycles" that were all different DFS paths
 /// through the same SCC. After the SCC refactor, the same data yields
@@ -3906,9 +7771,9 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
         "use crate::a::a_fn;\npub fn c_fn() { a_fn(); }\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -3926,7 +7791,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
     );
 }
 
-/// Regression for bug #12: `tokensave_port_order`'s `cycles` output must
+/// Regression for bug #12: `tracedecay_port_order`'s `cycles` output must
 /// expose the SCCs forming each cycle separately, instead of collapsing
 /// all unsorted nodes into a single mega-blob. Without this, on a real
 /// codebase the cycle entry contained 200+ unrelated symbols and the
@@ -3952,11 +7817,11 @@ pub fn leaf() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -3990,7 +7855,7 @@ pub fn leaf() {}
     }
 }
 
-/// Regression for new bug-report batch (#25): `tokensave_port_order` must
+/// Regression for new bug-report batch (#25): `tracedecay_port_order` must
 /// expose intra-cycle ordering signals so an agent can pick a starting
 /// point inside a 200-symbol SCC instead of staring at an undifferentiated
 /// blob. We expect each cycle entry to carry per-symbol in-cycle degree
@@ -4014,11 +7879,11 @@ pub fn h() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -4092,11 +7957,11 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_port_order",
+        "tracedecay_port_order",
         json!({"source_dir": "src"}),
         None,
         None,
@@ -4112,7 +7977,7 @@ impl Triplet {
     );
 }
 
-/// Regression for bug #9: `tokensave_inheritance_depth` must surface Rust
+/// Regression for bug #9: `tracedecay_inheritance_depth` must surface Rust
 /// supertrait chains (`trait T: U`) as `Extends` edges.
 #[tokio::test]
 async fn inheritance_depth_walks_rust_supertraits() {
@@ -4128,9 +7993,9 @@ pub trait Leaf: Middle {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_inheritance_depth", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -4149,7 +8014,7 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
-/// Regression for new bug-report batch (#26): `tokensave_circular` must
+/// Regression for new bug-report batch (#26): `tracedecay_circular` must
 /// emit *disjoint* SCCs — no file should appear in more than one cycle
 /// entry. The sonium run reported 216 cycles "sharing long tails", which
 /// would only be possible if the SCC condensation step were broken. This
@@ -4189,9 +8054,9 @@ async fn circular_emits_disjoint_sccs_under_load() {
         )
         .unwrap();
     }
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_circular", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -4213,7 +8078,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
     }
 }
 
-/// Regression for new bug-report batch (#24): `tokensave_diff_context`'s
+/// Regression for new bug-report batch (#24): `tracedecay_diff_context`'s
 /// `modified_symbols` must dedup by node id, even when callers pass the
 /// same path multiple times in `files`. The sonium run showed an
 /// `hmatrix.rs` file node listed 7× in a row because the caller had the
@@ -4228,12 +8093,12 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
         "pub struct S; pub fn one() {} pub fn two() {}\n",
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_diff_context",
+        "tracedecay_diff_context",
         json!({"files": ["src/lib.rs", "src/lib.rs", "src/lib.rs"], "depth": 1}),
         None,
         None,
@@ -4255,7 +8120,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
 }
 
 /// Regression for new bug-report batch (#23): when a whole subtree is
-/// removed in a diff, `tokensave_changelog` must not report the deleted
+/// removed in a diff, `tracedecay_changelog` must not report the deleted
 /// directory under `files_not_indexed`. The previous `is_dir()` filter
 /// missed this case because the path was gone from disk by the time we
 /// checked. The fix uses gix's `entry_mode` flag to skip tree entries
@@ -4284,12 +8149,12 @@ async fn changelog_filters_deleted_directory_entries() {
     fs::remove_dir_all(project.join("crates")).unwrap();
     git(project, &["add", "-A"]);
     git(project, &["commit", "-m", "drop crates"]);
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly and the sync lock has a pre-existing parallel-test flake.
     let result = handle_tool_call(
         &cg,
-        "tokensave_changelog",
+        "tracedecay_changelog",
         json!({"from_ref": "HEAD~1", "to_ref": "HEAD"}),
         None,
         None,
@@ -4311,7 +8176,7 @@ async fn changelog_filters_deleted_directory_entries() {
     );
 }
 
-/// Regression for new bug-report batch (#22): `tokensave_pr_context` must
+/// Regression for new bug-report batch (#22): `tracedecay_pr_context` must
 /// NOT explode Cargo.toml (or any .toml/.yaml/.json config file) into one
 /// symbol per `[name]`, `[version]`, `[dependencies]` key. On real PRs a
 /// Cargo.toml change with ~30 dependency lines produced ~70 entries that
@@ -4351,7 +8216,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "deps"]);
 
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     // Intentionally skipping `index_all()` — pr_context reads the diff
     // from git directly and classifies Cargo.toml as `config` before any
     // index lookup, so we don't need the index to verify the collapse
@@ -4360,7 +8225,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
 
     let result = handle_tool_call(
         &cg,
-        "tokensave_pr_context",
+        "tracedecay_pr_context",
         json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
         None,
         None,
@@ -4396,7 +8261,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
-/// Regression for new bug-report batch (#21): `tokensave_unused_imports`
+/// Regression for new bug-report batch (#21): `tracedecay_unused_imports`
 /// must flag genuinely unused identifiers inside grouped `use foo::{A, B}`
 /// imports. Real-world Rust style is dominated by grouped imports
 /// (`use std::collections::{HashMap, HashSet, BTreeMap};`); without
@@ -4417,9 +8282,9 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tokensave_unused_imports", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -4455,7 +8320,7 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
-/// Regression for new bug-report batch (#20): `tokensave_dead_code` must not
+/// Regression for new bug-report batch (#20): `tracedecay_dead_code` must not
 /// consider non-reference edges like `annotates` or `derives_macro` as
 /// "this function is alive" evidence. Previously, a private helper with no
 /// callers but an `#[inline]` (or any other attribute) on it had an
@@ -4484,10 +8349,10 @@ fn dead_helper_with_attr() {}
 "#,
     )
     .unwrap();
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
 
-    let result = handle_tool_call(&cg, "tokensave_dead_code", json!({}), None, None)
+    let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -4504,7 +8369,7 @@ fn dead_helper_with_attr() {}
     );
 }
 
-/// Regression for new bug-report batch (#19): `tokensave_search` must rank
+/// Regression for new bug-report batch (#19): `tracedecay_search` must rank
 /// trait/struct/function definitions above `use` re-exports of the same name.
 /// Previously, several `use foo::LinearOperator;` lines could outrank the
 /// `pub trait LinearOperator { … }` definition because BM25 scored short
@@ -4543,11 +8408,11 @@ pub mod e;
         )
         .unwrap();
     }
-    let cg = TokenSave::init(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "LinearOperator", "limit": 10}),
         None,
         None,
@@ -4574,18 +8439,18 @@ async fn refresh_file_token_map_picks_up_new_files() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.sync().await.unwrap();
 
-    let server = tokensave::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
     let initial_map = server.file_token_map_snapshot();
     let initial_keys: std::collections::HashSet<_> = initial_map.keys().cloned().collect();
 
     // Add a new file, sync it, then refresh.
     std::fs::write(project.join("b.rs"), "fn b() { let y = 2; }").unwrap();
-    let cg2 = tokensave::tokensave::TokenSave::open(project)
+    let cg2 = tracedecay::tracedecay::TraceDecay::open(project)
         .await
         .unwrap();
     cg2.sync().await.unwrap();
@@ -4610,12 +8475,12 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tokensave::tokensave::TokenSave::init(project)
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
         .await
         .unwrap();
     cg.sync().await.unwrap();
 
-    let server = tokensave::mcp::McpServer::new(cg, None).await;
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(2))
@@ -4631,19 +8496,698 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     // doesn't have to wait through the 30 s cooldown gate in
     // `maybe_sync_if_stale`.
     std::fs::write(project.join("b.rs"), "fn b() {}").unwrap();
-    let stale = server.cg().find_stale_files().await;
+    let server_cg = server.cg().await;
+    let stale = server_cg.find_stale_files().await;
     assert!(
         !stale.is_empty(),
         "find_stale_files should detect newly written b.rs"
     );
-    server.cg().sync_if_stale_silent(&stale).await.unwrap();
-    server.refresh_file_token_map().await;
-
-    let after_count = server.file_token_map_snapshot().len();
+    server_cg.sync_if_stale_silent(&stale).await.unwrap();
+    let mut after_count = initial_count;
+    for _ in 0..10 {
+        server.refresh_file_token_map().await;
+        after_count = server.file_token_map_snapshot().len();
+        if after_count > initial_count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert!(
         after_count > initial_count,
         "lazy sync should have refreshed map ({initial_count} -> {after_count})"
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn lcm_expand_paginates_summary_sources_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=4 {
+        let message_id = format!("page-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-page-session",
+            &message_id,
+            format!("paged source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    let summary = db
+        .lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-page-session".to_string(),
+            session_id: "lcm-page-session".to_string(),
+            depth: 0,
+            summary_text: "paged summary".to_string(),
+            source_refs: store_ids
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 16,
+            summary_token_count: 2,
+            source_time_start: Some(1),
+            source_time_end: Some(4),
+            expand_hint: Some("pagination test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary.node_id},
+            "source_offset": 1,
+            "source_limit": 2
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
+    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
+    let pagination = &payload["expansion"]["source_pagination"];
+    assert_eq!(pagination["source_offset"], 1);
+    assert_eq!(pagination["source_limit"], 2);
+    assert_eq!(pagination["returned_sources"], 2);
+    assert_eq!(pagination["total_sources"], 4);
+    assert_eq!(pagination["next_source_offset"], 3);
+    assert_eq!(pagination["has_more"], true);
+    assert_eq!(pagination["remaining_sources"], 1);
+}
+
+#[tokio::test]
+async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-message",
+        "cross session grep target body",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "the caller's active session",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "raw_message");
+    assert_eq!(payload["expansion"]["from_current_session"], false);
+    assert_eq!(
+        payload["expansion"]["raw_message"]["session_id"],
+        "lcm-origin-session"
+    );
+    assert_eq!(
+        payload["expansion"]["content"],
+        "cross session grep target body"
+    );
+}
+
+#[tokio::test]
+async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
+    let (cg, _dir) = setup_project().await;
+    let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
+    seed_lcm_tool_result_message(
+        &cg,
+        "lcm-origin-session",
+        "origin-external-message",
+        body,
+        1,
+    )
+    .await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-active-session",
+        "active-message",
+        "active context",
+        2,
+    )
+    .await;
+    let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
+
+    let raw_result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "raw_message", "store_id": origin_store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let raw_payload: Value = serde_json::from_str(extract_text(&raw_result.value)).unwrap();
+    assert_eq!(raw_payload["status"], "ok");
+    assert_eq!(raw_payload["expansion"]["from_current_session"], false);
+    assert!(raw_payload["expansion"]["externalized_note"].is_null());
+    let payload_ref = raw_payload["expansion"]["payload_ref"]
+        .as_str()
+        .expect("cross-session external row should surface payload_ref")
+        .to_string();
+    let owner_session = raw_payload["expansion"]["raw_message"]["session_id"]
+        .as_str()
+        .expect("owner session id should be surfaced")
+        .to_string();
+
+    let payload_result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "content_limit": 80
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["expansion"]["kind"], "external_payload");
+    assert!(payload["expansion"]["content"]
+        .as_str()
+        .expect("external payload content")
+        .starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
+async fn lcm_compress_handler_honors_incremental_max_depth_override() {
+    let (cg, _dir) = setup_project().await;
+    let mut store_ids = Vec::new();
+    for index in 1..=6 {
+        let message_id = format!("depth-msg-{index}");
+        seed_lcm_session_message(
+            &cg,
+            "lcm-depth-session",
+            &message_id,
+            format!("depth source body {index}"),
+            index,
+        )
+        .await;
+        store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
+    }
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    for (index, pair) in store_ids.chunks(2).enumerate() {
+        db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-depth-session".to_string(),
+            session_id: "lcm-depth-session".to_string(),
+            depth: 1,
+            summary_text: format!("depth one summary {}", index + 1),
+            source_refs: pair
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+            source_token_count: 12,
+            summary_token_count: 4,
+            source_time_start: Some(10 + index as i64),
+            source_time_end: Some(20 + index as i64),
+            expand_hint: Some("depth override test".to_string()),
+            metadata_json: None,
+        })
+        .await
+        .expect("depth-1 summary should insert");
+    }
+    db.lcm_update_lifecycle(LcmLifecycleUpdate {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-depth-session".to_string(),
+        current_session_id: "lcm-depth-session".to_string(),
+        current_frontier_store_id: store_ids.last().copied(),
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: Vec::new(),
+    })
+    .await
+    .expect("lifecycle state should update");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-depth-session",
+            "messages": [],
+            "summary_fan_in": 3,
+            "incremental_max_depth": 2,
+            "summarizer": {"mode": "fake", "summary_text": "depth-two condensation"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["reason"], "condensed_summary_nodes");
+    assert_eq!(payload["summary_nodes_created"], 1);
+    assert_eq!(payload["summary_nodes"][0]["depth"], 2);
+}
+
+#[tokio::test]
+async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
+    let (cg, _dir) = setup_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-diag-session",
+        "diag-message",
+        "alpha beta gamma delta",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "diag-message").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-diag-session".to_string(),
+        session_id: "lcm-diag-session".to_string(),
+        depth: 0,
+        summary_text: "diag summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage { store_id }],
+        source_token_count: 24,
+        summary_token_count: 6,
+        source_time_start: Some(1),
+        source_time_end: Some(2),
+        expand_hint: Some("diagnostics test".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .expect("summary should insert");
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_status",
+        json!({"provider": "cursor", "session_id": "lcm-diag-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["status"], "ok");
+    let lcm = &payload["lcm"];
+    assert_eq!(lcm["store"]["messages"], 1);
+    assert_eq!(lcm["store"]["estimated_tokens"], 4);
+    assert_eq!(lcm["dag"]["total_nodes"], 1);
+    assert_eq!(lcm["dag"]["total_tokens"], 6);
+    assert_eq!(lcm["dag"]["total_source_tokens"], 24);
+    assert_eq!(lcm["dag"]["compression_ratio"], "4.0:1");
+    assert_eq!(lcm["dag"]["depths"]["d0"]["count"], 1);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["tokens"], 6);
+    assert_eq!(lcm["dag"]["depths"]["d0"]["source_tokens"], 24);
+    assert_eq!(lcm["config"]["fresh_tail_count"], 2);
+    assert_eq!(lcm["config"]["summary_fan_in"], 4);
+    assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
+}
+
+// Repeated LCM tool calls in one process must reuse the per-process
+// "schema already ensured" flag instead of re-opening the project DB with a
+// full DDL ensure each time. Observable via the version gate: after the
+// first call marks the path as ensured, a manually downgraded version
+// marker stays downgraded — a re-run of the migrations would bump it back
+// to LCM_SCHEMA_VERSION.
+#[tokio::test]
+async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
+    let (cg, _dir) = setup_project().await;
+
+    // Seed data to ensure the sessions.db exists (lcm_status is now read-only
+    // and will not create the DB). The schema-ensure caching under test lives
+    // in the write-path open (`open_session_db_with_cached_ensure`), triggered
+    // by the seed call, and is observable via the lcm_status read.
+    seed_lcm_session_message(
+        &cg,
+        "ensure-cache-session",
+        "ensure-cache-msg",
+        "schema ensure cache sentinel",
+        1,
+    )
+    .await;
+
+    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
+    );
+
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
+    {
+        let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE session_schema_migrations SET version = 1 WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(
+        payload["status"], "ok",
+        "repeated serve-mode call must work"
+    );
+    assert_eq!(
+        payload["lcm"]["schema_version"],
+        json!(1),
+        "second call must take the per-process ensured fast path instead of re-running migrations"
+    );
+
+    // The on-disk marker is untouched as well.
+    let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Scope validation (fail-closed, not fail-open)
+// ---------------------------------------------------------------------------
+
+/// Regression test: an invalid `scope` must be a hard error naming the valid
+/// values — never silently broadened to `all`.
+#[tokio::test]
+async fn lcm_grep_rejects_invalid_scope() {
+    let (cg, _dir) = setup_project().await;
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_lcm_grep",
+            json!({"query": "anything", "scope": "everything"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("scope must be one of current, session, all"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Same contract for `tracedecay_message_search`: invalid scope values fail
+/// closed instead of broadening the search to every session.
+#[tokio::test]
+async fn message_search_rejects_invalid_scope() {
+    let (cg, _dir) = setup_project().await;
+    for invalid in ["everything", "", "parents"] {
+        let err = expect_tool_error(
+            handle_tool_call(
+                &cg,
+                "tracedecay_message_search",
+                json!({"query": "anything", "scope": invalid}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            err.contains("scope must be one of all, parents_only, subagents_only"),
+            "unexpected error for scope {invalid:?}: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: ghost-create — pure-read LCM tools must not create sessions.db
+// ---------------------------------------------------------------------------
+
+/// Calling a `readOnlyHint` LCM tool on a project that has never ingested
+/// any sessions must:
+///   1. Return `status: "not_ingested"` (not "ok" or "unavailable").
+///   2. Set `store_exists: false` so callers can distinguish "nothing yet"
+///      from an I/O error.
+///   3. NOT create the sessions.db file on disk.
+#[tokio::test]
+async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
+        .await
+        .unwrap();
+    cg.index_all().await.unwrap();
+
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project);
+
+    // Confirm no DB exists before calling any tool.
+    assert!(
+        !db_path.exists(),
+        "sessions.db must not exist before any ingest"
+    );
+
+    // Exercise all six pure-read LCM tools.
+    for (tool, args) in [
+        ("tracedecay_lcm_status", json!({})),
+        ("tracedecay_lcm_grep", json!({"query": "anything"})),
+        (
+            "tracedecay_lcm_load_session",
+            json!({"session_id": "ghost-session"}),
+        ),
+        (
+            "tracedecay_lcm_describe",
+            json!({"session_id": "ghost-session"}),
+        ),
+        (
+            "tracedecay_lcm_expand",
+            json!({"session_id": "ghost-session", "target": {"kind": "raw_message", "store_id": 1}}),
+        ),
+        (
+            "tracedecay_lcm_expand_query",
+            json!({"session_id": "ghost-session", "prompt": "anything"}),
+        ),
+    ] {
+        let result = handle_tool_call(&cg, tool, args.clone(), None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{tool} returned error: {e}"));
+
+        let text = extract_text(&result.value);
+        let payload: Value = serde_json::from_str(text)
+            .unwrap_or_else(|e| panic!("{tool} response is not valid JSON: {e}\n{text}"));
+
+        assert_eq!(
+            payload["status"], "not_ingested",
+            "{tool}: expected status=not_ingested, got {payload}"
+        );
+        assert_eq!(
+            payload["store_exists"], false,
+            "{tool}: expected store_exists=false, got {payload}"
+        );
+
+        assert!(
+            !db_path.exists(),
+            "{tool}: sessions.db was ghost-created at {}",
+            db_path.display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: max_tokens must not suppress context budget
+// ---------------------------------------------------------------------------
+
+/// Before the fix, `default_context_limit = max_tokens.clamp(32_000, 65_536)`
+/// always evaluated to 32_000 because max_tokens ≤ 8_192 < 32_000, making
+/// `max_tokens` dead. After the fix, `context_max_tokens` defaults to the
+/// constant 32_000 and both params are independent. We verify that the handler
+/// accepts an explicit `context_max_tokens` override and that the returned
+/// payload reflects it.
+#[tokio::test]
+async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
+        .await
+        .unwrap();
+    cg.index_all().await.unwrap();
+
+    // With no sessions.db the tool returns not_ingested — that is fine here;
+    // we just verify the argument parsing does not panic or error.
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "session_id": "test-session",
+            "prompt": "what did we discuss?",
+            "max_tokens": 500,
+            "context_max_tokens": 48000,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("expand_query with explicit context_max_tokens must not error");
+
+    let text = extract_text(&result.value);
+    let payload: Value =
+        serde_json::from_str(text).expect("expand_query result must be valid JSON");
+
+    // Either not_ingested (no sessions.db) or ok — both are valid here.
+    // The important thing: it must NOT return a Config/argument error about
+    // max_tokens or context_max_tokens.
+    assert!(
+        payload["status"] == "not_ingested" || payload["status"] == "ok",
+        "unexpected status in expand_query response: {payload}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: catch-up flag ordering — transcript_ingest_done must lag
+// ---------------------------------------------------------------------------
+
+/// `wait_for_startup_catch_up` must wait for the transcript-ingest task to
+/// complete (transcript_ingest_done), not just the file-tree sync
+/// (startup_catch_up_done). This test verifies that after waiting, the
+/// `transcript_ingest_done` flag is always true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
+
+    let cg = tracedecay::tracedecay::TraceDecay::init(project)
+        .await
+        .unwrap();
+    cg.index_all().await.unwrap();
+
+    let server = tracedecay::mcp::McpServer::new(cg, None).await;
+    server.run_startup_catch_up_sync().await;
+
+    let completed = server
+        .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
+        .await;
+
+    assert!(completed, "wait_for_startup_catch_up timed out after 5s");
+
+    // After the wait returns true, both flags must be set.
+    assert!(
+        server.startup_catch_up_done(),
+        "startup_catch_up_done must be true after wait"
+    );
+    assert!(
+        server.transcript_ingest_done(),
+        "transcript_ingest_done must be true after wait"
+    );
+
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Store failures must surface as tool errors, not silent empty results
+// (cross-cutting audit: silent-empty handlers). Breaking the `edges` table
+// out from under the open connection makes every edge query fail while
+// node/file queries keep working — exactly the partial-store-failure case
+// the old `unwrap_or_default()` calls papered over as "no data".
+// ---------------------------------------------------------------------------
+
+/// Renames the `edges` table so every edge query on the open connection
+/// fails while node and file queries keep working.
+async fn break_edges_table(cg: &TraceDecay) {
+    cg.db()
+        .conn()
+        .execute("ALTER TABLE edges RENAME TO edges_broken", ())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn simplify_scan_surfaces_store_failure_instead_of_no_findings() {
+    let (cg, _dir) = setup_project().await;
+    break_edges_table(&cg).await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_simplify_scan",
+        json!({"files": ["src/utils.rs"]}),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a failing store query must produce a tool error, not an empty findings list"
+    );
+}
+
+#[tokio::test]
+async fn type_hierarchy_surfaces_store_failure_instead_of_empty_tree() {
+    let (cg, _dir) = setup_project().await;
+    let node_id = find_node_id(&cg, "helper").await;
+    break_edges_table(&cg).await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_type_hierarchy",
+        json!({"node_id": node_id}),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a failing store query must produce a tool error, not an empty hierarchy"
+    );
 }

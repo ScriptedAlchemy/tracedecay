@@ -3,7 +3,7 @@ use thiserror::Error;
 
 /// Errors that can occur during code graph operations.
 #[derive(Error, Debug)]
-pub enum TokenSaveError {
+pub enum TraceDecayError {
     #[error("file error: {message} (path: {path})")]
     File { message: String, path: String },
 
@@ -36,8 +36,8 @@ pub enum TokenSaveError {
     Json(#[from] serde_json::Error),
 }
 
-/// Convenience alias for results using `TokenSaveError`.
-pub type Result<T> = std::result::Result<T, TokenSaveError>;
+/// Convenience alias for results using `TraceDecayError`.
+pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
 #[cfg(test)]
 mod tests {
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn file_error_display_includes_message_and_path() {
-        let err = TokenSaveError::File {
+        let err = TraceDecayError::File {
             message: "not found".to_string(),
             path: "/tmp/foo.rs".to_string(),
         };
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn parse_error_display_includes_line() {
-        let err = TokenSaveError::Parse {
+        let err = TraceDecayError::Parse {
             message: "unexpected token".to_string(),
             path: "src/main.rs".to_string(),
             line: Some(42),
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn parse_error_display_no_line() {
-        let err = TokenSaveError::Parse {
+        let err = TraceDecayError::Parse {
             message: "eof".to_string(),
             path: "src/lib.rs".to_string(),
             line: None,
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn database_error_display_includes_operation() {
-        let err = TokenSaveError::Database {
+        let err = TraceDecayError::Database {
             message: "constraint violated".to_string(),
             operation: "INSERT".to_string(),
         };
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn search_error_display_includes_query() {
-        let err = TokenSaveError::Search {
+        let err = TraceDecayError::Search {
             message: "timeout".to_string(),
             query: "fn main".to_string(),
         };
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn config_error_display() {
-        let err = TokenSaveError::Config {
+        let err = TraceDecayError::Config {
             message: "bad value".to_string(),
         };
         assert!(err.to_string().contains("bad value"));
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn sync_lock_error_display() {
-        let err = TokenSaveError::SyncLock {
+        let err = TraceDecayError::SyncLock {
             message: "already running".to_string(),
         };
         assert!(err.to_string().contains("already running"));
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn json_error_from_serde() {
         let serde_err = serde_json::from_str::<serde_json::Value>("bad json");
-        let err: TokenSaveError = match serde_err {
+        let err: TraceDecayError = match serde_err {
             Err(e) => e.into(),
             Ok(_) => panic!("expected JSON parse error"),
         };

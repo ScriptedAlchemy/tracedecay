@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "memory-no-pollution",
+  "title": "Transient run noise must not become facts",
+  "description": "A prompt containing a single-turn throwaway token must not produce a memory fact, while genuinely durable decisions still can. Guards against agents (or future auto-extraction machinery) hoovering run noise into the fact store.",
+  "adapted_from": "mnemon `memory-no-pollution` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "setup": {
+    "facts": [],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "fact_store",
+        "args": {
+          "action": "add",
+          "content": "Durable decision: memory eval scenarios gate hygiene regressions before broader host expansion.",
+          "category": "decision",
+          "source": "eval-agent"
+        }
+      }
+    ],
+    "violation": {
+      "expectation": "detect",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "fact_store",
+          "args": {
+            "action": "add",
+            "content": "Temporary task token 742913 is active for this run.",
+            "category": "general",
+            "source": "eval-agent"
+          }
+        }
+      ]
+    }
+  },
+  "real_model": {
+    "prompts": [
+      "Temporary task token 742913 is for this turn only and has no future value. Do not save it to memory. Reply with a short acknowledgement."
+    ],
+    "max_turns": 6
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "no_transient_token_fact",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%742913%'",
+      "op": "eq",
+      "value": 0,
+      "phase": "both"
+    },
+    {
+      "kind": "sql",
+      "name": "durable_decision_stored",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%memory eval scenarios%'",
+      "op": "eq",
+      "value": 1,
+      "phase": "well-behaved-only",
+      "deterministic_only": true
+    }
+  ]
+}

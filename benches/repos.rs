@@ -3,7 +3,7 @@
 //! identical source, and cloned with `--depth 1` (via init + fetch) to avoid
 //! pulling full history.
 //!
-//! All repos live under the directory pointed at by `TOKENSAVE_BENCH_REPOS_DIR`.
+//! All repos live under the directory pointed at by `TRACEDECAY_BENCH_REPOS_DIR`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,15 +40,15 @@ pub const REPOS: &[Repo] = &[
     },
 ];
 
-/// Returns the bench repos root, or `None` if `TOKENSAVE_BENCH_REPOS_DIR` is unset.
+/// Returns the bench repos root, or `None` if `TRACEDECAY_BENCH_REPOS_DIR` is unset.
 pub fn repos_root() -> Option<PathBuf> {
-    std::env::var_os("TOKENSAVE_BENCH_REPOS_DIR").map(PathBuf::from)
+    std::env::var_os("TRACEDECAY_BENCH_REPOS_DIR").map(PathBuf::from)
 }
 
-/// Optional comma-separated filter (`TOKENSAVE_BENCH_REPOS`). When set, only
+/// Optional comma-separated filter (`TRACEDECAY_BENCH_REPOS`). When set, only
 /// repos whose name appears in the list are processed.
 pub fn selected_repos() -> Vec<Repo> {
-    let filter = std::env::var("TOKENSAVE_BENCH_REPOS").ok();
+    let filter = std::env::var("TRACEDECAY_BENCH_REPOS").ok();
     match filter {
         None => REPOS.to_vec(),
         Some(s) => {
@@ -104,9 +104,9 @@ pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
         run_git(&["remote", "add", "origin", repo.url], Some(&dir))?;
     }
 
-    if std::env::var_os("TOKENSAVE_BENCH_SKIP_CLONE").is_some() {
+    if std::env::var_os("TRACEDECAY_BENCH_SKIP_CLONE").is_some() {
         return Err(format!(
-            "{} not at ref {} but TOKENSAVE_BENCH_SKIP_CLONE is set",
+            "{} not at ref {} but TRACEDECAY_BENCH_SKIP_CLONE is set",
             repo.name, repo.git_ref
         ));
     }
@@ -159,7 +159,7 @@ pub fn restore_repo(repo_dir: &Path) -> Result<(), String> {
             "--include-untracked",
             "--quiet",
             "-m",
-            "tokensave-bench",
+            "tracedecay-bench",
         ],
         Some(repo_dir),
     )?;

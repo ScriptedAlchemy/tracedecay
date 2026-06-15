@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-//! Sequential schema migrations for the tokensave database.
+//! Sequential schema migrations for the tracedecay database.
 //!
 //! Each migration is a function that takes a connection and applies DDL
 //! statements. Migrations run inside an EXCLUSIVE transaction so that
@@ -11,28 +11,29 @@
 
 use libsql::Connection;
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
+use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 10;
+const LATEST_VERSION: u32 = 14;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
     let mut rows =
         conn.query("PRAGMA user_version", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read user_version: {e}"),
                 operation: "get_version".to_string(),
             })?;
-    let row = rows.next().await.map_err(|e| TokenSaveError::Database {
+    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
         message: format!("failed to read user_version row: {e}"),
         operation: "get_version".to_string(),
     })?;
     match row {
         Some(r) => {
-            let v: i64 = r.get(0).map_err(|e| TokenSaveError::Database {
+            let v: i64 = r.get(0).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read user_version value: {e}"),
                 operation: "get_version".to_string(),
             })?;
@@ -49,7 +50,7 @@ async fn get_version(conn: &Connection) -> Result<u32> {
 async fn set_version(conn: &Connection, version: u32) -> Result<()> {
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to set user_version: {e}"),
             operation: "set_version".to_string(),
         })?;
@@ -184,26 +185,6 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_ast ON node_fingerprints(ast_hash);
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_size ON node_fingerprints(body_tokens);
 
-        CREATE TABLE IF NOT EXISTS memory_decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            reason TEXT,
-            created_at INTEGER NOT NULL,
-            files TEXT NOT NULL DEFAULT '[]',
-            tags TEXT NOT NULL DEFAULT '[]'
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_code_areas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT NOT NULL,
-            description TEXT,
-            last_touched_at INTEGER NOT NULL,
-            touch_count INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_code_areas_path ON memory_code_areas(path);
-        CREATE INDEX IF NOT EXISTS idx_memory_decisions_created_at ON memory_decisions(created_at);
-
         CREATE TABLE IF NOT EXISTS read_cache (
             project_id   TEXT NOT NULL,
             session_id   TEXT NOT NULL,
@@ -219,39 +200,15 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_read_cache_session
-            ON read_cache(session_id, created_at);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_decisions_fts USING fts5(
-            text, reason,
-            content='memory_decisions', content_rowid='id'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_insert
-            AFTER INSERT ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(rowid, text, reason)
-                VALUES (NEW.id, NEW.text, NEW.reason);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_delete
-            AFTER DELETE ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(memory_decisions_fts, rowid, text, reason)
-                VALUES ('delete', OLD.id, OLD.text, OLD.reason);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_decisions_fts_update
-            AFTER UPDATE ON memory_decisions BEGIN
-                INSERT INTO memory_decisions_fts(memory_decisions_fts, rowid, text, reason)
-                VALUES ('delete', OLD.id, OLD.text, OLD.reason);
-                INSERT INTO memory_decisions_fts(rowid, text, reason)
-                VALUES (NEW.id, NEW.text, NEW.reason);
-            END;",
+            ON read_cache(session_id, created_at);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("failed to create schema: {e}"),
         operation: "create_schema".to_string(),
     })?;
 
+    create_holographic_memory_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
     Ok(())
 }
@@ -272,14 +229,14 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         return Ok(false);
     }
 
-    eprintln!("[tokensave] migrating database schema v{current} → v{LATEST_VERSION}…");
+    eprintln!("[tracedecay] migrating database schema v{current} → v{LATEST_VERSION}…");
 
     // BEGIN EXCLUSIVE blocks other writers (including other MCP servers or
     // post-commit hooks) until we COMMIT. Readers using WAL mode are not
     // blocked.
     conn.execute("BEGIN EXCLUSIVE", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to acquire exclusive lock: {e}"),
             operation: "migrate".to_string(),
         })?;
@@ -294,7 +251,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         Ok(()) => {
             conn.execute("COMMIT", ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
@@ -333,12 +290,165 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         8 => migrate_v8(conn).await,
         9 => migrate_v9(conn).await,
         10 => migrate_v10(conn).await,
-        _ => Err(TokenSaveError::Database {
+        11 => migrate_v11(conn).await,
+        12 => migrate_v12(conn).await,
+        13 => migrate_v13(conn).await,
+        14 => migrate_v14(conn).await,
+        _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
         }),
     }
 }
+
+/// Compatibility marker after v12 was exposed on the PR stack.
+///
+/// The dirty-bank schema now lives in the folded v11/fresh schema, but existing
+/// databases may already carry `user_version = 12`. Keep the version monotonic
+/// so later schema work can safely use v13 instead of reusing an exposed number.
+#[allow(clippy::unused_async)] // keeps the migration dispatch uniform
+async fn migrate_v12(_conn: &Connection) -> Result<()> {
+    Ok(())
+}
+
+/// v13: Cleanup marker for the (never-shipped) fact-archive schema.
+///
+/// An uncommitted revision of v13 briefly added archive columns (`state`,
+/// `archived_at`, `archived_reason`, `merged_into`, `superseded_by`) to
+/// `memory_facts`. Curation now hard-deletes losing facts instead, so this
+/// migration drops those columns from any local development database that
+/// ran the earlier revision, and is a no-op everywhere else.
+async fn migrate_v13(conn: &Connection) -> Result<()> {
+    // table_xinfo, not table_info: the earlier revision could have left
+    // `superseded_by` as a GENERATED column, which plain table_info hides —
+    // and a skipped drop then breaks dropping the column it references.
+    let existing: std::collections::HashSet<String> = {
+        let mut rows = conn
+            .query("PRAGMA table_xinfo(memory_facts)", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v13: failed to read table_xinfo: {e}"),
+                operation: "migrate_v13".to_string(),
+            })?;
+        let mut names = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("v13: failed to iterate table_xinfo: {e}"),
+            operation: "migrate_v13".to_string(),
+        })? {
+            let name: String = row.get(1).map_err(|e| TraceDecayError::Database {
+                message: format!("v13: failed to read column name: {e}"),
+                operation: "migrate_v13".to_string(),
+            })?;
+            names.insert(name);
+        }
+        names
+    };
+
+    // The index must go before its column can be dropped.
+    conn.execute("DROP INDEX IF EXISTS idx_memory_facts_state", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v13: failed to drop state index: {e}"),
+            operation: "migrate_v13".to_string(),
+        })?;
+
+    // Drop in REVERSE order of how the abandoned revision added them: a
+    // later-added column can be a generated column referencing an earlier
+    // one (e.g. `superseded_by` GENERATED ALWAYS AS (... merged_into ...)),
+    // and SQLite refuses to drop a column while a generated column still
+    // references it ("no such column" / "error in generated column").
+    for col in [
+        "superseded_by",
+        "merged_into",
+        "archived_reason",
+        "archived_at",
+        "state",
+    ] {
+        if existing.contains(col) {
+            conn.execute(&format!("ALTER TABLE memory_facts DROP COLUMN {col}"), ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("v13: failed to drop column {col}: {e}"),
+                    operation: "migrate_v13".to_string(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+/// v14: Memory-lifecycle additions — fact access tracking and the memory
+/// operation log.
+///
+/// Adds `access_count` / `last_recalled_at` to `memory_facts` (bumped only
+/// when a recall search RETURNS a fact, unlike `retrieval_count`, which also
+/// counts probe/list scans) and creates `memory_oplog`, an append-only audit
+/// of memory mutations. Idempotent: columns are probed before ALTER and the
+/// table/index use IF NOT EXISTS, so databases created from the fresh schema
+/// (which already includes both) pass through unchanged.
+async fn migrate_v14(conn: &Connection) -> Result<()> {
+    let existing: std::collections::HashSet<String> = {
+        let mut rows = conn
+            .query("PRAGMA table_info(memory_facts)", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v14: failed to read table_info: {e}"),
+                operation: "migrate_v14".to_string(),
+            })?;
+        let mut names = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("v14: failed to iterate table_info: {e}"),
+            operation: "migrate_v14".to_string(),
+        })? {
+            let name: String = row.get(1).map_err(|e| TraceDecayError::Database {
+                message: format!("v14: failed to read column name: {e}"),
+                operation: "migrate_v14".to_string(),
+            })?;
+            names.insert(name);
+        }
+        names
+    };
+
+    for (column, ddl) in [
+        (
+            "access_count",
+            "ALTER TABLE memory_facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_recalled_at",
+            "ALTER TABLE memory_facts ADD COLUMN last_recalled_at INTEGER",
+        ),
+    ] {
+        if !existing.contains(column) {
+            conn.execute(ddl, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("v14: failed to add column {column}: {e}"),
+                    operation: "migrate_v14".to_string(),
+                })?;
+        }
+    }
+
+    conn.execute_batch(MEMORY_OPLOG_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v14: failed to create memory_oplog: {e}"),
+            operation: "migrate_v14".to_string(),
+        })?;
+    Ok(())
+}
+
+/// Append-only audit log of memory mutations (add/update/remove/feedback and
+/// curation applies). `detail_json` never carries fact content beyond what
+/// the op needs — deletes record a content hash, not the content.
+const MEMORY_OPLOG_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_oplog (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL DEFAULT 0,
+        op TEXT NOT NULL,
+        fact_id INTEGER,
+        detail_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_oplog_ts ON memory_oplog(ts);";
 
 // ---------------------------------------------------------------------------
 // Migration V1: initial schema
@@ -404,7 +514,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         );",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create tables: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -438,7 +548,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         END;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create FTS: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -462,7 +572,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file_path);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v1: failed to create indexes: {e}"),
         operation: "migrate_v1".to_string(),
     })?;
@@ -484,7 +594,7 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v2: failed to create metadata table: {e}"),
         operation: "migrate_v2".to_string(),
     })?;
@@ -492,7 +602,7 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
     // Drop the legacy schema_versions table if it exists.
     conn.execute("DROP TABLE IF EXISTS schema_versions", ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("v2: failed to drop schema_versions: {e}"),
             operation: "migrate_v2".to_string(),
         })?;
@@ -513,7 +623,7 @@ async fn migrate_v3(conn: &Connection) -> Result<()> {
          ALTER TABLE nodes ADD COLUMN max_nesting INTEGER NOT NULL DEFAULT 0;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v3: failed to add complexity columns: {e}"),
         operation: "migrate_v3".to_string(),
     })?;
@@ -533,7 +643,7 @@ async fn migrate_v4(conn: &Connection) -> Result<()> {
          ALTER TABLE nodes ADD COLUMN assertions INTEGER NOT NULL DEFAULT 0;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v4: failed to add safety metric columns: {e}"),
         operation: "migrate_v4".to_string(),
     })?;
@@ -578,7 +688,7 @@ async fn migrate_v5(conn: &Connection) -> Result<()> {
             ON edges(source, target, kind, COALESCE(line, -1));",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v5: failed to deduplicate edges: {e}"),
         operation: "migrate_v5".to_string(),
     })?;
@@ -598,7 +708,7 @@ async fn migrate_v6(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v6: failed to create lower(name) index: {e}"),
         operation: "migrate_v6".to_string(),
     })?;
@@ -623,7 +733,7 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v7: failed to add attrs_start_line column: {e}"),
         operation: "migrate_v7".to_string(),
     })?;
@@ -633,7 +743,7 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v7: failed to backfill attrs_start_line: {e}"),
         operation: "migrate_v7".to_string(),
     })?;
@@ -648,8 +758,9 @@ async fn migrate_v7(conn: &Connection) -> Result<()> {
 /// Adds tables for persistent agent memory: `memory_decisions` records
 /// architecture / design choices with optional reason and tags;
 /// `memory_code_areas` tracks paths the agent has worked in. An FTS5 mirror
-/// over `memory_decisions.text` and `memory_decisions.reason` enables
-/// fuzzy recall via `tokensave_session_recall`.
+/// over `memory_decisions.text` and `memory_decisions.reason` supported the
+/// legacy decision-recall implementation before v11 backfilled and dropped
+/// these tables.
 async fn migrate_v8(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_decisions (
@@ -700,7 +811,7 @@ async fn migrate_v8(conn: &Connection) -> Result<()> {
             END;",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v8: failed to create memory tables: {e}"),
         operation: "migrate_v8".to_string(),
     })?;
@@ -714,7 +825,7 @@ async fn migrate_v8(conn: &Connection) -> Result<()> {
 
 /// Two changes:
 ///
-/// 1. Creates the `read_cache` table used by `tokensave_read` to serve
+/// 1. Creates the `read_cache` table used by `tracedecay_read` to serve
 ///    unchanged files as a tiny stub across sessions.
 /// 2. Denormalizes `Contains` edges onto a new `nodes.parent_id` column.
 ///    The column is backfilled from existing `Contains` rows, then those
@@ -740,7 +851,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
             ON read_cache(session_id, created_at);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v9: failed to create read_cache table: {e}"),
         operation: "migrate_v9".to_string(),
     })?;
@@ -753,12 +864,12 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
         let mut rows = conn
             .query("PRAGMA table_info(nodes)", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to probe nodes columns: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
         let mut found = false;
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("v9: failed to read table_info row: {e}"),
             operation: "migrate_v9".to_string(),
         })? {
@@ -775,7 +886,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
     if !has_parent_id {
         conn.execute("ALTER TABLE nodes ADD COLUMN parent_id TEXT", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to add parent_id column: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
@@ -791,13 +902,13 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to probe sqlite_master: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
         rows.next()
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to read sqlite_master row: {e}"),
                 operation: "migrate_v9".to_string(),
             })?
@@ -817,14 +928,14 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
             (),
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("v9: failed to backfill parent_id from contains edges: {e}"),
             operation: "migrate_v9".to_string(),
         })?;
 
         conn.execute("DELETE FROM edges WHERE kind = 'contains'", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("v9: failed to drop contains edges: {e}"),
                 operation: "migrate_v9".to_string(),
             })?;
@@ -835,7 +946,7 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
         (),
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v9: failed to create idx_nodes_parent_id: {e}"),
         operation: "migrate_v9".to_string(),
     })?;
@@ -844,10 +955,10 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Migration V10: node_fingerprints (issue #83 — tokensave_redundancy)
+// Migration V10: node_fingerprints (issue #83 — tracedecay_redundancy)
 // ---------------------------------------------------------------------------
 
-/// Creates the `node_fingerprints` table used by `tokensave_redundancy` to
+/// Creates the `node_fingerprints` table used by `tracedecay_redundancy` to
 /// detect AST-isomorphic, control-flow-equivalent, and token-similar
 /// function/method duplicates. Populated lazily on first redundancy query
 /// and invalidated by `source_hash` mismatch.
@@ -868,9 +979,408 @@ async fn migrate_v10(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_node_fingerprints_size ON node_fingerprints(body_tokens);",
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("v10: failed to create node_fingerprints table: {e}"),
         operation: "migrate_v10".to_string(),
+    })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Migration V11: holographic memory active schema
+// ---------------------------------------------------------------------------
+
+/// Creates the active holographic-memory tables alongside the legacy memory
+/// tables. Legacy data is preserved and copied into `memory_facts`.
+async fn migrate_v11(conn: &Connection) -> Result<()> {
+    create_holographic_memory_schema(conn, "migrate_v11").await?;
+    if legacy_memory_tables_exist(conn).await? {
+        backfill_legacy_memory_as_facts(conn).await?;
+        backfill_holographic_memory_vectors_and_banks(conn).await?;
+    }
+    Ok(())
+}
+
+async fn backfill_holographic_memory_vectors_and_banks(conn: &Connection) -> Result<()> {
+    let store = MemoryStore::new(conn);
+    loop {
+        let updated = store.compute_missing_vectors(500).await?;
+        if updated == 0 {
+            break;
+        }
+    }
+    store.rebuild_all_banks().await?;
+    Ok(())
+}
+
+async fn legacy_memory_tables_exist(conn: &Connection) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table'
+               AND name IN ('memory_decisions', 'memory_code_areas')",
+            (),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("migrate_v11: failed to probe legacy memory tables: {e}"),
+            operation: "migrate_v11".to_string(),
+        })?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("migrate_v11: failed to read legacy table probe: {e}"),
+            operation: "migrate_v11".to_string(),
+        })?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "migrate_v11: legacy table probe returned no rows".to_string(),
+            operation: "migrate_v11".to_string(),
+        })?;
+    let count: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
+        message: format!("migrate_v11: failed to read legacy table count: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+    Ok(count > 0)
+}
+
+async fn create_holographic_memory_schema(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL DEFAULT 'general',
+            tags TEXT NOT NULL DEFAULT '[]',
+            trust_score REAL NOT NULL DEFAULT 0.5,
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            access_count INTEGER NOT NULL DEFAULT 0,
+            helpful_count INTEGER NOT NULL DEFAULT 0,
+            unhelpful_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            last_retrieved_at INTEGER,
+            last_recalled_at INTEGER,
+            last_feedback_at INTEGER,
+            source TEXT NOT NULL DEFAULT 'manual',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            hrr_vector BLOB,
+            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
+            hrr_dim INTEGER NOT NULL DEFAULT 2048
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_entities (
+            entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            entity_type TEXT NOT NULL DEFAULT 'unknown',
+            aliases TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_fact_entities (
+            fact_id INTEGER NOT NULL,
+            entity_id INTEGER NOT NULL,
+            PRIMARY KEY (fact_id, entity_id),
+            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_banks (
+            bank_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bank_name TEXT NOT NULL UNIQUE,
+            vector BLOB NOT NULL,
+            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
+            hrr_dim INTEGER NOT NULL DEFAULT 2048,
+            fact_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_bank_dirty (
+            bank_name TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_feedback_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact_id INTEGER NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('helpful', 'unhelpful')),
+            trust_delta REAL NOT NULL,
+            old_trust REAL NOT NULL,
+            new_trust REAL NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'mcp',
+            note TEXT,
+            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_category
+            ON memory_facts(category);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_updated_at
+            ON memory_facts(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_trust_score
+            ON memory_facts(trust_score);
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_source
+            ON memory_facts(source);
+        CREATE INDEX IF NOT EXISTS idx_memory_entities_type
+            ON memory_entities(entity_type);
+        CREATE INDEX IF NOT EXISTS idx_memory_fact_entities_entity_id
+            ON memory_fact_entities(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_banks_updated_at
+            ON memory_banks(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_fact_id
+            ON memory_feedback_events(fact_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_created_at
+            ON memory_feedback_events(created_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
+            content, tags,
+            content='memory_facts', content_rowid='rowid'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_insert
+            AFTER INSERT ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(rowid, content, tags)
+                VALUES (NEW.rowid, NEW.content, NEW.tags);
+            END;
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_delete
+            AFTER DELETE ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
+            END;
+
+        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_update
+            AFTER UPDATE OF content, tags ON memory_facts BEGIN
+                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
+                INSERT INTO memory_facts_fts(rowid, content, tags)
+                VALUES (NEW.rowid, NEW.content, NEW.tags);
+            END;",
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("{operation}: failed to create holographic memory schema: {e}"),
+        operation: operation.to_string(),
+    })?;
+
+    conn.execute_batch(MEMORY_OPLOG_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to create memory oplog schema: {e}"),
+            operation: operation.to_string(),
+        })?;
+
+    Ok(())
+}
+
+async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "WITH normalized_decisions AS (
+            SELECT
+                id,
+                text,
+                reason,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_facts (
+            content,
+            category,
+            tags,
+            created_at,
+            updated_at,
+            source,
+            metadata
+        )
+        SELECT
+            CASE
+                WHEN reason IS NULL OR length(trim(reason)) = 0 THEN text
+                ELSE text || char(10) || char(10) || 'Reason: ' || reason
+            END || char(10) || char(10) || 'Legacy decision id: ' || id,
+            'decision',
+            safe_tags,
+            created_at,
+            created_at,
+            'legacy_memory_decisions',
+            json_object(
+                'holographic_memory_backfill_v1', 1,
+                'legacy_table', 'memory_decisions',
+                'legacy_id', id,
+                'decision_text', text,
+                'reason', COALESCE(reason, ''),
+                'files', json(safe_files),
+                'tags', json(safe_tags)
+            )
+        FROM normalized_decisions;
+
+        WITH normalized_code_areas AS (
+            SELECT id, path, description, last_touched_at, touch_count
+            FROM memory_code_areas
+        )
+        INSERT OR IGNORE INTO memory_facts (
+            content,
+            category,
+            tags,
+            created_at,
+            updated_at,
+            source,
+            metadata
+        )
+        SELECT
+            CASE
+                WHEN description IS NULL OR length(trim(description)) = 0 THEN path
+                ELSE path || char(10) || char(10) || description
+            END || char(10) || char(10) || 'Legacy code area id: ' || id,
+            'code_area',
+            json_array('code_area', path),
+            last_touched_at,
+            last_touched_at,
+            'legacy_memory_code_areas',
+            json_object(
+                'holographic_memory_backfill_v1', 1,
+                'legacy_table', 'memory_code_areas',
+                'legacy_id', id,
+                'path', path,
+                'description', COALESCE(description, ''),
+                'last_touched_at', last_touched_at,
+                'touch_count', touch_count
+            )
+        FROM normalized_code_areas;",
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("migrate_v11: failed to backfill legacy memory: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+
+    conn.execute_batch(
+        "WITH normalized_decisions AS (
+            SELECT
+                id,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT value, lower(value), 'legacy_file', created_at
+        FROM normalized_decisions, json_each(safe_files)
+        WHERE trim(value) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                created_at,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT value, lower(value), 'legacy_tag', created_at
+        FROM normalized_decisions, json_each(safe_tags)
+        WHERE trim(value) != '';
+
+        INSERT OR IGNORE INTO memory_entities (name, normalized_name, entity_type, created_at)
+        SELECT DISTINCT path, lower(path), 'legacy_path', last_touched_at
+        FROM memory_code_areas
+        WHERE trim(path) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(files), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(files), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(files), ''), '[]')
+                    ELSE '[]'
+                END AS safe_files
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM normalized_decisions d
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_decisions'
+         AND json_extract(f.metadata, '$.legacy_id') = d.id
+        JOIN json_each(d.safe_files) file_entity
+        JOIN memory_entities e ON e.normalized_name = lower(file_entity.value)
+        WHERE trim(file_entity.value) != '';
+
+        WITH normalized_decisions AS (
+            SELECT
+                id,
+                CASE
+                    WHEN json_valid(COALESCE(NULLIF(trim(tags), ''), '[]'))
+                     AND json_type(COALESCE(NULLIF(trim(tags), ''), '[]')) = 'array'
+                    THEN COALESCE(NULLIF(trim(tags), ''), '[]')
+                    ELSE '[]'
+                END AS safe_tags
+            FROM memory_decisions
+        )
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM normalized_decisions d
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_decisions'
+         AND json_extract(f.metadata, '$.legacy_id') = d.id
+        JOIN json_each(d.safe_tags) tag_entity
+        JOIN memory_entities e ON e.normalized_name = lower(tag_entity.value)
+        WHERE trim(tag_entity.value) != '';
+
+        INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+        SELECT f.fact_id, e.entity_id
+        FROM memory_code_areas c
+        JOIN memory_facts f
+          ON f.source = 'legacy_memory_code_areas'
+         AND json_extract(f.metadata, '$.legacy_id') = c.id
+        JOIN memory_entities e ON e.normalized_name = lower(c.path)
+        WHERE trim(c.path) != '';",
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("migrate_v11: failed to link legacy memory entities: {e}"),
+        operation: "migrate_v11".to_string(),
+    })?;
+
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memory_decisions_fts_insert;
+         DROP TRIGGER IF EXISTS memory_decisions_fts_delete;
+         DROP TRIGGER IF EXISTS memory_decisions_fts_update;
+         DROP TABLE IF EXISTS memory_decisions_fts;
+         DROP TABLE IF EXISTS memory_code_areas;
+         DROP TABLE IF EXISTS memory_decisions;",
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("migrate_v11: failed to drop legacy memory tables: {e}"),
+        operation: "migrate_v11".to_string(),
     })?;
 
     Ok(())

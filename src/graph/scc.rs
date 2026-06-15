@@ -1,7 +1,7 @@
 //! Tarjan's strongly-connected-components algorithm.
 //!
-//! Shared by `tokensave_circular` (file-level cycle grouping) and
-//! `tokensave_port_order` (intra-cycle visibility). Both tools were
+//! Shared by `tracedecay_circular` (file-level cycle grouping) and
+//! `tracedecay_port_order` (intra-cycle visibility). Both tools were
 //! emitting either every walk through an SCC (`circular`'s 73-cycle
 //! tail-overlap explosion) or a single flat blob of every cycle node
 //! (`port_order`'s 200+ symbol mega-cycle). SCCs replace both with the

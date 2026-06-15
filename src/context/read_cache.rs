@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-//! Cross-session response cache for `tokensave_read`.
+//! Cross-session response cache for `tracedecay_read`.
 //!
 //! Cached entries are keyed by `(project_id, file_path, mode, args_hash)` and
 //! survive across MCP sessions. The `mtime_ns` column on each row is the
@@ -17,7 +17,7 @@
 use libsql::{params, Connection};
 use sha2::{Digest, Sha256};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 /// Sentinel session id used for cross-session cache rows. Picked so it cannot
 /// collide with a real session UUID.
@@ -102,19 +102,19 @@ pub async fn get(
             params![project_id, session_id, file_path, mode, args_hash],
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("read_cache lookup failed: {e}"),
             operation: "read_cache::get".to_string(),
         })?;
 
-    let row = rows.next().await.map_err(|e| TokenSaveError::Database {
+    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
         message: format!("read_cache row fetch failed: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
 
     let Some(row) = row else { return Ok(None) };
 
-    let cached_mtime: i64 = row.get(0).map_err(|e| TokenSaveError::Database {
+    let cached_mtime: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 0: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
@@ -123,15 +123,15 @@ pub async fn get(
         return Ok(None);
     }
 
-    let digest: String = row.get(1).map_err(|e| TokenSaveError::Database {
+    let digest: String = row.get(1).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 1: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
-    let body: Vec<u8> = row.get(2).map_err(|e| TokenSaveError::Database {
+    let body: Vec<u8> = row.get(2).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 2: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
-    let token_count: i64 = row.get(3).map_err(|e| TokenSaveError::Database {
+    let token_count: i64 = row.get(3).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 3: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
@@ -181,7 +181,7 @@ pub async fn put(
         ],
     )
     .await
-    .map_err(|e| TokenSaveError::Database {
+    .map_err(|e| TraceDecayError::Database {
         message: format!("read_cache insert failed: {e}"),
         operation: "read_cache::put".to_string(),
     })?;
@@ -198,7 +198,7 @@ pub async fn sweep(conn: &Connection) -> Result<u64> {
             params![cutoff],
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("read_cache sweep failed: {e}"),
             operation: "read_cache::sweep".to_string(),
         })?;

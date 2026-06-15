@@ -2,14 +2,14 @@
 //! Compile/type-check diagnostics, normalised across languages.
 //!
 //! 5.0 ships the Rust driver (`cargo check --message-format=json`) — the
-//! largest single Bash:tokensave gap in the 2026-05-04 telemetry scan
+//! largest single Bash:tracedecay gap in the 2026-05-04 telemetry scan
 //! (777 invocations). TypeScript (`tsc --noEmit`) and Python (`pyright`)
 //! drivers land in follow-up commits.
 //!
 //! The contract is that every driver returns a `Vec<Diagnostic>` with a
 //! consistent shape. The MCP layer enriches each diagnostic with the
 //! enclosing graph node, so callers get structured errors mapped to the
-//! same node IDs the rest of tokensave's tools speak.
+//! same node IDs the rest of tracedecay's tools speak.
 
 pub mod python;
 pub mod rust;

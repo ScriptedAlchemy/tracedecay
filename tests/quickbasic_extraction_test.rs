@@ -1,9 +1,9 @@
 #[cfg(feature = "lang-qbasic")]
 mod quickbasic_tests {
 
-    use tokensave::extraction::LanguageExtractor;
-    use tokensave::extraction::QuickBasicExtractor;
-    use tokensave::types::*;
+    use tracedecay::extraction::LanguageExtractor;
+    use tracedecay::extraction::QuickBasicExtractor;
+    use tracedecay::types::*;
 
     fn extract_fixture() -> ExtractionResult {
         let source = std::fs::read_to_string("tests/fixtures/sample.bi").unwrap();

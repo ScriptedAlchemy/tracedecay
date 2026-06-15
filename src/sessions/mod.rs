@@ -1,4 +1,77 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
+
+use crate::global_db::GlobalDb;
+use crate::sessions::source::{ingest_source, TranscriptIngestStats, TranscriptSource};
+
+pub mod claude;
+pub mod cline_like;
+pub mod codex;
+pub mod cursor;
+pub mod hermes;
+pub mod kiro;
+pub mod lcm;
+pub mod source;
+pub(crate) mod transcript_backfill;
+pub mod vibe;
+
+/// Ingest transcripts from every path-discoverable agent whose sessions
+/// belong to `project_root`, into the project-local `sessions.db` (`db`).
+/// Hookless agents (Claude, Codex, …) are reconciled exclusively by this
+/// startup catch-up sweep; Cursor additionally has live end-of-turn hooks,
+/// and its sweep entry shares the hooks' parse offsets so neither path ever
+/// re-ingests the other's work. Fail-open and incremental (unchanged files
+/// are a no-op).
+pub async fn ingest_global_sources(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
+    let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
+    if let Some(source) = claude::ClaudeSource::new() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = codex::CodexSource::new() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = vibe::VibeSource::new() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::cline() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::roo_code() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::kilo() {
+        sources.push(Box::new(source));
+    }
+    if let Some(source) = kiro::KiroSource::new() {
+        sources.push(Box::new(source));
+    }
+    // Cursor has live hook ingestion, but transcripts written before a project
+    // was indexed (or while hooks were absent) need this catch-up path; shared
+    // parse offsets make hook-ingested files no-ops here and vice versa.
+    if let Some(source) = cursor::CursorSweepSource::new() {
+        sources.push(Box::new(source));
+    }
+    let stats = ingest_sources(db, project_root, &sources).await;
+    // Hermes stores many sessions in one SQLite file per profile, so it plugs
+    // in beside the file-based sources rather than through `TranscriptSource`.
+    stats.merge(hermes::ingest_for_project(db, project_root).await)
+}
+
+/// Drive a set of sources against `db` for `project_root`. Separated from
+/// [`ingest_global_sources`] so tests can supply sources rooted at a temporary
+/// home directory instead of the real `~`.
+pub(crate) async fn ingest_sources(
+    db: &GlobalDb,
+    project_root: &Path,
+    sources: &[Box<dyn TranscriptSource>],
+) -> TranscriptIngestStats {
+    let mut stats = TranscriptIngestStats::default();
+    for source in sources {
+        stats = stats.merge(ingest_source(db, source.as_ref(), project_root, None).await);
+    }
+    stats
+}
 
 /// Provider-neutral metadata for an indexed agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +85,10 @@ pub struct SessionRecord {
     pub ended_at: Option<i64>,
     pub transcript_path: Option<String>,
     pub metadata_json: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub is_subagent: bool,
+    pub agent_id: Option<String>,
+    pub parent_tool_use_id: Option<String>,
 }
 
 /// Provider-neutral message payload extracted from an agent transcript.
@@ -38,4 +115,12 @@ pub struct SessionMessageSearchResult {
     pub session: SessionRecord,
     pub message: SessionMessageRecord,
     pub score: f64,
+}
+
+/// Scope filter for session-message full-text search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionSearchScope {
+    All,
+    ParentsOnly,
+    SubagentsOnly,
 }
