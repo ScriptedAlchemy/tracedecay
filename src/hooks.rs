@@ -631,7 +631,7 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 
 /// Returns the target branch for a branch-changing git command:
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
-/// and `git switch -c <branch>`.
+/// `git switch -c <branch>`, and `git worktree add <path> <branch>`.
 ///
 /// Path checkouts (`git checkout -- <file>` or obvious file pathspecs), remote
 /// tracking shortcuts such as `git switch --track origin/feature`, and
@@ -674,8 +674,50 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
             }
             None
         }
+        "worktree" => {
+            let action = raw.get(sub_pos + 1).map(|token| token.to_ascii_lowercase());
+            if action.as_deref() != Some("add") {
+                return None;
+            }
+            cursor_worktree_add_target(&raw[sub_pos + 2..])
+        }
         _ => None,
     }
+}
+
+fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
+    let mut i = 0;
+    let mut positional = Vec::new();
+    let mut detached = false;
+    while i < after.len() {
+        let tok = &after[i];
+        if tok == "--" {
+            positional.extend(after[i + 1..].iter().cloned());
+            break;
+        }
+        if matches!(tok.as_str(), "-b" | "-B") {
+            return after.get(i + 1).cloned();
+        }
+        if tok == "-d" || tok == "--detach" {
+            detached = true;
+            i += 1;
+            continue;
+        }
+        if tok == "--reason" {
+            i += 2;
+            continue;
+        }
+        if tok.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        positional.push(tok.clone());
+        i += 1;
+    }
+    if detached {
+        return None;
+    }
+    positional.get(1).cloned()
 }
 
 fn is_obvious_checkout_pathspec(token: &str) -> bool {
