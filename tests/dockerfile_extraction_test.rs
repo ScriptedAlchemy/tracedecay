@@ -1,8 +1,8 @@
 #![cfg(feature = "lang-dockerfile")]
 
-use tokensave::extraction::DockerfileExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::DockerfileExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_dockerfile_file_node_is_root() {

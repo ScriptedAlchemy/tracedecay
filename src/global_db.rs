@@ -1,13 +1,18 @@
-//! User-level database that tracks all `TokenSave` projects and their saved tokens.
+//! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
-//! Stored at `~/.tokensave/global.db`, this DB holds one row per project with
-//! the project's DB path and its cumulative tokens-saved count. All operations
-//! are best-effort: failures are silently ignored so they never block the main
-//! MCP server loop.
+//! Stored at `~/.tracedecay/global.db` (or a legacy `~/.tokensave/global.db`
+//! when that dir already exists — see [`crate::config::user_data_dir`]), this
+//! DB holds one row per project with the project's DB path and its cumulative
+//! tokens-saved count. All operations are best-effort: failures are silently
+//! ignored so they never block the main MCP server loop.
 
 use std::path::{Path, PathBuf};
 
-use libsql::{params, Builder, Connection, Database as LibsqlDatabase};
+use libsql::{params, Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value};
+
+use crate::sessions::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
+};
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -24,46 +29,399 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
-/// User-level database tracking all `TokenSave` projects.
+/// One freshly computed token count headed for the dashboard sidecar cache
+/// (see [`GlobalDb::save_token_counts`]).
+#[derive(Debug, Clone)]
+pub struct TokenCountUpsert {
+    pub provider: String,
+    pub message_id: String,
+    pub text_len: i64,
+    pub encoder: &'static str,
+    pub token_count: i64,
+}
+
+/// Transcript-ingest backlog snapshot for a session store. See
+/// [`GlobalDb::session_ingest_health`].
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct SessionIngestHealth {
+    /// Transcripts referenced by sessions that still exist on disk.
+    pub tracked_transcripts: u64,
+    /// Transcripts with un-ingested appended bytes.
+    pub pending_transcripts: u64,
+    /// Total un-ingested bytes across pending transcripts.
+    pub pending_bytes: u64,
+    /// Largest single-transcript backlog. The hook ingest caps are
+    /// per-transcript, so this (not the total) decides whether the hooks can
+    /// still drain the backlog on their own.
+    pub max_transcript_pending_bytes: u64,
+    /// Newest transcript mtime recorded at ingest time (Unix seconds).
+    pub last_ingest_unix: Option<i64>,
+}
+
+/// Persisted parse cursor for a transcript path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOffset {
+    pub byte_offset: u64,
+    pub mtime: u64,
+    pub file_id: u64,
+}
+
+/// One transcript session plus its parsed messages, for multi-session batch
+/// upserts from SQLite-backed stores where a single store file holds every
+/// session (e.g. Hermes `state.db`).
+#[derive(Debug, Clone)]
+pub struct TranscriptBatch {
+    pub session: SessionRecord,
+    pub messages: Vec<SessionMessageRecord>,
+}
+
+/// Whether a transcript batch writes the full dual store (LCM raw + searchable
+/// projection) or only the `session_messages` projection.
+#[derive(Debug, Clone, Copy)]
+enum TranscriptWriteMode {
+    Full,
+    ProjectionOnly,
+}
+
+/// User-level database tracking all `TraceDecay` projects.
 pub struct GlobalDb {
     conn: Connection,
+    storage_root: PathBuf,
+    db_path: PathBuf,
     _db: LibsqlDatabase,
 }
 
-/// Returns the path to the global database: `~/.tokensave/global.db`.
+const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
+/// Legacy env-var spelling, still honored as a fallback.
+const LEGACY_GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
+
+fn global_db_path_override() -> Option<PathBuf> {
+    [GLOBAL_DB_PATH_ENV, LEGACY_GLOBAL_DB_PATH_ENV]
+        .iter()
+        .find_map(|name| std::env::var_os(name).filter(|path| !path.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// Returns the path to the global database: `global.db` inside the user-level
+/// data dir (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present).
 pub fn global_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".tokensave").join("global.db"))
+    if let Some(path) = global_db_path_override() {
+        return Some(path);
+    }
+    crate::config::user_data_dir().map(|dir| dir.join("global.db"))
+}
+
+/// True when `TRACEDECAY_GLOBAL_DB` (or the legacy `TOKENSAVE_GLOBAL_DB`)
+/// pins the global DB to an explicit path. Consumers (the dashboard LCM
+/// store selection) treat the override as an operator decision that wins
+/// over project-local store discovery.
+pub fn global_db_path_is_overridden() -> bool {
+    global_db_path_override().is_some()
+}
+
+/// How [`global_accounting_enabled`] reached its decision; the dashboard
+/// surfaces this so an empty ledger can be explained honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountingMode {
+    /// No env override — global accounting is on by default.
+    Default,
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (or legacy `TOKENSAVE_ENABLE_GLOBAL_DB`)
+    /// explicitly enabled it.
+    EnabledByEnv,
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
+    /// `TRACEDECAY_DISABLE_GLOBAL_DB` (or their legacy `TOKENSAVE_*`
+    /// spellings) explicitly disabled it.
+    DisabledByEnv,
+}
+
+impl AccountingMode {
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::DisabledByEnv)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::EnabledByEnv => "enabled_by_env",
+            Self::DisabledByEnv => "disabled_by_env",
+        }
+    }
+}
+
+/// Canonical truthy-env-value test shared by every boolean env flag: trims,
+/// case-folds, and accepts `1`/`true`/`yes`/`on`. (Two parsers used to
+/// coexist with diverging semantics — e.g. `TRACEDECAY_DISABLE_GLOBAL_DB=on`
+/// was silently ignored while the LCM doctor flag honored it.)
+pub fn env_value_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// True when the named env var is set to a truthy value.
+pub fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
+}
+
+/// Whether user-level global accounting (the cross-project `savings_ledger`
+/// plus worldwide-counter flushes in the MCP server) is enabled.
+///
+/// Enabled **by default**: every other writer of the user-level `global.db`
+/// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the
+/// Savings dashboard reads the ledger — an opt-in gate here silently left
+/// the ledger empty while lifetime counters kept growing. Precedence:
+///
+/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set (or legacy
+///    `TOKENSAVE_ENABLE_GLOBAL_DB`) → its truthiness decides (the spelling
+///    existing agent installers already write).
+/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` (or legacy spelling) truthy → disabled
+///    (opt-out; set by `.cargo/config.toml` so `cargo test` runs stay
+///    hermetic).
+/// 3. Otherwise → enabled.
+pub fn global_accounting_mode() -> AccountingMode {
+    if let Some(value) = crate::config::brand_env("ENABLE_GLOBAL_DB") {
+        return if env_value_truthy(&value) {
+            AccountingMode::EnabledByEnv
+        } else {
+            AccountingMode::DisabledByEnv
+        };
+    }
+    if crate::config::brand_env("DISABLE_GLOBAL_DB").is_some_and(|value| env_value_truthy(&value)) {
+        return AccountingMode::DisabledByEnv;
+    }
+    AccountingMode::Default
+}
+
+/// Convenience wrapper over [`global_accounting_mode`].
+pub fn global_accounting_enabled() -> bool {
+    global_accounting_mode().enabled()
+}
+
+fn opt_text(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |s| Value::Text(s.to_string()))
+}
+
+fn opt_i64(value: Option<i64>) -> Value {
+    value.map_or(Value::Null, Value::Integer)
+}
+
+fn row_to_session(row: &libsql::Row) -> Option<SessionRecord> {
+    Some(SessionRecord {
+        provider: row.get(0).ok()?,
+        session_id: row.get(1).ok()?,
+        project_key: row.get(2).ok()?,
+        project_path: row.get(3).ok()?,
+        title: row.get(4).ok()?,
+        started_at: row.get(5).ok()?,
+        ended_at: row.get(6).ok()?,
+        transcript_path: row.get(7).ok()?,
+        metadata_json: row.get(8).ok()?,
+        parent_session_id: row.get(9).ok()?,
+        is_subagent: row.get::<i64>(10).unwrap_or(0) != 0,
+        agent_id: row.get(11).ok()?,
+        parent_tool_use_id: row.get(12).ok()?,
+    })
+}
+
+fn row_to_message(row: &libsql::Row, offset: i32) -> Option<SessionMessageRecord> {
+    Some(SessionMessageRecord {
+        provider: row.get(offset).ok()?,
+        message_id: row.get(offset + 1).ok()?,
+        session_id: row.get(offset + 2).ok()?,
+        role: row.get(offset + 3).ok()?,
+        timestamp: row.get(offset + 4).ok()?,
+        ordinal: row.get(offset + 5).ok()?,
+        text: row.get(offset + 6).ok()?,
+        kind: row.get(offset + 7).ok()?,
+        model: row.get(offset + 8).ok()?,
+        tool_names: row.get(offset + 9).ok()?,
+        source_path: row.get(offset + 10).ok()?,
+        source_offset: row.get(offset + 11).ok()?,
+        metadata_json: row.get(offset + 12).ok()?,
+    })
+}
+
+fn session_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter_map(|word| {
+            let sanitized: String = word.chars().filter(|c| *c != '"').collect();
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(format!("\"{sanitized}\"*"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+async fn session_column_exists(conn: &Connection, column: &str) -> bool {
+    let Ok(mut rows) = conn.query("PRAGMA table_info(sessions)", ()).await else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).ok().as_deref() == Some(column) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn ensure_session_parent_columns(conn: &Connection) -> Option<()> {
+    for (column, ddl) in [
+        (
+            "parent_session_id",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+        ),
+        (
+            "is_subagent",
+            "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
+        (
+            "parent_tool_use_id",
+            "ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT",
+        ),
+    ] {
+        if !session_column_exists(conn, column).await {
+            add_session_parent_column_after_missing_check(conn, column, ddl).await?;
+        }
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent
+            ON sessions(provider, parent_session_id)",
+        (),
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+async fn parse_offsets_column_exists(conn: &Connection, column: &str) -> bool {
+    let Ok(mut rows) = conn.query("PRAGMA table_info(parse_offsets)", ()).await else {
+        return false;
+    };
+    while let Ok(Some(row)) = rows.next().await {
+        if row.get::<String>(1).ok().as_deref() == Some(column) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn add_parse_offset_column_after_missing_check(
+    conn: &Connection,
+    column: &str,
+    ddl: &str,
+) -> Option<()> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Some(()),
+        Err(_) if parse_offsets_column_exists(conn, column).await => Some(()),
+        Err(_) => None,
+    }
+}
+
+async fn ensure_parse_offset_columns(conn: &Connection) -> Option<()> {
+    if !parse_offsets_column_exists(conn, "file_id").await {
+        add_parse_offset_column_after_missing_check(
+            conn,
+            "file_id",
+            "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+    }
+    Some(())
+}
+
+async fn add_session_parent_column_after_missing_check(
+    conn: &Connection,
+    column: &str,
+    ddl: &str,
+) -> Option<()> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Some(()),
+        Err(_) if session_column_exists(conn, column).await => Some(()),
+        Err(_) => None,
+    }
 }
 
 impl GlobalDb {
+    async fn open_local(db_path: &Path, read_only: bool) -> Option<Self> {
+        let storage_root = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let builder = if read_only {
+            Builder::new_local(db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        } else {
+            Builder::new_local(db_path)
+        };
+        let db = builder.build().await.ok()?;
+        let conn = db.connect().ok()?;
+
+        let pragmas = if read_only {
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;"
+        } else {
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;"
+        };
+        conn.execute_batch(pragmas).await.ok()?;
+
+        Some(Self {
+            conn,
+            storage_root,
+            db_path: db_path.to_path_buf(),
+            _db: db,
+        })
+    }
+
     /// Opens (or creates) the global database at an explicit path. Returns
     /// `None` if the directory cannot be created or the DB fails to open.
+    ///
+    /// Concurrent first opens of the same fresh store used to race each
+    /// other's `PRAGMA journal_mode = WAL`, DDL batch, and migration
+    /// transactions: all but one connection silently got `None`, which
+    /// disabled global accounting (ledger recording) for the unlucky
+    /// callers' entire session. Opens are rare, so they are serialized
+    /// in-process and retried briefly to also cover a racing *external*
+    /// process (e.g. two MCP servers starting simultaneously).
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
+        static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = OPEN_ENSURE_LOCK.lock().await;
+        for attempt in 0..3_u64 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            if let Some(db) = Self::open_at_unsynchronized(db_path).await {
+                return Some(db);
+            }
+        }
+        None
+    }
+
+    async fn open_at_unsynchronized(db_path: &std::path::Path) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
+        let db = Self::open_local(db_path, false).await?;
 
-        let db = Builder::new_local(db_path).build().await.ok()?;
-        let conn = db.connect().ok()?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;",
-        )
-        .await
-        .ok()?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS projects (
+        db.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS projects (
                 path TEXT PRIMARY KEY,
                 tokens_saved INTEGER NOT NULL DEFAULT 0
             )",
-        )
-        .await
-        .ok()?;
+            )
+            .await
+            .ok()?;
 
-        conn.execute_batch(
+        db.conn
+            .execute_batch(
             "CREATE TABLE IF NOT EXISTS turns (
                 message_id TEXT PRIMARY KEY,
                 project_hash TEXT NOT NULL,
@@ -84,7 +442,8 @@ impl GlobalDb {
             CREATE TABLE IF NOT EXISTS parse_offsets (
                 file_path TEXT PRIMARY KEY,
                 byte_offset INTEGER NOT NULL,
-                mtime INTEGER NOT NULL
+                mtime INTEGER NOT NULL,
+                file_id INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS savings_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,12 +454,106 @@ impl GlobalDb {
                 after_tokens INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts ON savings_ledger(ts);
-            CREATE INDEX IF NOT EXISTS idx_savings_ledger_project ON savings_ledger(project_path)",
+            CREATE INDEX IF NOT EXISTS idx_savings_ledger_project ON savings_ledger(project_path);
+            CREATE TABLE IF NOT EXISTS sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                transcript_path TEXT,
+                metadata_json TEXT,
+                parent_session_id TEXT,
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT,
+                parent_tool_use_id TEXT,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_project
+                ON sessions(provider, project_key);
+            CREATE INDEX IF NOT EXISTS idx_sessions_started_at
+                ON sessions(started_at);
+            CREATE TABLE IF NOT EXISTS session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT,
+                source_path TEXT,
+                source_offset INTEGER,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id),
+                FOREIGN KEY(provider, session_id)
+                    REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_messages_session
+                ON session_messages(provider, session_id, ordinal);
+            CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
+                ON session_messages(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_session_messages_source
+                ON session_messages(source_path);
+            CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+                text, role, kind, model, tool_names,
+                content='session_messages', content_rowid='rowid'
+            );
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
+                AFTER INSERT ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
+                    VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
+                END;
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
+                AFTER DELETE ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, text, role, kind, model, tool_names)
+                    VALUES ('delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names);
+                END;
+            CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
+                AFTER UPDATE ON session_messages BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, text, role, kind, model, tool_names)
+                    VALUES ('delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names);
+                    INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
+                    VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
+                END",
         )
         .await
         .ok()?;
+        ensure_session_parent_columns(&db.conn).await?;
+        ensure_parse_offset_columns(&db.conn).await?;
+        crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn).await?;
+        // One-off self-heal: re-derive timestamps and token-usage counters
+        // for legacy messages ingested before extraction existed.
+        // Marker-guarded (runs once per store) and fail-open, like the LCM
+        // schema migrations above.
+        let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
 
-        Some(Self { conn, _db: db })
+        Some(db)
+    }
+
+    /// Opens a writable database at an explicit path assuming its schema was
+    /// already ensured by a prior [`Self::open_at`] in this process: skips the
+    /// DDL batch and LCM migrations while still applying the per-connection
+    /// PRAGMAs. Long-lived servers use this to avoid re-paying the schema
+    /// ensure on every tool call (the caller tracks which paths are ensured).
+    pub async fn open_at_assuming_schema(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        Self::open_local(db_path, false).await
+    }
+
+    /// Opens an existing database without creating directories, creating schema,
+    /// or running LCM carry-forward migrations.
+    pub async fn open_read_only_at(db_path: &std::path::Path) -> Option<Self> {
+        if !db_path.is_file() {
+            return None;
+        }
+        Self::open_local(db_path, true).await
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
@@ -110,9 +563,80 @@ impl GlobalDb {
         Self::open_at(&db_path).await
     }
 
+    /// Raw connection for crate-internal read layers (the dashboard HTTP
+    /// server queries the LCM tables directly).
+    pub(crate) fn dashboard_connection(&self) -> Connection {
+        self.conn.clone()
+    }
+
+    /// Transcript-ingest backlog for the session store backing this DB.
+    ///
+    /// For every session with a known transcript path, compares the on-disk
+    /// transcript size against the persisted parse offset. `pending_bytes` is
+    /// the total un-ingested tail across transcripts; `last_ingest_unix` is
+    /// the newest transcript mtime recorded at ingest time. Surfaced by
+    /// `tracedecay_status` and `tracedecay doctor --agent cursor` so a stalled
+    /// ingest (e.g. a backlog larger than the hook ingest caps) is visible
+    /// instead of silently eroding trust in session recall.
+    pub async fn session_ingest_health(&self) -> SessionIngestHealth {
+        let mut health = SessionIngestHealth::default();
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT DISTINCT transcript_path FROM sessions
+                 WHERE transcript_path IS NOT NULL AND transcript_path != ''
+                 LIMIT 1000",
+                (),
+            )
+            .await
+        else {
+            return health;
+        };
+        let mut paths = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Ok(path) = row.get::<String>(0) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            health.tracked_transcripts += 1;
+            let cursor = self.get_parse_offset(&path).await.unwrap_or_default();
+            if cursor.mtime > 0 {
+                let mtime = cursor.mtime as i64;
+                health.last_ingest_unix = Some(
+                    health
+                        .last_ingest_unix
+                        .map_or(mtime, |prev| prev.max(mtime)),
+                );
+            }
+            let pending = meta.len().saturating_sub(cursor.byte_offset);
+            if pending > 0 {
+                health.pending_transcripts += 1;
+                health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                health.max_transcript_pending_bytes =
+                    health.max_transcript_pending_bytes.max(pending);
+            }
+        }
+        health
+    }
+
+    /// Canonical registry key for a project path. Falls back to the lossy path
+    /// string when canonicalization fails (e.g. the path no longer exists) so
+    /// upserts and lookups always agree on a single key per project, instead of
+    /// creating divergent rows for `/p`, `/p/`, and symlinked spellings (#6).
+    fn canonical_project_key(project_path: &Path) -> String {
+        std::fs::canonicalize(project_path)
+            .unwrap_or_else(|_| project_path.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let _ = self
             .conn
             .execute(
@@ -125,7 +649,7 @@ impl GlobalDb {
 
     /// Returns the stored `tokens_saved` count for a specific project, or 0 if not found.
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        let path_str = project_path.to_string_lossy().to_string();
+        let path_str = Self::canonical_project_key(project_path);
         let Ok(mut rows) = self
             .conn
             .query(
@@ -173,7 +697,7 @@ impl GlobalDb {
             )
             .await;
         if let Err(e) = result {
-            eprintln!("[tokensave] savings_ledger insert failed: {e}");
+            eprintln!("[tracedecay] savings_ledger insert failed: {e}");
         }
     }
 
@@ -242,6 +766,84 @@ impl GlobalDb {
         out
     }
 
+    /// Ensures the dashboard token-count sidecar table exists.
+    ///
+    /// Dashboard-scope only: called once when the dashboard opens the global
+    /// accounting DB. Deliberately NOT part of the shared `open_at` DDL batch
+    /// so project-local session stores keep their schema untouched.
+    pub async fn ensure_token_count_cache(&self) -> bool {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
+                    store TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    text_len INTEGER NOT NULL,
+                    encoder TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    computed_at INTEGER NOT NULL,
+                    PRIMARY KEY (store, provider, message_id)
+                )",
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Loads every cached token count for one session store. Returns
+    /// `(provider, message_id, text_len, token_count)` tuples; empty on any
+    /// error (including the sidecar table not existing yet).
+    pub async fn load_token_counts(&self, store: &str) -> Vec<(String, String, i64, i64)> {
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT provider, message_id, text_len, token_count
+                 FROM dashboard_token_counts WHERE store = ?1",
+                params![store],
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let (Ok(provider), Ok(message_id), Ok(text_len), Ok(tokens)) = (
+                row.get::<String>(0),
+                row.get::<String>(1),
+                row.get::<i64>(2),
+                row.get::<i64>(3),
+            ) else {
+                continue;
+            };
+            out.push((provider, message_id, text_len, tokens));
+        }
+        out
+    }
+
+    /// Upserts freshly computed token counts for one session store.
+    /// Best-effort: the cache is an optimization, so errors are swallowed.
+    pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
+        let now = crate::tracedecay::current_timestamp();
+        for row in rows {
+            let _ = self
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO dashboard_token_counts
+                     (store, provider, message_id, text_len, encoder, token_count, computed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        store,
+                        row.provider.as_str(),
+                        row.message_id.as_str(),
+                        row.text_len,
+                        row.encoder,
+                        row.token_count,
+                        now
+                    ],
+                )
+                .await;
+        }
+    }
+
     /// Removes a project's row from the global DB. Best-effort.
     pub async fn delete_project(&self, project_path: &Path) {
         let path_str = project_path.to_string_lossy().to_string();
@@ -292,6 +894,537 @@ impl GlobalDb {
             }
         }
         paths
+    }
+
+    /// Inserts or replaces a provider session. Returns `false` on any DB error.
+    pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO sessions
+                 (provider, session_id, project_key, project_path, title, started_at, ended_at,
+                  transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+                  parent_tool_use_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(provider, session_id) DO UPDATE SET
+                    project_key = excluded.project_key,
+                    project_path = excluded.project_path,
+                    title = excluded.title,
+                    started_at = excluded.started_at,
+                    ended_at = excluded.ended_at,
+                    transcript_path = excluded.transcript_path,
+                    metadata_json = excluded.metadata_json,
+                    parent_session_id = excluded.parent_session_id,
+                    is_subagent = excluded.is_subagent,
+                    agent_id = excluded.agent_id,
+                    parent_tool_use_id = excluded.parent_tool_use_id",
+                params![
+                    session.provider.as_str(),
+                    session.session_id.as_str(),
+                    session.project_key.as_str(),
+                    session.project_path.as_str(),
+                    opt_text(session.title.as_deref()),
+                    opt_i64(session.started_at),
+                    opt_i64(session.ended_at),
+                    opt_text(session.transcript_path.as_deref()),
+                    opt_text(session.metadata_json.as_deref()),
+                    opt_text(session.parent_session_id.as_deref()),
+                    i64::from(session.is_subagent),
+                    opt_text(session.agent_id.as_deref()),
+                    opt_text(session.parent_tool_use_id.as_deref()),
+                ],
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Returns a single provider session by its provider-local ID.
+    pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT provider, session_id, project_key, project_path, title, started_at,
+                        ended_at, transcript_path, metadata_json, parent_session_id,
+                        is_subagent, agent_id, parent_tool_use_id
+                 FROM sessions WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+            )
+            .await
+            .ok()?;
+        row_to_session(&rows.next().await.ok()??)
+    }
+
+    /// Inserts or replaces a provider message. Returns `false` on any DB error.
+    pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return false;
+        }
+
+        if !self.upsert_session_message_in_existing_tx(message).await {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
+    }
+
+    async fn upsert_session_message_in_existing_tx(&self, message: &SessionMessageRecord) -> bool {
+        let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
+            &self.conn,
+            &self.storage_root,
+            message,
+        )
+        .await;
+        match raw_result {
+            Ok(raw) => {
+                self.upsert_session_message_projection(
+                    message,
+                    &raw.projection_text,
+                    raw.projection_metadata_json.as_deref(),
+                )
+                .await
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Atomically upserts one transcript session + all parsed messages and then
+    /// advances the parse cursor. Any failure rolls back the entire batch so a
+    /// follow-up ingest can safely replay from the previous offset.
+    pub async fn upsert_transcript_batch(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        let batch = TranscriptBatch {
+            session: session.clone(),
+            messages: messages.to_vec(),
+        };
+        self.upsert_transcript_batches_inner(
+            std::slice::from_ref(&batch),
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::Full,
+        )
+        .await
+    }
+
+    /// Atomically upserts several transcript sessions (and their messages),
+    /// writing only the searchable `session_messages` projection — never
+    /// `lcm_raw_messages` — and then advances one shared parse cursor.
+    ///
+    /// Used by the Hermes `state.db` sweep: Hermes already ingests its raw
+    /// conversation losslessly into the LCM store at runtime (the generated
+    /// plugin's `lcm_preflight` active-message ingest) and via the one-time
+    /// legacy-store migration, under its own message ids. Writing raw rows
+    /// again from the transcript sweep would duplicate the LCM store, so
+    /// Hermes transcripts only fill the provider-neutral projection. Any
+    /// failure rolls back the whole batch so a follow-up ingest can safely
+    /// replay from the previous cursor.
+    pub async fn upsert_transcript_projection_batches(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
+        self.upsert_transcript_batches_inner(
+            batches,
+            parse_offset_path,
+            parse_offset,
+            TranscriptWriteMode::ProjectionOnly,
+        )
+        .await
+    }
+
+    async fn upsert_transcript_batches_inner(
+        &self,
+        batches: &[TranscriptBatch],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+        mode: TranscriptWriteMode,
+    ) -> bool {
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return false;
+        }
+        for batch in batches {
+            if !self.upsert_session(&batch.session).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return false;
+            }
+            for message in &batch.messages {
+                let upserted = match mode {
+                    TranscriptWriteMode::Full => {
+                        self.upsert_session_message_in_existing_tx(message).await
+                    }
+                    TranscriptWriteMode::ProjectionOnly => {
+                        let text = crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+                        self.upsert_session_message_projection(
+                            message,
+                            &text,
+                            message.metadata_json.as_deref(),
+                        )
+                        .await
+                    }
+                };
+                if !upserted {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return false;
+                }
+            }
+        }
+        if !self
+            .set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
+            .await
+        {
+            let _ = self.conn.execute("ROLLBACK", ()).await;
+            return false;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return true;
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        false
+    }
+
+    async fn upsert_session_message_projection(
+        &self,
+        message: &SessionMessageRecord,
+        text: &str,
+        metadata_json: Option<&str>,
+    ) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO session_messages
+                 (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+                  tool_names, source_path, source_offset, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(provider, message_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    role = excluded.role,
+                    timestamp = excluded.timestamp,
+                    ordinal = excluded.ordinal,
+                    text = excluded.text,
+                    kind = excluded.kind,
+                    model = excluded.model,
+                    tool_names = excluded.tool_names,
+                    source_path = excluded.source_path,
+                    source_offset = excluded.source_offset,
+                    metadata_json = excluded.metadata_json",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.session_id.as_str(),
+                    message.role.as_str(),
+                    opt_i64(message.timestamp),
+                    message.ordinal,
+                    text,
+                    opt_text(message.kind.as_deref()),
+                    opt_text(message.model.as_deref()),
+                    opt_text(message.tool_names.as_deref()),
+                    opt_text(message.source_path.as_deref()),
+                    opt_i64(message.source_offset),
+                    opt_text(metadata_json),
+                ],
+            )
+            .await
+            .is_ok()
+    }
+
+    /// Returns a single provider message by its provider-local ID.
+    pub async fn get_session_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<SessionMessageRecord> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                        model, tool_names, source_path, source_offset, metadata_json
+                 FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await
+            .ok()?;
+        row_to_message(&rows.next().await.ok()??, 0)
+    }
+
+    /// Returns the current LCM schema version recorded for this session DB.
+    ///
+    /// Intentional integration-test seam for verifying migrations without
+    /// routing through MCP/tool handlers.
+    pub async fn lcm_schema_version(&self) -> Option<i64> {
+        crate::sessions::lcm::schema::schema_version(&self.conn).await
+    }
+
+    /// Loads a raw LCM message by provider and provider-local message ID.
+    ///
+    /// Intentional integration-test seam for asserting raw-store fidelity while
+    /// keeping production callers on higher-level LCM query APIs.
+    pub async fn lcm_load_raw_message(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Option<crate::sessions::lcm::LcmRawMessage> {
+        crate::sessions::lcm::schema::load_raw_message(&self.conn, provider, message_id).await
+    }
+
+    /// Loads ordered raw LCM messages for one session with stable store-id pagination.
+    pub async fn lcm_load_session(
+        &self,
+        request: crate::sessions::lcm::LcmLoadSessionRequest,
+    ) -> Result<crate::sessions::lcm::LcmLoadSessionPage, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::load_session(&self.conn, request).await
+    }
+
+    /// Searches bounded LCM raw snippets and, optionally, summary node text.
+    pub async fn lcm_grep(
+        &self,
+        request: crate::sessions::lcm::LcmGrepRequest,
+    ) -> Result<Vec<crate::sessions::lcm::LcmGrepHit>, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::grep(&self.conn, request).await
+    }
+
+    /// Expands a raw message, summary node, or external payload with content range metadata.
+    pub async fn lcm_expand(
+        &self,
+        request: crate::sessions::lcm::LcmExpandRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Assembles bounded LCM retrieval context for host-side query synthesis.
+    pub async fn lcm_expand_query(
+        &self,
+        request: crate::sessions::lcm::LcmExpandQueryRequest,
+    ) -> Result<crate::sessions::lcm::LcmExpandQueryResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::expand_query(&self.conn, request).await
+    }
+
+    /// Describes a session's LCM raw-message and summary-DAG shape without payload bodies.
+    pub async fn lcm_describe(
+        &self,
+        request: crate::sessions::lcm::LcmDescribeRequest,
+    ) -> Result<crate::sessions::lcm::LcmDescribeResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::describe(&self.conn, request).await
+    }
+
+    /// Reports LCM schema, storage, payload, and currently implemented maintenance counts.
+    pub async fn lcm_status(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::status(&self.conn, &self.storage_root, provider, session_id)
+            .await
+    }
+
+    /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
+    pub async fn lcm_doctor(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+        mode: &str,
+        apply: bool,
+        clean_config: crate::sessions::lcm::LcmCleanConfig,
+    ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::doctor::doctor(
+            &self.conn,
+            crate::sessions::lcm::doctor::DoctorRequest {
+                storage_root: &self.storage_root,
+                db_path: &self.db_path,
+                provider,
+                session_id,
+                mode,
+                apply,
+                clean_config,
+            },
+        )
+        .await
+    }
+
+    /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
+    ///
+    /// Intentional integration-test seam for lifecycle state setup; production
+    /// code updates this state through LCM preflight/compression flows.
+    pub async fn lcm_update_lifecycle(
+        &self,
+        update: crate::sessions::lcm::LcmLifecycleUpdate,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::update_lifecycle(&self.conn, update).await
+    }
+
+    /// Loads durable LCM lifecycle/frontier state for a provider conversation.
+    ///
+    /// Intentional integration-test seam for verifying lifecycle persistence
+    /// without coupling tests to compression internals.
+    pub async fn lcm_lifecycle_state(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::lifecycle_state(&self.conn, provider, conversation_id)
+            .await
+    }
+
+    /// Records a compression-boundary session start; a skipped carry-over
+    /// starts the durable compression cooldown for the new session.
+    pub async fn lcm_session_boundary(
+        &self,
+        request: crate::sessions::lcm::LcmSessionBoundaryRequest,
+    ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
+    {
+        crate::sessions::lcm::compression::record_session_boundary(&self.conn, request).await
+    }
+
+    /// Ingests active messages and reports whether deterministic replay changed.
+    pub async fn lcm_preflight(
+        &self,
+        request: crate::sessions::lcm::LcmPreflightRequest,
+    ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::preflight(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Runs deterministic LCM compression without invoking an auxiliary LLM.
+    pub async fn lcm_compress(
+        &self,
+        request: crate::sessions::lcm::LcmCompressionRequest,
+    ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::compression::compress(&self.conn, &self.storage_root, request).await
+    }
+
+    /// Returns an LCM store bound to an explicit storage root for payload files.
+    ///
+    /// Intentional integration-test seam for ingesting payload-backed messages
+    /// with temporary storage roots.
+    pub fn lcm_store(
+        &self,
+        storage_root: impl AsRef<Path>,
+    ) -> crate::sessions::lcm::payload::LcmStore<'_> {
+        crate::sessions::lcm::payload::LcmStore::new(
+            &self.conn,
+            storage_root.as_ref().to_path_buf(),
+        )
+    }
+
+    /// Inserts or updates an LCM summary node and its ordered source lineage.
+    ///
+    /// Intentional integration-test seam for constructing DAG fixtures without
+    /// invoking the summarization pipeline.
+    pub async fn lcm_insert_summary_node(
+        &self,
+        draft: crate::sessions::lcm::LcmSummaryNodeDraft,
+    ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::insert_summary_node(&self.conn, draft).await
+    }
+
+    /// Expands one summary node to its direct raw-message or summary-node sources.
+    ///
+    /// Intentional integration-test seam for asserting DAG lineage expansion
+    /// directly while production callers use `lcm_expand`.
+    pub async fn lcm_expand_summary_node(
+        &self,
+        provider: &str,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<crate::sessions::lcm::LcmSummaryExpansion, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::dag::expand_summary_node(&self.conn, provider, session_id, node_id)
+            .await
+    }
+
+    /// Searches message text for a provider, optionally constrained to one project.
+    pub async fn search_session_messages(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult> {
+        self.search_session_messages_filtered(
+            provider,
+            project_key,
+            query,
+            limit,
+            SessionSearchScope::All,
+            None,
+        )
+        .await
+    }
+
+    /// Searches message text with optional parent/subagent relationship filters.
+    pub async fn search_session_messages_filtered(
+        &self,
+        provider: &str,
+        project_key: Option<&str>,
+        query: &str,
+        limit: usize,
+        scope: SessionSearchScope,
+        parent_session_id: Option<&str>,
+    ) -> Vec<SessionMessageSearchResult> {
+        let fts_query = session_fts_query(query);
+        if fts_query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let select = "SELECT
+                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+                s.is_subagent, s.agent_id, s.parent_tool_use_id,
+                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
+                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
+                bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
+             FROM session_messages_fts
+             JOIN session_messages m ON session_messages_fts.rowid = m.rowid
+             JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
+             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2
+               AND (?3 IS NULL OR s.project_key = ?3)
+               AND (?4 IS NULL OR s.parent_session_id = ?4)
+               AND (?5 != 1 OR s.is_subagent = 0)
+               AND (?6 != 1 OR s.is_subagent = 1)";
+        let order = " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+                      LIMIT ?7";
+        let parents_only = i64::from(matches!(scope, SessionSearchScope::ParentsOnly));
+        let subagents_only = i64::from(matches!(scope, SessionSearchScope::SubagentsOnly));
+        let rows_result = self
+            .conn
+            .query(
+                &format!("{select}{order}"),
+                params![
+                    fts_query.as_str(),
+                    provider,
+                    opt_text(project_key),
+                    opt_text(parent_session_id),
+                    parents_only,
+                    subagents_only,
+                    limit as i64,
+                ],
+            )
+            .await;
+
+        let Ok(mut rows) = rows_result else {
+            return Vec::new();
+        };
+
+        let mut results = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let Some(session) = row_to_session(&row) else {
+                continue;
+            };
+            let Some(message) = row_to_message(&row, 13) else {
+                continue;
+            };
+            let score = row.get::<f64>(26).map_or(0.0, |rank| -rank);
+            results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score,
+            });
+        }
+        results
     }
 
     // ── Accounting: turns table ──────────────────────────────────────
@@ -425,33 +1558,83 @@ impl GlobalDb {
 
     // ── Accounting: parse_offsets table ────────────────────────────────
 
-    /// Get the saved parse offset for a JSONL file.
-    /// Returns `(byte_offset, mtime)` or `None` if not tracked.
-    pub async fn get_parse_offset(&self, path: &str) -> Option<(u64, u64)> {
-        let mut rows = self
+    /// Returns the saved parse cursor for a JSONL file, including the
+    /// optional file identity id, or `None` if the path is not tracked.
+    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
+        let Ok(mut rows) = self
             .conn
             .query(
-                "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
                 params![path],
             )
             .await
-            .ok()?;
+        else {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                    params![path],
+                )
+                .await
+                .ok()?;
+            let row = rows.next().await.ok()??;
+            let offset: i64 = row.get(0).ok()?;
+            let mtime: i64 = row.get(1).ok()?;
+            return Some(ParseOffset {
+                byte_offset: offset as u64,
+                mtime: mtime as u64,
+                file_id: 0,
+            });
+        };
         let row = rows.next().await.ok()??;
         let offset: i64 = row.get(0).ok()?;
         let mtime: i64 = row.get(1).ok()?;
-        Some((offset as u64, mtime as u64))
+        let file_id: i64 = row.get(2).ok()?;
+        Some(ParseOffset {
+            byte_offset: offset as u64,
+            mtime: mtime as u64,
+            file_id: file_id as u64,
+        })
     }
 
-    /// Save the parse offset for a JSONL file. Best-effort.
-    pub async fn set_parse_offset(&self, path: &str, offset: u64, mtime: u64) {
-        let _ = self
+    /// Saves the parse cursor for a transcript path. Best-effort.
+    pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
+        let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
+    }
+
+    async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {
+        if self
             .conn
             .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(file_path) DO UPDATE SET byte_offset = ?2, mtime = ?3",
-                params![path, offset as i64, mtime as i64],
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3,
+                    file_id = ?4",
+                params![
+                    path,
+                    offset.byte_offset as i64,
+                    offset.mtime as i64,
+                    offset.file_id as i64
+                ],
             )
-            .await;
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = ?2,
+                    mtime = ?3",
+                params![path, offset.byte_offset as i64, offset.mtime as i64],
+            )
+            .await
+            .is_ok()
     }
 
     /// Checkpoints the WAL. Best-effort.
@@ -460,5 +1643,42 @@ impl GlobalDb {
             .conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_column_migration_tolerates_duplicate_column_race() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("sessions.db");
+        let db = Builder::new_local(&db_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .unwrap();
+
+        assert!(!session_column_exists(&conn, "parent_session_id").await);
+
+        conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", ())
+            .await
+            .unwrap();
+
+        assert!(add_session_parent_column_after_missing_check(
+            &conn,
+            "parent_session_id",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+        )
+        .await
+        .is_some());
     }
 }

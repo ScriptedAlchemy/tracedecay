@@ -1,16 +1,16 @@
-use tokensave::context::*;
-use tokensave::types::*;
+use tracedecay::context::*;
+use tracedecay::types::*;
 
 #[tokio::test]
 async fn test_reranking_demotes_fixture_nodes() {
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
 
@@ -149,8 +149,8 @@ fn test_format_context_json() {
 async fn test_build_context_with_db() {
     use std::fs;
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -160,7 +160,7 @@ async fn test_build_context_with_db() {
     fs::write(project.join("src/lib.rs"), "pub fn process_data() {}\n").unwrap();
 
     // Init DB and insert a node
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
     let node = Node {
@@ -203,8 +203,8 @@ async fn test_build_context_with_db() {
 async fn test_get_code_reads_source_file() {
     use std::fs;
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -216,7 +216,7 @@ async fn test_get_code_reads_source_file() {
     )
     .unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
 
@@ -257,13 +257,13 @@ async fn test_get_code_reads_source_file() {
 #[tokio::test]
 async fn test_get_code_returns_none_for_missing_file() {
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
 
@@ -301,13 +301,13 @@ async fn test_get_code_returns_none_for_missing_file() {
 #[tokio::test]
 async fn test_find_relevant_context() {
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
     let node = Node {
@@ -348,13 +348,13 @@ async fn test_find_relevant_context() {
 #[tokio::test]
 async fn test_exclude_node_ids_deduplication() {
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
 
@@ -411,8 +411,8 @@ async fn test_exclude_node_ids_deduplication() {
 async fn test_merge_adjacent_code_blocks() {
     use std::fs;
     use tempfile::TempDir;
-    use tokensave::context::ContextBuilder;
-    use tokensave::db::Database;
+    use tracedecay::context::ContextBuilder;
+    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -423,7 +423,7 @@ async fn test_merge_adjacent_code_blocks() {
     )
     .unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tokensave/tokensave.db"))
+    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
         .await
         .unwrap();
 

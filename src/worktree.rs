@@ -1,6 +1,7 @@
 //! Borrowed-index detection for git worktrees.
 //!
-//! A tokensave index lives in a `.tokensave/` directory and is resolved by
+//! A tracedecay index lives in a `.tracedecay/` (or legacy `.tokensave/`)
+//! directory and is resolved by
 //! walking up parent directories to the nearest one (see
 //! [`config::discover_project_root`](crate::config::discover_project_root)).
 //! That walk is unaware of git worktrees: when a worktree is created *inside*
@@ -22,12 +23,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A mismatch between the caller's git working tree and the resolved
-/// tokensave index root.
+/// tracedecay index root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeIndexMismatch {
     /// The git working tree the command was invoked from.
     pub worktree_root: PathBuf,
-    /// The (different) working tree whose `.tokensave/` index is being
+    /// The (different) working tree whose data-dir index is being
     /// served.
     pub index_root: PathBuf,
 }
@@ -57,13 +58,13 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Detect when `start_path` lives in one git working tree but the resolved
-/// tokensave index (`index_root`) belongs to a *different* working tree.
+/// tracedecay index (`index_root`) belongs to a *different* working tree.
 ///
 /// Returns `None` — meaning "nothing to warn about" — when:
 ///   - `start_path` isn't in a git repo (or git is unavailable),
 ///   - the index already lives in `start_path`'s own working tree, or
 ///   - `index_root` isn't itself a working-tree root (an unrelated parent
-///     directory that merely happens to contain a `.tokensave/`), which
+///     directory that merely happens to contain a data dir), which
 ///     keeps non-git and monorepo-subdir layouts from producing false
 ///     warnings.
 pub fn detect_worktree_index_mismatch(
@@ -88,15 +89,15 @@ pub fn detect_worktree_index_mismatch(
     })
 }
 
-/// Verbose multi-line warning for `tokensave status` and similar contexts
+/// Verbose multi-line warning for `tracedecay status` and similar contexts
 /// where the answer can sit alongside a heads-up block.
 pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
     format!(
-        "This tokensave index belongs to a different git working tree.\n  \
+        "This tracedecay index belongs to a different git working tree.\n  \
          Running in: {}\n  \
          Index from: {}\n\
          Results reflect that tree's code (often a different branch), not this worktree — \
-         symbols changed only here are missing. Run `tokensave init` in this worktree for a \
+         symbols changed only here are missing. Run `tracedecay init` in this worktree for a \
          worktree-local index.",
         m.worktree_root.display(),
         m.index_root.display()
@@ -109,9 +110,9 @@ pub fn worktree_mismatch_warning(m: &WorktreeIndexMismatch) -> String {
 /// bury the result.
 pub fn worktree_mismatch_notice(m: &WorktreeIndexMismatch) -> String {
     format!(
-        "WARNING: tokensave results below come from a different git worktree ({}), \
+        "WARNING: tracedecay results below come from a different git worktree ({}), \
          not where you're working ({}) — they may reflect another branch, and symbols \
-         changed only here are missing. Run `tokensave init` here for a worktree-local index.",
+         changed only here are missing. Run `tracedecay init` here for a worktree-local index.",
         m.index_root.display(),
         m.worktree_root.display()
     )

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokensave::display::{
+use tracedecay::display::{
     format_bytes, format_number, format_relative_time, format_token_count, print_status_header,
     print_status_table,
 };
-use tokensave::types::GraphStats;
+use tracedecay::types::GraphStats;
 
 // ── format_token_count ──────────────────────────────────────────────────────
 

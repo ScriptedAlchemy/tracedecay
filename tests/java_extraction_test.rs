@@ -1,6 +1,6 @@
-use tokensave::extraction::JavaExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::JavaExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_java_empty_javadoc_no_panic() {

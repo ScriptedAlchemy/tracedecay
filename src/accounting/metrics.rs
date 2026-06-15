@@ -15,7 +15,7 @@ pub struct CostSummary {
     pub efficiency_ratio: f64,
 }
 
-/// Quick cost summary for the `tokensave status` header row.
+/// Quick cost summary for the `tracedecay status` header row.
 /// Returns `None` if no accounting data exists.
 pub async fn quick_cost_summary(
     gdb: &GlobalDb,

@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "tracedecay hook-cursor-session-start",
+        "timeout": 5
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "tracedecay hook-cursor-session-end",
+        "timeout": 30
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "tracedecay hook-cursor-subagent-start",
+        "timeout": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "tracedecay hook-cursor-post-tool-use",
+        "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "tracedecay hook-cursor-before-submit-prompt",
+        "timeout": 5
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "tracedecay hook-cursor-after-file-edit",
+        "timeout": 30
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "tracedecay hook-cursor-after-shell",
+        "timeout": 60
+      }
+    ],
+    "workspaceOpen": [
+      {
+        "command": "tracedecay hook-cursor-workspace-open",
+        "timeout": 60
+      }
+    ],
+    "stop": [
+      {
+        "command": "tracedecay hook-cursor-stop",
+        "timeout": 30
+      }
+    ]
+  }
+}

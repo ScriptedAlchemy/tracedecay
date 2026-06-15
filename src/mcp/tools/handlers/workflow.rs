@@ -12,8 +12,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::diagnose::{parse_cargo_output, Severity};
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::{is_test_file, TokenSave};
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::{is_test_file, TraceDecay};
 use crate::types::NodeKind;
 
 use super::super::ToolResult;
@@ -24,12 +24,12 @@ use super::{truncate_response, unique_file_paths};
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
 
-/// Handles `tokensave_diagnose`.
-pub(super) async fn handle_diagnose(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_diagnose`.
+pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let cargo_output =
         args.get("cargo_output")
             .and_then(|v| v.as_str())
-            .ok_or(TokenSaveError::Config {
+            .ok_or(TraceDecayError::Config {
                 message: "missing required parameter: cargo_output".to_string(),
             })?;
 
@@ -67,7 +67,7 @@ pub(super) async fn handle_diagnose(cg: &TokenSave, args: Value) -> Result<ToolR
         let callers_json = if include_callers {
             match &node {
                 Some(n) => {
-                    let callers = cg.get_callers(&n.id, 1).await.unwrap_or_default();
+                    let callers = cg.get_callers(&n.id, 1).await?;
                     let trimmed: Vec<Value> = callers
                         .into_iter()
                         .take(5)
@@ -136,8 +136,8 @@ fn severity_string(s: Severity) -> &'static str {
     }
 }
 
-/// Handles `tokensave_run_affected_tests`.
-pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+/// Handles `tracedecay_run_affected_tests`.
+pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let explicit_paths: Option<Vec<String>> = args.get("changed_paths").and_then(|v| {
         v.as_array().map(|arr| {
             arr.iter()
@@ -185,7 +185,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
     let mut test_targets: HashMap<String, Vec<String>> = HashMap::new();
     let mut covered_sources: HashSet<String> = HashSet::new();
     for path in &changed_paths {
-        let nodes = cg.get_nodes_by_file(path).await.unwrap_or_default();
+        let nodes = cg.get_nodes_by_file(path).await?;
 
         // (b) Direct dispatch from changed test files.
         let path_is_test_file = is_test_file(path);
@@ -195,10 +195,7 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
                 .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
                 .map(|n| n.id.clone())
                 .collect();
-            let test_annotated_in_file = cg
-                .get_test_annotated_node_ids(&candidate_ids)
-                .await
-                .unwrap_or_default();
+            let test_annotated_in_file = cg.get_test_annotated_node_ids(&candidate_ids).await?;
             for node in &nodes {
                 if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
                     continue;
@@ -224,12 +221,9 @@ pub(super) async fn handle_run_affected_tests(cg: &TokenSave, args: Value) -> Re
             if !matches!(node.kind, NodeKind::Function | NodeKind::Method) {
                 continue;
             }
-            let callers = cg.get_callers(&node.id, 3).await.unwrap_or_default();
+            let callers = cg.get_callers(&node.id, 3).await?;
             let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-            let test_annotated = cg
-                .get_test_annotated_node_ids(&caller_ids)
-                .await
-                .unwrap_or_default();
+            let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
             for (caller, _) in callers {
                 if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
                     continue;

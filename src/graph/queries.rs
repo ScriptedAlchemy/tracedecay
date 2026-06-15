@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::db::Database;
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
 /// Metrics describing the connectivity and structure around a single node.
@@ -226,13 +226,13 @@ impl<'a> GraphQueryManager<'a> {
                 .conn()
                 .query(&sql, ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to find dead code: {e}"),
                     operation: "find_dead_code".to_string(),
                 })?;
 
         let mut dead = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: "find_dead_code".to_string(),
         })? {
@@ -302,13 +302,13 @@ impl<'a> GraphQueryManager<'a> {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file dependencies: {e}"),
                 operation: "get_file_dependencies".to_string(),
             })?;
 
         let mut target_ids: Vec<String> = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read target id: {e}"),
             operation: "get_file_dependencies".to_string(),
         })? {
@@ -364,13 +364,13 @@ impl<'a> GraphQueryManager<'a> {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file dependents: {e}"),
                 operation: "get_file_dependents".to_string(),
             })?;
 
         let mut source_ids: Vec<String> = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read source id: {e}"),
             operation: "get_file_dependents".to_string(),
         })? {
@@ -454,7 +454,7 @@ impl<'a> GraphQueryManager<'a> {
                 .conn()
                 .query(sql, ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query file adjacency: {e}"),
                     operation: "build_file_adjacency".to_string(),
                 })?;
@@ -470,7 +470,7 @@ impl<'a> GraphQueryManager<'a> {
 
         let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
 
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read adjacency row: {e}"),
             operation: "build_file_adjacency".to_string(),
         })? {

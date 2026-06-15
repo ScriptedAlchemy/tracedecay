@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::ZigExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::ZigExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_zig_extract_imports() {

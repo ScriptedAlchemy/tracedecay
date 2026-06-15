@@ -3,8 +3,8 @@
 //! These tests verify that extractors handle real-world code patterns correctly,
 //! producing the expected nodes, edges, and relationships.
 
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 fn read_fixture(name: &str) -> String {
     let path = format!("tests/fixtures/{}", name);
@@ -16,7 +16,7 @@ fn read_fixture(name: &str) -> String {
 #[test]
 fn test_fixture_typescript() {
     let source = read_fixture("sample.ts");
-    let extractor = tokensave::extraction::TypeScriptExtractor;
+    let extractor = tracedecay::extraction::TypeScriptExtractor;
     let result = extractor.extract("sample.ts", &source);
     assert!(result.errors.is_empty(), "TS errors: {:?}", result.errors);
 
@@ -123,7 +123,7 @@ fn test_fixture_typescript() {
 #[test]
 fn test_fixture_javascript() {
     let source = read_fixture("sample.js");
-    let extractor = tokensave::extraction::TypeScriptExtractor;
+    let extractor = tracedecay::extraction::TypeScriptExtractor;
     let result = extractor.extract("sample.js", &source);
     assert!(result.errors.is_empty(), "JS errors: {:?}", result.errors);
 
@@ -152,7 +152,7 @@ fn test_fixture_javascript() {
 #[test]
 fn test_fixture_python() {
     let source = read_fixture("sample.py");
-    let extractor = tokensave::extraction::PythonExtractor;
+    let extractor = tracedecay::extraction::PythonExtractor;
     let result = extractor.extract("sample.py", &source);
     assert!(
         result.errors.is_empty(),
@@ -279,7 +279,7 @@ fn test_fixture_python() {
 #[test]
 fn test_fixture_c() {
     let source = read_fixture("sample.c");
-    let extractor = tokensave::extraction::CExtractor;
+    let extractor = tracedecay::extraction::CExtractor;
     let result = extractor.extract("sample.c", &source);
     assert!(result.errors.is_empty(), "C errors: {:?}", result.errors);
 
@@ -372,7 +372,7 @@ fn test_fixture_c() {
 #[test]
 fn test_fixture_c_header() {
     let source = read_fixture("sample.h");
-    let extractor = tokensave::extraction::CExtractor;
+    let extractor = tracedecay::extraction::CExtractor;
     let result = extractor.extract("sample.h", &source);
     assert!(
         result.errors.is_empty(),
@@ -404,7 +404,7 @@ fn test_fixture_c_header() {
 #[test]
 fn test_fixture_cpp() {
     let source = read_fixture("sample.cpp");
-    let extractor = tokensave::extraction::CppExtractor;
+    let extractor = tracedecay::extraction::CppExtractor;
     let result = extractor.extract("sample.cpp", &source);
     assert!(result.errors.is_empty(), "C++ errors: {:?}", result.errors);
 
@@ -503,7 +503,7 @@ fn test_fixture_cpp() {
 #[test]
 fn test_fixture_kotlin() {
     let source = read_fixture("sample.kt");
-    let extractor = tokensave::extraction::KotlinExtractor;
+    let extractor = tracedecay::extraction::KotlinExtractor;
     let result = extractor.extract("sample.kt", &source);
     assert!(
         result.errors.is_empty(),
@@ -609,7 +609,7 @@ fn test_fixture_kotlin() {
 #[test]
 fn test_fixture_dart() {
     let source = read_fixture("sample.dart");
-    let extractor = tokensave::extraction::DartExtractor;
+    let extractor = tracedecay::extraction::DartExtractor;
     let result = extractor.extract("sample.dart", &source);
     assert!(result.errors.is_empty(), "Dart errors: {:?}", result.errors);
 
@@ -686,7 +686,7 @@ fn test_fixture_dart() {
 #[test]
 fn test_fixture_csharp() {
     let source = read_fixture("sample.cs");
-    let extractor = tokensave::extraction::CSharpExtractor;
+    let extractor = tracedecay::extraction::CSharpExtractor;
     let result = extractor.extract("sample.cs", &source);
     assert!(result.errors.is_empty(), "C# errors: {:?}", result.errors);
 
@@ -806,7 +806,7 @@ fn test_fixture_csharp() {
 #[test]
 fn test_fixture_php() {
     let source = read_fixture("sample.php");
-    let extractor = tokensave::extraction::PhpExtractor;
+    let extractor = tracedecay::extraction::PhpExtractor;
     let result = extractor.extract("sample.php", &source);
     assert!(result.errors.is_empty(), "PHP errors: {:?}", result.errors);
 
@@ -938,7 +938,7 @@ fn test_fixture_php() {
 #[test]
 fn test_fixture_pascal() {
     let source = read_fixture("sample.pas");
-    let extractor = tokensave::extraction::PascalExtractor;
+    let extractor = tracedecay::extraction::PascalExtractor;
     let result = extractor.extract("sample.pas", &source);
     assert!(
         result.errors.is_empty(),
@@ -1026,7 +1026,7 @@ fn test_fixture_pascal() {
 #[test]
 fn test_fixture_ruby() {
     let source = read_fixture("sample.rb");
-    let extractor = tokensave::extraction::RubyExtractor;
+    let extractor = tracedecay::extraction::RubyExtractor;
     let result = extractor.extract("sample.rb", &source);
     assert!(result.errors.is_empty(), "Ruby errors: {:?}", result.errors);
 
@@ -1139,7 +1139,7 @@ fn test_fixture_ruby() {
 #[test]
 fn test_fixture_swift() {
     let source = read_fixture("sample.swift");
-    let extractor = tokensave::extraction::SwiftExtractor;
+    let extractor = tracedecay::extraction::SwiftExtractor;
     let result = extractor.extract("sample.swift", &source);
     assert!(
         result.errors.is_empty(),
@@ -1342,7 +1342,7 @@ fn test_fixture_swift() {
 #[test]
 fn test_fixture_bash() {
     let source = read_fixture("sample.sh");
-    let extractor = tokensave::extraction::BashExtractor;
+    let extractor = tracedecay::extraction::BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "Bash errors: {:?}", result.errors);
 
@@ -1407,7 +1407,7 @@ fn test_fixture_bash() {
 #[test]
 fn test_fixture_lua() {
     let source = read_fixture("sample.lua");
-    let extractor = tokensave::extraction::LuaExtractor;
+    let extractor = tracedecay::extraction::LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "Lua errors: {:?}", result.errors);
 
@@ -1487,7 +1487,7 @@ fn test_fixture_lua() {
 #[test]
 fn test_fixture_zig() {
     let source = read_fixture("sample.zig");
-    let extractor = tokensave::extraction::ZigExtractor;
+    let extractor = tracedecay::extraction::ZigExtractor;
     let result = extractor.extract("sample.zig", &source);
     assert!(result.errors.is_empty(), "Zig errors: {:?}", result.errors);
 
@@ -1659,7 +1659,7 @@ fn test_fixture_zig() {
 #[test]
 fn test_fixture_proto() {
     let source = read_fixture("sample.proto");
-    let extractor = tokensave::extraction::ProtoExtractor;
+    let extractor = tracedecay::extraction::ProtoExtractor;
     let result = extractor.extract("sample.proto", &source);
     assert!(
         result.errors.is_empty(),
@@ -1795,7 +1795,7 @@ fn test_fixture_proto() {
 #[test]
 fn test_fixture_nix() {
     let source = read_fixture("sample.nix");
-    let extractor = tokensave::extraction::NixExtractor;
+    let extractor = tracedecay::extraction::NixExtractor;
     let result = extractor.extract("sample.nix", &source);
     assert!(result.errors.is_empty(), "Nix errors: {:?}", result.errors);
 
@@ -1899,7 +1899,7 @@ fn test_fixture_nix() {
 #[test]
 fn test_fixture_vbnet() {
     let source = read_fixture("sample.vb");
-    let extractor = tokensave::extraction::VbNetExtractor;
+    let extractor = tracedecay::extraction::VbNetExtractor;
     let result = extractor.extract("sample.vb", &source);
 
     // File root
@@ -2068,7 +2068,7 @@ fn test_fixture_vbnet() {
 #[test]
 fn test_fixture_powershell() {
     let source = read_fixture("sample.ps1");
-    let extractor = tokensave::extraction::PowerShellExtractor;
+    let extractor = tracedecay::extraction::PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(
         result.errors.is_empty(),
@@ -2141,7 +2141,7 @@ fn test_fixture_powershell() {
 #[test]
 fn test_fixture_batch() {
     let source = read_fixture("sample.bat");
-    let extractor = tokensave::extraction::BatchExtractor;
+    let extractor = tracedecay::extraction::BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(
         result.errors.is_empty(),
@@ -2201,7 +2201,7 @@ fn test_fixture_batch() {
 #[test]
 fn test_fixture_perl() {
     let source = read_fixture("sample.pl");
-    let extractor = tokensave::extraction::PerlExtractor;
+    let extractor = tracedecay::extraction::PerlExtractor;
     let result = extractor.extract("sample.pl", &source);
     assert!(result.errors.is_empty(), "Perl errors: {:?}", result.errors);
 
@@ -2327,7 +2327,7 @@ fn test_fixture_perl() {
 #[test]
 fn test_fixture_objc() {
     let source = read_fixture("sample.m");
-    let extractor = tokensave::extraction::ObjcExtractor;
+    let extractor = tracedecay::extraction::ObjcExtractor;
     let result = extractor.extract("sample.m", &source);
 
     // File root
@@ -2488,7 +2488,7 @@ fn test_fixture_objc() {
 #[test]
 fn test_fixture_fortran() {
     let source = read_fixture("sample.f90");
-    let extractor = tokensave::extraction::FortranExtractor;
+    let extractor = tracedecay::extraction::FortranExtractor;
     let result = extractor.extract("sample.f90", &source);
     assert!(
         result.errors.is_empty(),
@@ -2646,7 +2646,7 @@ fn test_fixture_fortran() {
 #[test]
 fn test_fixture_cobol() {
     let source = read_fixture("sample.cob");
-    let extractor = tokensave::extraction::CobolExtractor;
+    let extractor = tracedecay::extraction::CobolExtractor;
     let result = extractor.extract("sample.cob", &source);
     assert!(
         result.errors.is_empty(),
@@ -2753,7 +2753,7 @@ fn test_fixture_cobol() {
 #[test]
 fn test_fixture_msbasic2() {
     let source = read_fixture("sample.bas");
-    let extractor = tokensave::extraction::MsBasic2Extractor;
+    let extractor = tracedecay::extraction::MsBasic2Extractor;
     let result = extractor.extract("sample.bas", &source);
     assert!(
         result.errors.is_empty(),
@@ -2835,7 +2835,7 @@ fn test_fixture_msbasic2() {
 #[test]
 fn test_fixture_gwbasic() {
     let source = read_fixture("sample.gw");
-    let extractor = tokensave::extraction::GwBasicExtractor;
+    let extractor = tracedecay::extraction::GwBasicExtractor;
     let result = extractor.extract("sample.gw", &source);
     assert!(
         result.errors.is_empty(),
@@ -2921,7 +2921,7 @@ fn test_fixture_gwbasic() {
 #[test]
 fn test_fixture_qbasic() {
     let source = read_fixture("sample.qb");
-    let extractor = tokensave::extraction::QBasicExtractor;
+    let extractor = tracedecay::extraction::QBasicExtractor;
     let result = extractor.extract("sample.qb", &source);
     assert!(
         result.errors.is_empty(),

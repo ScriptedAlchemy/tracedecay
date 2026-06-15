@@ -1,0 +1,235 @@
+[mcp_servers.tracedecay]
+args = [
+    "serve",
+    "--path",
+    ".",
+]
+command = "/home/zack/projects/tokensave/target/debug/tracedecay"
+
+[mcp_servers.tracedecay.tools.tracedecay_affected]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_body]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_branch_diff]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_branch_list]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_branch_search]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_by_qualified_name]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_call_chain]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_callees]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_callers]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_callers_for]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_changelog]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_circular]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_commit_context]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_complexity]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_config]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_constructors]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_context]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_coupling]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_dead_code]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_dependency_depth]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_derives]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_diagnose]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_diagnostics]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_diff_context]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_distribution]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_doc_coverage]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_dsm]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_fact_feedback]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_fact_store]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_field_sites]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_file_dependents]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_files]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_find_exact_symbol]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_gini]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_god_class]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_health]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_hotspots]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_impact]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_implementations]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_impls]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_inheritance_depth]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_insert_at]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_insert_at_symbol]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_largest]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_memory_status]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_message_search]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_module_api]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_multi_str_replace]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_node]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_outline]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_port_order]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_port_status]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_pr_context]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_rank]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_read]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_recursion]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_redundancy]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_rename_preview]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_replace_symbol]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_run_affected_tests]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_runtime]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_search]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_session_end]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_session_start]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_signature]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_signature_search]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_similar]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_simplify_scan]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_status]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_str_replace]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_test_map]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_test_risk]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_todos]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_type_hierarchy]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_unsafe_patterns]
+approval_mode = "auto"
+
+[mcp_servers.tracedecay.tools.tracedecay_unused_imports]
+approval_mode = "auto"

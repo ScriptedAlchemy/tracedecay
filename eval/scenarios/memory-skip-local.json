@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "id": "memory-skip-local",
+  "title": "Do not store or recall what is already in visible context",
+  "description": "When the answer is sitting in a visible workspace file, the agent must neither store it as a fact nor churn memory recall for it. Seeded unrelated facts must keep retrieval_count = 0 in the deterministic layer.",
+  "adapted_from": "mnemon `memory-skip-local` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "setup": {
+    "facts": [
+      {
+        "content": "The CI pipeline runs clippy with deny warnings on every push.",
+        "category": "code_area",
+        "source": "eval-seed",
+        "trust": 0.8,
+        "retrieval_count": 0
+      },
+      {
+        "content": "Release notes are drafted from the changelog tool output.",
+        "category": "general",
+        "source": "eval-seed",
+        "trust": 0.7,
+        "retrieval_count": 0
+      }
+    ],
+    "files": {
+      "FACTS.md": "# Local Facts\n\nThe local release color is teal-7.\n"
+    }
+  },
+  "deterministic": {
+    "well_behaved": [],
+    "violation": {
+      "expectation": "detect",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "fact_store",
+          "args": {
+            "action": "add",
+            "content": "The local release color is teal-7.",
+            "category": "general",
+            "source": "eval-agent"
+          }
+        },
+        {
+          "kind": "tool",
+          "tool": "fact_store",
+          "args": {
+            "action": "search",
+            "query": "release color"
+          }
+        }
+      ]
+    }
+  },
+  "real_model": {
+    "prompts": [
+      "Answer using only visible workspace files. What is the local release color in FACTS.md? The answer is already local, so do not store it in memory. Reply with the color only."
+    ],
+    "max_turns": 6
+  },
+  "assertions": [
+    {
+      "kind": "sql",
+      "name": "no_local_fact_stored",
+      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%teal-7%'",
+      "op": "eq",
+      "value": 0,
+      "phase": "both"
+    },
+    {
+      "kind": "sql",
+      "name": "no_recall_churn_on_seeded_facts",
+      "sql": "SELECT COALESCE(SUM(retrieval_count), 0) FROM memory_facts WHERE source = 'eval-seed'",
+      "op": "eq",
+      "value": 0,
+      "phase": "both",
+      "deterministic_only": true
+    }
+  ]
+}

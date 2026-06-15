@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tracedecay": {
+      "type": "stdio",
+      "command": "tracedecay",
+      "args": [
+        "serve",
+        "--path",
+        "${workspaceFolder}"
+      ]
+    }
+  }
+}

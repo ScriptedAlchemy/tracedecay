@@ -1,0 +1,777 @@
+//! Tests for the `TraceDecay` orchestrator methods that aren't fully exercised
+//! by the MCP handler tests.
+
+use std::{fs, process::Command};
+use tempfile::TempDir;
+use tracedecay::tracedecay::{is_test_file, TraceDecay};
+use tracedecay::types::{EdgeKind, NodeKind};
+
+// ---------------------------------------------------------------------------
+// Shared setup
+// ---------------------------------------------------------------------------
+
+/// Creates a temporary Rust project with cross-file calls, then initializes
+/// and indexes a `TraceDecay`.
+async fn setup() -> (TraceDecay, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+pub fn foo() { bar(); }
+fn bar() {}
+fn unused_private() {}
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/utils.rs"),
+        r#"
+use crate::lib::foo;
+pub fn helper() { foo(); }
+"#,
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (cg, dir)
+}
+
+fn run_git(project: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// is_test_file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_is_test_file_test_dir() {
+    assert!(is_test_file("tests/my_test.rs"));
+    assert!(is_test_file("tests/integration.rs"));
+}
+
+#[test]
+fn test_is_test_file_test_prefix() {
+    assert!(is_test_file("test/foo.rs"));
+}
+
+#[test]
+fn test_is_test_file_spec_dir() {
+    assert!(is_test_file("spec/models/user_spec.rb"));
+}
+
+#[test]
+fn test_is_test_file_e2e_dir() {
+    assert!(is_test_file("e2e/login.test.ts"));
+}
+
+#[test]
+fn test_is_test_file_dot_test() {
+    assert!(is_test_file("src/utils.test.ts"));
+    assert!(is_test_file("src/utils.spec.js"));
+}
+
+#[test]
+fn test_is_test_file_underscore_test() {
+    assert!(is_test_file("src/utils_test.rs"));
+    assert!(is_test_file("src/utils_spec.py"));
+}
+
+#[test]
+fn test_is_test_file_dunder_tests() {
+    assert!(is_test_file("__tests__/component.test.tsx"));
+}
+
+#[test]
+fn test_is_test_file_normal_source() {
+    assert!(!is_test_file("src/lib.rs"));
+    assert!(!is_test_file("src/main.rs"));
+    assert!(!is_test_file("src/utils.rs"));
+}
+
+#[test]
+fn test_is_test_file_case_insensitive() {
+    assert!(is_test_file("Tests/MyTest.rs"));
+    assert!(is_test_file("TESTS/foo.rs"));
+}
+
+// ---------------------------------------------------------------------------
+// get_all_files / get_all_nodes / get_all_edges through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_all_files() {
+    let (cg, _dir) = setup().await;
+    let files = cg.get_all_files().await.unwrap();
+    assert!(
+        files.len() >= 2,
+        "should have at least 2 indexed files (lib.rs, utils.rs), got {}",
+        files.len(),
+    );
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"src/lib.rs"));
+    assert!(paths.contains(&"src/utils.rs"));
+}
+
+#[tokio::test]
+async fn test_get_all_nodes() {
+    let (cg, _dir) = setup().await;
+    let nodes = cg.get_all_nodes().await.unwrap();
+    assert!(
+        !nodes.is_empty(),
+        "should have extracted some nodes from the project",
+    );
+    let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"foo"), "should have extracted 'foo'");
+    assert!(names.contains(&"bar"), "should have extracted 'bar'");
+}
+
+#[tokio::test]
+async fn test_get_all_edges() {
+    let (cg, _dir) = setup().await;
+    let edges = cg.get_all_edges().await.unwrap();
+    // foo() calls bar(), so there should be at least one edge
+    assert!(!edges.is_empty(), "should have at least one edge");
+}
+
+// ---------------------------------------------------------------------------
+// get_file_dependents
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_file_dependents() {
+    let (cg, _dir) = setup().await;
+    // utils.rs calls foo from lib.rs, so lib.rs has utils.rs as a dependent
+    // (or utils depends on lib). Let's check if lib.rs has dependents.
+    let dependents = cg.get_file_dependents("src/lib.rs").await.unwrap();
+    // The cross-file resolution may or may not work depending on extractor,
+    // but the method should not panic.
+    // dependents is a Vec<String> of file paths
+    assert!(
+        dependents.is_empty() || dependents.iter().any(|d| d.contains("utils")),
+        "dependents of lib.rs should either be empty (if resolution didn't link) or contain utils.rs"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// find_dead_code
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_find_dead_code_functions() {
+    let (cg, _dir) = setup().await;
+    let dead = cg
+        .find_dead_code(&[NodeKind::Function], false)
+        .await
+        .unwrap();
+    // The method should return successfully. Private functions without
+    // incoming call edges appear as dead code. The exact results depend
+    // on the extractor's edge generation (e.g., contains edges may give
+    // nodes incoming edges). Verify the method runs and returns only
+    // non-pub, non-main, non-test nodes.
+    for node in &dead {
+        assert_ne!(node.name, "main", "main should be excluded from dead code");
+        assert!(
+            !node.name.starts_with("test"),
+            "test functions should be excluded from dead code",
+        );
+        assert_ne!(
+            node.visibility,
+            tracedecay::types::Visibility::Pub,
+            "pub items should be excluded from dead code",
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_find_dead_code_custom_kinds() {
+    let (cg, _dir) = setup().await;
+    // Look for dead structs — our test project has none, should return empty
+    let dead = cg.find_dead_code(&[NodeKind::Struct], false).await.unwrap();
+    assert!(
+        dead.is_empty(),
+        "test project has no structs, so no dead struct code expected",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// get_file_coupling
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_file_coupling_fan_in() {
+    let (cg, _dir) = setup().await;
+    let coupling = cg.get_file_coupling(true, None, 10).await.unwrap();
+    // Even if coupling is empty (due to how the extractor resolves cross-file refs),
+    // the method should succeed.
+    for (path, count) in &coupling {
+        assert!(!path.is_empty());
+        assert!(*count > 0);
+    }
+}
+
+#[tokio::test]
+async fn test_get_file_coupling_fan_out() {
+    let (cg, _dir) = setup().await;
+    let coupling = cg.get_file_coupling(false, None, 10).await.unwrap();
+    for (path, count) in &coupling {
+        assert!(!path.is_empty());
+        assert!(*count > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// check_file_staleness
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_check_file_staleness_not_stale() {
+    let (cg, _dir) = setup().await;
+    // Right after indexing, files should not be stale
+    let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
+    // Immediately after indexing, the file should not be stale
+    // (mtime <= indexed_at in most cases)
+    assert!(
+        stale.is_empty(),
+        "files should not be stale right after indexing"
+    );
+}
+
+#[tokio::test]
+async fn test_check_file_staleness_after_modification() {
+    let (cg, dir) = setup().await;
+
+    // Wait a moment, then modify the file so mtime > indexed_at
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let file_path = dir.path().join("src/lib.rs");
+    fs::write(
+        &file_path,
+        "pub fn foo() { bar(); }\nfn bar() {}\nfn new_function() {}\n",
+    )
+    .unwrap();
+
+    let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
+    assert!(
+        stale.contains(&"src/lib.rs".to_string()),
+        "src/lib.rs should be stale after modification"
+    );
+}
+
+#[tokio::test]
+async fn test_check_file_staleness_new_file_not_in_db() {
+    use tempfile::tempdir;
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    fs::write(project.join("a.rs"), "fn a() {}").unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    // Now add a new file but DON'T sync. b.rs is on disk but not in the DB.
+    fs::write(project.join("b.rs"), "fn b() {}").unwrap();
+
+    let stale = cg.check_file_staleness(&["b.rs".to_string()]).await;
+    assert_eq!(
+        stale,
+        vec!["b.rs".to_string()],
+        "new file on disk but not in DB should be reported stale"
+    );
+}
+
+#[tokio::test]
+async fn test_check_file_staleness_deleted_indexed_file() {
+    use tempfile::tempdir;
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    fs::write(project.join("a.rs"), "fn a() {}").unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    // Delete the file. It's indexed but no longer on disk.
+    fs::remove_file(project.join("a.rs")).unwrap();
+
+    let stale = cg.check_file_staleness(&["a.rs".to_string()]).await;
+    assert_eq!(
+        stale,
+        vec!["a.rs".to_string()],
+        "indexed file deleted from disk should be reported stale"
+    );
+}
+
+#[tokio::test]
+async fn sync_refuses_to_mutate_fallback_branch_db() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    run_git(project, &["init", "-b", "main"]);
+    run_git(project, &["config", "user.email", "test@test.com"]);
+    run_git(project, &["config", "user.name", "Test"]);
+    run_git(project, &["add", "."]);
+    run_git(project, &["commit", "-m", "initial"]);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    run_git(project, &["checkout", "-b", "feature/sync-safety"]);
+    fs::write(
+        project.join("src/feature.rs"),
+        "pub fn feature_symbol() {}\n",
+    )
+    .unwrap();
+    run_git(project, &["add", "."]);
+    run_git(project, &["commit", "-m", "feature"]);
+
+    let feature_cg = TraceDecay::open(project).await.unwrap();
+    assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
+    assert_eq!(feature_cg.serving_branch(), Some("main"));
+    assert!(feature_cg.is_fallback());
+
+    let err = feature_cg
+        .sync()
+        .await
+        .expect_err("syncing a fallback DB should be refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("feature/sync-safety") && message.contains("tracedecay branch add"),
+        "error should explain how to track the branch, got: {message}",
+    );
+
+    let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
+    let main_files = main_cg.get_all_files().await.unwrap();
+    assert!(
+        !main_files.iter().any(|file| file.path == "src/feature.rs"),
+        "fallback sync must not insert feature files into the main DB"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #87 — Windows path-separator normalization
+// ---------------------------------------------------------------------------
+// The DB stores all file paths in canonical forward-slash form (the walker
+// in `accept_file` normalizes before insert). If a caller passed a
+// backslash-form path (`src\foo.py`) into the staleness / sync entry
+// points, the old code treated it as a different file from the
+// normalized `src/foo.py` already in the DB — which produced both a
+// "stale" verdict (DB miss for the backslash variant) and, after the
+// follow-up sync, a *second* row alongside the original. Tools doubled
+// their results, the redundancy score halved. This test pins the
+// post-fix behaviour: backslash-form input is treated as the same file
+// as the forward-slash row.
+
+#[tokio::test]
+async fn check_file_staleness_normalizes_backslash_paths() {
+    use tempfile::tempdir;
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    // The DB row is stored under `src/a.rs`. A caller handing us the
+    // Windows-shaped `src\a.rs` must hit the same row — not be treated
+    // as a missing file that needs indexing.
+    let stale = cg.check_file_staleness(&["src\\a.rs".to_string()]).await;
+    assert!(
+        stale.is_empty(),
+        "backslash-form path should match the forward-slash DB row, got stale={stale:?}"
+    );
+}
+
+#[tokio::test]
+async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path() {
+    use tempfile::tempdir;
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    // Sleep past the indexed_at second boundary so the mtime check in
+    // `check_file_staleness` fires when we rewrite the file. Without
+    // this, second-resolution mtimes on some filesystems can leave
+    // `mtime == indexed_at` and the staleness check returns empty.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    fs::write(project.join("src/a.rs"), "fn a() { let _x = 1; }").unwrap();
+
+    cg.sync_if_stale_silent(&["src\\a.rs".to_string()])
+        .await
+        .unwrap();
+
+    // Exactly one row should exist for this physical file. Pre-fix,
+    // both `src/a.rs` and `src\a.rs` would appear.
+    let all = cg.get_all_files().await.unwrap();
+    let matches: Vec<&String> = all
+        .iter()
+        .map(|f| &f.path)
+        .filter(|p| p.ends_with("a.rs"))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one a.rs row in DB, found {matches:?}"
+    );
+    assert_eq!(
+        matches[0], "src/a.rs",
+        "the surviving row must be the canonical forward-slash form"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// get_tokens_saved / set_tokens_saved — round-trip
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_tokens_saved_round_trip() {
+    let (cg, _dir) = setup().await;
+
+    // Initially should be 0
+    let initial = cg.get_tokens_saved().await.unwrap();
+    assert_eq!(initial, 0, "initial tokens_saved should be 0");
+
+    // Set a value
+    cg.set_tokens_saved(42_000).await.unwrap();
+    let saved = cg.get_tokens_saved().await.unwrap();
+    assert_eq!(saved, 42_000);
+
+    // Overwrite
+    cg.set_tokens_saved(100_000).await.unwrap();
+    let saved2 = cg.get_tokens_saved().await.unwrap();
+    assert_eq!(saved2, 100_000);
+}
+
+// ---------------------------------------------------------------------------
+// get_complexity_ranked through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_complexity_ranked() {
+    let (cg, _dir) = setup().await;
+    let ranked = cg.get_complexity_ranked(None, None, 10).await.unwrap();
+    // Should return functions/methods from our indexed project
+    assert!(
+        !ranked.is_empty(),
+        "should have at least one function in complexity ranking",
+    );
+    // Verify the tuple structure (node, lines, fan_out, fan_in, score)
+    let (node, lines, _fan_out, _fan_in, score) = &ranked[0];
+    assert!(!node.name.is_empty());
+    assert!(*lines > 0);
+    assert!(*score > 0);
+}
+
+// ---------------------------------------------------------------------------
+// get_undocumented_public_symbols through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_undocumented_public_symbols_no_filter() {
+    let (cg, _dir) = setup().await;
+    let undoc = cg.get_undocumented_public_symbols(None, 50).await.unwrap();
+    // foo is pub and has no docstring
+    let names: Vec<&str> = undoc.iter().map(|n| n.name.as_str()).collect();
+    assert!(
+        names.contains(&"foo"),
+        "foo is pub without docs, should appear, found: {:?}",
+        names,
+    );
+}
+
+#[tokio::test]
+async fn test_get_undocumented_public_symbols_with_prefix() {
+    let (cg, _dir) = setup().await;
+    let undoc = cg
+        .get_undocumented_public_symbols(Some("src/utils"), 50)
+        .await
+        .unwrap();
+    // helper in utils.rs is pub without docs
+    for node in &undoc {
+        assert!(
+            node.file_path.starts_with("src/utils"),
+            "path prefix filter should only return src/utils files, got: {}",
+            node.file_path,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// get_node_distribution through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_node_distribution() {
+    let (cg, _dir) = setup().await;
+    let dist = cg.get_node_distribution(None).await.unwrap();
+    assert!(!dist.is_empty(), "should have node distribution data");
+    // Each entry is (file_path, kind, count)
+    for (file, kind, count) in &dist {
+        assert!(!file.is_empty());
+        assert!(!kind.is_empty());
+        assert!(*count > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// is_initialized
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_is_initialized() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    assert!(
+        !TraceDecay::is_initialized(project),
+        "should not be initialized before init"
+    );
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "fn main() {}\n").unwrap();
+    let _cg = TraceDecay::init(project).await.unwrap();
+    assert!(
+        TraceDecay::is_initialized(project),
+        "should be initialized after init"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// get_god_classes through TraceDecay (empty for Rust-only project)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_god_classes_empty() {
+    let (cg, _dir) = setup().await;
+    let god = cg.get_god_classes(None, 10).await.unwrap();
+    // Pure Rust project with no classes should return empty
+    assert!(
+        god.is_empty(),
+        "Rust project without classes should have no god classes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// get_inheritance_depth through TraceDecay (empty for Rust-only project)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_inheritance_depth_empty() {
+    let (cg, _dir) = setup().await;
+    let depths = cg.get_inheritance_depth(None, 10).await.unwrap();
+    assert!(
+        depths.is_empty(),
+        "Rust project without class hierarchies should have no inheritance depth"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// search through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search() {
+    let (cg, _dir) = setup().await;
+    let results = cg.search("foo", 10).await.unwrap();
+    assert!(!results.is_empty(), "should find 'foo' via search");
+    assert_eq!(results[0].node.name, "foo");
+}
+
+// ---------------------------------------------------------------------------
+// get_stats through TraceDecay
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_stats() {
+    let (cg, _dir) = setup().await;
+    let stats = cg.get_stats().await.unwrap();
+    assert!(stats.node_count > 0, "should have nodes");
+    assert!(stats.file_count > 0, "should have files");
+}
+
+// ---------------------------------------------------------------------------
+// sync_if_stale_silent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sync_if_stale_removes_deleted_indexed_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
+    fs::write(
+        project.join("src/remove_me.rs"),
+        "pub fn deleted_symbol() {}\n",
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+    fs::remove_file(project.join("src/remove_me.rs")).unwrap();
+
+    let still_stale = cg
+        .sync_if_stale(&["src/remove_me.rs".to_string()])
+        .await
+        .unwrap();
+
+    assert!(
+        !still_stale,
+        "targeted sync should clear stale state for deleted indexed files"
+    );
+    let files = cg.get_all_files().await.unwrap();
+    assert!(
+        !files.iter().any(|file| file.path == "src/remove_me.rs"),
+        "deleted file row should be removed, got {files:?}"
+    );
+    let nodes = cg.get_all_nodes().await.unwrap();
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| node.file_path == "src/remove_me.rs"),
+        "deleted file nodes should be removed"
+    );
+}
+
+#[tokio::test]
+async fn str_replace_reindex_resolves_new_cross_file_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
+    fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.sync().await.unwrap();
+
+    let edit = cg
+        .str_replace(
+            "src/caller.rs",
+            "pub fn caller() {}\n",
+            "pub fn caller() { target(); }\n",
+        )
+        .await
+        .unwrap();
+    assert!(edit.success, "edit should succeed: {edit:?}");
+
+    let nodes = cg.get_all_nodes().await.unwrap();
+    let caller = nodes
+        .iter()
+        .find(|node| node.name == "caller" && node.file_path == "src/caller.rs")
+        .unwrap();
+    let target = nodes
+        .iter()
+        .find(|node| node.name == "target" && node.file_path == "src/target.rs")
+        .unwrap();
+    let edges = cg.get_all_edges().await.unwrap();
+
+    assert!(
+        edges.iter().any(|edge| {
+            edge.kind == EdgeKind::Calls && edge.source == caller.id && edge.target == target.id
+        }),
+        "direct edit reindex should resolve the new caller -> target edge; edges={edges:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().to_path_buf();
+    std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
+
+    let cg = tracedecay::tracedecay::TraceDecay::init(&project)
+        .await
+        .unwrap();
+    cg.sync().await.unwrap();
+
+    // Hold the sync lock to simulate a peer MCP syncing, then release it
+    // from a background task so the silent variant's bounded wait can make
+    // progress.
+    let lock = tracedecay::tracedecay::try_acquire_sync_lock(&project).expect("lock");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(lock);
+    });
+
+    // Touch the file so it's stale.
+    std::fs::write(project.join("a.rs"), "fn a() { let x = 1; }").unwrap();
+
+    // Silent variant should wait for the peer to release the lock and
+    // return Ok(()).
+    let result = cg.sync_if_stale_silent(&["a.rs".to_string()]).await;
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// #86 — last_sync_timestamp prefers metadata over max(indexed_at)
+// ---------------------------------------------------------------------------
+
+/// Regression for #86: the MCP `last synced N ago` warning was reading
+/// `MAX(files.indexed_at)`, which only advances when a file is actually
+/// reindexed. On quiet repos a successful sync (with 0 changes) leaves
+/// `indexed_at` stuck and the warning fires forever. `last_sync_at`
+/// metadata is the right source of truth because `sync()` writes it
+/// unconditionally.
+#[tokio::test]
+async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
+    let (cg, _dir) = setup().await;
+
+    // Backdate every file's `indexed_at` to simulate a long-quiet repo
+    // (typical state before a no-change sync). We use `1` rather than 0
+    // because `last_sync_timestamp` treats 0 as "no info available".
+    let stale = 1_i64;
+    cg.db()
+        .conn()
+        .execute("UPDATE files SET indexed_at = ?1", libsql::params![stale])
+        .await
+        .unwrap();
+
+    // Have the metadata reflect a recent sync.
+    let fresh = tracedecay::tracedecay::current_timestamp();
+    cg.db()
+        .set_metadata("last_sync_at", &fresh.to_string())
+        .await
+        .unwrap();
+
+    let observed = cg.last_sync_timestamp().await;
+    assert_eq!(
+        observed, fresh,
+        "last_sync_timestamp must return the metadata value, not MAX(indexed_at) (stale={stale}, got {observed})",
+    );
+    assert_ne!(
+        observed, stale,
+        "regression: still reading stale indexed_at"
+    );
+}
+
+/// Fallback: if `last_sync_at` metadata is missing, fall back to
+/// `last_index_time`. This keeps freshly-imported projects (no sync yet,
+/// only an `init`) honest.
+#[tokio::test]
+async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
+    let (cg, _dir) = setup().await;
+    cg.db()
+        .conn()
+        .execute(
+            "DELETE FROM metadata WHERE key = ?1",
+            libsql::params!["last_sync_at"],
+        )
+        .await
+        .unwrap();
+
+    let observed = cg.last_sync_timestamp().await;
+    let fallback = cg.last_index_time().await.unwrap();
+    assert_eq!(observed, fallback);
+}

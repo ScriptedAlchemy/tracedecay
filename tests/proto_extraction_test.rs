@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::ProtoExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::ProtoExtractor;
+use tracedecay::types::*;
 
 fn extract_sample() -> ExtractionResult {
     let source = std::fs::read_to_string("tests/fixtures/sample.proto")

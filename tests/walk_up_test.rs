@@ -3,12 +3,12 @@
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
-use tokensave::mcp::handle_tool_call;
-use tokensave::tokensave::TokenSave;
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::tracedecay::TraceDecay;
 
 /// Sets up a project at the temp root with files in `src/mcp/`, `src/db/`, and `tests/`,
-/// then initialises and indexes a `TokenSave`.
-async fn setup_nested_project() -> (TokenSave, TempDir) {
+/// then initialises and indexes a `TraceDecay`.
+async fn setup_nested_project() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     fs::create_dir_all(root.join("src/mcp")).unwrap();
@@ -60,7 +60,7 @@ fn test_serve() {
     )
     .unwrap();
 
-    let cg = TokenSave::init(root).await.unwrap();
+    let cg = TraceDecay::init(root).await.unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -75,12 +75,12 @@ fn extract_text(value: &serde_json::Value) -> &str {
 async fn test_discover_project_root_from_subdir() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::create_dir_all(root.join(".tokensave")).unwrap();
-    fs::write(root.join(".tokensave/tokensave.db"), b"fake").unwrap();
+    fs::create_dir_all(root.join(".tracedecay")).unwrap();
+    fs::write(root.join(".tracedecay/tracedecay.db"), b"fake").unwrap();
     let subdir = root.join("src/mcp/tools");
     fs::create_dir_all(&subdir).unwrap();
 
-    let found = tokensave::config::discover_project_root(&subdir);
+    let found = tracedecay::config::discover_project_root(&subdir);
     assert_eq!(found.unwrap(), root);
 }
 
@@ -89,7 +89,7 @@ async fn test_files_scoped_to_subdir() {
     let (cg, _dir) = setup_nested_project().await;
 
     // Scoped to "src/mcp" — should only return mcp files
-    let result = handle_tool_call(&cg, "tokensave_files", json!({}), None, Some("src/mcp"))
+    let result = handle_tool_call(&cg, "tracedecay_files", json!({}), None, Some("src/mcp"))
         .await
         .unwrap();
     let text = extract_text(&result.value);
@@ -111,7 +111,7 @@ async fn test_traversal_unscoped() {
     // Search for "serve" to get its node_id (unscoped search to find it)
     let search_result = handle_tool_call(
         &cg,
-        "tokensave_search",
+        "tracedecay_search",
         json!({"query": "serve", "limit": 10}),
         None,
         None,
@@ -127,7 +127,7 @@ async fn test_traversal_unscoped() {
         // Callers should work even with scope_prefix set — traversals are unscoped
         let callers_result = handle_tool_call(
             &cg,
-            "tokensave_callers",
+            "tracedecay_callers",
             json!({"node_id": node_id}),
             None,
             Some("src/mcp"),

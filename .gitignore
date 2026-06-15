@@ -2,13 +2,14 @@
 .DS_Store
 .codegraph
 .tokensave
+.tracedecay
 .mcp.json
 .claude/
+.cursor/
 docs/superpowers
 /local-only
 .worktrees
 .agents/
-.codex/
 .rtk/
 .sentrux/
 cache/

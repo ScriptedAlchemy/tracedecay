@@ -1,6 +1,6 @@
-use tokensave::extraction::CppExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::CppExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_cpp_file_node_is_root() {

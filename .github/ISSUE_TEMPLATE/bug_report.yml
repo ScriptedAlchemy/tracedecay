@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in tokensave
+description: Report a bug in tracedecay
 labels: ["bug"]
 body:
   - type: markdown
@@ -10,8 +10,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: tokensave version
-      description: Run `tokensave --version`
+      label: tracedecay version
+      description: Run `tracedecay --version`
       placeholder: "3.2.0"
     validations:
       required: true
@@ -47,7 +47,7 @@ body:
     attributes:
       label: What happened?
       description: A clear description of the bug.
-      placeholder: "When I run `tokensave sync` on my project, it fails with..."
+      placeholder: "When I run `tracedecay sync` on my project, it fails with..."
     validations:
       required: true
 
@@ -72,7 +72,7 @@ body:
     id: component
     attributes:
       label: Component
-      description: Which part of tokensave is affected?
+      description: Which part of tracedecay is affected?
       options:
         - Indexing / sync
         - MCP server

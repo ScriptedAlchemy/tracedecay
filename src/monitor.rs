@@ -1,11 +1,12 @@
 //! Global memory-mapped ring buffer for live token-savings monitoring.
 //!
-//! The mmap lives at `~/.tokensave/monitor.mmap` so a single TUI can
-//! show activity from every project on the machine. Multiple MCP server
-//! instances (one per project) write concurrently using file locking.
+//! The mmap lives at `monitor.mmap` inside the user-level data dir
+//! (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present) so a single
+//! TUI can show activity from every project on the machine. Multiple MCP
+//! server instances (one per project) write concurrently using file locking.
 //!
 //! Entry format is generic: each entry carries a **prefix** (tool suite
-//! name, e.g. "tokensave"), a **project** (folder name), and a
+//! name, e.g. "tracedecay"), a **project** (folder name), and a
 //! **`tool_name`** (the specific MCP call).
 
 use std::path::{Path, PathBuf};
@@ -36,9 +37,10 @@ const EOFF_TIMESTAMP: usize = 112;
 const MMAP_FILENAME: &str = "monitor.mmap";
 const LOCK_FILENAME: &str = "monitor.lock";
 
-/// Resolve the global `~/.tokensave/` directory.
-fn global_tokensave_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".tokensave"))
+/// Resolve the user-level data directory (`~/.tracedecay/`, falling back to
+/// a legacy `~/.tokensave/` when present).
+fn global_tracedecay_dir() -> Option<PathBuf> {
+    crate::config::user_data_dir()
 }
 
 /// A single ring-buffer entry read from the mmap.
@@ -64,10 +66,10 @@ impl MonitorEntry {
 /// Write a tool-call entry to the global monitor mmap.
 ///
 /// `project_root` is used to derive the folder name. `prefix` identifies
-/// the tool suite (e.g. "tokensave"). Best-effort: silently returns on
+/// the tool suite (e.g. "tracedecay"). Best-effort: silently returns on
 /// any failure.
 pub fn write_entry(project_root: &Path, prefix: &str, tool_name: &str, delta: u64, before: u64) {
-    let Some(dir) = global_tokensave_dir() else {
+    let Some(dir) = global_tracedecay_dir() else {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
@@ -179,7 +181,7 @@ fn read_str(mmap: &memmap2::Mmap, offset: usize) -> String {
 impl MmapReader {
     /// Open the global monitor mmap for reading.
     pub fn open() -> std::io::Result<Self> {
-        let dir = global_tokensave_dir().ok_or_else(|| {
+        let dir = global_tracedecay_dir().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "cannot resolve home directory",
@@ -265,7 +267,7 @@ impl MmapReader {
     }
 }
 
-// ── TUI (tokensave monitor command) ─────────────────────────────────
+// ── TUI (tracedecay monitor command) ────────────────────────────────
 
 use std::io::Write;
 
@@ -275,7 +277,7 @@ pub fn run() -> std::io::Result<()> {
         cursor, execute, terminal,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen},
     };
-    let dir = global_tokensave_dir().ok_or_else(|| {
+    let dir = global_tracedecay_dir().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "cannot resolve home directory",
@@ -616,7 +618,7 @@ fn monitor_loop(
         let sep = "\u{2500}".repeat(w);
         let total_saved: u64 = entries.iter().map(|e| e.delta).sum();
         let total_str = format_number(total_saved);
-        let label = "TokenSave Monitor";
+        let label = "TraceDecay Monitor";
         let suffix = "saved tokens";
         let footer_content = format!("{label}  {total_str} {suffix}");
         let footer_padding = w.saturating_sub(footer_content.len());
@@ -721,7 +723,7 @@ mod tests {
         assert_eq!(update_color_for(&recent, "other_proj", "newest"), "");
     }
 
-    /// Regression test for issue #39: `tokensave monitor` panicked on
+    /// Regression test for issue #39: `tracedecay monitor` panicked on
     /// macOS/Linux with "Cannot start a runtime from within a runtime."
     ///
     /// `refresh_cost_cache` was building a fresh `tokio::runtime` and

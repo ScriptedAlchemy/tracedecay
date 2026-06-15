@@ -2,7 +2,7 @@
 //!
 //! Extracts structured diagnostics — severity, optional error code, message,
 //! and primary source location — from the human-readable text that the
-//! `rustc` / `clippy` toolchain emits. Used by the `tokensave_diagnose` MCP
+//! `rustc` / `clippy` toolchain emits. Used by the `tracedecay_diagnose` MCP
 //! tool to map each diagnostic to a graph node and pre-attach the relevant
 //! callers/callees.
 //!
@@ -174,7 +174,7 @@ warning: redundant closure
     #[test]
     fn ignores_unanchored_summary_errors() {
         // Cargo's tail line has no span and must not be reported.
-        let input = "error: could not compile `tokensave` (lib) due to 43 previous errors";
+        let input = "error: could not compile `tracedecay` (lib) due to 43 previous errors";
         let diags = parse_cargo_output(input);
         assert!(diags.is_empty());
     }

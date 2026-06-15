@@ -1,5 +1,5 @@
-use tokensave::extraction::{LanguageRegistry, RustExtractor};
-use tokensave::types::*;
+use tracedecay::extraction::{LanguageRegistry, RustExtractor};
+use tracedecay::types::*;
 
 #[test]
 fn test_extract_function() {
