@@ -1,6 +1,10 @@
-# Tokensave vs Token-Savior Benchmark
+# TraceDecay vs Token-Savior Benchmark
 
 Generated: 2026-05-25 12:08:32 UTC
+
+> Historical run, recorded before the project was renamed from Tokensave to
+> TraceDecay. The `tokensave` binary, command, and column names below are the
+> names that were measured at run time and are preserved as recorded.
 
 Side-by-side comparison on real-world Python repositories. Both tools index
 the same clone, and the same random sample of symbols (seed=42) is used for

@@ -1,6 +1,6 @@
-use tokensave::extraction::CExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::CExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_c_file_node_is_root() {

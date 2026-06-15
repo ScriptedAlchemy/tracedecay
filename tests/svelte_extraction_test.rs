@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::SvelteExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::SvelteExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_svelte_file_node() {

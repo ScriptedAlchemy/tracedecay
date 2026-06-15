@@ -1,6 +1,6 @@
-use tokensave::extraction::GoExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::GoExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_go_extract_package() {

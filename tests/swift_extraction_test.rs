@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::SwiftExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::SwiftExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_swift_extract_imports() {

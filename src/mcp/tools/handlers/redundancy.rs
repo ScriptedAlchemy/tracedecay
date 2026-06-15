@@ -1,5 +1,5 @@
 // Rust guideline compliant 2026-05-25
-//! `tokensave_redundancy` — AST-level functional-duplicate detector.
+//! `tracedecay_redundancy` — AST-level functional-duplicate detector.
 //!
 //! Pipeline:
 //!
@@ -23,15 +23,15 @@ use crate::redundancy::{
     composite_similarity, compute_fingerprint, find_node_at_lines, jaccard_similarity,
     overlap_kind, parse_file, severity_bucket, Fingerprint,
 };
-use crate::tokensave::TokenSave;
+use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
 
 use super::super::ToolResult;
 use super::{effective_path, truncate_response};
 
-/// `tokensave_redundancy` handler.
+/// `tracedecay_redundancy` handler.
 pub(super) async fn handle_redundancy(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -94,7 +94,7 @@ pub(super) async fn handle_redundancy(
 // ---------------------------------------------------------------------------
 
 async fn collect_candidates(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     path_prefix: Option<&str>,
     min_lines: u32,
 ) -> Result<Vec<Node>> {
@@ -125,7 +125,7 @@ async fn collect_candidates(
 /// node's body; otherwise re-parses the file once, computes fingerprints
 /// for all candidate nodes in that file, and persists them.
 async fn ensure_fingerprints(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     candidates: &[Node],
 ) -> Result<HashMap<String, Fingerprint>> {
     let registry = crate::extraction::LanguageRegistry::new();
@@ -211,7 +211,7 @@ async fn ensure_fingerprints(
             // Persist for next time. Errors are logged but not fatal —
             // the redundancy query still returns results.
             if let Err(e) = cg.db().upsert_fingerprint(&node.id, &fp).await {
-                eprintln!("[tokensave] redundancy: upsert_fingerprint failed: {e}");
+                eprintln!("[tracedecay] redundancy: upsert_fingerprint failed: {e}");
             }
             out.insert(node.id.clone(), fp);
         }

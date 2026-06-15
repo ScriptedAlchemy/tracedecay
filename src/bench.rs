@@ -1,4 +1,4 @@
-//! Reproducible benchmark harness for `tokensave bench`.
+//! Reproducible benchmark harness for `tracedecay bench`.
 //!
 //! Loads a query file (TOML), runs each query through `cg.build_context(...)`,
 //! and reports retrieval savings: how many tokens an agent would have spent
@@ -11,8 +11,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::context::format_context_as_markdown;
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 use crate::types::{BuildContextOptions, OutputFormat as ContextFormat};
 
 #[derive(Debug, Deserialize)]
@@ -70,17 +70,17 @@ impl Default for BenchOptions {
     }
 }
 
-/// The embedded default query set. Compiled into the binary so `tokensave bench`
+/// The embedded default query set. Compiled into the binary so `tracedecay bench`
 /// works without any external file dependency.
 pub const DEFAULT_QUERIES_TOML: &str = include_str!("../benchmarks/queries/default.toml");
 
 /// Run the bench from a TOML query file on disk.
 pub async fn run_bench(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     queries_path: &Path,
     opts: BenchOptions,
 ) -> Result<BenchReport> {
-    let raw = std::fs::read_to_string(queries_path).map_err(|e| TokenSaveError::Config {
+    let raw = std::fs::read_to_string(queries_path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read query file {}: {e}", queries_path.display()),
     })?;
     run_bench_with_toml(cg, &raw, opts).await
@@ -89,11 +89,11 @@ pub async fn run_bench(
 /// Run the bench from an in-memory TOML string. Used by the CLI's default path
 /// (avoids a filesystem dependency on the embedded query set).
 pub async fn run_bench_with_toml(
-    cg: &TokenSave,
+    cg: &TraceDecay,
     toml_str: &str,
     opts: BenchOptions,
 ) -> Result<BenchReport> {
-    let parsed: QueryFile = toml::from_str(toml_str).map_err(|e| TokenSaveError::Config {
+    let parsed: QueryFile = toml::from_str(toml_str).map_err(|e| TraceDecayError::Config {
         message: format!("failed to parse query file as TOML: {e}"),
     })?;
 
@@ -163,7 +163,7 @@ pub async fn run_bench_with_toml(
 /// Format the report for the terminal: a fixed-width colored table.
 /// Numbers use compact units (`k`, `M`); savings percentages are colored by
 /// tier (green ≥80%, yellow ≥50%, red <50%). Matches the ANSI style used
-/// elsewhere in `tokensave status`.
+/// elsewhere in `tracedecay status`.
 pub fn format_report_console(report: &BenchReport) -> String {
     use crate::display::{format_number, format_token_count};
 
@@ -191,7 +191,7 @@ pub fn format_report_console(report: &BenchReport) -> String {
 
     let _ = writeln!(
         s,
-        "{BOLD}{CYAN}tokensave bench{RESET}{BOLD} — {} {}{RESET}\n",
+        "{BOLD}{CYAN}tracedecay bench{RESET}{BOLD} — {} {}{RESET}\n",
         report.aggregate.queries,
         if report.aggregate.queries == 1 {
             "query"

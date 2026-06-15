@@ -1,7 +1,7 @@
 //! Times a single-file extraction. Usage: `cargo run --release --example bench_extract <file>`.
 
 use std::time::Instant;
-use tokensave::extraction::{CExtractor, CppExtractor};
+use tracedecay::extraction::{CExtractor, CppExtractor};
 
 fn main() {
     let path = std::env::args()

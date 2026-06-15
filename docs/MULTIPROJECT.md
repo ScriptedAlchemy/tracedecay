@@ -2,16 +2,16 @@
 
 ## Problem
 
-The global git post-commit hook runs `tokensave sync` in every repo. Before the init/sync separation (see `tokensave init`), this silently created databases in non-enrolled repos. Even with that fix, tokensave currently assumes one project per database. Monorepos and multi-app workspaces (e.g. `Code/App1/`, `Code/App2/`) have no way to scope queries to a single sub-project.
+The global git post-commit hook runs `tracedecay sync` in every repo. Before the init/sync separation (see `tracedecay init`), this silently created databases in non-enrolled repos. Even with that fix, tracedecay currently assumes one project per database. Monorepos and multi-app workspaces (e.g. `Code/App1/`, `Code/App2/`) have no way to scope queries to a single sub-project.
 
 ## Goal
 
-A single `.tokensave` database can cover multiple projects. Each node and file belongs to exactly one project. Queries gain an optional `project` filter. New cross-project queries enable comparison (e.g. "which project has the most god classes?").
+A single `.tracedecay` database can cover multiple projects. Each node and file belongs to exactly one project. Queries gain an optional `project` filter. New cross-project queries enable comparison (e.g. "which project has the most god classes?").
 
 ## Concepts
 
 - **Single-project mode** (default): All nodes belong to `[root]`. Existing behavior, no changes needed.
-- **Multiproject mode** (`tokensave init --multiproject`): The indexer creates a project for each direct subfolder of the root. Files in the root itself belong to `[root]`.
+- **Multiproject mode** (`tracedecay init --multiproject`): The indexer creates a project for each direct subfolder of the root. Files in the root itself belong to `[root]`.
 
 Example:
 ```
@@ -33,10 +33,10 @@ Add `project TEXT NOT NULL DEFAULT '[root]'` to both `nodes` and `files` tables.
 
 **Query changes**: Every query that accepts `path_prefix` gains an optional `project` parameter. ~15 DB methods + ~15 MCP handlers. The SQL filter is `AND n.project = ?` when provided.
 
-**Config**: `TokenSaveConfig` gains `multiproject: bool`. The indexer reads direct subdirectories to assign project names.
+**Config**: `TraceDecayConfig` gains `multiproject: bool`. The indexer reads direct subdirectories to assign project names.
 
 **New MCP tools**:
-- `tokensave_projects` -- list available projects in the database
+- `tracedecay_projects` -- list available projects in the database
 - Cross-project analysis tools (GROUP BY project variants of existing tools)
 
 **Pros**:
@@ -95,5 +95,5 @@ These are new queries enabled by having `project` as a column:
 ## Open Questions
 
 - Should `project` and `path` filters be combinable? (e.g. "god classes in App1 under src/main/")
-- Should `tokensave sync` in multiproject mode re-discover new subdirectories automatically, or require `tokensave init` again?
+- Should `tracedecay sync` in multiproject mode re-discover new subdirectories automatically, or require `tracedecay init` again?
 - Should there be a way to manually map project names to paths (beyond auto-discovery from subdirectories)?

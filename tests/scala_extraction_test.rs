@@ -1,7 +1,7 @@
-use tokensave::extraction::ScalaExtractor;
-use tokensave::types::{EdgeKind, NodeKind};
+use tracedecay::extraction::ScalaExtractor;
+use tracedecay::types::{EdgeKind, NodeKind};
 
-fn extract(source: &str) -> tokensave::types::ExtractionResult {
+fn extract(source: &str) -> tracedecay::types::ExtractionResult {
     ScalaExtractor::extract_scala("test.scala", source)
 }
 
@@ -211,7 +211,10 @@ fn test_scala_visibility_private() {
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
     assert_eq!(methods.len(), 1);
-    assert_eq!(methods[0].visibility, tokensave::types::Visibility::Private);
+    assert_eq!(
+        methods[0].visibility,
+        tracedecay::types::Visibility::Private
+    );
 }
 
 #[test]
@@ -223,7 +226,7 @@ fn test_scala_visibility_default_is_public() {
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
     assert_eq!(methods.len(), 1);
-    assert_eq!(methods[0].visibility, tokensave::types::Visibility::Pub);
+    assert_eq!(methods[0].visibility, tracedecay::types::Visibility::Pub);
 }
 
 #[test]

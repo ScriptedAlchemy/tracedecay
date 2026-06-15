@@ -1,7 +1,7 @@
 use std::time::Duration;
 use tempfile::tempdir;
-use tokensave::mcp::McpServer;
-use tokensave::tokensave::TokenSave;
+use tracedecay::mcp::McpServer;
+use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
@@ -10,13 +10,13 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
     // Initial sync so both MCPs start with the same DB state.
-    let cg_init = TokenSave::init(&project).await.unwrap();
+    let cg_init = TraceDecay::init(&project).await.unwrap();
     cg_init.sync().await.unwrap();
     drop(cg_init);
 
     // Spin up two MCP servers on the same project.
-    let cg1 = TokenSave::open(&project).await.unwrap();
-    let cg2 = TokenSave::open(&project).await.unwrap();
+    let cg1 = TraceDecay::open(&project).await.unwrap();
+    let cg2 = TraceDecay::open(&project).await.unwrap();
     let server1 = McpServer::new(cg1, None).await;
     let server2 = McpServer::new(cg2, None).await;
 
@@ -50,9 +50,10 @@ async fn two_mcps_on_same_project_coordinate_via_sync_lock() {
     // production path in `maybe_sync_if_stale`, which always refreshes
     // after passing the cooldown gate so quiet peers don't drift.
     for server in [&server1, &server2] {
-        let stale = server.cg().find_stale_files().await;
+        let cg = server.cg().await;
+        let stale = cg.find_stale_files().await;
         if !stale.is_empty() {
-            server.cg().sync_if_stale_silent(&stale).await.unwrap();
+            cg.sync_if_stale_silent(&stale).await.unwrap();
         }
         server.refresh_file_token_map().await;
     }

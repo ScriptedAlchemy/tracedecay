@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use libsql::params;
 
 use super::connection::Database;
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,39 @@ fn build_qmark_placeholders(n: usize) -> String {
         s.push('?');
     }
     s
+}
+
+impl Database {
+    async fn with_batch_transaction<T>(
+        &self,
+        operation: &str,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.conn()
+            .execute("BEGIN", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to begin: {e}"),
+                operation: operation.to_string(),
+            })?;
+
+        match work.await {
+            Ok(value) => {
+                if let Err(e) = self.conn().execute("COMMIT", ()).await {
+                    let _ = self.conn().execute("ROLLBACK", ()).await;
+                    return Err(TraceDecayError::Database {
+                        message: format!("failed to commit: {e}"),
+                        operation: operation.to_string(),
+                    });
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn().execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +238,7 @@ impl Database {
                 ],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to insert node: {e}"),
                 operation: "insert_node".to_string(),
             })?;
@@ -387,7 +420,7 @@ impl Database {
         self.conn()
             .execute_batch(&sql)
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to bulk insert: {e}"),
                 operation: "insert_all".to_string(),
             })?;
@@ -401,72 +434,63 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
+        self.with_batch_transaction("insert_nodes", async {
+            let stmt = self.conn()
+                .prepare(
+                    "INSERT OR REPLACE INTO nodes \
+                     (id,kind,name,qualified_name,file_path,\
+                     start_line,end_line,start_column,end_column,\
+                     docstring,signature,visibility,is_async,\
+                     branches,loops,returns,max_nesting,\
+                     unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_nodes".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare(
-                "INSERT OR REPLACE INTO nodes \
-                 (id,kind,name,qualified_name,file_path,\
-                 start_line,end_line,start_column,end_column,\
-                 docstring,signature,visibility,is_async,\
-                 branches,loops,returns,max_nesting,\
-                 unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
-            )
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
+            for node in nodes {
+                let params = params![
+                    node.id.as_str(),
+                    node.kind.as_str(),
+                    node.name.as_str(),
+                    node.qualified_name.as_str(),
+                    node.file_path.as_str(),
+                    i64::from(node.start_line),
+                    i64::from(node.end_line),
+                    i64::from(node.start_column),
+                    i64::from(node.end_column),
+                    opt_str(node.docstring.as_deref()),
+                    opt_str(node.signature.as_deref()),
+                    node.visibility.as_str(),
+                    i64::from(node.is_async),
+                    i64::from(node.branches),
+                    i64::from(node.loops),
+                    i64::from(node.returns),
+                    i64::from(node.max_nesting),
+                    i64::from(node.unsafe_blocks),
+                    i64::from(node.unchecked_calls),
+                    i64::from(node.assertions),
+                    node.updated_at as i64,
+                    i64::from(node.attrs_start_line),
+                    opt_str(node.parent_id.as_deref()),
+                ];
+                let insert_result = stmt.execute(params).await;
+                if let Err(e) = insert_result {
+                    stmt.reset();
+                    return Err(TraceDecayError::Database {
+                        message: format!("failed to insert node: {e}"),
+                        operation: "insert_nodes".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for node in nodes {
-            stmt.execute(params![
-                node.id.as_str(),
-                node.kind.as_str(),
-                node.name.as_str(),
-                node.qualified_name.as_str(),
-                node.file_path.as_str(),
-                i64::from(node.start_line),
-                i64::from(node.end_line),
-                i64::from(node.start_column),
-                i64::from(node.end_column),
-                opt_str(node.docstring.as_deref()),
-                opt_str(node.signature.as_deref()),
-                node.visibility.as_str(),
-                i64::from(node.is_async),
-                i64::from(node.branches),
-                i64::from(node.loops),
-                i64::from(node.returns),
-                i64::from(node.max_nesting),
-                i64::from(node.unsafe_blocks),
-                i64::from(node.unchecked_calls),
-                i64::from(node.assertions),
-                node.updated_at as i64,
-                i64::from(node.attrs_start_line),
-                opt_str(node.parent_id.as_deref()),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert node: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_nodes".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Retrieves a node by its unique ID, returning `None` if not found.
@@ -481,17 +505,17 @@ impl Database {
                 params![id],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query node by id: {e}"),
                 operation: "get_node_by_id".to_string(),
             })?;
 
-        match rows.next().await.map_err(|e| TokenSaveError::Database {
+        match rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read node row: {e}"),
             operation: "get_node_by_id".to_string(),
         })? {
             Some(row) => {
-                let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+                let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                     message: format!("failed to map node row: {e}"),
                     operation: "get_node_by_id".to_string(),
                 })?;
@@ -528,7 +552,7 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to batch query nodes: {e}"),
                 operation: "get_nodes_by_ids".to_string(),
             })?;
@@ -547,7 +571,7 @@ impl Database {
                 params![file_path],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query nodes by file: {e}"),
                 operation: "get_nodes_by_file".to_string(),
             })?;
@@ -569,7 +593,7 @@ impl Database {
                 params![parent_id],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query children: {e}"),
                 operation: "get_children_of".to_string(),
             })?;
@@ -589,7 +613,7 @@ impl Database {
                 params![kind.as_str()],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query nodes by kind: {e}"),
                 operation: "get_nodes_by_kind".to_string(),
             })?;
@@ -609,7 +633,7 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query all nodes: {e}"),
                 operation: "get_all_nodes".to_string(),
             })?;
@@ -636,20 +660,23 @@ impl Database {
                     params![file_path],
                 )
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query node ids: {e}"),
                     operation: "delete_nodes_by_file".to_string(),
                 })?;
 
             let mut ids = Vec::new();
-            while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read node id: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })? {
-                ids.push(row.get::<String>(0).map_err(|e| TokenSaveError::Database {
-                    message: format!("failed to read node id value: {e}"),
-                    operation: "delete_nodes_by_file".to_string(),
-                })?);
+                ids.push(
+                    row.get::<String>(0)
+                        .map_err(|e| TraceDecayError::Database {
+                            message: format!("failed to read node id value: {e}"),
+                            operation: "delete_nodes_by_file".to_string(),
+                        })?,
+                );
             }
             ids
         };
@@ -662,7 +689,7 @@ impl Database {
             .conn()
             .transaction()
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to begin transaction: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
@@ -673,7 +700,7 @@ impl Database {
                 params![id.as_str()],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete edges: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
@@ -683,7 +710,7 @@ impl Database {
                 params![id.as_str()],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete unresolved refs: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
@@ -693,7 +720,7 @@ impl Database {
                 params![id.as_str()],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete vectors: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
@@ -701,12 +728,12 @@ impl Database {
 
         tx.execute("DELETE FROM nodes WHERE file_path = ?1", params![file_path])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete nodes: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
 
-        tx.commit().await.map_err(|e| TokenSaveError::Database {
+        tx.commit().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to commit transaction: {e}"),
             operation: "delete_nodes_by_file".to_string(),
         })
@@ -729,7 +756,7 @@ impl Database {
                     params![edge.source.as_str(), edge.target.as_str()],
                 )
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to set parent_id: {e}"),
                     operation: "insert_edge".to_string(),
                 })?;
@@ -749,7 +776,7 @@ impl Database {
                 ],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to insert edge: {e}"),
                 operation: "insert_edge".to_string(),
             })?;
@@ -767,74 +794,69 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
+        self.with_batch_transaction("insert_edges", async {
+            // Conditional INSERT: only insert when both endpoints exist in
+            // `nodes`. This avoids FK violations during incremental sync
+            // when an edge references a node from a not-yet-indexed file.
+            let stmt = self
+                .conn()
+                .prepare(
+                    "INSERT OR IGNORE INTO edges (source, target, kind, line) \
+                     SELECT ?1, ?2, ?3, ?4 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_edges".to_string(),
+                })?;
 
-        // Conditional INSERT: only insert when both endpoints exist in
-        // `nodes`. This avoids FK violations during incremental sync
-        // when an edge references a node from a not-yet-indexed file.
-        let stmt = self
-            .conn()
-            .prepare(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line) \
-                 SELECT ?1, ?2, ?3, ?4 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
-            )
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
+            let parent_stmt = self
+                .conn()
+                .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to prepare parent update: {e}"),
+                    operation: "insert_edges".to_string(),
+                })?;
 
-        let parent_stmt = self
-            .conn()
-            .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare parent update: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-
-        for edge in edges {
-            if edge.kind == EdgeKind::Contains {
-                parent_stmt
-                    .execute(params![edge.source.as_str(), edge.target.as_str()])
+            for edge in edges {
+                if edge.kind == EdgeKind::Contains {
+                    if let Err(e) = parent_stmt
+                        .execute(params![edge.source.as_str(), edge.target.as_str()])
+                        .await
+                    {
+                        parent_stmt.reset();
+                        return Err(TraceDecayError::Database {
+                            message: format!("failed to set parent_id: {e}"),
+                            operation: "insert_edges".to_string(),
+                        });
+                    }
+                    parent_stmt.reset();
+                    continue;
+                }
+                if let Err(e) = stmt
+                    .execute(params![
+                        edge.source.as_str(),
+                        edge.target.as_str(),
+                        edge.kind.as_str(),
+                        edge.line.map(i64::from),
+                    ])
                     .await
-                    .map_err(|e| TokenSaveError::Database {
-                        message: format!("failed to set parent_id: {e}"),
+                {
+                    stmt.reset();
+                    return Err(TraceDecayError::Database {
+                        message: format!("failed to insert edge: {e}"),
                         operation: "insert_edges".to_string(),
-                    })?;
-                parent_stmt.reset();
-                continue;
+                    });
+                }
+                stmt.reset();
             }
-            stmt.execute(params![
-                edge.source.as_str(),
-                edge.target.as_str(),
-                edge.kind.as_str(),
-                edge.line.map(i64::from),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert edge: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-            stmt.reset();
-        }
 
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_edges".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Returns outgoing edges from a source node, optionally filtered by edge kinds.
@@ -853,7 +875,7 @@ impl Database {
                     params![source_id],
                 )
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query outgoing edges: {e}"),
                     operation: "get_outgoing_edges".to_string(),
                 })?;
@@ -880,7 +902,7 @@ impl Database {
                 .conn()
                 .query(&sql, libsql::params_from_iter(param_values))
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query outgoing edges: {e}"),
                     operation: "get_outgoing_edges".to_string(),
                 })?;
@@ -905,7 +927,7 @@ impl Database {
                     params![target_id],
                 )
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query incoming edges: {e}"),
                     operation: "get_incoming_edges".to_string(),
                 })?;
@@ -932,7 +954,7 @@ impl Database {
                 .conn()
                 .query(&sql, libsql::params_from_iter(param_values))
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query incoming edges: {e}"),
                     operation: "get_incoming_edges".to_string(),
                 })?;
@@ -989,7 +1011,7 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query bulk incoming edges: {e}"),
                 operation: "get_incoming_edges_bulk".to_string(),
             })?;
@@ -1027,12 +1049,12 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query test-annotated nodes: {e}"),
                 operation: "get_test_annotated_node_ids".to_string(),
             })?;
         let mut result = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read test-annotated row: {e}"),
             operation: "get_test_annotated_node_ids".to_string(),
         })? {
@@ -1058,12 +1080,12 @@ impl Database {
             .conn()
             .query(sql, ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query test-annotation files: {e}"),
                 operation: "get_files_with_test_annotations".to_string(),
             })?;
         let mut result = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read test-annotation file row: {e}"),
             operation: "get_files_with_test_annotations".to_string(),
         })? {
@@ -1081,12 +1103,12 @@ impl Database {
             .conn()
             .query(sql, ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query skip-test-coverage nodes: {e}"),
                 operation: "get_skip_test_coverage_node_ids".to_string(),
             })?;
         let mut result = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read skip-test-coverage row: {e}"),
             operation: "get_skip_test_coverage_node_ids".to_string(),
         })? {
@@ -1115,7 +1137,7 @@ impl Database {
             self.conn()
                 .query(sql, params![name])
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query by name: {e}"),
                     operation: "get_nodes_by_name".to_string(),
                 })?;
@@ -1139,7 +1161,7 @@ impl Database {
             .conn()
             .query(exact_sql, params![qname])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query by qualified_name: {e}"),
                 operation: "get_nodes_by_qualified_name".to_string(),
             })?;
@@ -1188,7 +1210,7 @@ impl Database {
             .conn()
             .query(sql, params![pattern.as_str()])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query by qualified_name fallback: {e}"),
                 operation: "get_nodes_by_qualified_name".to_string(),
             })?;
@@ -1267,21 +1289,21 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query ranked nodes: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map row: {e}"),
                 operation: op.to_string(),
             })?;
-            let count = row.get::<u64>(23).map_err(|e| TokenSaveError::Database {
+            let count = row.get::<u64>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read count column: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1337,21 +1359,21 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query largest nodes: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map row: {e}"),
                 operation: op.to_string(),
             })?;
-            let lines = row.get::<u32>(23).map_err(|e| TokenSaveError::Database {
+            let lines = row.get::<u32>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read lines column: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1401,21 +1423,23 @@ impl Database {
             .conn()
             .query(&sql, params![limit as i64])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file coupling: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let file_path = row.get::<String>(0).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read file_path: {e}"),
-                operation: op.to_string(),
-            })?;
-            let count = row.get::<u64>(1).map_err(|e| TokenSaveError::Database {
+            let file_path = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read file_path: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let count = row.get::<u64>(1).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read coupling count: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1489,21 +1513,21 @@ impl Database {
             .conn()
             .query(&sql, params![limit as i64])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query inheritance depth: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map row: {e}"),
                 operation: op.to_string(),
             })?;
-            let depth = row.get::<u64>(23).map_err(|e| TokenSaveError::Database {
+            let depth = row.get::<u64>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read depth column: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1544,25 +1568,29 @@ impl Database {
             .conn()
             .query(sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query node distribution: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let file_path = row.get::<String>(0).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read file_path: {e}"),
-                operation: op.to_string(),
-            })?;
-            let kind = row.get::<String>(1).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read kind: {e}"),
-                operation: op.to_string(),
-            })?;
-            let count = row.get::<u64>(2).map_err(|e| TokenSaveError::Database {
+            let file_path = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read file_path: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let kind = row
+                .get::<String>(1)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read kind: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let count = row.get::<u64>(2).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read count: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1594,24 +1622,28 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query call edges: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let source = row.get::<String>(0).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read source: {e}"),
-                operation: op.to_string(),
-            })?;
-            let target = row.get::<String>(1).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read target: {e}"),
-                operation: op.to_string(),
-            })?;
+            let source = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read source: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let target = row
+                .get::<String>(1)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read target: {e}"),
+                    operation: op.to_string(),
+                })?;
             items.push((source, target));
         }
 
@@ -1643,24 +1675,28 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query call edges with lines: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let source = row.get::<String>(0).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read source: {e}"),
-                operation: op.to_string(),
-            })?;
-            let target = row.get::<String>(1).map_err(|e| TokenSaveError::Database {
-                message: format!("failed to read target: {e}"),
-                operation: op.to_string(),
-            })?;
+            let source = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read source: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let target = row
+                .get::<String>(1)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read target: {e}"),
+                    operation: op.to_string(),
+                })?;
             let line = row.get::<u32>(2).ok();
             items.push((source, target, line));
         }
@@ -1723,33 +1759,33 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query complexity ranking: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map row: {e}"),
                 operation: op.to_string(),
             })?;
-            let lines = row.get::<u32>(23).map_err(|e| TokenSaveError::Database {
+            let lines = row.get::<u32>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read lines: {e}"),
                 operation: op.to_string(),
             })?;
-            let fan_out = row.get::<u64>(24).map_err(|e| TokenSaveError::Database {
+            let fan_out = row.get::<u64>(24).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read fan_out: {e}"),
                 operation: op.to_string(),
             })?;
-            let fan_in = row.get::<u64>(25).map_err(|e| TokenSaveError::Database {
+            let fan_in = row.get::<u64>(25).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read fan_in: {e}"),
                 operation: op.to_string(),
             })?;
-            let score = row.get::<u64>(26).map_err(|e| TokenSaveError::Database {
+            let score = row.get::<u64>(26).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read score: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1817,7 +1853,7 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query undocumented symbols: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1861,29 +1897,29 @@ impl Database {
             .conn()
             .query(&sql, params![limit as i64])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query god classes: {e}"),
                 operation: op.to_string(),
             })?;
 
         let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read row: {e}"),
             operation: op.to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map row: {e}"),
                 operation: op.to_string(),
             })?;
-            let methods = row.get::<u64>(23).map_err(|e| TokenSaveError::Database {
+            let methods = row.get::<u64>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read methods: {e}"),
                 operation: op.to_string(),
             })?;
-            let fields = row.get::<u64>(24).map_err(|e| TokenSaveError::Database {
+            let fields = row.get::<u64>(24).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read fields: {e}"),
                 operation: op.to_string(),
             })?;
-            let total = row.get::<u64>(25).map_err(|e| TokenSaveError::Database {
+            let total = row.get::<u64>(25).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read total: {e}"),
                 operation: op.to_string(),
             })?;
@@ -1899,7 +1935,7 @@ impl Database {
             .conn()
             .query("SELECT source, target, kind, line FROM edges", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query all edges: {e}"),
                 operation: "get_all_edges".to_string(),
             })?;
@@ -1912,7 +1948,7 @@ impl Database {
         self.conn()
             .execute("DELETE FROM edges WHERE source = ?1", params![source_id])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete edges by source: {e}"),
                 operation: "delete_edges_by_source".to_string(),
             })?;
@@ -1932,47 +1968,39 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
+        self.with_batch_transaction("upsert_files", async {
+            let stmt = self.conn()
+                .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "upsert_files".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare("INSERT OR REPLACE INTO files (path,content_hash,size,modified_at,indexed_at,node_count) VALUES (?1,?2,?3,?4,?5,?6)")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
+            for file in files {
+                if let Err(e) = stmt
+                    .execute(params![
+                        file.path.as_str(),
+                        file.content_hash.as_str(),
+                        file.size as i64,
+                        file.modified_at,
+                        file.indexed_at,
+                        i64::from(file.node_count),
+                    ])
+                    .await
+                {
+                    stmt.reset();
+                    return Err(TraceDecayError::Database {
+                        message: format!("failed to upsert file: {e}"),
+                        operation: "upsert_files".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for file in files {
-            stmt.execute(params![
-                file.path.as_str(),
-                file.content_hash.as_str(),
-                file.size as i64,
-                file.modified_at,
-                file.indexed_at,
-                i64::from(file.node_count),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to upsert file: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "upsert_files".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     pub async fn upsert_file(&self, file: &FileRecord) -> Result<()> {
@@ -1991,7 +2019,7 @@ impl Database {
                 ],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to upsert file: {e}"),
                 operation: "upsert_file".to_string(),
             })?;
@@ -2008,17 +2036,17 @@ impl Database {
                 params![path],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query file: {e}"),
                 operation: "get_file".to_string(),
             })?;
 
-        match rows.next().await.map_err(|e| TokenSaveError::Database {
+        match rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read file row: {e}"),
             operation: "get_file".to_string(),
         })? {
             Some(row) => {
-                let file = row_to_file(&row).map_err(|e| TokenSaveError::Database {
+                let file = row_to_file(&row).map_err(|e| TraceDecayError::Database {
                     message: format!("failed to map file row: {e}"),
                     operation: "get_file".to_string(),
                 })?;
@@ -2037,7 +2065,7 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query all files: {e}"),
                 operation: "get_all_files".to_string(),
             })?;
@@ -2051,7 +2079,7 @@ impl Database {
         self.conn()
             .execute("DELETE FROM files WHERE path = ?1", params![path])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete file: {e}"),
                 operation: "delete_file".to_string(),
             })?;
@@ -2081,7 +2109,7 @@ impl Database {
                 ],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to insert unresolved ref: {e}"),
                 operation: "insert_unresolved_ref".to_string(),
             })?;
@@ -2094,47 +2122,39 @@ impl Database {
             return Ok(());
         }
 
-        self.conn()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to begin: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
+        self.with_batch_transaction("insert_unresolved_refs", async {
+            let stmt = self.conn()
+                .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to prepare: {e}"),
+                    operation: "insert_unresolved_refs".to_string(),
+                })?;
 
-        let stmt = self.conn()
-            .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
+            for uref in refs {
+                if let Err(e) = stmt
+                    .execute(params![
+                        uref.from_node_id.as_str(),
+                        uref.reference_name.as_str(),
+                        uref.reference_kind.as_str(),
+                        i64::from(uref.line),
+                        i64::from(uref.column),
+                        uref.file_path.as_str(),
+                    ])
+                    .await
+                {
+                    stmt.reset();
+                    return Err(TraceDecayError::Database {
+                        message: format!("failed to insert unresolved ref: {e}"),
+                        operation: "insert_unresolved_refs".to_string(),
+                    });
+                }
+                stmt.reset();
+            }
 
-        for uref in refs {
-            stmt.execute(params![
-                uref.from_node_id.as_str(),
-                uref.reference_name.as_str(),
-                uref.reference_kind.as_str(),
-                i64::from(uref.line),
-                i64::from(uref.column),
-                uref.file_path.as_str(),
-            ])
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to insert unresolved ref: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-            stmt.reset();
-        }
-
-        self.conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|e| TokenSaveError::Database {
-                message: format!("failed to commit: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Returns all unresolved references.
@@ -2147,7 +2167,7 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query unresolved refs: {e}"),
                 operation: "get_unresolved_refs".to_string(),
             })?;
@@ -2160,7 +2180,7 @@ impl Database {
         self.conn()
             .execute("DELETE FROM unresolved_refs", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to clear unresolved refs: {e}"),
                 operation: "clear_unresolved_refs".to_string(),
             })?;
@@ -2203,7 +2223,7 @@ impl Database {
             Ok(ref results) if !results.is_empty() => return fts_result,
             Ok(_) => {} // empty — fall through to LIKE
             Err(ref e) if Self::is_corruption_error(e) => {
-                eprintln!("[tokensave] FTS index corruption detected — rebuilding…");
+                eprintln!("[tracedecay] FTS index corruption detected — rebuilding…");
                 if self.rebuild_fts().await.is_ok() {
                     match self.search_nodes_fts(&fts_query, limit).await {
                         Ok(results) if !results.is_empty() => return Ok(results),
@@ -2230,17 +2250,17 @@ impl Database {
                 params![like_pattern.as_str(), limit as i64],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to execute LIKE query: {e}"),
                 operation: "search_nodes".to_string(),
             })?;
 
         let mut results = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read search result: {e}"),
             operation: "search_nodes".to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map search result: {e}"),
                 operation: "search_nodes".to_string(),
             })?;
@@ -2266,21 +2286,21 @@ impl Database {
                 params![fts_query, limit as i64],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to execute FTS query: {e}"),
                 operation: "search_nodes".to_string(),
             })?;
 
         let mut results = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read search result: {e}"),
             operation: "search_nodes".to_string(),
         })? {
-            let node = row_to_node(&row).map_err(|e| TokenSaveError::Database {
+            let node = row_to_node(&row).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to map search result: {e}"),
                 operation: "search_nodes".to_string(),
             })?;
-            let rank: f64 = row.get::<f64>(23).map_err(|e| TokenSaveError::Database {
+            let rank: f64 = row.get::<f64>(23).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read rank: {e}"),
                 operation: "search_nodes".to_string(),
             })?;
@@ -2311,11 +2331,11 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to batch count incoming calls: {e}"),
                 operation: "batch_incoming_call_counts".to_string(),
             })?;
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read batch call count row: {e}"),
             operation: "batch_incoming_call_counts".to_string(),
         })? {
@@ -2358,7 +2378,7 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to search by exact name: {e}"),
                 operation: "search_nodes_by_exact_name".to_string(),
             })?;
@@ -2367,9 +2387,9 @@ impl Database {
     }
 
     /// Returns `true` if the error indicates `SQLite` database corruption.
-    pub fn is_corruption_error(e: &TokenSaveError) -> bool {
+    pub fn is_corruption_error(e: &TraceDecayError) -> bool {
         match e {
-            TokenSaveError::Database { message, .. } => {
+            TraceDecayError::Database { message, .. } => {
                 message.contains("malformed")
                     || message.contains("corrupt")
                     || message.contains("disk image")
@@ -2399,14 +2419,14 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query counts: {e}"),
                 operation: "get_stats".to_string(),
             })?;
         let counts_row = counts_rows
             .next()
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read counts row: {e}"),
                 operation: "get_stats".to_string(),
             })?;
@@ -2447,16 +2467,16 @@ impl Database {
                 .conn()
                 .query("SELECT path FROM files", ())
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query files for language stats: {e}"),
                     operation: "get_stats".to_string(),
                 })?;
             let mut map: HashMap<String, u64> = HashMap::new();
-            while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read file row: {e}"),
                 operation: "get_stats".to_string(),
             })? {
-                let path: String = row.get(0).map_err(|e| TokenSaveError::Database {
+                let path: String = row.get(0).map_err(|e| TraceDecayError::Database {
                     message: format!("failed to read file path: {e}"),
                     operation: "get_stats".to_string(),
                 })?;
@@ -2526,7 +2546,7 @@ impl Database {
                  DELETE FROM files;",
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to clear database: {e}"),
                 operation: "clear".to_string(),
             })?;
@@ -2545,17 +2565,17 @@ impl Database {
             .conn()
             .query("SELECT value FROM metadata WHERE key = ?1", params![key])
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query metadata: {e}"),
                 operation: "get_metadata".to_string(),
             })?;
 
-        match rows.next().await.map_err(|e| TokenSaveError::Database {
+        match rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read metadata row: {e}"),
             operation: "get_metadata".to_string(),
         })? {
             Some(row) => {
-                let value: String = row.get(0).map_err(|e| TokenSaveError::Database {
+                let value: String = row.get(0).map_err(|e| TraceDecayError::Database {
                     message: format!("failed to read metadata value: {e}"),
                     operation: "get_metadata".to_string(),
                 })?;
@@ -2573,7 +2593,7 @@ impl Database {
                 params![key, value],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to set metadata: {e}"),
                 operation: "set_metadata".to_string(),
             })?;
@@ -2615,7 +2635,7 @@ impl Database {
             .conn()
             .query(&sql, libsql::params_from_iter(param_values))
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query nodes by dir: {e}"),
                 operation: "get_nodes_by_dir".to_string(),
             })?;
@@ -2661,7 +2681,7 @@ impl Database {
                 .conn()
                 .query(&sql, libsql::params_from_iter(param_values))
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query internal edges: {e}"),
                     operation: "get_internal_edges".to_string(),
                 })?;
@@ -2707,16 +2727,16 @@ impl Database {
             .conn()
             .query(sql, ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query test marker ids: {e}"),
                 operation: op.to_string(),
             })?;
         let mut ids = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read marker id row: {e}"),
             operation: op.to_string(),
         })? {
-            let id: String = row.get(0).map_err(|e| TokenSaveError::Database {
+            let id: String = row.get(0).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read marker id column: {e}"),
                 operation: op.to_string(),
             })?;
@@ -2746,13 +2766,13 @@ impl Database {
         // Drop + recreate so we always start from an empty table.
         conn.execute("DROP TABLE IF EXISTS temp.test_markers", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_markers: {e}"),
                 operation: op.to_string(),
             })?;
         conn.execute("CREATE TEMP TABLE test_markers (id TEXT PRIMARY KEY)", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to create temp.test_markers: {e}"),
                 operation: op.to_string(),
             })?;
@@ -2775,7 +2795,7 @@ impl Database {
                 .collect();
             conn.execute(&sql, libsql::params_from_iter(params))
                 .await
-                .map_err(|e| TokenSaveError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to bulk-insert test markers: {e}"),
                     operation: op.to_string(),
                 })?;
@@ -2792,7 +2812,7 @@ impl Database {
         self.conn()
             .execute("DROP TABLE IF EXISTS temp.test_markers", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_markers: {e}"),
                 operation: "drop_test_marker_temp_table".to_string(),
             })?;
@@ -2828,7 +2848,7 @@ impl Database {
         // hygiene as the test_markers temp table.
         conn.execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_annotated_targets: {e}"),
                 operation: op.to_string(),
             })?;
@@ -2837,7 +2857,7 @@ impl Database {
             (),
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create temp.test_annotated_targets: {e}"),
             operation: op.to_string(),
         })?;
@@ -2853,7 +2873,7 @@ impl Database {
             (),
         )
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to populate temp.test_annotated_targets: {e}"),
             operation: op.to_string(),
         })?;
@@ -2866,7 +2886,7 @@ impl Database {
         self.conn()
             .execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_annotated_targets: {e}"),
                 operation: "drop_test_annotated_targets_temp_table".to_string(),
             })?;
@@ -2921,11 +2941,11 @@ async fn collect_rows<T>(
     operation: &str,
 ) -> Result<Vec<T>> {
     let mut items = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
         message: format!("failed to read row: {e}"),
         operation: operation.to_string(),
     })? {
-        items.push(map_fn(&row).map_err(|e| TokenSaveError::Database {
+        items.push(map_fn(&row).map_err(|e| TraceDecayError::Database {
             message: format!("failed to map row: {e}"),
             operation: operation.to_string(),
         })?);
@@ -3008,19 +3028,19 @@ async fn query_kind_counts(conn: &libsql::Connection, sql: &str) -> Result<HashM
     let mut rows = conn
         .query(sql, ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to query kind counts: {e}"),
             operation: "get_stats".to_string(),
         })?;
-    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
         message: format!("failed to read kind count row: {e}"),
         operation: "get_stats".to_string(),
     })? {
-        let kind: String = row.get(0).map_err(|e| TokenSaveError::Database {
+        let kind: String = row.get(0).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read kind: {e}"),
             operation: "get_stats".to_string(),
         })?;
-        let count: i64 = row.get(1).map_err(|e| TokenSaveError::Database {
+        let count: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read count: {e}"),
             operation: "get_stats".to_string(),
         })?;
@@ -3036,7 +3056,7 @@ async fn query_scalar_i64(conn: &libsql::Connection, sql: &str, operation: &str)
     let mut rows = conn
         .query(sql, ())
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to execute scalar query: {e}"),
             operation: operation.to_string(),
         })?;
@@ -3044,23 +3064,23 @@ async fn query_scalar_i64(conn: &libsql::Connection, sql: &str, operation: &str)
     let row = rows
         .next()
         .await
-        .map_err(|e| TokenSaveError::Database {
+        .map_err(|e| TraceDecayError::Database {
             message: format!("failed to read scalar row: {e}"),
             operation: operation.to_string(),
         })?
-        .ok_or_else(|| TokenSaveError::Database {
+        .ok_or_else(|| TraceDecayError::Database {
             message: "no result from scalar query".to_string(),
             operation: operation.to_string(),
         })?;
 
-    row.get::<i64>(0).map_err(|e| TokenSaveError::Database {
+    row.get::<i64>(0).map_err(|e| TraceDecayError::Database {
         message: format!("failed to read scalar value: {e}"),
         operation: operation.to_string(),
     })
 }
 
 // ---------------------------------------------------------------------------
-// Node fingerprints (issue #83 — tokensave_redundancy)
+// Node fingerprints (issue #83 — tracedecay_redundancy)
 // ---------------------------------------------------------------------------
 
 /// A stored fingerprint row, paired with its node id.
@@ -3098,7 +3118,7 @@ impl Database {
                 ],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to upsert fingerprint: {e}"),
                 operation: "upsert_fingerprint".to_string(),
             })?;
@@ -3115,11 +3135,11 @@ impl Database {
                 params![node_id],
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query fingerprint: {e}"),
                 operation: "get_fingerprint".to_string(),
             })?;
-        match rows.next().await.map_err(|e| TokenSaveError::Database {
+        match rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read fingerprint row: {e}"),
             operation: "get_fingerprint".to_string(),
         })? {
@@ -3140,12 +3160,12 @@ impl Database {
                 (),
             )
             .await
-            .map_err(|e| TokenSaveError::Database {
+            .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query fingerprints: {e}"),
                 operation: "get_all_fingerprints".to_string(),
             })?;
         let mut out: Vec<StoredFingerprint> = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read fingerprint row: {e}"),
             operation: "get_all_fingerprints".to_string(),
         })? {
@@ -3156,34 +3176,34 @@ impl Database {
 }
 
 fn row_to_fingerprint(row: &libsql::Row) -> Result<StoredFingerprint> {
-    let shingles_str: String = row.get(4).map_err(|e| TokenSaveError::Database {
+    let shingles_str: String = row.get(4).map_err(|e| TraceDecayError::Database {
         message: format!("failed to read shingles: {e}"),
         operation: "row_to_fingerprint".to_string(),
     })?;
-    let body_tokens_i: i64 = row.get(5).map_err(|e| TokenSaveError::Database {
+    let body_tokens_i: i64 = row.get(5).map_err(|e| TraceDecayError::Database {
         message: format!("failed to read body_tokens: {e}"),
         operation: "row_to_fingerprint".to_string(),
     })?;
     Ok(StoredFingerprint {
-        node_id: row.get(0).map_err(|e| TokenSaveError::Database {
+        node_id: row.get(0).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read node_id: {e}"),
             operation: "row_to_fingerprint".to_string(),
         })?,
-        ast_hash: row.get(1).map_err(|e| TokenSaveError::Database {
+        ast_hash: row.get(1).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read ast_hash: {e}"),
             operation: "row_to_fingerprint".to_string(),
         })?,
-        cfg_hash: row.get(2).map_err(|e| TokenSaveError::Database {
+        cfg_hash: row.get(2).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read cfg_hash: {e}"),
             operation: "row_to_fingerprint".to_string(),
         })?,
-        call_seq_hash: row.get(3).map_err(|e| TokenSaveError::Database {
+        call_seq_hash: row.get(3).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read call_seq_hash: {e}"),
             operation: "row_to_fingerprint".to_string(),
         })?,
         shingles: crate::redundancy::Fingerprint::shingles_from_string(&shingles_str),
         body_tokens: u32::try_from(body_tokens_i).unwrap_or(u32::MAX),
-        source_hash: row.get(6).map_err(|e| TokenSaveError::Database {
+        source_hash: row.get(6).map_err(|e| TraceDecayError::Database {
             message: format!("failed to read source_hash: {e}"),
             operation: "row_to_fingerprint".to_string(),
         })?,

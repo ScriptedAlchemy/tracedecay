@@ -1,6 +1,6 @@
 //! Git integration helpers for churn analysis.
 //! Shells out to `git log` at runtime to gather temporal data.
-//! No data is persisted to the tokensave DB.
+//! No data is persisted to the TraceDecay DB.
 
 use std::collections::HashMap;
 use std::path::Path;

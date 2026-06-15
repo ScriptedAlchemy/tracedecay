@@ -1,6 +1,6 @@
-use tokensave::extraction::FortranExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::FortranExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("tests/fixtures/sample.f90").unwrap();

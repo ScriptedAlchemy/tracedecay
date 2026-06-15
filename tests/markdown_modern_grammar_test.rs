@@ -11,7 +11,7 @@ fn timed_extract(source: String, timeout: Duration) -> Option<(f64, usize, usize
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let t0 = Instant::now();
-        let res = tokensave::extraction::MarkdownExtractor::extract_markdown("t.md", &source);
+        let res = tracedecay::extraction::MarkdownExtractor::extract_markdown("t.md", &source);
         let _ = tx.send((t0.elapsed().as_secs_f64(), res.nodes.len(), res.edges.len()));
     });
     rx.recv_timeout(timeout).ok()
@@ -36,11 +36,11 @@ fn yaml_frontmatter_hang_reproducer() {
 fn extracts_headings_and_links() {
     let src =
         "# Top\n\nSee [main](src/main.rs) for details.\n\n## Sub\n\nAlso [util](src/util.rs).\n";
-    let res = tokensave::extraction::MarkdownExtractor::extract_markdown("doc.md", src);
+    let res = tracedecay::extraction::MarkdownExtractor::extract_markdown("doc.md", src);
     let modules: Vec<&str> = res
         .nodes
         .iter()
-        .filter(|n| matches!(n.kind, tokensave::types::NodeKind::Module))
+        .filter(|n| matches!(n.kind, tracedecay::types::NodeKind::Module))
         .map(|n| n.name.as_str())
         .collect();
     assert!(modules.contains(&"Top"), "got modules {modules:?}");
@@ -48,7 +48,7 @@ fn extracts_headings_and_links() {
     let uses_count = res
         .edges
         .iter()
-        .filter(|e| matches!(e.kind, tokensave::types::EdgeKind::Uses))
+        .filter(|e| matches!(e.kind, tracedecay::types::EdgeKind::Uses))
         .count();
     assert_eq!(uses_count, 2, "expected 2 Uses edges, got {uses_count}");
 }
@@ -59,11 +59,11 @@ fn frontmatter_is_opaque() {
     // (a `# heading`-like line, a `- list item`) must NOT produce Module
     // nodes — it's metadata, not document structure.
     let src = "---\ntitle: My Doc\n# this is yaml comment style\n- bogus\n---\n\n# Real Heading\n";
-    let res = tokensave::extraction::MarkdownExtractor::extract_markdown("doc.md", src);
+    let res = tracedecay::extraction::MarkdownExtractor::extract_markdown("doc.md", src);
     let module_names: Vec<&str> = res
         .nodes
         .iter()
-        .filter(|n| matches!(n.kind, tokensave::types::NodeKind::Module))
+        .filter(|n| matches!(n.kind, tracedecay::types::NodeKind::Module))
         .map(|n| n.name.as_str())
         .collect();
     assert_eq!(

@@ -1,14 +1,14 @@
-//! Criterion benchmark: tokensave MCP tools against large, real-world repos.
+//! Criterion benchmark: tracedecay MCP tools against large, real-world repos.
 //!
 //! What it does:
-//!  1. Reads `TOKENSAVE_BENCH_REPOS_DIR` (on-disk cache for the cloned repos).
+//!  1. Reads `TRACEDECAY_BENCH_REPOS_DIR` (on-disk cache for the cloned repos).
 //!     If unset, prints a message and registers zero benchmarks.
 //!  2. For each selected repo (see `repos::REPOS`, optionally filtered with
-//!     `TOKENSAVE_BENCH_REPOS=name1,name2`), shallow-clones it (`git fetch
+//!     `TRACEDECAY_BENCH_REPOS=name1,name2`), shallow-clones it (`git fetch
 //!     --depth 1`) at a constant ref the first time it is encountered.
-//!  3. Opens (or initialises) the `.tokensave/` database for the repo and
+//!  3. Opens (or initialises) the `.tracedecay/` database for the repo and
 //!     **always runs a full `index_all()` first** — equivalent to
-//!     `tokensave sync --force` — so every bench run starts from a freshly
+//!     `tracedecay sync --force` — so every bench run starts from a freshly
 //!     synced graph regardless of how stale the cached index is.
 //!  4. Samples the resulting graph to build one query catalog per repo:
 //!     ≥ 5 queries per tool, each holding concrete `node_id` / qualified-name
@@ -22,9 +22,9 @@
 //!     each prepared repo so mutations made by the write benches are reverted.
 //!
 //! Environment variables:
-//!   TOKENSAVE_BENCH_REPOS_DIR   required — root directory for cloned repos
-//!   TOKENSAVE_BENCH_REPOS       optional — comma-separated repo subset
-//!   TOKENSAVE_BENCH_SKIP_CLONE  optional — fail rather than clone
+//!   TRACEDECAY_BENCH_REPOS_DIR   required — root directory for cloned repos
+//!   TRACEDECAY_BENCH_REPOS       optional — comma-separated repo subset
+//!   TRACEDECAY_BENCH_SKIP_CLONE  optional — fail rather than clone
 
 mod queries;
 mod repos;
@@ -36,15 +36,15 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use serde_json::Value;
 use tokio::runtime::Runtime;
 
-use tokensave::mcp::handle_tool_call;
-use tokensave::tokensave::TokenSave;
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::tracedecay::TraceDecay;
 
 use queries::{build_context, build_queries, Query, QueryKind, ToolGroup, SCRATCH_DIR};
 use repos::{ensure_cloned, repos_root, restore_repo, selected_repos, Repo};
 
 /// Per-repo state we hand to criterion: indexed graph + frozen query catalog.
 struct RepoBench {
-    cg: TokenSave,
+    cg: TraceDecay,
     dir: PathBuf,
     name: &'static str,
     groups: Vec<ToolGroup>,
@@ -53,18 +53,18 @@ struct RepoBench {
 async fn prepare_repo(rt_root: &std::path::Path, repo: Repo) -> Result<RepoBench, String> {
     let dir = ensure_cloned(rt_root, repo)?;
 
-    let cg = if TokenSave::is_initialized(&dir) {
-        TokenSave::open(&dir)
+    let cg = if TraceDecay::is_initialized(&dir) {
+        TraceDecay::open(&dir)
             .await
             .map_err(|e| format!("open {}: {e}", repo.name))?
     } else {
-        TokenSave::init(&dir)
+        TraceDecay::init(&dir)
             .await
             .map_err(|e| format!("init {}: {e}", repo.name))?
     };
 
     // Always force a full re-index before benching, matching
-    // `tokensave sync --force`. This guarantees the cached graph reflects the
+    // `tracedecay sync --force`. This guarantees the cached graph reflects the
     // pinned checkout regardless of how the repo dir was previously left.
     eprintln!(
         "[bench] force-indexing {} (sync --force equivalent)...",
@@ -84,7 +84,7 @@ async fn prepare_repo(rt_root: &std::path::Path, repo: Repo) -> Result<RepoBench
     })
 }
 
-fn run_query(rt: &Runtime, cg: &TokenSave, q: &Query) -> Value {
+fn run_query(rt: &Runtime, cg: &TraceDecay, q: &Query) -> Value {
     rt.block_on(async {
         // We don't care about the response shape, only that the call completes.
         // `unwrap_or_else` keeps the bench going even if a sampled id was stale
@@ -116,7 +116,7 @@ fn reset_scratch(project_root: &std::path::Path, scratch_path: &str, init_conten
 fn bench_all(c: &mut Criterion) {
     let Some(root) = repos_root() else {
         eprintln!(
-            "[bench] TOKENSAVE_BENCH_REPOS_DIR is unset — skipping large-repo benchmarks. \
+            "[bench] TRACEDECAY_BENCH_REPOS_DIR is unset — skipping large-repo benchmarks. \
              Set it to a writable directory to enable them."
         );
         return;
@@ -130,7 +130,7 @@ fn bench_all(c: &mut Criterion) {
 
     let repos = selected_repos();
     if repos.is_empty() {
-        eprintln!("[bench] no repos selected (TOKENSAVE_BENCH_REPOS filter excluded everything)");
+        eprintln!("[bench] no repos selected (TRACEDECAY_BENCH_REPOS filter excluded everything)");
         return;
     }
 

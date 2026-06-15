@@ -1,0 +1,27 @@
+{
+  "name": "tracedecay",
+  "version": "0.0.2",
+  "description": "Cursor integration for the TraceDecay semantic code intelligence MCP server.",
+  "author": {
+    "name": "ScriptedAlchemy",
+    "url": "https://github.com/ScriptedAlchemy"
+  },
+  "homepage": "https://github.com/ScriptedAlchemy/tracedecay",
+  "repository": "https://github.com/ScriptedAlchemy/tracedecay",
+  "license": "MIT",
+  "keywords": [
+    "code-graph",
+    "mcp",
+    "code-search",
+    "token-savings",
+    "call-graph",
+    "code-health"
+  ],
+  "mcpServers": "mcp.json",
+  "hooks": "hooks/hooks.json",
+  "rules": [
+    "rules/tracedecay.mdc"
+  ],
+  "skills": "skills/",
+  "agents": "agents/"
+}

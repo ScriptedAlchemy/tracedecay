@@ -1,12 +1,12 @@
-# Contributing to tokensave
+# Contributing to tracedecay
 
 Thanks for your interest in contributing! This guide covers everything you need to get started.
 
 ## Getting Started
 
 ```bash
-git clone https://github.com/aovestdipaperino/tokensave.git
-cd tokensave
+git clone https://github.com/ScriptedAlchemy/tracedecay.git
+cd tracedecay
 cargo build
 cargo test
 ```
@@ -33,7 +33,7 @@ docs/            Design docs and guides
 
 ## Feature Flags
 
-tokensave supports 31 languages via feature flags:
+tracedecay supports 31 languages via feature flags:
 
 | Feature | Languages |
 |---------|-----------|
@@ -105,9 +105,9 @@ Keep the first line under 72 characters. Add a body explaining *why* if the chan
 
 ## Reporting Issues
 
-Open an issue at https://github.com/aovestdipaperino/tokensave/issues with:
+Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 
-- tokensave version (`tokensave --version`)
+- tracedecay version (`tracedecay --version`)
 - OS and architecture
 - Steps to reproduce
 - Expected vs. actual behavior

@@ -7,10 +7,10 @@ pub mod formatter;
 /// Re-ranking of search candidates using structural signals.
 pub mod ranking;
 
-/// Cross-session cache backing `tokensave_read`.
+/// Cross-session cache backing `tracedecay_read`.
 pub mod read_cache;
 
-/// Mode dispatchers (`full`, `lines`, `map`, `signatures`) for `tokensave_read`.
+/// Mode dispatchers (`full`, `lines`, `map`, `signatures`) for `tracedecay_read`.
 pub mod read_modes;
 
 pub use builder::{extract_symbols_from_query, ContextBuilder};

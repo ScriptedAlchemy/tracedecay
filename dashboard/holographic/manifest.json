@@ -1,0 +1,16 @@
+{
+  "name": "holographic",
+  "label": "Holographic Memory",
+  "description": "Holographic memory explorer + curation",
+  "provider": {
+    "kind": "memory",
+    "name": "holographic_plus"
+  },
+  "tab": {
+    "path": "/holographic-memory",
+    "override": "/holographic-memory"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
