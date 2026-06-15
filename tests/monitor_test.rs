@@ -3,12 +3,12 @@ use tempfile::TempDir;
 
 /// Helper: write an entry to a specific mmap dir.
 fn write(dir: &Path, project: &Path, prefix: &str, tool: &str, delta: u64, before: u64) {
-    tokensave::monitor::write_entry_to(dir, project, prefix, tool, delta, before);
+    tracedecay::monitor::write_entry_to(dir, project, prefix, tool, delta, before);
 }
 
 /// Helper: open reader at a specific mmap dir.
-fn reader(dir: &Path) -> tokensave::monitor::MmapReader {
-    tokensave::monitor::MmapReader::open_at(dir).unwrap()
+fn reader(dir: &Path) -> tracedecay::monitor::MmapReader {
+    tracedecay::monitor::MmapReader::open_at(dir).unwrap()
 }
 
 #[test]
@@ -19,8 +19,8 @@ fn test_write_and_read_entry() {
     write(
         dir.path(),
         project.path(),
-        "tokensave",
-        "tokensave_context",
+        "tracedecay",
+        "tracedecay_context",
         63_102,
         290_000,
     );
@@ -29,8 +29,8 @@ fn test_write_and_read_entry() {
     assert_eq!(r.write_idx(), 1);
 
     let entry = r.entry(0).unwrap();
-    assert_eq!(entry.prefix, "tokensave");
-    assert_eq!(entry.tool_name, "tokensave_context");
+    assert_eq!(entry.prefix, "tracedecay");
+    assert_eq!(entry.tool_name, "tracedecay_context");
     assert_eq!(entry.delta, 63_102);
     assert_eq!(entry.before, 290_000);
     assert!(entry.timestamp > 0);
@@ -46,8 +46,8 @@ fn test_ring_buffer_wraps() {
         write(
             dir.path(),
             project.path(),
-            "tokensave",
-            "tokensave_search",
+            "tracedecay",
+            "tracedecay_search",
             i + 1,
             i * 10,
         );
@@ -73,16 +73,16 @@ fn test_write_entry_accumulates() {
     write(
         dir.path(),
         project.path(),
-        "tokensave",
-        "tokensave_context",
+        "tracedecay",
+        "tracedecay_context",
         100,
         500,
     );
     write(
         dir.path(),
         project.path(),
-        "tokensave",
-        "tokensave_search",
+        "tracedecay",
+        "tracedecay_search",
         50,
         200,
     );
@@ -103,8 +103,8 @@ fn test_entry_label_format() {
     write(
         dir.path(),
         project.path(),
-        "tokensave",
-        "tokensave_context",
+        "tracedecay",
+        "tracedecay_context",
         42,
         100,
     );
@@ -112,8 +112,8 @@ fn test_entry_label_format() {
     let r = reader(dir.path());
     let entry = r.entry(0).unwrap();
     let label = entry.label();
-    assert!(label.starts_with("tokensave - "), "got: {label}");
-    assert!(label.ends_with(" - tokensave_context"), "got: {label}");
+    assert!(label.starts_with("tracedecay - "), "got: {label}");
+    assert!(label.ends_with(" - tracedecay_context"), "got: {label}");
 }
 
 #[test]
@@ -122,7 +122,14 @@ fn test_tool_name_truncation() {
     let project = TempDir::new().unwrap();
 
     let long_name = "a".repeat(100);
-    write(dir.path(), project.path(), "tokensave", &long_name, 42, 100);
+    write(
+        dir.path(),
+        project.path(),
+        "tracedecay",
+        &long_name,
+        42,
+        100,
+    );
 
     let r = reader(dir.path());
     let entry = r.entry(0).unwrap();
@@ -139,16 +146,16 @@ fn test_multiple_projects() {
     write(
         dir.path(),
         project_a.path(),
-        "tokensave",
-        "tokensave_context",
+        "tracedecay",
+        "tracedecay_context",
         100,
         500,
     );
     write(
         dir.path(),
         project_b.path(),
-        "tokensave",
-        "tokensave_search",
+        "tracedecay",
+        "tracedecay_search",
         200,
         600,
     );
@@ -169,8 +176,8 @@ fn test_different_prefixes() {
     write(
         dir.path(),
         project.path(),
-        "tokensave",
-        "tokensave_context",
+        "tracedecay",
+        "tracedecay_context",
         100,
         500,
     );
@@ -186,6 +193,6 @@ fn test_different_prefixes() {
     let r = reader(dir.path());
     let e0 = r.entry(0).unwrap();
     let e1 = r.entry(1).unwrap();
-    assert_eq!(e0.prefix, "tokensave");
+    assert_eq!(e0.prefix, "tracedecay");
     assert_eq!(e1.prefix, "othertool");
 }

@@ -457,7 +457,7 @@ impl<'a> ReferenceResolver<'a> {
         // `Implements`/`Extends`/`DerivesMacro` ref like `impl Default for X`
         // must NOT bind to an unrelated node kind (e.g. a local
         // `enum_variant Default`) just because the names match — that
-        // poisons `tokensave_rank` and every downstream graph query.
+        // poisons `tracedecay_rank` and every downstream graph query.
         let kind_filtered: Vec<&Node> = raw_candidates
             .iter()
             .filter(|n| kind_compatible(uref.reference_kind, &n.kind))
@@ -663,8 +663,8 @@ impl<'a> ReferenceResolver<'a> {
 /// Without this check, the resolver fuzzy-binds `impl Default for X`
 /// (an `Implements` ref) to whatever local node happens to share the
 /// name `Default` — e.g. a `Token::Default` enum variant in a parser
-/// crate. That poisons `tokensave_rank --edge-kind implements`,
-/// `tokensave_impls`, and the type-hierarchy tools.
+/// crate. That poisons `tracedecay_rank --edge-kind implements`,
+/// `tracedecay_impls`, and the type-hierarchy tools.
 ///
 /// The compatibility matrix is deliberately conservative: when the
 /// edge kind constrains the target shape (`Implements`/`Extends`/

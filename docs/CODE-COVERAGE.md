@@ -25,7 +25,7 @@
 | mcp | 2,604 | 3,055 | 85.2% |
 | resolution | 147 | 155 | 94.8% |
 | sync | 39 | 39 | 100.0% |
-| tokensave | 507 | 599 | 84.6% |
+| tracedecay | 507 | 599 | 84.6% |
 | types | 202 | 205 | 98.5% |
 | user_config | 37 | 50 | 74.0% |
 | vectors | 123 | 126 | 97.6% |
@@ -115,7 +115,7 @@
 | main.rs | 0 | 721 | 0.0% |
 | resolution/resolver.rs | 147 | 155 | 94.8% |
 | sync.rs | 39 | 39 | 100.0% |
-| tokensave.rs | 507 | 599 | 84.6% |
+| tracedecay.rs | 507 | 599 | 84.6% |
 | types.rs | 202 | 205 | 98.5% |
 | user_config.rs | 37 | 50 | 74.0% |
 | vectors/search.rs | 123 | 126 | 97.6% |

@@ -1,8 +1,14 @@
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
+use common::pyyaml_shim_pythonpath;
 use tempfile::TempDir;
-use tokensave::agents::*;
+use tracedecay::agents::*;
+use tracedecay::branch_meta;
+use tracedecay::config::get_tracedecay_dir;
+use tracedecay::tracedecay::TraceDecay;
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -121,29 +127,37 @@ fn test_agent_names_are_human_readable() {
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     }
 }
 
-fn run_local_install(agent: &str, project: &Path, home: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tokensave"))
-        .arg("install")
-        .arg("--local")
-        .arg("--agent")
-        .arg(agent)
+fn tracedecay_command(project: &Path, home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    command
         .current_dir(project)
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("KIRO_HOME", home.join(".kiro"))
-        .env("VIBE_HOME", home.join(".vibe"))
+        .env("VIBE_HOME", home.join(".vibe"));
+    command
+}
+
+fn run_local_install(agent: &str, project: &Path, home: &Path) -> std::process::Output {
+    tracedecay_command(project, home)
+        .arg("install")
+        .arg("--local")
+        .arg("--agent")
+        .arg(agent)
         .output()
         .unwrap_or_else(|e| panic!("failed to run local install for {agent}: {e}"))
 }
 
-fn assert_local_install_success(agent: &str, project: &Path, home: &Path) {
+fn assert_local_install_success(agent: &str, project: &Path, home: &Path) -> std::process::Output {
     let output = run_local_install(agent, project, home);
     assert!(
         output.status.success(),
@@ -151,6 +165,7 @@ fn assert_local_install_success(agent: &str, project: &Path, home: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    output
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
@@ -161,8 +176,8 @@ fn read_json(path: &Path) -> serde_json::Value {
     .unwrap_or_else(|e| panic!("failed to parse JSON {}: {e}", path.display()))
 }
 
-fn expected_tokensave_bin() -> String {
-    env!("CARGO_BIN_EXE_tokensave").replace('\\', "/")
+fn expected_tracedecay_bin() -> String {
+    env!("CARGO_BIN_EXE_tracedecay").replace('\\', "/")
 }
 
 fn assert_python_compiles(paths: &[&Path]) {
@@ -180,167 +195,261 @@ fn assert_python_compiles(paths: &[&Path]) {
     );
 }
 
-fn assert_command_is_tokensave(json: &serde_json::Value, command_path: &[&str]) {
-    let mut node = json;
-    for key in command_path {
-        node = node
-            .get(*key)
-            .unwrap_or_else(|| panic!("missing key {key} in {json:?}"));
-    }
-    let expected = expected_tokensave_bin();
+fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".cursor/plugins/local/tracedecay")
+}
+
+fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+    let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["license"], "MIT");
+    assert_eq!(manifest["mcpServers"], "mcp.json");
+    assert_eq!(manifest["hooks"], "hooks/hooks.json");
+    // Documented manifest metadata (displayName is not a documented field and
+    // must not reappear; author/homepage/keywords are the documented ones).
+    assert!(
+        manifest.get("displayName").is_none(),
+        "displayName is not a documented plugin.json field"
+    );
+    assert!(
+        manifest["author"]["name"].is_string(),
+        "plugin manifest should carry a documented author object"
+    );
+    assert!(manifest["homepage"].is_string());
+    assert!(
+        manifest["keywords"]
+            .as_array()
+            .is_some_and(|keywords| !keywords.is_empty()),
+        "plugin manifest should carry keywords"
+    );
+    assert!(
+        manifest.get("commands").is_none(),
+        "the deprecated commands surface must not be referenced by the manifest"
+    );
+    assert!(
+        manifest["rules"]
+            .as_array()
+            .is_some_and(|rules| rules.iter().any(|rule| rule == "rules/tracedecay.mdc")),
+        "plugin manifest should reference the tracedecay Cursor rule"
+    );
+
+    let mcp = read_json(&plugin_dir.join("mcp.json"));
+    let server = &mcp["mcpServers"]["tracedecay"];
+    assert_eq!(server["type"], "stdio");
+    assert_eq!(server["command"], expected_command);
     assert_eq!(
-        node.as_str(),
-        Some(expected.as_str()),
-        "local MCP config must use the resolved absolute tokensave executable"
+        server["args"],
+        serde_json::json!(["serve", "--path", "${workspaceFolder}"])
+    );
+
+    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    // The hint hook lives on postToolUse (the only generic tool event whose
+    // documented output supports `additional_context`) and runs unmatched so
+    // it also sees Read and Cursor's semantic search, whose matcher names are
+    // not documented. afterFileEdit runs unmatched so every Agent edit tool
+    // (not just Write) triggers the targeted sync.
+    let expected_hooks = [
+        ("sessionStart", "hook-cursor-session-start"),
+        ("sessionEnd", "hook-cursor-session-end"),
+        ("subagentStart", "hook-cursor-subagent-start"),
+        ("postToolUse", "hook-cursor-post-tool-use"),
+        ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
+        ("afterFileEdit", "hook-cursor-after-file-edit"),
+        ("afterShellExecution", "hook-cursor-after-shell"),
+        ("workspaceOpen", "hook-cursor-workspace-open"),
+        ("stop", "hook-cursor-stop"),
+    ];
+    for (event, subcommand) in expected_hooks {
+        let entries = hooks["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("plugin hook {event} should be an array"));
+        let hook = entries
+            .iter()
+            .find(|entry| {
+                entry["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(subcommand))
+            })
+            .unwrap_or_else(|| panic!("plugin hook {event} should call {subcommand}"));
+        assert!(
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with(&format!("{expected_command} "))),
+            "plugin hook commands should use the installed tracedecay binary"
+        );
+        assert!(
+            hook.get("matcher").is_none(),
+            "plugin hook {event} should run unmatched (matchers either miss \
+             undocumented tool names or restrict edits to Write only)"
+        );
+    }
+    assert!(
+        hooks["hooks"].get("preToolUse").is_none(),
+        "the hint hook must not register on preToolUse: its documented output \
+         schema has no context-injection field"
+    );
+
+    let rule = std::fs::read_to_string(plugin_dir.join("rules/tracedecay.mdc")).unwrap();
+    assert!(rule.contains("alwaysApply: true"));
+    assert!(rule.contains("tracedecay MCP tools"));
+    assert!(rule.to_lowercase().contains("fall back"));
+    assert!(plugin_dir.join("README.md").exists());
+}
+
+#[test]
+fn test_cursor_plugin_bundle_files_are_valid() {
+    assert_cursor_plugin_bundle(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("cursor-plugin")
+            .as_path(),
+        "tracedecay",
+    );
+}
+
+fn assert_hermes_config_enables_tracedecay_memory(config_path: &Path) -> String {
+    let config = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read Hermes config {}: {e}",
+            config_path.display()
+        )
+    });
+    assert!(
+        config.contains("memory:"),
+        "missing memory block:\n{config}"
+    );
+    assert!(
+        config.contains("  provider: tracedecay"),
+        "missing tracedecay memory provider:\n{config}"
+    );
+    assert!(
+        config.contains("plugins:"),
+        "missing plugins block:\n{config}"
+    );
+    assert!(
+        config.contains("enabled:"),
+        "missing enabled block:\n{config}"
+    );
+    assert!(
+        config.contains("- tracedecay"),
+        "missing tracedecay plugin enablement:\n{config}"
+    );
+    assert!(
+        config.contains("context:"),
+        "missing context block (context.engine selects the plugin engine):\n{config}"
+    );
+    assert!(
+        config.contains("  engine: tracedecay"),
+        "missing tracedecay context engine activation:\n{config}"
+    );
+    config
+}
+
+#[test]
+fn test_cursor_install_installs_local_plugin_without_global_mcp() {
+    let home = TempDir::new().unwrap();
+    let ctx = make_install_ctx(home.path());
+
+    CursorIntegration.install(&ctx).unwrap();
+
+    let plugin_dir = cursor_plugin_install_dir(home.path());
+    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin);
+    assert!(
+        !std::fs::symlink_metadata(&plugin_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "Cursor install should write a real plugin directory, not a symlink"
+    );
+    assert!(
+        !home.path().join(".cursor/mcp.json").exists(),
+        "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
 }
 
 #[test]
-fn test_local_install_cursor_writes_project_config_only() {
+fn test_local_install_cursor_installs_plugin_without_project_config() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
     assert_local_install_success("cursor", project.path(), home.path());
 
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(home.path()),
+        &expected_tracedecay_bin(),
+    );
+
     let mcp_path = project.path().join(".cursor/mcp.json");
-    assert!(mcp_path.exists(), "Cursor local MCP config should exist");
-    let config = read_json(&mcp_path);
-    assert_command_is_tokensave(&config, &["mcpServers", "tokensave", "command"]);
-    assert_eq!(
-        config["mcpServers"]["tokensave"]["args"],
-        serde_json::json!(["serve", "--path", "."])
-    );
-    assert_eq!(
-        config["mcpServers"]["tokensave"]["type"],
-        serde_json::json!("stdio")
+    assert!(
+        !mcp_path.exists(),
+        "Cursor local install should not write legacy project MCP config"
     );
     assert!(
-        config["mcpServers"]["tokensave"].get("env").is_none(),
-        "local Cursor config should not need env flags for repo-local mode"
+        !project.path().join(".cursor/hooks.json").exists(),
+        "Cursor local install should not write legacy project hooks"
     );
-
-    let rule_path = project.path().join(".cursor/rules/tokensave.mdc");
-    assert!(rule_path.exists(), "Cursor local rule should exist");
-    let rule = std::fs::read_to_string(&rule_path).unwrap();
-    assert!(rule.contains("alwaysApply: true"));
-    assert!(rule.contains("tokensave MCP tools"));
-    assert!(rule.contains("fall back"));
-
-    let permissions_path = project.path().join(".cursor/permissions.json");
     assert!(
-        permissions_path.exists(),
-        "Cursor local permissions should exist"
+        !project.path().join(".cursor/rules/tracedecay.mdc").exists(),
+        "Cursor local install should not write legacy project rule"
     );
-    let permissions = read_json(&permissions_path);
-    let allow = permissions["mcpAllowlist"]
-        .as_array()
-        .expect("mcpAllowlist should be an array");
-    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    for tool in tool_names() {
-        let expected = format!("tokensave:{tool}");
-        assert!(
-            allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should allow MCP tool {expected}"
-        );
-    }
     assert!(
-        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
-        "Cursor permissions should not keep removed legacy memory tools"
+        !project.path().join(".cursor/permissions.json").exists(),
+        "Cursor local install should leave permissions to Cursor approval/run-mode behavior"
     );
-
-    let hooks_path = project.path().join(".cursor/hooks.json");
-    assert!(
-        hooks_path.exists(),
-        "Cursor local hooks config should exist"
-    );
-    let hooks = read_json(&hooks_path);
-    let subagent_hooks = hooks["hooks"]["subagentStart"]
-        .as_array()
-        .expect("subagentStart hooks should be an array");
-    let tokensave_hook = subagent_hooks
-        .iter()
-        .find(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-subagent-start"))
-        })
-        .expect("Cursor subagentStart hook should call tokensave hook-cursor-subagent-start");
-    assert_eq!(tokensave_hook["timeout"], serde_json::json!(5));
-    let before_submit_hooks = hooks["hooks"]["beforeSubmitPrompt"]
-        .as_array()
-        .expect("beforeSubmitPrompt hooks should be an array");
-    assert!(
-        before_submit_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-before-submit-prompt"))
-        }),
-        "Cursor beforeSubmitPrompt hook should reset tokensave's local counter"
-    );
-    let after_edit_hooks = hooks["hooks"]["afterFileEdit"]
-        .as_array()
-        .expect("afterFileEdit hooks should be an array");
-    let after_edit_hook = after_edit_hooks
-        .iter()
-        .find(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
-        })
-        .expect("Cursor afterFileEdit hook should keep tokensave's index fresh after writes");
-    assert_eq!(
-        after_edit_hook["matcher"], "Write",
-        "afterFileEdit hook should target agent Write edits via a matcher"
-    );
-
-    let session_start_hooks = hooks["hooks"]["sessionStart"]
-        .as_array()
-        .expect("sessionStart hooks should be an array");
-    assert!(
-        session_start_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-session-start"))
-        }),
-        "Cursor sessionStart hook should steer the agent toward tokensave MCP tools"
-    );
-
-    let after_shell_hooks = hooks["hooks"]["afterShellExecution"]
-        .as_array()
-        .expect("afterShellExecution hooks should be an array");
-    assert!(
-        after_shell_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-shell"))
-        }),
-        "Cursor afterShellExecution hook should resync after git state changes"
-    );
-
-    let workspace_open_hooks = hooks["hooks"]["workspaceOpen"]
-        .as_array()
-        .expect("workspaceOpen hooks should be an array");
-    assert!(
-        workspace_open_hooks.iter().any(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-workspace-open"))
-        }),
-        "Cursor workspaceOpen hook should run a catch-up sync"
-    );
-
     assert!(
         !home.path().join(".cursor/mcp.json").exists(),
-        "local install must not write the global Cursor config"
+        "local install must not write the legacy global Cursor MCP config"
     );
     assert!(
-        !home.path().join(".tokensave/config.toml").exists(),
+        !home.path().join(".tracedecay/config.toml").exists(),
         "local install must not create or mutate user-level install tracking"
     );
 }
 
+#[tokio::test]
+async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let git_init = Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(project.path())
+        .output()
+        .expect("git init should run");
+    assert!(
+        git_init.status.success(),
+        "git init should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    TraceDecay::init(project.path()).await.unwrap();
+    let checkout = Command::new("git")
+        .arg("checkout")
+        .arg("-b")
+        .arg("feature/install")
+        .current_dir(project.path())
+        .output()
+        .expect("git checkout should run");
+    assert!(
+        checkout.status.success(),
+        "git checkout should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+
+    assert_local_install_success("cursor", project.path(), home.path());
+
+    let meta = branch_meta::load_branch_meta(&get_tracedecay_dir(project.path()))
+        .expect("Cursor install should bootstrap branch tracking metadata");
+    assert!(meta.is_tracked("main"));
+    assert!(meta.is_tracked("feature/install"));
+}
+
 #[test]
-fn test_local_install_cursor_refreshes_memory_permissions() {
+fn test_local_install_cursor_preserves_existing_permissions_file() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let cursor_dir = project.path().join(".cursor");
@@ -350,8 +459,8 @@ fn test_local_install_cursor_refreshes_memory_permissions() {
         r#"{
   "mcpAllowlist": [
     "other:custom_tool",
-    "tokensave:tokensave_session_recall",
-    "tokensave:tokensave_str_replace"
+    "tracedecay:tracedecay_not_a_real_tool",
+    "tracedecay:tracedecay_str_replace"
   ]
 }
 "#,
@@ -360,22 +469,51 @@ fn test_local_install_cursor_refreshes_memory_permissions() {
 
     assert_local_install_success("cursor", project.path(), home.path());
 
-    let permissions = read_json(&cursor_dir.join("permissions.json"));
-    let allow = permissions["mcpAllowlist"]
-        .as_array()
-        .expect("mcpAllowlist should be an array");
-    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    assert!(allow_strs.contains(&"other:custom_tool"));
-    for tool in tool_names() {
-        let expected = format!("tokensave:{tool}");
-        assert!(
-            allow_strs.contains(&expected.as_str()),
-            "Cursor permissions should refresh every current tokensave tool {expected}"
-        );
-    }
-    assert!(
-        !allow_strs.contains(&"tokensave:tokensave_session_recall"),
-        "removed legacy memory permissions should be pruned"
+    let permissions = std::fs::read_to_string(cursor_dir.join("permissions.json")).unwrap();
+    assert!(permissions.contains("other:custom_tool"));
+    assert!(permissions.contains("tracedecay:tracedecay_not_a_real_tool"));
+    assert!(permissions.contains("tracedecay:tracedecay_str_replace"));
+}
+
+#[test]
+fn test_cursor_healthcheck_ignores_foreign_project_cursor_files() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    CursorIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"other-bin"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"other-hook","timeout":30}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tracedecay.mdc"),
+        "---\nalwaysApply: false\n---\nforeign rule\n",
+    )
+    .unwrap();
+
+    let mut dc = DoctorCounters::new();
+    CursorIntegration.healthcheck(
+        &mut dc,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+
+    assert_eq!(dc.warnings, 0, "foreign Cursor files should not warn");
+    assert_eq!(
+        dc.issues, 0,
+        "foreign Cursor files should not fail healthcheck"
     );
 }
 
@@ -384,25 +522,40 @@ fn test_hermes_local_install_writes_profile_plugin() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    assert_local_install_success("hermes", project.path(), home.path());
+    let output = assert_local_install_success("hermes", project.path(), home.path());
 
-    let plugin_dir = project.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = project.path().join(".hermes/plugins/tracedecay");
     let manifest = std::fs::read_to_string(plugin_dir.join("plugin.yaml")).unwrap();
-    assert!(manifest.contains("name: tokensave"));
+    assert!(manifest.contains("name: tracedecay"));
     assert!(manifest.contains("kind: standalone"));
+    // `hermes plugins list` shows the manifest version; it must track the
+    // generating binary so stale plugins are detectable after upgrades.
+    assert!(
+        manifest.contains(&format!("version: {}\n", env!("CARGO_PKG_VERSION"))),
+        "manifest version must match the generating binary:\n{manifest}"
+    );
+    assert!(manifest.contains("author: "));
     assert!(manifest.contains("provides_tools:"));
-    assert!(manifest.contains("tokensave_context"));
+    assert!(manifest.contains("tracedecay_context"));
+    assert!(manifest.contains("tracedecay_lcm_status"));
+    assert!(manifest.contains("tracedecay_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
     assert!(manifest.contains("provides_commands:"));
-    assert!(manifest.contains("/tokensave_status"));
+    assert!(manifest.contains("/tracedecay_status"));
 
     let init_py = std::fs::read_to_string(plugin_dir.join("__init__.py")).unwrap();
     assert!(init_py.contains("def register(ctx):"));
-    assert!(init_py.contains("ctx.register_tool("));
+    assert!(init_py.contains("class TracedecayMemoryProvider"));
+    assert!(init_py.contains("ctx.register_memory_provider("));
+    assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
-    assert!(init_py.contains("ctx.register_skill(\"tokensave:tokensave\""));
+    assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
+    assert!(init_py.contains("register_skill(\"tracedecay\""));
+    assert!(init_py.contains("class TraceDecayContextEngine"));
+    assert!(init_py.contains("storage_scope"));
+    assert!(init_py.contains("tracedecay_lcm_compress"));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
     assert!(schemas_py.contains("TOOL_SCHEMAS"));
@@ -410,17 +563,37 @@ fn test_hermes_local_install_writes_profile_plugin() {
     let schemas_json = read_json(&plugin_dir.join("schemas.json"));
     assert!(schemas_json.as_array().is_some_and(|schemas| schemas
         .iter()
-        .any(|schema| schema["name"] == "tokensave_context")));
+        .any(|schema| schema["name"] == "tracedecay_context")));
 
     let tools_py = std::fs::read_to_string(plugin_dir.join("tools.py")).unwrap();
-    assert!(tools_py.contains(&expected_tokensave_bin()));
+    assert!(tools_py.contains(&expected_tracedecay_bin()));
     assert!(tools_py.contains("subprocess.run"));
-    assert!(tools_py.contains("tokensave tool"));
-    assert!(tools_py.contains("TOKENSAVE_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("tracedecay tool"));
+    assert!(tools_py.contains("TRACEDECAY_TIMEOUT_SECONDS = 120"));
+    assert!(tools_py.contains("TRACEDECAY_LONG_TIMEOUT_SECONDS = 600"));
+    assert!(tools_py.contains("ARGS_FILE_THRESHOLD_BYTES"));
     assert!(tools_py.contains("truncate_output"));
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
-    assert!(tools_py.contains("\"tool\", name, \"--json\", \"--args\", payload"));
+    assert!(tools_py.contains("kwargs.get(\"project_root\")"));
+    assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
+    assert!(
+        tools_py.contains("config_pinned_project_root()"),
+        "tool dispatch must fall back to the config-block project pin"
+    );
+    assert!(
+        tools_py.contains("PROFILE_STORE_TOOLS"),
+        "profile-global state tools must anchor at the Hermes home when unpinned"
+    );
+    assert!(
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "the install-time pin lives only in plugins.tracedecay.project_root"
+    );
+    assert!(tools_py.contains("argv.extend([\"--project\", str(project_root)])"));
+    // Large payloads spill to a tempfile passed as `--args @<path>` so argv
+    // never exceeds the kernel's per-string cap.
+    assert!(tools_py.contains("argv.extend([name, \"--json\", \"--args\"])"));
+    assert!(tools_py.contains("argv.append(\"@\" + args_file)"));
     assert!(!tools_py.contains("shell=True"));
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
@@ -428,33 +601,125 @@ fn test_hermes_local_install_writes_profile_plugin() {
         &plugin_dir.join("__init__.py"),
     ]);
 
-    let skill = std::fs::read_to_string(plugin_dir.join("skills/tokensave/SKILL.md")).unwrap();
-    assert!(skill.contains("Use tokensave"));
+    let skill = std::fs::read_to_string(plugin_dir.join("skills/tracedecay/SKILL.md")).unwrap();
+    assert!(skill.contains("Use tracedecay"));
 
-    let config = std::fs::read_to_string(project.path().join(".hermes/config.yaml")).unwrap();
-    assert!(config.contains("plugins:"));
-    assert!(config.contains("enabled:"));
-    assert!(config.contains("- tokensave"));
+    assert_hermes_config_enables_tracedecay_memory(&project.path().join(".hermes/config.yaml"));
     assert!(
         !home.path().join(".hermes/config.yaml").exists(),
         "plain local install must not mutate the user profile config"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_hermes_homes = [
+        project.path().join(".hermes"),
+        std::fs::canonicalize(project.path())
+            .unwrap_or_else(|_| project.path().to_path_buf())
+            .join(".hermes"),
+    ];
+    assert!(
+        expected_hermes_homes
+            .iter()
+            .any(|path| stderr.contains(&format!("HERMES_HOME={}", path.display()))),
+        "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
+    );
 }
 
 #[test]
-fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
+fn test_hermes_generated_python_registers_lcm_context_engine() {
     let home = TempDir::new().unwrap();
-    let tokensave_bin = home.path().join("bin with spaces").join("token\"save-π");
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let init_py =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tracedecay/__init__.py"))
+            .unwrap();
+
+    assert!(init_py.contains("class TraceDecayContextEngine"));
+    assert!(init_py.contains("ctx.register_context_engine"));
+    assert!(init_py.contains("storage_scope"));
+    assert!(init_py.contains("def call_tracedecay_json"));
+    assert!(init_py.contains("tracedecay_lcm_status"));
+    assert!(init_py.contains("call_tracedecay_json(\"tracedecay_lcm_preflight\""));
+    assert!(init_py.contains("call_tracedecay_json(\"tracedecay_lcm_compress\""));
+    assert!(init_py.contains("tracedecay_lcm_session_boundary"));
+    // Both registered provider identities are "tracedecay"; "lcm" is reserved
+    // for the tool surface (lcm_* / tracedecay_lcm_*), not the engine name.
+    assert!(init_py.contains("return \"tracedecay\""));
+    assert!(
+        !init_py.contains("return \"lcm\""),
+        "context engine identity must be \"tracedecay\", not \"lcm\""
+    );
+
+    // The context engine exposes the full native LCM tool surface: every
+    // native lcm_* tool must be aliased to its tracedecay_lcm_* MCP tool and
+    // ship a native schema entry.
+    let native_lcm_tools = [
+        "lcm_grep",
+        "lcm_load_session",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "lcm_status",
+        "lcm_doctor",
+    ];
+    for native in native_lcm_tools {
+        assert!(
+            init_py.contains(&format!("\"{native}\": \"tracedecay_{native}\"")),
+            "__init__.py LCM_TOOL_ALIASES must map {native} -> tracedecay_{native}"
+        );
+        assert!(
+            init_py.contains(&format!("\"name\": \"{native}\"")),
+            "__init__.py LCM_NATIVE_SCHEMAS must define a schema for {native}"
+        );
+    }
+
+    // Every tracedecay_lcm_* MCP tool must be declared in the generated plugin
+    // manifest and tool schemas so the embedded constants cannot drift from
+    // the current LCM tool surface.
+    let manifest =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tracedecay/plugin.yaml"))
+            .unwrap();
+    let schemas_json =
+        std::fs::read_to_string(home.path().join(".hermes/plugins/tracedecay/schemas.json"))
+            .unwrap();
+    let lcm_tool_names: Vec<String> = tool_names()
+        .into_iter()
+        .filter(|name| name.starts_with("tracedecay_lcm_"))
+        .collect();
+    assert_eq!(
+        lcm_tool_names.len(),
+        10,
+        "expected the 10 LCM MCP tools, got {lcm_tool_names:?}"
+    );
+    for name in &lcm_tool_names {
+        assert!(
+            manifest.contains(&format!("  - {name}")),
+            "plugin.yaml provides_tools must list {name}"
+        );
+        assert!(
+            schemas_json.contains(&format!("\"name\": \"{name}\"")),
+            "schemas.json must contain a schema for {name}"
+        );
+    }
+}
+
+#[test]
+fn test_hermes_generated_python_handles_quoted_unicode_tracedecay_path() {
+    let home = TempDir::new().unwrap();
+    let tracedecay_bin = home.path().join("bin with spaces").join("token\"save-π");
     let ctx = InstallContext {
         home: home.path().to_path_buf(),
-        tokensave_bin: tokensave_bin.to_string_lossy().to_string(),
+        tracedecay_bin: tracedecay_bin.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert_python_compiles(&[
         &plugin_dir.join("tools.py"),
         &plugin_dir.join("schemas.py"),
@@ -467,16 +732,20 @@ fn test_hermes_generated_python_handles_quoted_unicode_tokensave_path() {
         r#"
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
 tools_path = pathlib.Path(sys.argv[1])
 expected_bin = sys.argv[2]
-spec = importlib.util.spec_from_file_location("tokensave_hermes_tools", tools_path)
+# Hermetic profile home so plugins.tracedecay from the developer's real
+# ~/.hermes config can never leak a --project argument into the argv checks.
+os.environ["HERMES_HOME"] = str(tools_path.parent.parent.parent)
+spec = importlib.util.spec_from_file_location("tracedecay_hermes_tools", tools_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-assert module.TOKENSAVE_BIN == expected_bin
+assert module.TRACEDECAY_BIN == expected_bin
 
 class Result:
     returncode = 7
@@ -485,14 +754,15 @@ class Result:
 
 def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
-    assert argv[1:] == ["tool", "tokensave_context", "--json", "--args", "{\"query\": \"x\"}"]
-    assert kwargs["timeout"] == 600
+    assert argv[1:] == ["tool", "tracedecay_context", "--json", "--args", "{\"query\": \"x\"}"]
+    assert "cwd" not in kwargs
+    assert kwargs["timeout"] == 120
     assert kwargs["shell"] is False
     return Result()
 
 module.subprocess.run = fake_run
-payload = json.loads(module.call_tokensave_tool("tokensave_context", {"query": "x"}))
-assert payload["error"] == "tokensave tool exited with status 7"
+payload = json.loads(module.call_tracedecay_tool("tracedecay_context", {"query": "x"}))
+assert payload["error"] == "tracedecay tool exited with status 7"
 assert payload["stdout"].startswith("stdout-")
 assert payload["stderr"].startswith("stderr-")
 assert payload["stdout"].endswith("...<truncated>")
@@ -504,12 +774,624 @@ assert payload["stderr"].endswith("...<truncated>")
     let output = Command::new("python3")
         .arg(&script)
         .arg(plugin_dir.join("tools.py"))
-        .arg(tokensave_bin)
+        .arg(tracedecay_bin)
         .output()
         .expect("python3 should run generated Hermes tools import check");
     assert!(
         output.status.success(),
         "generated tools.py should import and expose diagnosable errors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_hermes_generated_python_registers_memory_provider() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+    assert_python_compiles(&[
+        &plugin_dir.join("tools.py"),
+        &plugin_dir.join("schemas.py"),
+        &plugin_dir.join("__init__.py"),
+    ]);
+
+    let script = plugin_dir.join("check_memory_provider.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib
+import importlib.machinery
+import importlib.util
+import abc
+import json
+import os
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+
+parent_name = "_hermes_user_memory"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+parent_module = importlib.util.module_from_spec(parent_spec)
+sys.modules[parent_name] = parent_module
+
+module_name = f"{parent_name}.tracedecay"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+class FullCtx:
+    context_engine_tool_handlers_receive_messages = True
+
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+        self.commands = []
+        self.skills = []
+        self.memory_providers = []
+        self.config_defaults = []
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_command(self, name, handler, **kwargs):
+        self.commands.append((name, handler, kwargs))
+
+    def register_skill(self, name, path):
+        self.skills.append((name, path))
+
+    def register_memory_provider(self, provider):
+        self.memory_providers.append(provider)
+
+    def register_config_defaults(self, defaults):
+        self.config_defaults.append(defaults)
+
+ctx = FullCtx()
+plugin.register(ctx)
+assert any(tool["name"] == "tracedecay_context" for tool in ctx.tools)
+assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
+assert ctx.commands and ctx.commands[0][0] == "/tracedecay_status"
+assert ctx.skills and ctx.skills[0][0] == "tracedecay"
+assert len(ctx.memory_providers) == 1
+
+# Conventional config defaults registered under the plugins.tracedecay block.
+assert len(ctx.config_defaults) == 1
+defaults = ctx.config_defaults[0]
+assert set(defaults) == {"plugins"}
+assert "project_root" in defaults["plugins"]["tracedecay"]
+
+provider = ctx.memory_providers[0]
+assert isinstance(provider, MemoryProvider)
+assert provider.name == "tracedecay"
+assert provider.provider_id == "tracedecay"
+assert provider.is_available() is True
+original_bin = plugin.tools.TRACEDECAY_BIN
+plugin.tools.TRACEDECAY_BIN = "/definitely/missing/tracedecay"
+assert provider.is_available() is False
+plugin.tools.TRACEDECAY_BIN = original_bin
+provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
+assert provider.hermes_home == "/tmp/hermes-profile"
+assert provider.session_id == "session-123"
+# Without an explicit hermes_home the provider resolves the active profile
+# home itself (sync_turn/prefetch need a storage anchor).
+provider.initialize("session-only")
+assert provider.hermes_home == os.environ["HERMES_HOME"]
+assert provider.session_id == "session-only"
+
+# Collapsed schema surface: fact_store(action=...) covers the nine legacy
+# fixed-action aliases, which stay dispatchable but cost no schema footprint.
+schemas = provider.get_tool_schemas()
+schema_names = [schema.get("name") for schema in schemas]
+assert schema_names == ["fact_store", "fact_feedback", "memory_status"]
+assert all("function" not in schema for schema in schemas)
+schema_by_name = {schema["name"]: schema for schema in schemas}
+fact_store_schema = schema_by_name["fact_store"]
+fact_feedback_schema = schema_by_name["fact_feedback"]
+assert fact_store_schema["parameters"]["required"] == ["action"]
+assert fact_feedback_schema["parameters"]["required"] == ["fact_id"]
+
+calls = []
+
+def fake_call(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return json.dumps({"name": name, "args": args})
+
+plugin.tools.call_tracedecay_tool = fake_call
+store_result = provider.handle_tool_call("fact_store", {"action": "list"}, request_id="r1")
+feedback_result = provider.handle_tool_call("fact_feedback", {"fact_id": 7, "helpful": True})
+search_result = provider.handle_tool_call("fact_search", {"query": "Project Phoenix"})
+status_result = provider.handle_tool_call("memory_status", None)
+assert isinstance(store_result, str)
+assert isinstance(feedback_result, str)
+assert isinstance(search_result, str)
+assert isinstance(status_result, str)
+assert json.loads(store_result)["name"] == "tracedecay_fact_store"
+assert json.loads(feedback_result)["name"] == "tracedecay_fact_feedback"
+assert json.loads(search_result)["name"] == "tracedecay_fact_store"
+assert json.loads(status_result)["name"] == "tracedecay_memory_status"
+assert calls[0][0] == "tracedecay_fact_store"
+assert calls[0][1] == {"action": "list"}
+assert calls[0][2]["request_id"] == "r1"
+assert calls[1][0] == "tracedecay_fact_feedback"
+assert calls[2][0] == "tracedecay_fact_store"
+assert calls[2][1] == {"query": "Project Phoenix", "action": "search"}
+assert calls[3][0] == "tracedecay_memory_status"
+assert calls[3][1] == {}
+
+class LegacyCtx:
+    context_engine_tool_handlers_receive_messages = True
+
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+    def register_skill(self, name, path):
+        pass
+
+legacy = LegacyCtx()
+plugin.register(legacy)
+assert any(tool["name"] == "tracedecay_context" for tool in legacy.tools)
+assert legacy.hooks and legacy.hooks[0][0] == "pre_llm_call"
+
+class ProviderCollector:
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+collector = ProviderCollector()
+plugin.register(collector)
+assert collector.provider is not None
+assert collector.provider.name == "tracedecay"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run generated Hermes memory provider check");
+    assert!(
+        output.status.success(),
+        "generated plugin should register a Hermes memory provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_hermes_generated_memory_provider_is_discovered_from_active_home() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let hermes_home = home.path().join(".hermes");
+    let plugin_dir = hermes_home.join("plugins/tracedecay");
+    let script = plugin_dir.join("check_hermes_discovery.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+import types
+
+hermes_home = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(hermes_home)
+
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+    def get_config_schema(self):
+        return []
+
+    def save_config(self, values, hermes_home):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+
+def is_memory_provider_dir(path):
+    init_file = path / "__init__.py"
+    if not init_file.exists():
+        return False
+    source = init_file.read_text(errors="replace")[:8192]
+    return "register_memory_provider" in source or "MemoryProvider" in source
+
+def iter_user_provider_dirs():
+    plugins_dir = hermes_home / "plugins"
+    for child in sorted(plugins_dir.iterdir()):
+        if child.is_dir() and not child.name.startswith(("_", ".")) and is_memory_provider_dir(child):
+            yield child.name, child
+
+def load_provider(provider_dir):
+    parent_name = "_hermes_user_memory"
+    if parent_name not in sys.modules:
+        parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+        parent_spec.submodule_search_locations = []
+        sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+    module_name = f"{parent_name}.{provider_dir.name}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        provider_dir / "__init__.py",
+        submodule_search_locations=[str(provider_dir)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    class ProviderCollector:
+        def __init__(self):
+            self.provider = None
+        def register_memory_provider(self, provider):
+            self.provider = provider
+        def register_tool(self, *args, **kwargs):
+            pass
+        def register_hook(self, *args, **kwargs):
+            pass
+        def register_cli_command(self, *args, **kwargs):
+            pass
+
+    collector = ProviderCollector()
+    module.register(collector)
+    return collector.provider
+
+config = (hermes_home / "config.yaml").read_text()
+assert "memory:" in config
+assert "provider: tracedecay" in config
+assert "context:" in config
+assert "engine: tracedecay" in config
+
+providers = dict(iter_user_provider_dirs())
+assert "tracedecay" in providers
+provider = load_provider(providers["tracedecay"])
+assert provider is not None
+assert isinstance(provider, MemoryProvider)
+assert provider.name == "tracedecay"
+assert provider.is_available() is True
+
+# `hermes memory setup` walks get_config_schema(); the pin is the only field.
+schema = provider.get_config_schema()
+assert [field["key"] for field in schema] == ["project_root"]
+assert "description" in schema[0]
+assert not any(field.get("secret") for field in schema)
+
+# Hermes layers get_config_defaults() under DEFAULT_CONFIG.
+defaults = provider.get_config_defaults()
+assert "project_root" in defaults["plugins"]["tracedecay"]
+
+# Dashboard hints use full config dot-paths.
+field_meta = provider.get_config_field_meta()
+assert "plugins.tracedecay.project_root" in field_meta
+assert "description" in field_meta["plugins.tracedecay.project_root"]
+
+# `hermes memory setup` persists non-secret values via save_config(); the
+# conventional home is the plugins.tracedecay block.
+import yaml
+provider.save_config({"project_root": "/pinned/by/setup"}, str(hermes_home))
+saved = yaml.safe_load((hermes_home / "config.yaml").read_text())
+assert saved["plugins"]["tracedecay"]["project_root"] == "/pinned/by/setup"
+assert saved["memory"]["provider"] == "tracedecay"
+
+provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
+assert provider.hermes_home == str(hermes_home)
+assert "fact_store" in [schema["name"] for schema in provider.get_tool_schemas()]
+assert "memory_status" in [schema["name"] for schema in provider.get_tool_schemas()]
+"#,
+    )
+    .unwrap();
+
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(hermes_home);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
+        .output()
+        .expect("python3 should run Hermes memory provider discovery check");
+    assert!(
+        output.status.success(),
+        "Hermes-style memory provider discovery should find the generated tracedecay provider\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Stock-ABC variant harness: upstream (NousResearch/hermes-agent) Hermes
+/// differs from forks in two load-bearing ways — the ABCs enforce a fixed
+/// abstract-method set (instantiation raises `TypeError` on any miss), and
+/// the general `PluginContext` has **no** `register_memory_provider` or
+/// `register_config_defaults` (memory providers load through the
+/// `plugins/memory` `_ProviderCollector` instead). The generated plugin must
+/// keep memory + context + tools functional on that surface and skip
+/// fork-only registrations without raising.
+#[test]
+fn test_hermes_generated_python_degrades_gracefully_on_stock_hermes_api() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+    let script = plugin_dir.join("check_stock_abi.py");
+    std::fs::write(
+        &script,
+        r#"
+import abc
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+import types
+
+plugin_dir = pathlib.Path(sys.argv[1])
+os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+
+# Stock agent/memory_provider.py abstract surface (upstream pins these four).
+class MemoryProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def is_available(self):
+        pass
+
+    @abc.abstractmethod
+    def initialize(self, session_id, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def get_tool_schemas(self):
+        pass
+
+# Stock agent/context_engine.py abstract surface. Instantiating the generated
+# engine under this ABC proves every stock-abstract method is implemented
+# (update_from_response is the one newer stock releases added).
+class ContextEngine(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self):
+        pass
+
+    @abc.abstractmethod
+    def update_from_response(self, usage):
+        pass
+
+    @abc.abstractmethod
+    def should_compress(self, prompt_tokens=None):
+        pass
+
+    @abc.abstractmethod
+    def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+        pass
+
+agent_module = types.ModuleType("agent")
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = MemoryProvider
+context_engine_module = types.ModuleType("agent.context_engine")
+context_engine_module.ContextEngine = ContextEngine
+sys.modules["agent"] = agent_module
+sys.modules["agent.memory_provider"] = memory_provider_module
+sys.modules["agent.context_engine"] = context_engine_module
+
+parent_name = "_hermes_stock_plugins"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+
+module_name = f"{parent_name}.tracedecay"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# Stock general PluginContext: hooks/commands/skills/context engine/tools
+# exist; register_memory_provider, register_config_defaults, and the
+# context_engine_tool_handlers_receive_messages capability do not.
+class StockPluginContext:
+    def __init__(self):
+        self.tools = []
+        self.hooks = []
+        self.commands = []
+        self.cli_commands = []
+        self.middleware = []
+        self.skills = []
+        self.context_engine = None
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
+
+    def register_cli_command(self, *args, **kwargs):
+        self.cli_commands.append((args, kwargs))
+
+    def register_command(self, name, handler, description="", args_hint=""):
+        self.commands.append((name, handler, description))
+
+    def register_context_engine(self, engine):
+        assert self.context_engine is None, "only one context engine is allowed"
+        self.context_engine = engine
+
+    def register_hook(self, hook_name, callback):
+        self.hooks.append((hook_name, callback))
+
+    def register_middleware(self, kind, callback):
+        self.middleware.append((kind, callback))
+
+    def register_skill(self, name, path, description=""):
+        self.skills.append((name, path))
+
+ctx = StockPluginContext()
+plugin.register(ctx)
+
+# Core registrations stay functional on the stock surface.
+assert ctx.hooks and ctx.hooks[0][0] == "pre_llm_call"
+assert ctx.commands and ctx.commands[0][0] == "/tracedecay_status"
+assert ctx.skills and ctx.skills[0][0] == "tracedecay"
+assert ctx.context_engine is not None
+assert isinstance(ctx.context_engine, ContextEngine)
+assert ctx.context_engine.name == "tracedecay"
+# Code-graph / memory / transcript tools register unconditionally; only the
+# messages-dependent LCM live-ingest verbs (and the context-engine tool
+# mirrors) stay gated on the message-forwarding capability, which stock
+# never advertises — the LCM surface stays reachable through the context
+# engine schemas instead.
+registered = [tool["name"] for tool in ctx.tools]
+assert "tracedecay_search" in registered
+assert "tracedecay_context" in registered
+assert "tracedecay_lcm_compress" not in registered
+assert "tracedecay_lcm_preflight" not in registered
+assert "lcm_grep" not in registered
+lcm_names = [schema["name"] for schema in ctx.context_engine.get_tool_schemas()]
+assert "lcm_status" in lcm_names and "lcm_grep" in lcm_names
+
+# The stock-abstract ContextEngine methods round-trip.
+engine = ctx.context_engine
+engine.update_from_response({"prompt_tokens": 11, "completion_tokens": 4})
+assert engine.last_total_tokens == 15
+
+calls = []
+
+def fake_call(name, args, **kwargs):
+    calls.append((name, args))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({"should_compress": False})}]})
+
+original_call = plugin.tools.call_tracedecay_tool
+plugin.tools.call_tracedecay_tool = fake_call
+assert engine.should_compress(123) is False
+assert calls and calls[0][0] == "tracedecay_lcm_preflight"
+plugin.tools.call_tracedecay_tool = original_call
+
+# Stock memory activation: plugins/memory drives register() through its
+# _ProviderCollector (exactly these four methods — notably no
+# register_command, register_context_engine, or register_skill).
+class StockProviderCollector:
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+collector = StockProviderCollector()
+plugin.register(collector)
+assert collector.provider is not None
+assert isinstance(collector.provider, MemoryProvider)
+assert collector.provider.name == "tracedecay"
+assert collector.provider.is_available() is True
+assert collector.provider.get_tool_schemas()
+
+# Stock fallback branch: when register() yields no provider, the loader
+# instantiates any module-level MemoryProvider subclass directly.
+fallback = plugin.TracedecayMemoryProvider()
+assert isinstance(fallback, MemoryProvider)
+assert fallback.name == "tracedecay"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(plugin_dir)
+        .output()
+        .expect("python3 should run stock Hermes API degradation check");
+    assert!(
+        output.status.success(),
+        "generated plugin should degrade gracefully on the stock Hermes plugin API\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -522,21 +1404,29 @@ fn test_hermes_global_install_and_uninstall_plugin() {
 
     HermesIntegration.install(&ctx).unwrap();
 
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     assert!(plugin_dir.join("plugin.yaml").exists());
     assert!(plugin_dir.join("__init__.py").exists());
     let config = std::fs::read_to_string(home.path().join(".hermes/config.yaml")).unwrap();
-    assert!(config.contains("- tokensave"));
+    assert!(config.contains("- tracedecay"));
 
     HermesIntegration.uninstall(&ctx).unwrap();
     assert!(
         !plugin_dir.exists(),
-        "uninstall should remove only the tokensave Hermes plugin directory"
+        "uninstall should remove only the tracedecay Hermes plugin directory"
     );
     let config = std::fs::read_to_string(home.path().join(".hermes/config.yaml")).unwrap();
     assert!(
-        !config.contains("- tokensave"),
-        "uninstall should remove tokensave from plugins.enabled"
+        !config.contains("- tracedecay"),
+        "uninstall should remove tracedecay from plugins.enabled"
+    );
+    assert!(
+        !config.contains("memory:\n"),
+        "uninstall should remove the empty tracedecay-created memory block"
+    );
+    assert!(
+        !config.contains("engine: tracedecay") && !config.contains("context:\n"),
+        "uninstall should remove the tracedecay context engine activation:\n{config}"
     );
 }
 
@@ -545,24 +1435,31 @@ fn test_hermes_profile_install_targets_named_profile() {
     let home = TempDir::new().unwrap();
     let ctx = InstallContext {
         home: home.path().to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("Work_Profile".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.install(&ctx).unwrap();
 
     let plugin_dir = home
         .path()
-        .join(".hermes/profiles/work_profile/plugins/tokensave");
+        .join(".hermes/profiles/work_profile/plugins/tracedecay");
     assert!(plugin_dir.join("plugin.yaml").exists());
-    assert!(!home.path().join(".hermes/plugins/tokensave").exists());
+    assert!(!home.path().join(".hermes/plugins/tracedecay").exists());
     let config = std::fs::read_to_string(
         home.path()
             .join(".hermes/profiles/work_profile/config.yaml"),
     )
     .expect("profile config should be written");
-    assert!(config.contains("- tokensave"));
+    assert_hermes_config_enables_tracedecay_memory(
+        &home
+            .path()
+            .join(".hermes/profiles/work_profile/config.yaml"),
+    );
+    assert!(config.contains("- tracedecay"));
 
     HermesIntegration.uninstall(&ctx).unwrap();
     assert!(!plugin_dir.exists());
@@ -570,20 +1467,128 @@ fn test_hermes_profile_install_targets_named_profile() {
 }
 
 #[test]
+fn test_hermes_install_all_profiles_configures_default_and_named_profiles() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let default_profile = home.path().join(".hermes");
+    let work_profile = home.path().join(".hermes/profiles/work");
+    let personal_profile = home.path().join(".hermes/profiles/personal");
+    std::fs::create_dir_all(&work_profile).unwrap();
+    std::fs::create_dir_all(&personal_profile).unwrap();
+    std::fs::write(
+        default_profile.join("config.yaml"),
+        "theme: dark\nplugins:\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work_profile.join("config.yaml"),
+        "theme: light\nmemory:\n  retention: session\nplugins:\n  disabled:\n    - tracedecay\n    - other-disabled\n",
+    )
+    .unwrap();
+
+    let output = tracedecay_command(project.path(), home.path())
+        .arg("install")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--all-profiles")
+        .output()
+        .expect("run hermes all-profiles install");
+    assert!(
+        output.status.success(),
+        "hermes all-profiles install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        assert!(
+            profile.join("plugins/tracedecay/plugin.yaml").exists(),
+            "tracedecay plugin should be installed in {}",
+            profile.display()
+        );
+        assert_hermes_config_enables_tracedecay_memory(&profile.join("config.yaml"));
+    }
+    let default_config = std::fs::read_to_string(default_profile.join("config.yaml")).unwrap();
+    assert!(default_config.contains("    - other"));
+    let work_config = std::fs::read_to_string(work_profile.join("config.yaml")).unwrap();
+    assert!(work_config.contains("  retention: session"));
+    assert!(!work_config.contains("  disabled:\n    - tracedecay"));
+    assert!(
+        !project
+            .path()
+            .join(".hermes/plugins/tracedecay/plugin.yaml")
+            .exists(),
+        "profile-level all-profiles install must not write a project-local plugin"
+    );
+}
+
+#[test]
+fn test_hermes_uninstall_all_profiles_cleans_only_tracedecay_from_each_profile() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let default_profile = home.path().join(".hermes");
+    let work_profile = home.path().join(".hermes/profiles/work");
+    let personal_profile = home.path().join(".hermes/profiles/personal");
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        let plugin_dir = profile.join("plugins/tracedecay");
+        let other_plugin_dir = profile.join("plugins/other");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::create_dir_all(&other_plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.yaml"), "name: tracedecay\n").unwrap();
+        std::fs::write(other_plugin_dir.join("plugin.yaml"), "name: other\n").unwrap();
+        std::fs::write(
+            profile.join("config.yaml"),
+            "theme: dark\nmemory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n    - other\n",
+        )
+        .unwrap();
+    }
+
+    let output = tracedecay_command(project.path(), home.path())
+        .arg("uninstall")
+        .arg("--agent")
+        .arg("hermes")
+        .arg("--all-profiles")
+        .output()
+        .expect("run hermes all-profiles uninstall");
+    assert!(
+        output.status.success(),
+        "hermes all-profiles uninstall should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for profile in [&default_profile, &work_profile, &personal_profile] {
+        assert!(
+            !profile.join("plugins/tracedecay/plugin.yaml").exists(),
+            "tracedecay plugin should be removed from {}",
+            profile.display()
+        );
+        assert!(
+            profile.join("plugins/other/plugin.yaml").exists(),
+            "uninstall must preserve unrelated plugins in {}",
+            profile.display()
+        );
+        let config = std::fs::read_to_string(profile.join("config.yaml")).unwrap();
+        assert!(config.contains("theme: dark"));
+        assert!(config.contains("    - other"));
+        assert!(!config.contains("    - tracedecay"));
+        assert!(!config.contains("provider: tracedecay"));
+    }
+}
+
+#[test]
 fn test_hermes_local_install_with_profile_targets_named_profile() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let output = tracedecay_command(project.path(), home.path())
         .arg("install")
         .arg("--local")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("project")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes local install with profile");
     assert!(
@@ -594,12 +1599,15 @@ fn test_hermes_local_install_with_profile_targets_named_profile() {
 
     assert!(home
         .path()
-        .join(".hermes/profiles/project/plugins/tokensave/plugin.yaml")
+        .join(".hermes/profiles/project/plugins/tracedecay/plugin.yaml")
         .exists());
+    assert_hermes_config_enables_tracedecay_memory(
+        &home.path().join(".hermes/profiles/project/config.yaml"),
+    );
     assert!(
         !project
             .path()
-            .join(".hermes/plugins/tokensave/plugin.yaml")
+            .join(".hermes/plugins/tracedecay/plugin.yaml")
             .exists(),
         "--profile should target a profile instead of project plugin directory"
     );
@@ -610,9 +1618,11 @@ fn test_hermes_install_rejects_invalid_profile_names() {
     let home = TempDir::new().unwrap();
     let ctx = InstallContext {
         home: home.path().to_path_buf(),
-        tokensave_bin: "/usr/local/bin/tokensave".to_string(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
         profile: Some("_bad".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
@@ -625,15 +1635,12 @@ fn test_profile_flag_is_only_valid_for_hermes_install() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let output = tracedecay_command(project.path(), home.path())
         .arg("install")
         .arg("--agent")
         .arg("cursor")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run install with invalid --profile agent");
 
@@ -647,15 +1654,12 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let install = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let install = tracedecay_command(project.path(), home.path())
         .arg("install")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes profile install");
     assert!(
@@ -663,18 +1667,15 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
         "hermes profile install should succeed\nstderr:\n{}",
         String::from_utf8_lossy(&install.stderr)
     );
-    let plugin_dir = home.path().join(".hermes/profiles/work/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/profiles/work/plugins/tracedecay");
     assert!(plugin_dir.exists());
 
-    let uninstall = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let uninstall = tracedecay_command(project.path(), home.path())
         .arg("uninstall")
         .arg("--agent")
         .arg("hermes")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run hermes profile uninstall");
     assert!(
@@ -684,15 +1685,12 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
     );
     assert!(!plugin_dir.exists());
 
-    let invalid = Command::new(env!("CARGO_BIN_EXE_tokensave"))
+    let invalid = tracedecay_command(project.path(), home.path())
         .arg("uninstall")
         .arg("--agent")
         .arg("cursor")
         .arg("--profile")
         .arg("work")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
         .output()
         .expect("run non-Hermes uninstall with profile");
     assert!(!invalid.status.success());
@@ -701,13 +1699,13 @@ fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
 }
 
 #[test]
-fn test_hermes_install_removes_tokensave_from_disabled_list() {
+fn test_hermes_install_removes_tracedecay_from_disabled_list() {
     let home = TempDir::new().unwrap();
     let hermes_dir = home.path().join(".hermes");
     std::fs::create_dir_all(&hermes_dir).unwrap();
     std::fs::write(
         hermes_dir.join("config.yaml"),
-        "theme: dark\nplugins:\n  disabled:\n    - tokensave\n    - other\n",
+        "theme: dark\nplugins:\n  disabled:\n    - tracedecay\n    - other\n",
     )
     .unwrap();
 
@@ -718,12 +1716,157 @@ fn test_hermes_install_removes_tokensave_from_disabled_list() {
     let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
     assert!(config.contains("theme: dark"));
     assert!(config.contains("enabled:"));
-    assert!(config.contains("    - tokensave"));
+    assert!(config.contains("    - tracedecay"));
     assert!(
-        !config.contains("  disabled:\n    - tokensave"),
-        "plugins.disabled must not keep tokensave because disabled wins"
+        !config.contains("  disabled:\n    - tracedecay"),
+        "plugins.disabled must not keep tracedecay because disabled wins"
     );
     assert!(config.contains("    - other"));
+}
+
+#[test]
+fn test_hermes_install_matches_two_space_list_item_indent() {
+    // Hermes itself writes sequence items at the same indent as the key
+    // (`enabled:` + `  - item`); inserting a 4-space item into such a list
+    // produces unparseable YAML, so the installer must match the style.
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  enabled:\n  - other\n  - second\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n  - tracedecay\n  - other\n  - second\n"),
+        "tracedecay must be inserted with the existing 2-space item indent:\n{config}"
+    );
+    assert!(
+        !config.contains("    - tracedecay"),
+        "no 4-space item may be mixed into a 2-space list:\n{config}"
+    );
+
+    // Idempotency: a second install must detect the 2-space item.
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert_eq!(
+        config.matches("- tracedecay").count(),
+        1,
+        "re-install must not duplicate the 2-space list item:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_removes_two_space_indent_disabled_entry() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  disabled:\n  - tracedecay\n  - other\n  enabled:\n  - kept\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled:\n  - other\n"),
+        "tracedecay must be removed from the 2-space disabled list:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n  - tracedecay\n  - kept\n"),
+        "tracedecay must be enabled with matching indent:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_accepts_flow_style_empty_disabled_list() {
+    // Hermes writes `disabled: []` for the empty list; the installer used to
+    // reject it as "unsupported Hermes plugins config".
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\nplugins:\n  disabled: []\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  disabled: []"),
+        "the empty flow-style disabled list must be preserved:\n{config}"
+    );
+    assert!(
+        config.contains("  enabled:\n    - tracedecay\n    - other\n"),
+        "tracedecay must be added to the enabled list:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_rewrites_flow_style_empty_enabled_list() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  enabled: []\n  disabled: []\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  enabled:\n    - tracedecay\n"),
+        "`enabled: []` must be rewritten into a block list with tracedecay:\n{config}"
+    );
+    assert!(
+        !config.contains("enabled: []"),
+        "the empty flow-style enabled list must be replaced:\n{config}"
+    );
+    assert!(
+        config.contains("  disabled: []"),
+        "the untouched disabled flow list must survive:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_still_rejects_non_empty_flow_lists() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "plugins:\n  enabled: [other]\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("unsupported Hermes plugins config"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "non-empty flow lists must not be rewritten"
+    );
 }
 
 #[test]
@@ -747,6 +1890,196 @@ fn test_hermes_install_backs_up_existing_config() {
         std::fs::read_to_string(backup).unwrap(),
         original,
         "backup should preserve the exact original config"
+    );
+}
+
+#[test]
+fn test_hermes_install_rejects_existing_memory_provider_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original =
+        "theme: dark\nmemory:\n  provider: other-memory\nplugins:\n  enabled:\n    - other\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("Hermes memory provider already configured"));
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "install must not overwrite an existing Hermes memory provider"
+    );
+}
+
+#[test]
+fn test_hermes_install_rejects_existing_context_engine_without_rewrite() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    let original = "theme: dark\ncontext:\n  engine: other-engine\n";
+    std::fs::write(hermes_dir.join("config.yaml"), original).unwrap();
+
+    let err = HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("Hermes context engine already configured"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap(),
+        original,
+        "install must not overwrite a foreign Hermes context engine"
+    );
+}
+
+#[test]
+fn test_hermes_install_replaces_default_compressor_context_engine() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    // `compressor` is the built-in default the host falls back to anyway, so
+    // replacing it is the activation step, not an overwrite.
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "theme: dark\ncontext:\n  engine: compressor\n  other_key: 1\n",
+    )
+    .unwrap();
+
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("  engine: tracedecay"),
+        "install must replace the default compressor engine:\n{config}"
+    );
+    assert!(
+        config.contains("  other_key: 1"),
+        "install must keep unrelated context keys:\n{config}"
+    );
+
+    // Uninstall removes only the engine selection, not the user's block.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        !config.contains("engine: tracedecay"),
+        "uninstall must deactivate the tracedecay context engine:\n{config}"
+    );
+    assert!(
+        config.contains("context:") && config.contains("  other_key: 1"),
+        "uninstall must keep the user's remaining context block:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_install_preserves_user_keys_in_tracedecay_config_block() {
+    let home = TempDir::new().unwrap();
+    let hermes_dir = home.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(
+        hermes_dir.join("config.yaml"),
+        "plugins:\n  tracedecay:\n    summary_model: glm-4.7\n  enabled:\n    - other\n",
+    )
+    .unwrap();
+
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "install must add the pin to the existing plugins.tracedecay block:\n{config}"
+    );
+    assert!(
+        config.contains("    summary_model: glm-4.7"),
+        "install must keep user keys in the plugins.tracedecay block:\n{config}"
+    );
+
+    // Uninstall drops only the generated pin and keeps the user's keys.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+    assert!(
+        !config.contains("project_root:"),
+        "uninstall must remove the generated pin:\n{config}"
+    );
+    assert!(
+        config.contains("  tracedecay:") && config.contains("    summary_model: glm-4.7"),
+        "uninstall must keep user keys in the plugins.tracedecay block:\n{config}"
+    );
+}
+
+#[test]
+fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+
+    // Fresh install: version matches the binary, no pin — no warnings.
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.warnings, 0, "fresh install should be healthy");
+
+    // Stale manifest version (an old generator wrote it) must warn.
+    let manifest_path = plugin_dir.join("plugin.yaml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(
+            &format!("version: {}", env!("CARGO_PKG_VERSION")),
+            "version: 1.0.0",
+        ),
+    )
+    .unwrap();
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.warnings, 1,
+        "stale generated plugin version should warn once"
+    );
+
+    // A pinned project root that no longer exists must warn too.
+    HermesIntegration
+        .install(&InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+            tool_permissions: expected_tool_perms(),
+            profile: None,
+            project_root: Some(std::path::PathBuf::from("/missing/pinned/project")),
+            dashboard: true,
+        })
+        .unwrap();
+    let mut dc = DoctorCounters::new();
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.warnings, 1,
+        "a dangling pinned project root should warn once"
     );
 }
 
@@ -775,23 +2108,25 @@ fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
 fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
     let home = TempDir::new().unwrap();
     let profile = home.path().join(".hermes/profiles/work");
-    let plugin_dir = profile.join("plugins/tokensave");
+    let plugin_dir = profile.join("plugins/tracedecay");
     let other_plugin = profile.join("plugins/other");
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::create_dir_all(&other_plugin).unwrap();
-    std::fs::write(plugin_dir.join("plugin.yaml"), "name: tokensave\n").unwrap();
+    std::fs::write(plugin_dir.join("plugin.yaml"), "name: tracedecay\n").unwrap();
     std::fs::write(other_plugin.join("plugin.yaml"), "name: other\n").unwrap();
     std::fs::write(
         profile.join("config.yaml"),
-        "theme: dark\nplugins:\n  enabled:\n    - other\n    - tokensave\n",
+        "theme: dark\nplugins:\n  enabled:\n    - other\n    - tracedecay\n",
     )
     .unwrap();
 
     let ctx = InstallContext {
         home: home.path().to_path_buf(),
-        tokensave_bin: String::new(),
+        tracedecay_bin: String::new(),
         tool_permissions: expected_tool_perms(),
         profile: Some("work".to_string()),
+        project_root: None,
+        dashboard: true,
     };
 
     HermesIntegration.uninstall(&ctx).unwrap();
@@ -801,15 +2136,15 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
     let config = std::fs::read_to_string(profile.join("config.yaml")).unwrap();
     assert!(config.contains("theme: dark"));
     assert!(config.contains("    - other"));
-    assert!(!config.contains("    - tokensave"));
+    assert!(!config.contains("    - tracedecay"));
 }
 
 #[test]
-fn test_hermes_uninstall_preserves_unknown_files_in_tokensave_plugin_dir() {
+fn test_hermes_uninstall_preserves_unknown_files_in_tracedecay_plugin_dir() {
     let home = TempDir::new().unwrap();
-    let plugin_dir = home.path().join(".hermes/plugins/tokensave");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(plugin_dir.join("plugin.yaml"), "name: tokensave\n").unwrap();
+    std::fs::write(plugin_dir.join("plugin.yaml"), "name: tracedecay\n").unwrap();
     std::fs::write(plugin_dir.join("user-notes.txt"), "keep me\n").unwrap();
 
     HermesIntegration
@@ -818,53 +2153,164 @@ fn test_hermes_uninstall_preserves_unknown_files_in_tokensave_plugin_dir() {
 
     assert!(
         plugin_dir.join("user-notes.txt").exists(),
-        "uninstall should not delete unknown files in the tokensave plugin dir"
+        "uninstall should not delete unknown files in the tracedecay plugin dir"
     );
     assert!(
         !plugin_dir.join("plugin.yaml").exists(),
-        "uninstall should remove tokensave-generated files"
+        "uninstall should remove tracedecay-generated files"
     );
 }
 
 #[test]
-fn test_local_install_cursor_reconciles_existing_hooks_idempotently() {
+fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    // Pre-seed a hooks.json with a tokensave afterFileEdit entry that lacks
-    // the `Write` matcher (mirrors a config from an earlier tokensave version).
     let cursor_dir = project.path().join(".cursor");
-    std::fs::create_dir_all(&cursor_dir).unwrap();
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve","--path","."]}}}"#,
+    )
+    .unwrap();
     std::fs::write(
         cursor_dir.join("hooks.json"),
-        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"/old/tokensave hook-cursor-after-file-edit","timeout":30}]}}"#,
+        r#"{"version":1,"hooks":{"afterFileEdit":[{"command":"/old/tracedecay hook-cursor-after-file-edit","timeout":30}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tracedecay.mdc"),
+        "---\ndescription: Prefer tracedecay MCP tools for codebase exploration\nalwaysApply: true\n---\n\n# Prefer tracedecay MCP tools\n",
     )
     .unwrap();
 
-    // Install twice to prove idempotent reconciliation.
     assert_local_install_success("cursor", project.path(), home.path());
     assert_local_install_success("cursor", project.path(), home.path());
 
-    let hooks = read_json(&cursor_dir.join("hooks.json"));
-    let after = hooks["hooks"]["afterFileEdit"]
-        .as_array()
-        .expect("afterFileEdit should be an array");
-    let tokensave_entries: Vec<_> = after
-        .iter()
-        .filter(|hook| {
-            hook["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("hook-cursor-after-file-edit"))
-        })
-        .collect();
-    assert_eq!(
-        tokensave_entries.len(),
-        1,
-        "reinstall must keep exactly one tokensave afterFileEdit entry, got {after:?}"
+    assert!(
+        !cursor_dir.join("mcp.json").exists(),
+        "local install should remove legacy tracedecay-only project MCP config"
+    );
+    assert!(
+        !cursor_dir.join("hooks.json").exists(),
+        "local install should remove legacy tracedecay-only project hooks"
+    );
+    assert!(
+        !cursor_dir.join("rules/tracedecay.mdc").exists(),
+        "local install should remove legacy tracedecay project rule"
+    );
+}
+
+/// Global `tracedecay install --agent cursor` runs with the project as cwd and
+/// must sweep legacy project-local tracedecay artifacts there (old installs
+/// predate the plugin), while preserving user-authored entries alongside them.
+#[test]
+fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let cursor_dir = project.path().join(".cursor");
+    std::fs::create_dir_all(cursor_dir.join("rules")).unwrap();
+    std::fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"mcpServers":{"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve","--path","."]},"other":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cursor_dir.join("rules/tracedecay.mdc"),
+        "# Prefer tracedecay MCP tools\n",
+    )
+    .unwrap();
+
+    let output = tracedecay_command(project.path(), home.path())
+        .arg("install")
+        .arg("--agent")
+        .arg("cursor")
+        .output()
+        .expect("run global cursor install");
+    assert!(
+        output.status.success(),
+        "global cursor install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        home.path()
+            .join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json")
+            .exists(),
+        "the user-level plugin should be installed"
+    );
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cursor_dir.join("mcp.json")).unwrap())
+            .unwrap();
+    assert!(
+        mcp["mcpServers"].get("tracedecay").is_none(),
+        "legacy project tracedecay MCP entry should be swept"
+    );
+    assert!(
+        mcp["mcpServers"].get("other").is_some(),
+        "user-authored project MCP servers must be preserved"
+    );
+    assert!(
+        !cursor_dir.join("rules/tracedecay.mdc").exists(),
+        "legacy project tracedecay rule should be swept"
+    );
+}
+
+/// The legacy sweep must never modify files *through* a symlinked `.cursor`
+/// that escapes the project. A symlinked `.cursor` with no legacy tracedecay
+/// artifacts is left alone (the plugin owns all surfaces, so there is nothing
+/// to write project-locally), but once legacy artifacts are detected behind
+/// the symlink the install refuses rather than reaching outside the project.
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_rejects_symlinked_cursor_dir_with_legacy_artifacts() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let legacy_mcp = r#"{"mcpServers":{"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve","--path","."]}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), legacy_mcp).unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    let output = run_local_install("cursor", project.path(), home.path());
+    assert!(
+        !output.status.success(),
+        "local Cursor install should reject sweeping through a symlinked .cursor directory"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "error should explain the symlink refusal, got:\n{stderr}"
     );
     assert_eq!(
-        tokensave_entries[0]["matcher"], "Write",
-        "reinstall must reconcile the matcher onto a pre-existing entry"
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        legacy_mcp,
+        "files behind the symlink must be untouched"
+    );
+}
+
+/// A symlinked `.cursor` containing only user config is harmless now that
+/// the plugin owns MCP/hooks/rules and local install writes nothing
+/// project-local — the install succeeds and the linked tree is untouched.
+#[cfg(unix)]
+#[test]
+fn test_local_install_cursor_allows_legacy_free_symlinked_cursor_dir() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let user_mcp = r#"{"mcpServers":{"other":{"url":"https://example.com/mcp"}}}"#;
+    std::fs::write(outside.path().join("mcp.json"), user_mcp).unwrap();
+    symlink(outside.path(), project.path().join(".cursor")).unwrap();
+
+    assert_local_install_success("cursor", project.path(), home.path());
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("mcp.json")).unwrap(),
+        user_mcp,
+        "user config behind the symlink must be untouched"
     );
 }
 
@@ -884,8 +2330,8 @@ fn test_local_install_supported_agents_write_project_paths() {
             "kiro",
             vec![
                 ".kiro/settings/mcp.json",
-                ".kiro/steering/tokensave.md",
-                ".kiro/agents/tokensave.json",
+                ".kiro/steering/tracedecay.md",
+                ".kiro/agents/tracedecay.json",
             ],
         ),
         ("opencode", vec!["opencode.json", "AGENTS.md"]),
@@ -895,15 +2341,6 @@ fn test_local_install_supported_agents_write_project_paths() {
         ("kimi", vec![".kimi-code/mcp.json", "AGENTS.md"]),
         ("kilo", vec!["kilo.json"]),
         ("vibe", vec![".vibe/config.toml", ".vibe/prompts/cli.md"]),
-        (
-            "cursor",
-            vec![
-                ".cursor/mcp.json",
-                ".cursor/rules/tokensave.mdc",
-                ".cursor/permissions.json",
-                ".cursor/hooks.json",
-            ],
-        ),
     ];
 
     for (agent, paths) in cases {
@@ -921,27 +2358,38 @@ fn test_local_install_supported_agents_write_project_paths() {
             );
             let body = std::fs::read_to_string(&path).unwrap();
             assert!(
-                body.contains("tokensave"),
-                "{agent} local file {} should mention tokensave",
+                body.contains("tracedecay"),
+                "{agent} local file {} should mention tracedecay",
                 path.display()
             );
             let is_instruction_file = matches!(
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("md" | "mdc")
             );
-            let is_cursor_permissions = agent == "cursor" && relative == ".cursor/permissions.json";
-            if !is_instruction_file && !is_cursor_permissions {
-                let expected = expected_tokensave_bin();
+            if is_instruction_file {
+                assert!(
+                    body.contains("tracedecay_fact_store"),
+                    "{agent} local instruction file {} should mention fact memory tools",
+                    path.display()
+                );
+                assert!(
+                    body.contains("tracedecay_message_search"),
+                    "{agent} local instruction file {} should mention transcript message search",
+                    path.display()
+                );
+            }
+            if !is_instruction_file {
+                let expected = expected_tracedecay_bin();
                 assert!(
                     body.contains(&expected),
-                    "{agent} local config {} should use the resolved absolute tokensave executable",
+                    "{agent} local config {} should use the resolved absolute tracedecay executable",
                     path.display()
                 );
             }
         }
 
         assert!(
-            !home.path().join(".tokensave/config.toml").exists(),
+            !home.path().join(".tracedecay/config.toml").exists(),
             "{agent} local install must not create or mutate user-level install tracking"
         );
     }
@@ -964,7 +2412,7 @@ fn test_local_install_rejects_antigravity_without_project_mutation() {
         "unsupported-agent error should name Antigravity and --local, got:\n{stderr}"
     );
     assert!(
-        !home.path().join(".tokensave/config.toml").exists(),
+        !home.path().join(".tracedecay/config.toml").exists(),
         "rejected local install must not mutate user-level install tracking"
     );
 }
@@ -990,7 +2438,7 @@ fn test_local_install_rejects_cline_without_project_mutation() {
         "unsupported Cline local install must not write undocumented workspace config"
     );
     assert!(
-        !home.path().join(".tokensave/config.toml").exists(),
+        !home.path().join(".tracedecay/config.toml").exists(),
         "rejected local install must not mutate user-level install tracking"
     );
 }
@@ -1002,7 +2450,7 @@ fn test_claude_install_creates_config() {
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
 
-    // Check ~/.claude.json exists and has mcpServers.tokensave
+    // Check ~/.claude.json exists and has mcpServers.tracedecay
     let claude_json = home.join(".claude.json");
     assert!(
         claude_json.exists(),
@@ -1015,11 +2463,11 @@ fn test_claude_install_creates_config() {
         "mcpServers key should exist"
     );
     assert!(
-        content["mcpServers"]["tokensave"].is_object(),
-        "mcpServers.tokensave should be an object"
+        content["mcpServers"]["tracedecay"].is_object(),
+        "mcpServers.tracedecay should be an object"
     );
     // Verify args contain "serve"
-    let args = content["mcpServers"]["tokensave"]["args"]
+    let args = content["mcpServers"]["tracedecay"]["args"]
         .as_array()
         .unwrap();
     assert!(args.iter().any(|v| v.as_str() == Some("serve")));
@@ -1043,23 +2491,21 @@ fn test_claude_install_creates_config() {
         "permissions.allow should be an array"
     );
     let allow = settings["permissions"]["allow"].as_array().unwrap();
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_store") }));
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_fact_feedback") }));
-    assert!(allow
-        .iter()
-        .any(|v| { v.as_str() == Some("mcp__tokensave__tokensave_memory_status") }));
+    let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+    for perm in expected_tool_perms() {
+        assert!(
+            allow_strs.contains(&perm.as_str()),
+            "permissions.allow should contain {perm}"
+        );
+    }
 
-    // Check CLAUDE.md exists with tokensave rules
+    // Check CLAUDE.md exists with tracedecay rules
     let claude_md = home.join(".claude/CLAUDE.md");
     assert!(claude_md.exists(), "CLAUDE.md should exist after install");
     let md_content = std::fs::read_to_string(&claude_md).unwrap();
     assert!(
-        md_content.contains("tokensave"),
-        "CLAUDE.md should mention tokensave"
+        md_content.contains("tracedecay"),
+        "CLAUDE.md should mention tracedecay"
     );
 }
 
@@ -1079,12 +2525,12 @@ fn test_gemini_install_creates_config() {
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert!(
-        content["mcpServers"]["tokensave"].is_object(),
-        "mcpServers.tokensave should exist"
+        content["mcpServers"]["tracedecay"].is_object(),
+        "mcpServers.tracedecay should exist"
     );
     // Verify trust flag
     assert_eq!(
-        content["mcpServers"]["tokensave"]["trust"],
+        content["mcpServers"]["tracedecay"]["trust"],
         serde_json::json!(true),
         "gemini should have trust: true"
     );
@@ -1093,7 +2539,7 @@ fn test_gemini_install_creates_config() {
     let gemini_md = home.join(".gemini/GEMINI.md");
     assert!(gemini_md.exists(), "GEMINI.md should exist after install");
     let md_content = std::fs::read_to_string(&gemini_md).unwrap();
-    assert!(md_content.contains("tokensave"));
+    assert!(md_content.contains("tracedecay"));
 }
 
 #[test]
@@ -1114,11 +2560,11 @@ fn test_codex_install_creates_config() {
     // toml::Value::parse in all crate versions)
     let content = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        content.contains("[mcp_servers.tokensave]"),
-        "config.toml should contain [mcp_servers.tokensave]"
+        content.contains("[mcp_servers.tracedecay]"),
+        "config.toml should contain [mcp_servers.tracedecay]"
     );
     assert!(
-        content.contains("TOKENSAVE_ENABLE_GLOBAL_DB = \"1\""),
+        content.contains("TRACEDECAY_ENABLE_GLOBAL_DB = \"1\""),
         "global Codex config should opt into user-level global accounting"
     );
     assert!(
@@ -1126,14 +2572,16 @@ fn test_codex_install_creates_config() {
         "config.toml should contain \"serve\" in args"
     );
     for tool in tool_names() {
-        let section = format!("[mcp_servers.tokensave.tools.{tool}]");
+        let section = format!("[mcp_servers.tracedecay.tools.{tool}]");
         let section_start = content.find(&section).unwrap_or_else(|| {
             panic!("Codex config should include auto-approval section {section}")
         });
-        let after_section = &content[section_start..];
+        let section_body = content[section_start..]
+            .split_once("\n[")
+            .map_or(&content[section_start..], |(body, _)| body);
         assert!(
-            after_section.contains("approval_mode = \"auto\""),
-            "Codex should auto-approve tokensave tool {tool}"
+            section_body.contains("approval_mode = \"auto\""),
+            "Codex should auto-approve tracedecay tool {tool}"
         );
     }
 
@@ -1141,7 +2589,7 @@ fn test_codex_install_creates_config() {
     let agents_md = home.join(".codex/AGENTS.md");
     assert!(agents_md.exists(), "AGENTS.md should exist after install");
     let md_content = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(md_content.contains("tokensave"));
+    assert!(md_content.contains("tracedecay"));
 }
 
 /// Returns true if any matcher group registered under `event` has a handler
@@ -1186,7 +2634,7 @@ fn codex_matcher_for_handler(
 fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
     assert!(
         codex_event_has_handler(hooks, "SessionStart", "hook-codex-session-start"),
-        "Codex SessionStart hook should steer toward tokensave MCP tools: {hooks}"
+        "Codex SessionStart hook should steer toward tracedecay MCP tools: {hooks}"
     );
     assert!(
         codex_event_has_handler(hooks, "UserPromptSubmit", "hook-codex-user-prompt-submit"),
@@ -1238,8 +2686,8 @@ fn test_codex_local_install_writes_hooks() {
         "local Codex config should pin serve to the project root with --path ."
     );
     assert!(
-        !config.contains("TOKENSAVE_DISABLE_GLOBAL_DB")
-            && !config.contains("TOKENSAVE_ENABLE_GLOBAL_DB"),
+        !config.contains("TRACEDECAY_DISABLE_GLOBAL_DB")
+            && !config.contains("TRACEDECAY_ENABLE_GLOBAL_DB"),
         "local Codex config should not need env flags for repo-local mode"
     );
 
@@ -1250,7 +2698,7 @@ fn test_codex_local_install_writes_hooks() {
     );
     let hooks = read_json(&hooks_path);
     assert_codex_hooks_registered(&hooks);
-    // Local install must use the resolved absolute tokensave binary path.
+    // Local install must use the resolved absolute tracedecay binary path.
     assert_command_contains_bin(&hooks, "SessionStart", "hook-codex-session-start");
 
     assert!(
@@ -1273,10 +2721,10 @@ fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &
             })
         })
         .expect("handler command should exist");
-    let expected = expected_tokensave_bin();
+    let expected = expected_tracedecay_bin();
     assert!(
         command.contains(&expected),
-        "Codex hook command must use the resolved absolute tokensave executable, got {command}"
+        "Codex hook command must use the resolved absolute tracedecay executable, got {command}"
     );
 }
 
@@ -1285,7 +2733,7 @@ fn test_codex_install_reconciles_hooks_idempotently() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Pre-seed a hooks.json with a stale tokensave PostToolUse group plus a
+    // Pre-seed a hooks.json with a stale tracedecay PostToolUse group plus a
     // foreign hook that must be preserved across reinstall.
     let codex_dir = home.join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
@@ -1294,7 +2742,7 @@ fn test_codex_install_reconciles_hooks_idempotently() {
         r#"{
           "hooks": {
             "PostToolUse": [
-              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/old/tokensave hook-codex-post-tool-use", "timeout": 60 } ] },
+              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/old/tracedecay hook-codex-post-tool-use", "timeout": 60 } ] },
               { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/usr/bin/foreign-hook", "timeout": 10 } ] }
             ]
           }
@@ -1309,7 +2757,7 @@ fn test_codex_install_reconciles_hooks_idempotently() {
     let hooks = read_json(&codex_dir.join("hooks.json"));
     let groups = hooks["hooks"]["PostToolUse"].as_array().unwrap();
 
-    let tokensave_groups: Vec<_> = groups
+    let tracedecay_groups: Vec<_> = groups
         .iter()
         .filter(|group| {
             group["hooks"].as_array().is_some_and(|handlers| {
@@ -1322,9 +2770,9 @@ fn test_codex_install_reconciles_hooks_idempotently() {
         })
         .collect();
     assert_eq!(
-        tokensave_groups.len(),
+        tracedecay_groups.len(),
         1,
-        "reinstall must keep exactly one tokensave PostToolUse group, got {groups:?}"
+        "reinstall must keep exactly one tracedecay PostToolUse group, got {groups:?}"
     );
     assert!(
         groups.iter().any(|group| {
@@ -1354,7 +2802,7 @@ fn test_codex_uninstall_removes_hooks() {
         let hooks = read_json(&hooks_path);
         assert!(
             !codex_event_has_handler(&hooks, "SessionStart", "hook-codex-session-start"),
-            "uninstall should remove tokensave Codex hooks"
+            "uninstall should remove tracedecay Codex hooks"
         );
     }
 }
@@ -1371,10 +2819,10 @@ fn test_kimi_install_creates_config() {
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
     assert!(
-        content["mcpServers"]["tokensave"].is_object(),
-        "mcpServers.tokensave should be an object"
+        content["mcpServers"]["tracedecay"].is_object(),
+        "mcpServers.tracedecay should be an object"
     );
-    let args = content["mcpServers"]["tokensave"]["args"]
+    let args = content["mcpServers"]["tracedecay"]["args"]
         .as_array()
         .unwrap();
     assert!(args.iter().any(|v| v.as_str() == Some("serve")));
@@ -1382,7 +2830,7 @@ fn test_kimi_install_creates_config() {
     let agents_md = home.join(".kimi/AGENTS.md");
     assert!(agents_md.exists(), "AGENTS.md should exist after install");
     let md_content = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(md_content.contains("tokensave"));
+    assert!(md_content.contains("tracedecay"));
 }
 
 #[test]
@@ -1399,50 +2847,80 @@ fn test_kimi_install_then_uninstall() {
 
     assert!(
         !mcp_path.exists(),
-        "mcp.json with only tokensave should be removed on uninstall"
+        "mcp.json with only tracedecay should be removed on uninstall"
     );
 
     let agents_md = home.join(".kimi/AGENTS.md");
     if agents_md.exists() {
         let content = std::fs::read_to_string(&agents_md).unwrap();
         assert!(
-            !content.contains("## Prefer tokensave MCP tools"),
-            "AGENTS.md should not have tokensave rules after uninstall"
+            !content.contains("## Prefer tracedecay MCP tools"),
+            "AGENTS.md should not have tracedecay rules after uninstall"
         );
     }
 }
 
 #[test]
-fn test_kimi_is_detected_and_has_tokensave() {
+fn test_kimi_is_detected_and_has_tracedecay() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
     assert!(!KimiIntegration.is_detected(home));
-    assert!(!KimiIntegration.has_tokensave(home));
+    assert!(!KimiIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     KimiIntegration.install(&ctx).unwrap();
 
     assert!(KimiIntegration.is_detected(home));
-    assert!(KimiIntegration.has_tokensave(home));
+    assert!(KimiIntegration.has_tracedecay(home));
 }
 
 #[test]
-fn test_cursor_install_creates_config() {
+fn test_cursor_install_creates_plugin() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
 
-    let mcp_path = home.join(".cursor/mcp.json");
-    assert!(mcp_path.exists(), "mcp.json should exist after install");
-    let content: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
-    assert!(content["mcpServers"]["tokensave"].is_object());
-    assert_eq!(
-        content["mcpServers"]["tokensave"]["env"]["TOKENSAVE_ENABLE_GLOBAL_DB"],
-        serde_json::json!("1")
+    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
+    assert!(
+        !home.join(".cursor/mcp.json").exists(),
+        "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
+}
+
+#[test]
+fn test_cursor_install_sweeps_legacy_tokensave_plugin_dir() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+
+    // Simulate a pre-rebrand plugin install: tokensave-branded manifest plus
+    // the legacy rule file and dispatcher skill dirs the current bundle no
+    // longer ships. Earlier sweeps missed these and stranded the directory.
+    let legacy_dir = home.join(".cursor/plugins/local/tokensave");
+    std::fs::create_dir_all(legacy_dir.join(".cursor-plugin")).unwrap();
+    std::fs::write(
+        legacy_dir.join(".cursor-plugin/plugin.json"),
+        r#"{"name": "tokensave", "version": "5.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(legacy_dir.join("rules")).unwrap();
+    std::fs::write(legacy_dir.join("rules/tokensave.mdc"), "legacy rule\n").unwrap();
+    for skill in ["tokensave-audit-safety", "tokensave-map-architecture"] {
+        let skill_dir = legacy_dir.join("skills").join(skill);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "legacy dispatcher\n").unwrap();
+    }
+
+    let ctx = make_install_ctx(home);
+    CursorIntegration.install(&ctx).unwrap();
+
+    assert!(
+        !legacy_dir.exists(),
+        "legacy tokensave plugin dir should be fully removed once the \
+         tokensave.mdc rule and tokensave-<verb> dispatcher skills are swept"
+    );
+    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
 }
 
 #[test]
@@ -1461,7 +2939,7 @@ fn test_opencode_install_creates_config() {
     );
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    assert!(content["mcp"]["tokensave"].is_object());
+    assert!(content["mcp"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -1484,7 +2962,7 @@ fn test_zed_install_creates_config() {
     );
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert!(content["context_servers"]["tokensave"].is_object());
+    assert!(content["context_servers"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -1514,7 +2992,7 @@ fn test_cline_install_creates_config() {
     );
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert!(content["mcpServers"]["tokensave"].is_object());
+    assert!(content["mcpServers"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -1539,7 +3017,7 @@ fn test_roo_code_install_creates_config() {
     );
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert!(content["mcpServers"]["tokensave"].is_object());
+    assert!(content["mcpServers"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -1565,18 +3043,18 @@ fn test_copilot_install_creates_config() {
     );
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&vscode_settings).unwrap()).unwrap();
-    assert!(content["mcp"]["servers"]["tokensave"].is_object());
+    assert!(content["mcp"]["servers"]["tracedecay"].is_object());
 
     // Check CLI config
     let cli_config = home.join(".copilot/mcp-config.json");
     assert!(cli_config.exists(), "Copilot CLI config should exist");
     let cli_content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cli_config).unwrap()).unwrap();
-    assert!(cli_content["mcpServers"]["tokensave"].is_object());
+    assert!(cli_content["mcpServers"]["tracedecay"].is_object());
 
     let cli_prompt = home.join(".copilot/copilot-instructions.md");
     let prompt = std::fs::read_to_string(&cli_prompt).unwrap();
-    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("tracedecay_fact_store"));
     assert!(prompt.contains("memory_facts"));
     assert!(prompt.contains("sensitive or proprietary code"));
 }
@@ -1595,8 +3073,8 @@ fn test_vibe_install_creates_config() {
     );
     let content = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        content.contains("name = \"tokensave\""),
-        "config should contain tokensave MCP server"
+        content.contains("name = \"tracedecay\""),
+        "config should contain tracedecay MCP server"
     );
     assert!(
         content.contains("transport = \"stdio\""),
@@ -1614,8 +3092,8 @@ fn test_vibe_install_creates_config() {
         "Vibe prompt should exist after install"
     );
     let prompt = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(prompt.contains("tokensave"));
-    assert!(prompt.contains("tokensave_fact_store"));
+    assert!(prompt.contains("tracedecay"));
+    assert!(prompt.contains("tracedecay_fact_store"));
     assert!(prompt.contains("memory_facts"));
     assert!(prompt.contains("sensitive or proprietary code"));
 }
@@ -1637,20 +3115,20 @@ fn test_claude_install_then_uninstall() {
     // Uninstall
     ClaudeIntegration.uninstall(&ctx).unwrap();
 
-    // ~/.claude.json should be removed (was only tokensave)
+    // ~/.claude.json should be removed (was only tracedecay)
     // It may be removed entirely or have mcpServers removed
     if home.join(".claude.json").exists() {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap())
                 .unwrap();
-        // Should not have tokensave anymore
-        let has_tokensave = content
+        // Should not have tracedecay anymore
+        let has_tracedecay = content
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
+            .and_then(|v| v.get("tracedecay"))
             .is_some();
         assert!(
-            !has_tokensave,
-            "tokensave should be removed from .claude.json after uninstall"
+            !has_tracedecay,
+            "tracedecay should be removed from .claude.json after uninstall"
         );
     }
 }
@@ -1667,27 +3145,27 @@ fn test_gemini_install_then_uninstall() {
 
     GeminiIntegration.uninstall(&ctx).unwrap();
 
-    // After uninstall, settings.json should be removed or not contain tokensave
+    // After uninstall, settings.json should be removed or not contain tracedecay
     if settings_path.exists() {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-        let has_tokensave = content
+        let has_tracedecay = content
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
+            .and_then(|v| v.get("tracedecay"))
             .is_some();
         assert!(
-            !has_tokensave,
-            "tokensave should be removed from settings.json"
+            !has_tracedecay,
+            "tracedecay should be removed from settings.json"
         );
     }
 
-    // GEMINI.md should be removed (was only tokensave rules)
+    // GEMINI.md should be removed (was only tracedecay rules)
     let gemini_md = home.join(".gemini/GEMINI.md");
     if gemini_md.exists() {
         let content = std::fs::read_to_string(&gemini_md).unwrap();
         assert!(
-            !content.contains("## Prefer tokensave MCP tools"),
-            "GEMINI.md should not contain tokensave rules after uninstall"
+            !content.contains("## Prefer tracedecay MCP tools"),
+            "GEMINI.md should not contain tracedecay rules after uninstall"
         );
     }
 }
@@ -1704,27 +3182,27 @@ fn test_codex_install_then_uninstall() {
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
-    // After uninstall, the config (which only contained tokensave) becomes
-    // empty and is removed; or, if other content existed, the tokensave
+    // After uninstall, the config (which only contained tracedecay) becomes
+    // empty and is removed; or, if other content existed, the tracedecay
     // server is dropped but the rest is preserved.
     assert!(
         !config_path.exists(),
-        "config.toml with only tokensave should be removed on uninstall"
+        "config.toml with only tracedecay should be removed on uninstall"
     );
 
     let agents_md = home.join(".codex/AGENTS.md");
     if agents_md.exists() {
         let content = std::fs::read_to_string(&agents_md).unwrap();
         assert!(
-            !content.contains("## Prefer tokensave MCP tools"),
-            "AGENTS.md should not have tokensave rules after uninstall"
+            !content.contains("## Prefer tracedecay MCP tools"),
+            "AGENTS.md should not have tracedecay rules after uninstall"
         );
     }
 }
 
 #[test]
 fn test_codex_install_preserves_existing_config() {
-    // Regression test for issue #63: installing tokensave used to wipe out the
+    // Regression test for issue #63: installing tracedecay used to wipe out the
     // entire ~/.codex/config.toml because load_toml_file silently returned an
     // empty table.
     let dir = TempDir::new().unwrap();
@@ -1770,8 +3248,8 @@ args = [\"--flag\"]
         "pre-existing mcp_servers entries must be preserved"
     );
     assert!(
-        servers.contains_key("tokensave"),
-        "tokensave should be registered alongside existing servers"
+        servers.contains_key("tracedecay"),
+        "tracedecay should be registered alongside existing servers"
     );
 }
 
@@ -1875,13 +3353,33 @@ fn test_gemini_install_preserves_existing_config() {
 }
 
 #[test]
-fn test_cursor_install_preserves_existing_config() {
+fn test_cursor_install_preserves_existing_legacy_mcp_config() {
     let dir = TempDir::new().unwrap();
+    let path = dir.path().join(".cursor/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let original = r#"{
   "mcpServers": { "other": { "command": "other-bin" } }
 }
 "#;
-    assert_install_backs_up_and_preserves(&CursorIntegration, dir.path(), original, "other-bin");
+    std::fs::write(&path, original).unwrap();
+
+    CursorIntegration
+        .install(&make_install_ctx(dir.path()))
+        .unwrap();
+
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(dir.path()),
+        &make_install_ctx(dir.path()).tracedecay_bin,
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "plugin install should not rewrite legacy Cursor MCP config"
+    );
+    assert!(
+        !dir.path().join(".cursor/mcp.json.bak").exists(),
+        "plugin install should not create backups for untouched legacy MCP config"
+    );
 }
 
 #[test]
@@ -1938,7 +3436,7 @@ fn test_cursor_uninstall_backs_up_config_with_other_content() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let original = r#"{
   "mcpServers": {
-    "tokensave": { "command": "/usr/local/bin/tokensave", "args": ["serve"] },
+    "tracedecay": { "command": "/usr/local/bin/tracedecay", "args": ["serve"] },
     "other": { "command": "other-bin" }
   }
 }
@@ -1959,8 +3457,8 @@ fn test_cursor_uninstall_backs_up_config_with_other_content() {
     );
     let new = std::fs::read_to_string(&path).unwrap();
     assert!(
-        new.contains("other-bin") && !new.contains("tokensave"),
-        "uninstall must drop tokensave but keep other servers; got:\n{new}"
+        new.contains("other-bin") && !new.contains("tracedecay"),
+        "uninstall must drop tracedecay but keep other servers; got:\n{new}"
     );
 }
 
@@ -1990,7 +3488,7 @@ fn test_antigravity_install_preserves_existing_config() {
     );
 }
 
-/// Regression for #85: `tokensave install --agent antigravity` must populate
+/// Regression for #85: `tracedecay install --agent antigravity` must populate
 /// both the IDE config and the CLI plugin file so the `agy` CLI can see the
 /// server. Before the fix only the IDE path was written, which left the CLI
 /// invisible in `/mcp`.
@@ -1998,18 +3496,20 @@ fn test_antigravity_install_preserves_existing_config() {
 fn test_antigravity_install_writes_cli_plugin() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    let bin = "/usr/local/bin/tokensave";
+    let bin = "/usr/local/bin/tracedecay";
     let ctx = InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: bin.to_string(),
+        tracedecay_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).expect("install ok");
 
     let ide_path = home.join(".gemini/antigravity/mcp_config.json");
-    let cli_path = home.join(".gemini/antigravity-cli/plugins/tokensave.json");
+    let cli_path = home.join(".gemini/antigravity-cli/plugins/tracedecay.json");
     assert!(
         ide_path.exists(),
         "IDE config must be written: {ide_path:?}"
@@ -2024,8 +3524,8 @@ fn test_antigravity_install_writes_cli_plugin() {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let server = body
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .expect("tokensave entry");
+            .and_then(|v| v.get("tracedecay"))
+            .expect("tracedecay entry");
         assert_eq!(
             server.get("command").and_then(|v| v.as_str()),
             Some(bin),
@@ -2042,24 +3542,26 @@ fn test_antigravity_install_writes_cli_plugin() {
 }
 
 /// Uninstall must remove the CLI plugin file outright (it belongs only to
-/// tokensave) and remove the `tokensave` entry from the shared IDE config
+/// tracedecay) and remove the `tracedecay` entry from the shared IDE config
 /// without touching the user's other entries.
 #[test]
 fn test_antigravity_uninstall_removes_both_locations() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    let bin = "/usr/local/bin/tokensave";
+    let bin = "/usr/local/bin/tracedecay";
     let ctx = InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: bin.to_string(),
+        tracedecay_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     };
 
     AntigravityIntegration.install(&ctx).unwrap();
     AntigravityIntegration.uninstall(&ctx).unwrap();
 
-    let cli_path = home.join(".gemini/antigravity-cli/plugins/tokensave.json");
+    let cli_path = home.join(".gemini/antigravity-cli/plugins/tracedecay.json");
     assert!(
         !cli_path.exists(),
         "CLI plugin file must be deleted, still exists at {cli_path:?}"
@@ -2073,9 +3575,9 @@ fn test_antigravity_uninstall_removes_both_locations() {
             serde_json::from_str(&std::fs::read_to_string(&ide_path).unwrap()).unwrap();
         assert!(
             body.get("mcpServers")
-                .and_then(|v| v.get("tokensave"))
+                .and_then(|v| v.get("tracedecay"))
                 .is_none(),
-            "tokensave entry must be removed from {ide_path:?}"
+            "tracedecay entry must be removed from {ide_path:?}"
         );
     }
 }
@@ -2138,21 +3640,15 @@ fn test_cursor_install_then_uninstall() {
     let ctx = make_install_ctx(home);
 
     CursorIntegration.install(&ctx).unwrap();
-    let mcp_path = home.join(".cursor/mcp.json");
-    assert!(mcp_path.exists());
+    let plugin_dir = cursor_plugin_install_dir(home);
+    assert!(plugin_dir.exists());
 
     CursorIntegration.uninstall(&ctx).unwrap();
 
-    // mcp.json should be removed (was only tokensave)
-    if mcp_path.exists() {
-        let content: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
-        let has_tokensave = content
-            .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
-            .is_some();
-        assert!(!has_tokensave, "tokensave should be removed from mcp.json");
-    }
+    assert!(
+        !plugin_dir.exists(),
+        "Cursor uninstall should remove the local plugin install"
+    );
 }
 
 #[test]
@@ -2169,11 +3665,11 @@ fn test_copilot_install_then_uninstall() {
     if cli_config.exists() {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cli_config).unwrap()).unwrap();
-        let has_tokensave = content
+        let has_tracedecay = content
             .get("mcpServers")
-            .and_then(|v| v.get("tokensave"))
+            .and_then(|v| v.get("tracedecay"))
             .is_some();
-        assert!(!has_tokensave);
+        assert!(!has_tracedecay);
     }
 }
 
@@ -2190,8 +3686,8 @@ fn test_vibe_install_then_uninstall() {
     if config_path.exists() {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(
-            !content.contains("name = \"tokensave\""),
-            "tokensave should be removed from config.toml"
+            !content.contains("name = \"tracedecay\""),
+            "tracedecay should be removed from config.toml"
         );
     }
 
@@ -2199,8 +3695,8 @@ fn test_vibe_install_then_uninstall() {
     if prompt_path.exists() {
         let content = std::fs::read_to_string(&prompt_path).unwrap();
         assert!(
-            !content.contains("tokensave"),
-            "tokensave rules should be removed from prompt"
+            !content.contains("tracedecay"),
+            "tracedecay rules should be removed from prompt"
         );
     }
 }
@@ -2209,12 +3705,12 @@ fn test_vibe_install_then_uninstall() {
 // 5. Healthcheck with tempdir
 // ---------------------------------------------------------------------------
 
-/// Creates a fake tokensave binary in a temp dir and returns the path string.
+/// Creates a fake tracedecay binary in a temp dir and returns the path string.
 /// This allows healthchecks to verify binary existence.
 fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
     let bin_dir = home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
-    let bin_path = bin_dir.join("tokensave");
+    let bin_path = bin_dir.join("tracedecay");
     std::fs::write(&bin_path, "#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     {
@@ -2223,9 +3719,11 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
     }
     InstallContext {
         home: home.to_path_buf(),
-        tokensave_bin: bin_path.to_string_lossy().to_string(),
+        tracedecay_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
         profile: None,
+        project_root: None,
+        dashboard: true,
     }
 }
 
@@ -2299,16 +3797,16 @@ fn test_healthcheck_codex_local_install_checks_project_config() {
 }
 
 #[test]
-fn test_healthcheck_codex_global_install_ignores_unmanaged_project_agents_md() {
+fn test_healthcheck_codex_ignores_unrelated_project_agents_md() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let ctx = make_install_ctx(home.path());
-    CodexIntegration.install(&ctx).unwrap();
     std::fs::write(
         project.path().join("AGENTS.md"),
-        "Project-specific instructions\n",
+        "Project-specific agent instructions without tracedecay.\n",
     )
     .unwrap();
+    let ctx = make_install_ctx(home.path());
+    CodexIntegration.install(&ctx).unwrap();
 
     let mut dc = DoctorCounters::new();
     let hctx = HealthcheckContext {
@@ -2318,7 +3816,7 @@ fn test_healthcheck_codex_global_install_ignores_unmanaged_project_agents_md() {
     CodexIntegration.healthcheck(&mut dc, &hctx);
     assert_eq!(
         dc.issues, 0,
-        "unmanaged project AGENTS.md should not mask a healthy global Codex install"
+        "global Codex healthcheck should be used when project AGENTS.md is unrelated"
     );
 }
 
@@ -2353,6 +3851,52 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
     assert_eq!(
         dc.issues, 0,
         "local Cursor healthcheck should pass without global ~/.cursor config"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: Some("work".to_string()),
+        project_root: None,
+        dashboard: true,
+    };
+    HermesIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes profile install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize named profile installs"
+    );
+}
+
+#[test]
+fn test_healthcheck_hermes_local_install_checks_project_hermes_home() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    assert_local_install_success("hermes", project.path(), home.path());
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    HermesIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(dc.issues, 0, "Hermes local install should have no issues");
+    assert_eq!(
+        dc.warnings, 0,
+        "Hermes healthcheck should recognize project-local HERMES_HOME installs"
     );
 }
 
@@ -2721,7 +4265,7 @@ fn test_parse_jsonc() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. is_detected / has_tokensave tests
+// 7. is_detected / has_tracedecay tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2792,79 +4336,79 @@ fn test_is_detected_copilot() {
 }
 
 #[test]
-fn test_has_tokensave_claude() {
+fn test_has_tracedecay_claude() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     // No config => false
-    assert!(!ClaudeIntegration.has_tokensave(home));
+    assert!(!ClaudeIntegration.has_tracedecay(home));
 
     // After install => true
     let ctx = make_install_ctx(home);
     ClaudeIntegration.install(&ctx).unwrap();
-    assert!(ClaudeIntegration.has_tokensave(home));
+    assert!(ClaudeIntegration.has_tracedecay(home));
 
     // After uninstall => false
     ClaudeIntegration.uninstall(&ctx).unwrap();
-    assert!(!ClaudeIntegration.has_tokensave(home));
+    assert!(!ClaudeIntegration.has_tracedecay(home));
 }
 
 #[test]
-fn test_has_tokensave_gemini() {
+fn test_has_tracedecay_gemini() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    assert!(!GeminiIntegration.has_tokensave(home));
+    assert!(!GeminiIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     GeminiIntegration.install(&ctx).unwrap();
-    assert!(GeminiIntegration.has_tokensave(home));
+    assert!(GeminiIntegration.has_tracedecay(home));
 }
 
 #[test]
-fn test_has_tokensave_codex() {
+fn test_has_tracedecay_codex() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    assert!(!CodexIntegration.has_tokensave(home));
+    assert!(!CodexIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
     assert!(home.join(".codex/config.toml").exists());
     assert!(
-        CodexIntegration.has_tokensave(home),
-        "has_tokensave should detect tokensave after a clean install"
+        CodexIntegration.has_tracedecay(home),
+        "has_tracedecay should detect tracedecay after a clean install"
     );
 }
 
 #[test]
-fn test_has_tokensave_cursor() {
+fn test_has_tracedecay_cursor() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    assert!(!CursorIntegration.has_tokensave(home));
+    assert!(!CursorIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
-    assert!(CursorIntegration.has_tokensave(home));
+    assert!(CursorIntegration.has_tracedecay(home));
 }
 
 #[test]
-fn test_has_tokensave_opencode() {
+fn test_has_tracedecay_opencode() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    assert!(!OpenCodeIntegration.has_tokensave(home));
+    assert!(!OpenCodeIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     OpenCodeIntegration.install(&ctx).unwrap();
-    assert!(OpenCodeIntegration.has_tokensave(home));
+    assert!(OpenCodeIntegration.has_tracedecay(home));
 }
 
 #[test]
-fn test_has_tokensave_copilot() {
+fn test_has_tracedecay_copilot() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    assert!(!CopilotIntegration.has_tokensave(home));
+    assert!(!CopilotIntegration.has_tracedecay(home));
 
     let ctx = make_install_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
-    assert!(CopilotIntegration.has_tokensave(home));
+    assert!(CopilotIntegration.has_tracedecay(home));
 }
 
 // ---------------------------------------------------------------------------
@@ -2884,7 +4428,7 @@ fn test_claude_install_idempotent() {
     // Config should still be valid
     let claude_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
-    assert!(claude_json["mcpServers"]["tokensave"].is_object());
+    assert!(claude_json["mcpServers"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -2899,7 +4443,7 @@ fn test_gemini_install_idempotent() {
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap())
             .unwrap();
-    assert!(settings["mcpServers"]["tokensave"].is_object());
+    assert!(settings["mcpServers"]["tracedecay"].is_object());
 }
 
 #[test]
@@ -2944,8 +4488,8 @@ fn test_claude_install_preserves_existing_claude_json() {
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json_path).unwrap()).unwrap();
-    // tokensave added
-    assert!(content["mcpServers"]["tokensave"].is_object());
+    // tracedecay added
+    assert!(content["mcpServers"]["tracedecay"].is_object());
     // existing server preserved
     assert!(content["mcpServers"]["other-server"].is_object());
     // custom key preserved
@@ -2970,7 +4514,7 @@ fn test_gemini_install_preserves_existing_settings() {
 
     let content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert!(content["mcpServers"]["tokensave"].is_object());
+    assert!(content["mcpServers"]["tracedecay"].is_object());
     assert!(content["mcpServers"]["other"].is_object());
     assert_eq!(content["theme"], "dark");
 }
@@ -2985,8 +4529,8 @@ fn test_tool_names_not_empty() {
     assert!(!names.is_empty());
     for name in &names {
         assert!(
-            name.starts_with("tokensave_"),
-            "tool name should start with tokensave_: {name}"
+            name.starts_with("tracedecay_"),
+            "tool name should start with tracedecay_: {name}"
         );
     }
 }
@@ -3007,17 +4551,17 @@ fn test_read_only_tool_names_excludes_mutating_tools() {
     }
 
     for mutating in [
-        "tokensave_str_replace",
-        "tokensave_multi_str_replace",
-        "tokensave_insert_at",
-        "tokensave_ast_grep_rewrite",
-        "tokensave_replace_symbol",
-        "tokensave_insert_at_symbol",
-        "tokensave_run_affected_tests",
-        "tokensave_session_start",
-        "tokensave_session_end",
-        "tokensave_fact_store",
-        "tokensave_fact_feedback",
+        "tracedecay_str_replace",
+        "tracedecay_multi_str_replace",
+        "tracedecay_insert_at",
+        "tracedecay_ast_grep_rewrite",
+        "tracedecay_replace_symbol",
+        "tracedecay_insert_at_symbol",
+        "tracedecay_run_affected_tests",
+        "tracedecay_session_start",
+        "tracedecay_session_end",
+        "tracedecay_fact_store",
+        "tracedecay_fact_feedback",
     ] {
         assert!(
             !read_only_set.contains(mutating),
@@ -3032,8 +4576,8 @@ fn test_expected_tool_perms_not_empty() {
     assert!(!perms.is_empty());
     for perm in &perms {
         assert!(
-            perm.starts_with("mcp__tokensave__"),
-            "tool perm should start with mcp__tokensave__: {perm}"
+            perm.starts_with("mcp__tracedecay__"),
+            "tool perm should start with mcp__tracedecay__: {perm}"
         );
     }
 }
@@ -3048,7 +4592,7 @@ fn test_tool_perms_match_tool_names() {
         "tool_names and expected_tool_perms should have same length"
     );
     for name in &names {
-        let expected_perm = format!("mcp__tokensave__{name}");
+        let expected_perm = format!("mcp__tracedecay__{name}");
         assert!(
             perms.contains(&expected_perm),
             "missing permission for tool {name}: expected {expected_perm}"
@@ -3119,16 +4663,16 @@ fn test_restore_config_backup_missing_backup_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. which_tokensave
+// 12. which_tracedecay
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_which_tokensave_returns_some_or_none() {
-    // which_tokensave checks current_exe and PATH — we just verify it
+fn test_which_tracedecay_returns_some_or_none() {
+    // which_tracedecay checks current_exe and PATH — we just verify it
     // doesn't panic and returns a sensible result.
-    let result = which_tokensave();
-    // In a test environment, the current exe is the test runner, not tokensave,
-    // so it may return None (unless tokensave is on PATH). Either way, no panic.
+    let result = which_tracedecay();
+    // In a test environment, the current exe is the test runner, not tracedecay,
+    // so it may return None (unless tracedecay is on PATH). Either way, no panic.
     if let Some(ref path) = result {
         assert!(!path.is_empty(), "path should not be empty if Some");
     }
@@ -3158,7 +4702,7 @@ fn test_home_dir_returns_some() {
 fn test_migrate_installed_agents_skips_when_already_populated() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    let mut config = tokensave::user_config::UserConfig {
+    let mut config = tracedecay::user_config::UserConfig {
         installed_agents: vec!["claude".to_string()],
         ..Default::default()
     };
@@ -3179,11 +4723,11 @@ fn test_migrate_installed_agents_detects_installed_agents() {
     let ctx = make_install_ctx(home);
     CopilotIntegration.install(&ctx).unwrap();
 
-    let mut config = tokensave::user_config::UserConfig::default();
+    let mut config = tracedecay::user_config::UserConfig::default();
     assert!(config.installed_agents.is_empty());
 
     // migrate will scan and detect copilot is installed
-    // Note: save() will try to write to ~/.tokensave/config.toml which may fail
+    // Note: save() will try to write to ~/.tracedecay/config.toml which may fail
     // in CI, but the function still populates installed_agents in memory.
     migrate_installed_agents(home, &mut config);
 
@@ -3198,7 +4742,7 @@ fn test_migrate_installed_agents_detects_installed_agents() {
 fn test_migrate_installed_agents_empty_home_no_change() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
-    let mut config = tokensave::user_config::UserConfig::default();
+    let mut config = tracedecay::user_config::UserConfig::default();
 
     migrate_installed_agents(home, &mut config);
 
@@ -3258,7 +4802,7 @@ fn test_pick_integrations_interactive_single_uninstalled_agent() {
 #[test]
 fn test_vscode_data_dir_is_under_home() {
     let home = Path::new("/fake/home");
-    let dir = tokensave::agents::vscode_data_dir(home);
+    let dir = tracedecay::agents::vscode_data_dir(home);
     assert!(
         dir.starts_with("/fake/home"),
         "vscode_data_dir should be under home: {}",
@@ -3269,7 +4813,7 @@ fn test_vscode_data_dir_is_under_home() {
 #[test]
 fn test_copilot_cli_dir_is_under_home() {
     let home = Path::new("/fake/home");
-    let dir = tokensave::agents::copilot_cli_dir(home);
+    let dir = tracedecay::agents::copilot_cli_dir(home);
     assert_eq!(
         dir,
         Path::new("/fake/home/.copilot"),
@@ -3334,7 +4878,7 @@ fn test_backup_and_safe_write_round_trip() {
     let path = dir.path().join("roundtrip.json");
 
     // Create initial file
-    let initial = serde_json::json!({"name": "tokensave", "version": 1});
+    let initial = serde_json::json!({"name": "tracedecay", "version": 1});
     safe_write_json_file(&path, &initial, None).unwrap();
 
     // Create backup
@@ -3343,7 +4887,7 @@ fn test_backup_and_safe_write_round_trip() {
     let backup_path = backup.unwrap();
 
     // Overwrite with new content
-    let updated = serde_json::json!({"name": "tokensave", "version": 2});
+    let updated = serde_json::json!({"name": "tracedecay", "version": 2});
     safe_write_json_file(&path, &updated, Some(&backup_path)).unwrap();
 
     // Verify new content
@@ -3361,4 +4905,192 @@ fn test_backup_and_safe_write_round_trip() {
     let restored: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(restored["version"], 1);
+}
+
+#[test]
+fn test_hermes_install_writes_and_preserves_project_root_pin() {
+    let home = TempDir::new().unwrap();
+    let pinned = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tool_permissions: expected_tool_perms(),
+        profile: None,
+        project_root: Some(std::path::PathBuf::from("/pinned/project")),
+        dashboard: true,
+    };
+    HermesIntegration.install(&pinned).unwrap();
+
+    let tools_path = home.path().join(".hermes/plugins/tracedecay/tools.py");
+    let config_path = home.path().join(".hermes/config.yaml");
+    // The config block is the single pin home; the generated tools.py
+    // carries no install-time pin constant.
+    let tools_py = std::fs::read_to_string(&tools_path).unwrap();
+    assert!(
+        !tools_py.contains("PINNED_PROJECT_ROOT"),
+        "tools.py must not carry a pin constant (the config block owns the pin):\n{tools_py}"
+    );
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("  tracedecay:") && config.contains("    project_root: \"/pinned/project\""),
+        "install --project-root must write the pin into the conventional plugins.tracedecay config block:\n{config}"
+    );
+
+    // A reinstall without the flag must keep the pin (no silent unpinning).
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "reinstall must preserve the plugins.tracedecay config pin:\n{config}"
+    );
+
+    // A reinstall after the generated tools.py was deleted still keeps the
+    // config pin (the pin never lived in the generated Python).
+    std::fs::remove_file(&tools_path).unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
+    assert!(tools_path.is_file(), "reinstall must regenerate tools.py");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("    project_root: \"/pinned/project\""),
+        "reinstall must keep the plugins.tracedecay.project_root pin:\n{config}"
+    );
+
+    // Uninstall removes the generated pin from the config block.
+    HermesIntegration
+        .uninstall(&make_install_ctx(home.path()))
+        .unwrap();
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !config.contains("project_root:") && !config.contains("  tracedecay:"),
+        "uninstall must remove the generated plugins.tracedecay pin block:\n{config}"
+    );
+
+    // A fresh install without a pin stays unpinned.
+    let fresh_home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx(fresh_home.path()))
+        .unwrap();
+    let fresh_config =
+        std::fs::read_to_string(fresh_home.path().join(".hermes/config.yaml")).unwrap();
+    assert!(
+        !fresh_config.contains("project_root:"),
+        "fresh install without --project-root must not write a config pin:\n{fresh_config}"
+    );
+}
+
+#[test]
+fn test_hermes_generated_python_reads_plugins_tracedecay_config_block() {
+    let home = TempDir::new().unwrap();
+    HermesIntegration
+        .install(&make_install_ctx_with_real_bin(home.path()))
+        .unwrap();
+
+    let hermes_home = home.path().join(".hermes");
+    let plugin_dir = hermes_home.join("plugins/tracedecay");
+    let script = plugin_dir.join("check_config_block.py");
+    std::fs::write(
+        &script,
+        r#"
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import sys
+
+plugin_dir = pathlib.Path(sys.argv[1])
+hermes_home = plugin_dir.parent.parent
+os.environ["HERMES_HOME"] = str(hermes_home)
+
+# Simulate a user (or the installer) putting settings in the conventional
+# plugins.tracedecay config block.
+import yaml
+config_path = hermes_home / "config.yaml"
+config = yaml.safe_load(config_path.read_text()) or {}
+plugins_cfg = config.setdefault("plugins", {})
+plugins_cfg["tracedecay"] = {
+    "project_root": "/config/block/project",
+    "summary_model": "glm-4.7",
+}
+config_path.write_text(yaml.dump(config, default_flow_style=False))
+
+parent_name = "_hermes_user_config_block"
+parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+parent_spec.submodule_search_locations = []
+sys.modules[parent_name] = importlib.util.module_from_spec(parent_spec)
+module_name = f"{parent_name}.tracedecay"
+spec = importlib.util.spec_from_file_location(
+    module_name,
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+plugin = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = plugin
+spec.loader.exec_module(plugin)
+
+# The subprocess dispatch path resolves the pin from the config block; the
+# generated tools.py carries no pin constant at all.
+assert not hasattr(plugin.tools, "PINNED_PROJECT_ROOT")
+assert plugin.tools.config_pinned_project_root() == "/config/block/project"
+
+captured = {}
+
+class Result:
+    returncode = 0
+    stdout = "{}"
+    stderr = ""
+
+def fake_run(argv, **kwargs):
+    captured["argv"] = argv
+    return Result()
+
+plugin.tools.subprocess.run = fake_run
+plugin.tools.call_tracedecay_tool("tracedecay_status", {})
+argv = captured["argv"]
+assert "--project" in argv, argv
+assert argv[argv.index("--project") + 1] == "/config/block/project", argv
+
+# The context engine layers the block under the host config: block values
+# fill gaps, host-provided values always win.
+engine = plugin.TraceDecayContextEngine()
+assert engine.project_root == "/config/block/project", engine.project_root
+assert plugin._lcm_str_setting(engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"
+
+host_engine = plugin.TraceDecayContextEngine(config={"project_root": "/host/wins", "summary_model": "host-model"})
+assert host_engine.project_root == "/host/wins"
+assert plugin._lcm_str_setting(host_engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "host-model"
+
+# Attribute-style host configs chain through to the block too.
+class HostConfig:
+    summary_model = None
+    fresh_tail_count = 16
+
+attr_engine = plugin.TraceDecayContextEngine(config=HostConfig())
+assert plugin._lcm_str_setting(attr_engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"
+assert plugin._configured_int(attr_engine.config, "fresh_tail_count") == 16
+
+# Engines bound to a different profile home do not inherit this block.
+other_engine = plugin.TraceDecayContextEngine(hermes_home="/tmp/definitely-missing-hermes-home")
+assert other_engine.project_root is None
+"#,
+    )
+    .unwrap();
+
+    let mut check = Command::new("python3");
+    check.arg(&script).arg(&plugin_dir);
+    if let Some(shim_dir) = pyyaml_shim_pythonpath(home.path()) {
+        check.env("PYTHONPATH", shim_dir);
+    }
+    let output = check
+        .output()
+        .expect("python3 should run generated Hermes config block check");
+    assert!(
+        output.status.success(),
+        "generated plugin should read the plugins.tracedecay config block\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -2,21 +2,21 @@
 //!
 //! Tree-sitter grammars compiled from C/C++ can `abort()` on internal
 //! assertions, segfault, or otherwise terminate the process by paths that
-//! `catch_unwind` cannot intercept. To keep `tokensave sync` resilient,
+//! `catch_unwind` cannot intercept. To keep `tracedecay sync` resilient,
 //! extraction is delegated to short-lived worker subprocesses; if a worker
 //! dies, only the in-flight file is lost and the pool respawns the worker.
 //!
 //! ## Trust boundary
 //!
-//! The worker entry point is a hidden subcommand (`tokensave extract-worker`)
+//! The worker entry point is a hidden subcommand (`tracedecay extract-worker`)
 //! that authenticates via two facts the parent controls:
 //!
 //! 1. A 32-byte token, freshly generated per `WorkerPool`, passed via the
-//!    `TOKENSAVE_WORKER_TOKEN` env var (hex-encoded). The worker scrubs the
+//!    `TRACEDECAY_WORKER_TOKEN` env var (hex-encoded). The worker scrubs the
 //!    var immediately after reading.
 //! 2. The first 32 bytes received on stdin must equal the same token.
 //!
-//! A user invoking `tokensave extract-worker` directly hits the missing-env
+//! A user invoking `tracedecay extract-worker` directly hits the missing-env
 //! check and exits non-zero. A user who guesses or extracts the env value
 //! still cannot reproduce the stdin handshake without being inside the
 //! parent's address space — at which point the trust boundary is moot.
@@ -36,7 +36,7 @@ use crate::sync;
 use crate::types::ExtractionResult;
 
 const TOKEN_LEN: usize = 32;
-const TOKEN_ENV_VAR: &str = "TOKENSAVE_WORKER_TOKEN";
+const TOKEN_ENV_VAR: &str = "TRACEDECAY_WORKER_TOKEN";
 
 /// Hidden subcommand name. Kept here (not in main.rs) so the constant is
 /// shared between the spawn-side and the dispatch-side.
@@ -82,7 +82,7 @@ pub fn run_worker() -> ! {
     let code = match worker_main() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("[tokensave-worker] {e}");
+            eprintln!("[tracedecay-worker] {e}");
             1
         }
     };
@@ -147,7 +147,7 @@ fn process_request(registry: &LanguageRegistry, req: &ExtractRequest) -> Extract
     let content_hash = sync::content_hash(&source);
     let size = source.len() as u64;
     let mtime =
-        sync::file_stat(&abs_path).map_or_else(crate::tokensave::current_timestamp, |(m, _)| m);
+        sync::file_stat(&abs_path).map_or_else(crate::tracedecay::current_timestamp, |(m, _)| m);
 
     ExtractResponse {
         file_path: req.file_path.clone(),
@@ -165,7 +165,7 @@ fn process_request(registry: &LanguageRegistry, req: &ExtractRequest) -> Extract
 // =============================================================================
 
 /// One result tuple. Matches the shape the existing extraction sites in
-/// `tokensave.rs` expect from their rayon closures.
+/// `tracedecay.rs` expect from their rayon closures.
 pub type ExtractTuple = (String, ExtractionResult, String, u64, i64);
 
 pub struct WorkerPool {
@@ -346,7 +346,7 @@ fn worker_thread<F>(
             }
             RoundTripOutcome::Timeout => {
                 eprintln!(
-                    "[tokensave] extractor timed out on {file_path} after {}s; skipping",
+                    "[tracedecay] extractor timed out on {file_path} after {}s; skipping",
                     per_file_timeout.as_secs()
                 );
                 skipped
@@ -362,7 +362,7 @@ fn worker_thread<F>(
                     Ok(new_worker) => worker = new_worker,
                     Err(e) => {
                         eprintln!(
-                            "[tokensave] failed to respawn worker after timeout: {e}; \
+                            "[tracedecay] failed to respawn worker after timeout: {e}; \
                              this thread is giving up, remaining workers continue"
                         );
                         return;
@@ -370,7 +370,7 @@ fn worker_thread<F>(
                 }
             }
             RoundTripOutcome::Err(e) => {
-                eprintln!("[tokensave] extraction worker crashed on {file_path}: {e}, respawning");
+                eprintln!("[tracedecay] extraction worker crashed on {file_path}: {e}, respawning");
                 skipped
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -380,7 +380,7 @@ fn worker_thread<F>(
                     Ok(new_worker) => worker = new_worker,
                     Err(e) => {
                         eprintln!(
-                            "[tokensave] failed to respawn worker after crash: {e}; \
+                            "[tracedecay] failed to respawn worker after crash: {e}; \
                              this thread is giving up, remaining workers continue"
                         );
                         return;

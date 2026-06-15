@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::MarkdownExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::MarkdownExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_markdown_file_node_is_root() {

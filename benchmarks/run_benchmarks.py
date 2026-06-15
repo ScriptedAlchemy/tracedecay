@@ -1,4 +1,4 @@
-"""Tokensave vs Token-Savior — side-by-side benchmark on Python repos.
+"""TraceDecay vs Token-Savior — side-by-side benchmark on Python repos.
 
 Adapted from token-savior's benchmarks/run_benchmarks.py
 (https://github.com/Mibayy/token-savior). Runs both tools against the same
@@ -7,14 +7,14 @@ query-timing column is apples-to-apples, and emits a comparison report.
 
 Prerequisites:
     pip install token-savior        # for the token-savior column
-    tokensave --version             # tokensave CLI on PATH
+    tracedecay --version             # tracedecay CLI on PATH
 
 Usage:
     python benchmarks/run_benchmarks.py
     python benchmarks/run_benchmarks.py --repos fastapi
     python benchmarks/run_benchmarks.py --skip-clone
-    python benchmarks/run_benchmarks.py --skip-token-savior   # tokensave only
-    python benchmarks/run_benchmarks.py --skip-tokensave      # token-savior only
+    python benchmarks/run_benchmarks.py --skip-token-savior   # tracedecay only
+    python benchmarks/run_benchmarks.py --skip-tracedecay      # token-savior only
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ REPOS: dict[str, str] = {
     "cpython": "https://github.com/python/cpython.git",
 }
 
-CLONE_DIR = Path("/tmp/tokensave-bench")
+CLONE_DIR = Path("/tmp/tracedecay-bench")
 RESULTS_DIR = Path(__file__).resolve().parent
 RESULTS_JSON = RESULTS_DIR / "comparison-results.json"
 REPORT_MD = RESULTS_DIR / "comparison-report.md"
@@ -44,7 +44,7 @@ REPORT_MD = RESULTS_DIR / "comparison-report.md"
 RANDOM_SEED = 42
 NUM_QUERY_SAMPLES = 10
 
-TOKENSAVE_BIN = os.environ.get("TOKENSAVE_BIN", "tokensave")
+TRACEDECAY_BIN = os.environ.get("TRACEDECAY_BIN", "tracedecay")
 
 
 def log(msg: str) -> None:
@@ -157,7 +157,7 @@ def benchmark_token_savior(name: str, root: Path) -> tuple[dict, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# tokensave side (subprocess)
+# tracedecay side (subprocess)
 # ---------------------------------------------------------------------------
 
 
@@ -176,8 +176,8 @@ def run_timed(cmd: list[str], cwd: str | None = None) -> tuple[float, int, subpr
     return dt, max(0, after - before), cp
 
 
-class TokensaveMcp:
-    """Minimal JSON-RPC 2.0 client for `tokensave serve` over stdio.
+class TraceDecayMcp:
+    """Minimal JSON-RPC 2.0 client for `tracedecay serve` over stdio.
 
     Spawns a long-lived server so per-call latency reflects actual query work
     instead of process startup + DB open. Newline-delimited JSON, no Content-
@@ -189,9 +189,9 @@ class TokensaveMcp:
         self.proc: subprocess.Popen | None = None
         self._next_id = 1
 
-    def __enter__(self) -> "TokensaveMcp":
+    def __enter__(self) -> "TraceDecayMcp":
         self.proc = subprocess.Popen(
-            [TOKENSAVE_BIN, "serve", "-p", str(self.root), "--timings"],
+            [TRACEDECAY_BIN, "serve", "-p", str(self.root), "--timings"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -201,7 +201,7 @@ class TokensaveMcp:
         self._request("initialize", {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
-            "clientInfo": {"name": "tokensave-bench", "version": "0.1"},
+            "clientInfo": {"name": "tracedecay-bench", "version": "0.1"},
         })
         self._notify("notifications/initialized", {})
         return self
@@ -230,7 +230,7 @@ class TokensaveMcp:
         while True:
             line = self.proc.stdout.readline()
             if not line:
-                raise RuntimeError("tokensave serve closed stdout unexpectedly")
+                raise RuntimeError("tracedecay serve closed stdout unexpectedly")
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
@@ -252,7 +252,7 @@ class TokensaveMcp:
 
     @staticmethod
     def first_node_id(search_resp: dict) -> str | None:
-        """Extract the first node id from a tokensave_search response."""
+        """Extract the first node id from a tracedecay_search response."""
         try:
             text = search_resp["result"]["content"][0]["text"]
             items = json.loads(text)
@@ -263,14 +263,14 @@ class TokensaveMcp:
         return None
 
 
-def benchmark_tokensave(name: str, root: Path, sample_symbols: list[str]) -> dict:
+def benchmark_tracedecay(name: str, root: Path, sample_symbols: list[str]) -> dict:
     out: dict = {}
-    ts_dir = root / ".tokensave"
+    ts_dir = root / ".tracedecay"
     if ts_dir.exists():
         shutil.rmtree(ts_dir)
 
     log(f"[tk] {name}: init (cold) ...")
-    dt, mem, cp = run_timed([TOKENSAVE_BIN, "init"], cwd=str(root))
+    dt, mem, cp = run_timed([TRACEDECAY_BIN, "init"], cwd=str(root))
     if cp.returncode != 0:
         log(f"[tk] init failed: {cp.stderr[-400:]}")
         out["error"] = cp.stderr[-2000:]
@@ -279,10 +279,10 @@ def benchmark_tokensave(name: str, root: Path, sample_symbols: list[str]) -> dic
     out["cold_index_peak_memory_bytes"] = mem
 
     log(f"[tk] {name}: sync (warm) ...")
-    dt, _, cp = run_timed([TOKENSAVE_BIN, "sync"], cwd=str(root))
+    dt, _, cp = run_timed([TRACEDECAY_BIN, "sync"], cwd=str(root))
     out["warm_index_seconds"] = round(dt, 3) if cp.returncode == 0 else None
 
-    _, _, cp = run_timed([TOKENSAVE_BIN, "status", "--json"], cwd=str(root))
+    _, _, cp = run_timed([TRACEDECAY_BIN, "status", "--json"], cwd=str(root))
     if cp.returncode == 0:
         try:
             status = json.loads(cp.stdout)
@@ -304,21 +304,21 @@ def benchmark_tokensave(name: str, root: Path, sample_symbols: list[str]) -> dic
     def avg_ms(samples: list[int]) -> float | None:
         return round(sum(samples) / len(samples) / 1000.0, 3) if samples else None
 
-    with TokensaveMcp(root) as mcp:
+    with TraceDecayMcp(root) as mcp:
         # Warm-up so first-query DB/cache fill doesn't skew the averages.
         # `_meta.duration_us` already excludes transport overhead, but the
         # first call also pays one-time index warmup we want to drop.
         if queries:
-            mcp.call_tool("tokensave_search", {"query": queries[0], "limit": 5})
+            mcp.call_tool("tracedecay_search", {"query": queries[0], "limit": 5})
 
         # Apples-to-apples vs token-savior's find_symbol: bare-name index
-        # probe via `tokensave_find_exact_symbol`, not BM25-ranked `search`.
+        # probe via `tracedecay_find_exact_symbol`, not BM25-ranked `search`.
         find_us = [
             d
             for q in queries
             if (
                 d := handler_us(
-                    mcp.call_tool("tokensave_find_exact_symbol", {"name": q})
+                    mcp.call_tool("tracedecay_find_exact_symbol", {"name": q})
                 )
             )
             is not None
@@ -328,25 +328,25 @@ def benchmark_tokensave(name: str, root: Path, sample_symbols: list[str]) -> dic
         body_us = [
             d
             for q in queries
-            if (d := handler_us(mcp.call_tool("tokensave_body", {"symbol": q, "limit": 1})))
+            if (d := handler_us(mcp.call_tool("tracedecay_body", {"symbol": q, "limit": 1})))
             is not None
         ]
         out["get_function_source_avg_ms"] = avg_ms(body_us)
 
         impact_us: list[int] = []
         for q in queries:
-            sresp = mcp.call_tool("tokensave_search", {"query": q, "limit": 1})
+            sresp = mcp.call_tool("tracedecay_search", {"query": q, "limit": 1})
             search_us = handler_us(sresp) or 0
-            node_id = TokensaveMcp.first_node_id(sresp)
+            node_id = TraceDecayMcp.first_node_id(sresp)
             if node_id is None:
                 continue
-            iresp = mcp.call_tool("tokensave_impact", {"node_id": node_id, "max_depth": 3})
+            iresp = mcp.call_tool("tracedecay_impact", {"node_id": node_id, "max_depth": 3})
             ius = handler_us(iresp)
             if ius is not None:
                 impact_us.append(search_us + ius)
         out["get_change_impact_avg_ms"] = avg_ms(impact_us)
 
-    db = ts_dir / "tokensave.db"
+    db = ts_dir / "tracedecay.db"
     out["cache_size_bytes"] = os.path.getsize(db) if db.exists() else 0
 
     return out
@@ -399,7 +399,7 @@ def fmt_int(v) -> str:
 
 def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
     lines = [
-        "# Tokensave vs Token-Savior Benchmark",
+        "# TraceDecay vs Token-Savior Benchmark",
         "",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         "",
@@ -408,16 +408,16 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
         "query timing so the find_symbol column is directly comparable.",
         "",
         "**Memory notes.** token-savior's peak memory is measured with `tracemalloc`",
-        "(Python heap only). tokensave runs as a subprocess, so its peak is the",
+        "(Python heap only). tracedecay runs as a subprocess, so its peak is the",
         "`ru_maxrss` delta from `getrusage(RUSAGE_CHILDREN)` (resident set size).",
         "These are *not* identical units — treat them as order-of-magnitude.",
         "",
         "**Query timing.** token-savior is called in-process (pure Python dict",
-        "lookups). tokensave is driven over MCP via `tokensave serve --timings`",
+        "lookups). tracedecay is driven over MCP via `tracedecay serve --timings`",
         "and the per-query column reports the handler's `_meta.duration_us` —",
         "i.e. the time spent inside the Rust handler, with JSON-RPC / stdio /",
         "Python-parse overhead stripped out. A warm-up call is issued before",
-        "each timed loop. `get_change_impact` for tokensave sums the handler",
+        "each timed loop. `get_change_impact` for tracedecay sums the handler",
         "times of `search → impact`, mirroring how an agent must resolve the",
         "symbol to a node_id before querying.",
         "",
@@ -425,13 +425,13 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
     for r in results:
         name = r["repo"]
         ts = r.get("token_savior") or {}
-        tk = r.get("tokensave") or {}
+        tk = r.get("tracedecay") or {}
         lines += [
             f"## {name}",
             "",
             f"Naive `.py` source size: {fmt_bytes(naive_sizes.get(name))}",
             "",
-            "| Metric | token-savior | tokensave |",
+            "| Metric | token-savior | tracedecay |",
             "|--------|--------------|-----------|",
             f"| Cold index time | {fmt_sec(ts.get('cold_index_seconds'))} | {fmt_sec(tk.get('cold_index_seconds'))} |",
             f"| Warm reindex time | {fmt_sec(ts.get('warm_index_seconds'))} | {fmt_sec(tk.get('warm_index_seconds'))} |",
@@ -446,9 +446,9 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
         ]
         if tk.get("files_by_language"):
             langs = ", ".join(f"{k}={v}" for k, v in sorted(tk["files_by_language"].items()))
-            lines += [f"_tokensave indexed languages:_ {langs}", ""]
+            lines += [f"_tracedecay indexed languages:_ {langs}", ""]
         if tk.get("error"):
-            lines += [f"_tokensave error:_ `{tk['error'][:300]}`", ""]
+            lines += [f"_tracedecay error:_ `{tk['error'][:300]}`", ""]
     return "\n".join(lines)
 
 
@@ -458,7 +458,7 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Tokensave vs Token-Savior benchmark")
+    parser = argparse.ArgumentParser(description="TraceDecay vs Token-Savior benchmark")
     parser.add_argument(
         "--repos",
         nargs="+",
@@ -467,16 +467,16 @@ def main() -> None:
     )
     parser.add_argument("--skip-clone", action="store_true")
     parser.add_argument("--skip-token-savior", action="store_true")
-    parser.add_argument("--skip-tokensave", action="store_true")
+    parser.add_argument("--skip-tracedecay", action="store_true")
     args = parser.parse_args()
 
     if not args.skip_token_savior and not have_token_savior():
         log("token-savior not installed (`pip install token-savior`); skipping its column")
         args.skip_token_savior = True
-    if not args.skip_tokensave and shutil.which(TOKENSAVE_BIN) is None:
-        log(f"{TOKENSAVE_BIN} not on PATH; skipping its column")
-        args.skip_tokensave = True
-    if args.skip_token_savior and args.skip_tokensave:
+    if not args.skip_tracedecay and shutil.which(TRACEDECAY_BIN) is None:
+        log(f"{TRACEDECAY_BIN} not on PATH; skipping its column")
+        args.skip_tracedecay = True
+    if args.skip_token_savior and args.skip_tracedecay:
         log("Both tools unavailable; nothing to benchmark.")
         sys.exit(1)
 
@@ -498,10 +498,10 @@ def main() -> None:
             ts_result, sample = benchmark_token_savior(name, root)
             entry["token_savior"] = ts_result
 
-        if not args.skip_tokensave:
+        if not args.skip_tracedecay:
             if not sample:
                 sample = fallback_sample(root)
-            entry["tokensave"] = benchmark_tokensave(name, root, sample)
+            entry["tracedecay"] = benchmark_tracedecay(name, root, sample)
 
         results.append(entry)
 

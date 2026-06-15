@@ -1,4 +1,4 @@
-use tokensave::hooks::{
+use tracedecay::hooks::{
     cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
     cursor_shell_sync_plan_with_current_branch, CursorShellSyncPlan,
 };

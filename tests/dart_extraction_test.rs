@@ -1,6 +1,6 @@
-use tokensave::extraction::DartExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::DartExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 fn extract(source: &str) -> ExtractionResult {
     DartExtractor::extract_dart("test.dart", source)

@@ -1,13 +1,13 @@
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 
 fn agent_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(tokensave::agents::available_integrations())
+    PossibleValuesParser::new(tracedecay::agents::available_integrations())
 }
 
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
-    name = "tokensave",
+    name = "tracedecay",
     about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
     version
 )]
@@ -18,7 +18,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new TokenSave project (full index)
+    /// Initialize a new TraceDecay project (full index)
     Init {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -26,7 +26,7 @@ pub enum Commands {
         #[arg(long = "skip-folder", num_args = 1..)]
         skip_folders: Vec<String>,
     },
-    /// Incremental sync (project must already be initialized with `tokensave init`)
+    /// Incremental sync (project must already be initialized with `tracedecay init`)
     Sync {
         /// Project path (default: current directory)
         path: Option<String>,
@@ -61,16 +61,20 @@ pub enum Commands {
         #[arg(long)]
         runtime: bool,
     },
-    /// Invoke an MCP tool from the CLI (e.g. `tokensave tool search foo`).
+    /// Invoke an MCP tool from the CLI (e.g. `tracedecay tool search foo`).
     ///
-    /// Run `tokensave tool` (no name) to list every available tool.
-    /// Run `tokensave tool <name> --help` to see that tool's parameters.
+    /// Run `tracedecay tool` (no name) to list every available tool.
+    /// Run `tracedecay tool <name> --help` to see that tool's parameters.
     //
     // `disable_help_flag = true` lets `-h`/`--help` flow through to our parser
     // so we can print the per-tool schema instead of clap's generic help.
     #[command(disable_help_flag = true)]
     Tool {
-        /// MCP tool name (with or without the `tokensave_` prefix). Omit to list all tools.
+        /// Project root to open before dispatching the tool. Defaults to the
+        /// nearest initialised project walking up from cwd.
+        #[arg(long)]
+        project: Option<String>,
+        /// MCP tool name (with or without the `tracedecay_` prefix). Omit to list all tools.
         name: Option<String>,
         /// Tool arguments as alternating `--key value` flags, plus reserved flags
         /// `--json`, `--project <path>`, `--args <json>`, and `-h`/`--help`.
@@ -91,9 +95,33 @@ pub enum Commands {
         /// Hermes profile to install into (only used with --agent hermes)
         #[arg(long)]
         profile: Option<String>,
+        /// Install into the default profile and every Hermes profile directory
+        #[arg(long, conflicts_with = "profile")]
+        all_profiles: bool,
+        /// Pin the generated plugin to a project root (absolute path; only
+        /// used with --agent hermes). All plugin tool calls then resolve that
+        /// project's .tracedecay/ stores regardless of the Hermes cwd.
+        #[arg(long, conflicts_with = "all_profiles")]
+        project_root: Option<String>,
+        /// Skip deploying the tracedecay dashboard plugin page into the
+        /// Hermes dashboard (and remove a previously deployed one; only
+        /// used with --agent hermes).
+        #[arg(long)]
+        no_dashboard: bool,
     },
     /// Refresh settings for all already-installed agents
     Reinstall,
+    /// Refresh generated plugin code/assets for detected installs without
+    /// touching agent config files.
+    ///
+    /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
+    /// (.py files, schemas.json, dashboard page) for every detected profile,
+    /// the Cursor plugin bundle, and the Kiro managed agent — re-baking the
+    /// current binary path and version. Config files (Hermes config.yaml and
+    /// its project_root pin, mcp.json, settings, prompt rules) are left
+    /// byte-for-byte intact; use `tracedecay reinstall` to refresh those.
+    #[command(name = "update-plugin", visible_alias = "update-plugins")]
+    UpdatePlugin,
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(name = "uninstall", visible_alias = "claude-uninstall")]
     Uninstall {
@@ -103,8 +131,11 @@ pub enum Commands {
         /// Hermes profile to uninstall from (only used with --agent hermes)
         #[arg(long)]
         profile: Option<String>,
+        /// Uninstall from the default profile and every Hermes profile directory
+        #[arg(long, conflicts_with = "profile")]
+        all_profiles: bool,
     },
-    /// Extraction worker (spawned by tokensave itself; not for direct use).
+    /// Extraction worker (spawned by tracedecay itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]
     ExtractWorker,
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
@@ -128,6 +159,9 @@ pub enum Commands {
     /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-subagent-start", hide = true)]
     HookCursorSubagentStart,
+    /// Cursor postToolUse hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-post-tool-use", hide = true)]
+    HookCursorPostToolUse,
     /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
     HookCursorBeforeSubmitPrompt,
@@ -137,12 +171,18 @@ pub enum Commands {
     /// Cursor sessionStart hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-session-start", hide = true)]
     HookCursorSessionStart,
+    /// Cursor sessionEnd hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-session-end", hide = true)]
+    HookCursorSessionEnd,
     /// Cursor afterShellExecution hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-after-shell", hide = true)]
     HookCursorAfterShell,
     /// Cursor workspaceOpen hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-workspace-open", hide = true)]
     HookCursorWorkspaceOpen,
+    /// Cursor stop hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-stop", hide = true)]
+    HookCursorStop,
     /// Codex SessionStart hook handler (called by Codex, not by users directly)
     #[command(name = "hook-codex-session-start", hide = true)]
     HookCodexSessionStart,
@@ -155,6 +195,21 @@ pub enum Commands {
     /// Codex PostToolUse hook handler for incremental sync (called by Codex)
     #[command(name = "hook-codex-post-tool-use", hide = true)]
     HookCodexPostToolUse,
+    /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
+    Dashboard {
+        /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Address to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on (0 = pick a free port)
+        #[arg(long, default_value_t = tracedecay::dashboard::DEFAULT_PORT)]
+        port: u16,
+        /// Open the dashboard URL in the default browser after the server starts
+        #[arg(long)]
+        open: bool,
+    },
     /// Start MCP server over stdio
     Serve {
         /// Project path
@@ -202,7 +257,7 @@ pub enum Commands {
         /// "on" to enable, "off" to disable, omit to show current setting
         action: Option<String>,
     },
-    /// Check tokensave installation, configuration, and agent integration
+    /// Check tracedecay installation, configuration, and agent integration
     Doctor {
         /// Check only this agent (default: all agents)
         #[arg(long, value_parser = agent_value_parser())]
@@ -260,17 +315,54 @@ pub enum Commands {
         #[command(subcommand)]
         action: BranchAction,
     },
-    /// Wipe local tokensave DBs (current folder, parents, and children)
+    /// Holographic memory maintenance (curation without the dashboard)
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// Wipe local tracedecay DBs (current folder, parents, and children)
     Wipe {
         /// Wipe ALL tracked projects so the global DB ends empty
         #[arg(short, long)]
         all: bool,
     },
-    /// List tokensave projects (current folder, parents, and children)
+    /// List tracedecay projects (current folder, parents, and children)
     List {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MemoryAction {
+    /// Similarity-dedup curation (and the LLM-review plan/apply halves),
+    /// suitable for a cron job — no dashboard server required.
+    ///
+    /// Default is a dry-run preview. The LLM tier never calls a model from
+    /// this binary: `--llm` emits the review request (clusters + chat
+    /// messages); run it through your own LLM and feed the strict-JSON ops
+    /// back with `--llm-ops <file>` to validate and (with `--apply`) execute
+    /// them.
+    Curate {
+        /// Apply the proposed deletions/ops instead of previewing them
+        #[arg(long)]
+        apply: bool,
+        /// Include the LLM-review request (clusters + messages) in the report
+        #[arg(long)]
+        llm: bool,
+        /// JSON file with externally produced LLM ops ({"ops": [...]}); "-" reads stdin
+        #[arg(long, value_name = "FILE")]
+        llm_ops: Option<String>,
+        /// Maximum candidate clusters included in the LLM review request
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
+        max_clusters: usize,
+        /// Confidence floor below which LLM ops are rejected
+        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
+        min_confidence: f64,
+        /// Project path (default: current directory, with discovery)
+        #[arg(short, long)]
+        path: Option<String>,
     },
 }
 

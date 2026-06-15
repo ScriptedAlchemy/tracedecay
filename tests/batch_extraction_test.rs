@@ -1,6 +1,6 @@
-use tokensave::extraction::BatchExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::BatchExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_batch_extract_labels_as_functions() {

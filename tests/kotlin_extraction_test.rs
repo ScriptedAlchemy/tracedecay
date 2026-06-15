@@ -1,6 +1,6 @@
-use tokensave::extraction::KotlinExtractor;
-use tokensave::extraction::LanguageExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::KotlinExtractor;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::types::*;
 
 fn extract(source: &str) -> ExtractionResult {
     let extractor = KotlinExtractor;

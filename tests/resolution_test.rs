@@ -1,7 +1,7 @@
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::resolution::ReferenceResolver;
-use tokensave::types::*;
+use tracedecay::db::Database;
+use tracedecay::resolution::ReferenceResolver;
+use tracedecay::types::*;
 
 /// Sets up a temporary database pre-populated with two nodes: a `helper`
 /// function in `src/utils.rs` and a `main` function in `src/main.rs`.

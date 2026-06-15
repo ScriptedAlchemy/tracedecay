@@ -1,6 +1,7 @@
 //! Branch metadata persistence for multi-branch indexing.
 //!
-//! Stores tracking information in `.tokensave/branch-meta.json`.
+//! Stores tracking information in `branch-meta.json` inside the project data
+//! dir (`.tracedecay/`, or legacy `.tokensave/`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,8 @@ const BRANCH_META_FILENAME: &str = "branch-meta.json";
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchEntry {
-    /// Relative path to the DB file (e.g. `tokensave.db` or `branches/feature_foo.db`).
+    /// Relative path to the DB file (e.g. `tracedecay.db` — `tokensave.db`
+    /// in legacy data dirs — or `branches/feature_foo.db`).
     pub db_file: String,
     /// Branch this was copied from (None for the default branch).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,14 +35,28 @@ pub struct BranchMeta {
 }
 
 impl BranchMeta {
-    /// Creates a new metadata with a single default branch entry.
+    /// Creates a new metadata with a single default branch entry pointing at
+    /// the standard `tracedecay.db`. Prefer [`BranchMeta::new_for_dir`] when
+    /// the data dir is at hand so legacy `.tokensave/` projects keep pointing
+    /// at their existing `tokensave.db`.
     pub fn new(default_branch: &str) -> Self {
+        Self::with_db_file(default_branch, crate::config::DB_FILENAME)
+    }
+
+    /// Creates a new metadata whose default-branch entry references the main
+    /// DB filename appropriate for `data_dir` (`tracedecay.db`, or
+    /// `tokensave.db` inside a legacy dir).
+    pub fn new_for_dir(data_dir: &Path, default_branch: &str) -> Self {
+        Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
+    }
+
+    fn with_db_file(default_branch: &str, db_file: &str) -> Self {
         let now = now_unix_str();
         let mut branches = HashMap::new();
         branches.insert(
             default_branch.to_string(),
             BranchEntry {
-                db_file: "tokensave.db".to_string(),
+                db_file: db_file.to_string(),
                 parent: None,
                 created_at: now.clone(),
                 last_synced_at: now,
@@ -102,12 +118,12 @@ impl BranchMeta {
     }
 }
 
-/// Loads branch metadata from `.tokensave/branch-meta.json`.
+/// Loads branch metadata from `branch-meta.json` in the project data dir.
 ///
 /// Returns `None` if the file doesn't exist (single-DB mode / pre-branch projects).
 /// Prints a warning to stderr if the file exists but is malformed.
-pub fn load_branch_meta(tokensave_dir: &Path) -> Option<BranchMeta> {
-    let path = tokensave_dir.join(BRANCH_META_FILENAME);
+pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
+    let path = data_dir.join(BRANCH_META_FILENAME);
     let content = std::fs::read_to_string(&path).ok()?;
     match serde_json::from_str(&content) {
         Ok(meta) => Some(meta),
@@ -121,16 +137,16 @@ pub fn load_branch_meta(tokensave_dir: &Path) -> Option<BranchMeta> {
     }
 }
 
-/// Saves branch metadata to `.tokensave/branch-meta.json`.
-pub fn save_branch_meta(tokensave_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
-    let path = tokensave_dir.join(BRANCH_META_FILENAME);
+/// Saves branch metadata to `branch-meta.json` in the project data dir.
+pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
+    let path = data_dir.join(BRANCH_META_FILENAME);
     let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
 }
 
 /// Returns the path to the `branches/` subdirectory, creating it if needed.
-pub fn ensure_branches_dir(tokensave_dir: &Path) -> std::io::Result<PathBuf> {
-    let dir = tokensave_dir.join("branches");
+pub fn ensure_branches_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let dir = data_dir.join("branches");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -174,8 +190,16 @@ mod tests {
         let meta = BranchMeta::new("main");
         assert_eq!(meta.default_branch, "main");
         assert!(meta.is_tracked("main"));
-        assert_eq!(meta.branches["main"].db_file, "tokensave.db");
+        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
         assert!(meta.branches["main"].parent.is_none());
+    }
+
+    #[test]
+    fn new_for_dir_tracks_data_dir_brand() {
+        let legacy = BranchMeta::new_for_dir(Path::new("/p/.tokensave"), "main");
+        assert_eq!(legacy.branches["main"].db_file, "tokensave.db");
+        let fresh = BranchMeta::new_for_dir(Path::new("/p/.tracedecay"), "main");
+        assert_eq!(fresh.branches["main"].db_file, "tracedecay.db");
     }
 
     #[test]

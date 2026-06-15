@@ -1,6 +1,6 @@
 # MCP probe matrix
 
-Drive a fresh `tokensave serve` MCP server over stdio and exercise every
+Drive a fresh `tracedecay serve` MCP server over stdio and exercise every
 read-only tool against a set of real repos. Produces a per-tool / per-repo
 status matrix that flags tools needing investigation (errors, timeouts,
 empty results, performance regressions).
@@ -31,15 +31,15 @@ Each module exposes a `probes_for(discovered)` function that returns
 ## Quick run
 
 ```sh
-# 1. Build the release binary (driver shells out to ../../target/release/tokensave)
-cargo build --release --bin tokensave
+# 1. Build the release binary (driver shells out to ../../target/release/tracedecay)
+cargo build --release --bin tracedecay
 
 # 2. Run the matrix
 python3 scripts/mcp_probe/probe.py
 python3 scripts/mcp_probe/build_matrix.py > /tmp/matrix.md
 ```
 
-The driver writes per-call status to `/tmp/tokensave_matrix.log` in TSV:
+The driver writes per-call status to `/tmp/tracedecay_matrix.log` in TSV:
 `repo  tool  query_json  status  detail`, where status ∈
 `OK | EMPTY | ERROR | TIMEOUT | BAD | SLOW`.
 

@@ -3,30 +3,30 @@
 
 use serde_json::{json, Value};
 
-use crate::errors::{Result, TokenSaveError};
-use crate::tokensave::TokenSave;
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 
-pub(super) async fn handle_str_replace(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: path".to_string(),
-        })?;
+pub(super) async fn handle_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let path =
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: path".to_string(),
+            })?;
 
     let old_str = args
         .get("old_str")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: old_str".to_string(),
         })?;
 
     let new_str = args
         .get("new_str")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: new_str".to_string(),
         })?;
 
@@ -40,18 +40,18 @@ pub(super) async fn handle_str_replace(cg: &TokenSave, args: Value) -> Result<To
     })
 }
 
-pub(super) async fn handle_multi_str_replace(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: path".to_string(),
-        })?;
+pub(super) async fn handle_multi_str_replace(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let path =
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: path".to_string(),
+            })?;
 
     let replacements = args
         .get("replacements")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: replacements".to_string(),
         })?;
 
@@ -69,7 +69,7 @@ pub(super) async fn handle_multi_str_replace(cg: &TokenSave, args: Value) -> Res
         .collect();
 
     if parsed_replacements.len() != replacements.len() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: "each replacement must be an array of exactly 2 strings".to_string(),
         });
     }
@@ -84,25 +84,25 @@ pub(super) async fn handle_multi_str_replace(cg: &TokenSave, args: Value) -> Res
     })
 }
 
-pub(super) async fn handle_insert_at(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: path".to_string(),
-        })?;
+pub(super) async fn handle_insert_at(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let path =
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: path".to_string(),
+            })?;
 
     let anchor =
         args.get("anchor")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: anchor".to_string(),
             })?;
 
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: content".to_string(),
         })?;
 
@@ -121,17 +121,17 @@ pub(super) async fn handle_insert_at(cg: &TokenSave, args: Value) -> Result<Tool
     })
 }
 
-pub(super) async fn handle_replace_symbol(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_replace_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let symbol =
         args.get("symbol")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: symbol".to_string(),
             })?;
     let new_source = args
         .get("new_source")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: new_source".to_string(),
         })?;
 
@@ -149,17 +149,17 @@ pub(super) async fn handle_replace_symbol(cg: &TokenSave, args: Value) -> Result
     })
 }
 
-pub(super) async fn handle_insert_at_symbol(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let symbol =
         args.get("symbol")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TokenSaveError::Config {
+            .ok_or_else(|| TraceDecayError::Config {
                 message: "missing required parameter: symbol".to_string(),
             })?;
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: content".to_string(),
         })?;
     let position = args
@@ -181,25 +181,25 @@ pub(super) async fn handle_insert_at_symbol(cg: &TokenSave, args: Value) -> Resu
     })
 }
 
-pub(super) async fn handle_ast_grep_rewrite(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
-            message: "missing required parameter: path".to_string(),
-        })?;
+pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let path =
+        args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: path".to_string(),
+            })?;
 
     let pattern = args
         .get("pattern")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: pattern".to_string(),
         })?;
 
     let rewrite = args
         .get("rewrite")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| TokenSaveError::Config {
+        .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: rewrite".to_string(),
         })?;
 

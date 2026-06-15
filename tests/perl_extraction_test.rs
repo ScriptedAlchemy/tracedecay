@@ -1,6 +1,6 @@
-use tokensave::extraction::LanguageExtractor;
-use tokensave::extraction::PerlExtractor;
-use tokensave::types::*;
+use tracedecay::extraction::LanguageExtractor;
+use tracedecay::extraction::PerlExtractor;
+use tracedecay::types::*;
 
 #[test]
 fn test_perl_extract_functions() {

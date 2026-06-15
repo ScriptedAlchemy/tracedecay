@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-post-tool-use",
+            "command": "'/home/zack/projects/tokensave/target/debug/tracedecay' hook-codex-post-tool-use",
             "timeout": 60,
             "type": "command"
           }
@@ -16,7 +16,7 @@
       {
         "hooks": [
           {
-            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-session-start",
+            "command": "'/home/zack/projects/tokensave/target/debug/tracedecay' hook-codex-session-start",
             "timeout": 5,
             "type": "command"
           }
@@ -27,7 +27,7 @@
       {
         "hooks": [
           {
-            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-subagent-start",
+            "command": "'/home/zack/projects/tokensave/target/debug/tracedecay' hook-codex-subagent-start",
             "timeout": 5,
             "type": "command"
           }
@@ -38,7 +38,7 @@
       {
         "hooks": [
           {
-            "command": "'/home/zack/projects/tokensave/target/debug/tokensave' hook-codex-user-prompt-submit",
+            "command": "'/home/zack/projects/tokensave/target/debug/tracedecay' hook-codex-user-prompt-submit",
             "timeout": 5,
             "type": "command"
           }

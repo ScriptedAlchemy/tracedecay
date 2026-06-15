@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tokensave::bench::{run_bench, BenchOptions, OutputFormat};
-use tokensave::tokensave::TokenSave;
+use tracedecay::bench::{run_bench, BenchOptions, OutputFormat};
+use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]
 async fn bench_runs_and_returns_report() {
@@ -10,7 +10,7 @@ async fn bench_runs_and_returns_report() {
         "pub fn hello() {}\npub fn world() {}\n",
     )
     .unwrap();
-    let cg = TokenSave::init(tmp.path()).await.unwrap();
+    let cg = TraceDecay::init(tmp.path()).await.unwrap();
 
     let queries_path = tmp.path().join("q.toml");
     std::fs::write(

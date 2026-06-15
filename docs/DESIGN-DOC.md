@@ -1,6 +1,6 @@
-# Tokensave Design Document
+# TraceDecay Design Document
 
-Tokensave is a code intelligence tool that builds semantic knowledge graphs from source code.
+TraceDecay is a code intelligence tool that builds semantic knowledge graphs from source code.
 It parses source files with tree-sitter, extracts symbols and relationships into a SQLite
 database, and exposes the graph through a CLI and an MCP (Model Context Protocol) server.
 The core insight is that AI coding agents waste tokens reading raw files when a pre-built
@@ -47,15 +47,15 @@ paths without duplication.
 src/
   main.rs             CLI entry point, subcommand dispatch
   lib.rs              Crate root, module declarations, lint config
-  tokensave.rs        TokenSave facade -- the main public API
+  tracedecay.rs        TraceDecay facade -- the main public API
   branch.rs           Git branch resolution (current branch, default detection, merge-base)
   branch_meta.rs      Branch metadata persistence (branch-meta.json)
   config.rs           Per-project config (exclude patterns, limits)
   errors.rs           Error types (thiserror)
   sync.rs             Content hashing, stale/new/removed file detection
-  user_config.rs      User-level config (~/.tokensave/config.toml)
+  user_config.rs      User-level config (~/.tracedecay/config.toml)
   cloud.rs            Cloudflare Worker counter, GitHub release checks
-  global_db.rs        Cross-project token tracking (~/.tokensave/global.db)
+  global_db.rs        Cross-project token tracking (~/.tracedecay/global.db)
 
   extraction/         Tree-sitter based extractors (one per language)
     mod.rs            Extractor registry, feature-gated language modules
@@ -135,7 +135,7 @@ The graph has three primary entities stored in SQLite tables.
 
 ### 1. File Discovery
 
-`TokenSave::index_all` walks the project tree, filters by extension (language support)
+`TraceDecay::index_all` walks the project tree, filters by extension (language support)
 and config exclude globs. If `git_ignore` is enabled, it additionally filters through
 `.gitignore` rules via the `ignore` crate.
 
@@ -175,7 +175,7 @@ from the MCP server and git post-commit hooks.
 
 ### 5. Incremental Sync
 
-`TokenSave::sync` compares the current file system state against the stored file records
+`TraceDecay::sync` compares the current file system state against the stored file records
 using SHA-256 content hashes. It identifies three sets:
 
 - **New files**: on disk but not in DB, need full extraction
@@ -242,8 +242,8 @@ query terms appear literally in the code, but fails when concepts don't match
 symbol names (e.g. "authentication" won't find `login()` unless a docstring
 mentions it).
 
-Rather than embedding models, tokensave uses **agent-driven keyword expansion**.
-The `tokensave_context` MCP tool accepts a `keywords` array where the calling
+Rather than embedding models, tracedecay uses **agent-driven keyword expansion**.
+The `tracedecay_context` MCP tool accepts a `keywords` array where the calling
 agent provides synonyms:
 
 ```json
@@ -283,7 +283,7 @@ the Model Context Protocol lifecycle:
 3. **tools/call**: dispatches to `handle_tool_call` which routes by tool name
 
 The server is stateless between calls (each call queries the database independently).
-It tracks basic statistics (call counts, tokens saved per tool) for the `tokensave_status`
+It tracks basic statistics (call counts, tokens saved per tool) for the `tracedecay_status`
 tool.
 
 ### Tool Categories
@@ -305,7 +305,7 @@ The 37 MCP tools fall into several categories:
 | Status          | status                                                   |
 
 Each tool is defined in `mcp/tools.rs` with a JSON Schema for its parameters.
-`handle_tool_call` deserializes the arguments, calls the appropriate `TokenSave`
+`handle_tool_call` deserializes the arguments, calls the appropriate `TraceDecay`
 method, and formats the result.
 
 ## Agent Integration
@@ -323,7 +323,7 @@ Each agent's install routine:
 
 ```mermaid
 graph TB
-    subgraph "tokensave install --agent X"
+    subgraph "tracedecay install --agent X"
         I[Install] --> MCP[Register MCP Server]
         I --> PERM[Set Tool Permissions]
         I --> HOOK[Install Hook]
@@ -364,12 +364,13 @@ tree-sitter versions. The FFI shims live in `src/tree_sitter/`.
 
 ## Token Tracking
 
-Tokensave tracks how many tokens it saves compared to raw file reads. Each MCP tool
+TraceDecay tracks how many tokens it saves compared to raw file reads. Each MCP tool
 call estimates the tokens that would have been consumed by reading the relevant files,
 subtracts the size of the tool's response, and accumulates the difference in the
 per-project database.
 
-A global database at `~/.tokensave/global.db` aggregates totals across all projects.
+A global database at `~/.tracedecay/global.db` aggregates totals across all projects
+(an existing legacy `~/.tokensave/` directory is still honored as a fallback).
 An opt-in worldwide counter (Cloudflare Worker) lets users contribute their totals
 anonymously. Upload is best-effort with 2-second timeouts and never blocks the CLI.
 
@@ -379,13 +380,13 @@ The system uses `tokio` for async I/O but most work is CPU-bound (tree-sitter pa
 or SQLite-bound. Key concurrency points:
 
 - The MCP server processes one JSON-RPC request at a time (single stdio stream)
-- The git post-commit hook runs `tokensave sync` in the background (`&`). `sync` requires an existing database -- it will not create one. This prevents the hook from silently bootstrapping indexes in repos that were never initialized with `tokensave init`.
+- The git post-commit hook runs `tracedecay sync` in the background (`&`). `sync` requires an existing database -- it will not create one. This prevents the hook from silently bootstrapping indexes in repos that were never initialized with `tracedecay init`.
 - SQLite WAL mode + busy timeout handles concurrent access gracefully
 - Version checks and counter uploads run on background threads during `sync`
 
 ## Build and Distribution
 
-- **Cargo**: `cargo install tokensave`
+- **Cargo**: `cargo install tracedecay`
 - **Homebrew**: custom tap with prebuilt bottles (macOS ARM64, Linux x86_64)
 - **Scoop**: custom bucket with prebuilt Windows x86_64 zip
 - **GitHub Releases**: prebuilt archives for all platforms

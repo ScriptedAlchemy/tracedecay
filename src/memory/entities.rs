@@ -109,7 +109,7 @@ fn extract_code_tokens(text: &str) -> Vec<(usize, String)> {
         .into_iter()
         .filter_map(|(index, token)| {
             let cleaned = clean_code_token(token);
-            if is_file_path(&cleaned) || is_rust_symbol(&cleaned) || is_tokensave_tool(&cleaned) {
+            if is_file_path(&cleaned) || is_rust_symbol(&cleaned) || is_tracedecay_tool(&cleaned) {
                 Some((index, cleaned))
             } else {
                 None
@@ -200,7 +200,8 @@ fn clean_code_token(token: &str) -> String {
         .to_string();
 
     let normalized_tool = cleaned.replace('-', "_").to_ascii_lowercase();
-    if normalized_tool.starts_with("tokensave_") {
+    // Accept both tracedecay_ (new) and tokensave_ (legacy) tool name prefixes.
+    if normalized_tool.starts_with("tracedecay_") || normalized_tool.starts_with("tokensave_") {
         normalized_tool.trim_end_matches('.').to_string()
     } else {
         cleaned.trim_end_matches('.').to_string()
@@ -224,9 +225,13 @@ fn is_rust_symbol(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':'))
 }
 
-fn is_tokensave_tool(token: &str) -> bool {
+/// Returns true for both `tracedecay_*` (new) and `tokensave_*` (legacy)
+/// MCP tool names found in stored session messages.
+///
+/// LEGACY-COMPAT: tokensave_ prefix accepted alongside tracedecay_.
+fn is_tracedecay_tool(token: &str) -> bool {
     let normalized = token.replace('-', "_").to_ascii_lowercase();
-    normalized.starts_with("tokensave_")
+    (normalized.starts_with("tracedecay_") || normalized.starts_with("tokensave_"))
         && token
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')

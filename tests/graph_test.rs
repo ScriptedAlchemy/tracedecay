@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use tempfile::TempDir;
-use tokensave::db::Database;
-use tokensave::graph::git::file_churn;
-use tokensave::graph::queries::GraphQueryManager;
-use tokensave::graph::traversal::GraphTraverser;
-use tokensave::tokensave::TokenSave;
-use tokensave::types::*;
+use tracedecay::db::Database;
+use tracedecay::graph::git::file_churn;
+use tracedecay::graph::queries::GraphQueryManager;
+use tracedecay::graph::traversal::GraphTraverser;
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir).
 async fn setup_db() -> (Database, TempDir) {
@@ -648,7 +648,7 @@ async fn test_find_circular_dependencies() {
     db.insert_edges(&edges).await.expect("insert edges failed");
 
     // Register files so they show up in get_all_files.
-    let file_a = tokensave::types::FileRecord {
+    let file_a = tracedecay::types::FileRecord {
         path: "src/a.rs".to_string(),
         content_hash: "hash_a".to_string(),
         size: 100,
@@ -656,7 +656,7 @@ async fn test_find_circular_dependencies() {
         indexed_at: 2000,
         node_count: 1,
     };
-    let file_b = tokensave::types::FileRecord {
+    let file_b = tracedecay::types::FileRecord {
         path: "src/b.rs".to_string(),
         content_hash: "hash_b".to_string(),
         size: 100,
@@ -826,7 +826,7 @@ async fn test_node_metrics_depth() {
 // ---------------------------------------------------------------------------
 
 /// Creates a temporary Rust project with cross-file calls and indexes it.
-async fn setup_project() -> (TokenSave, TempDir) {
+async fn setup_project() -> (TraceDecay, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let project = dir.path();
     fs::create_dir_all(project.join("src")).expect("failed to create src dir");
@@ -856,9 +856,9 @@ pub fn helper() -> String {
     )
     .expect("failed to write utils.rs");
 
-    let cg = TokenSave::init(project)
+    let cg = TraceDecay::init(project)
         .await
-        .expect("failed to init TokenSave");
+        .expect("failed to init TraceDecay");
     cg.index_all().await.expect("failed to index project");
     (cg, dir)
 }
@@ -889,7 +889,7 @@ async fn test_build_file_adjacency() {
 // Health algorithm tests
 // ---------------------------------------------------------------------------
 
-use tokensave::graph::health::{
+use tracedecay::graph::health::{
     acyclicity_score, compute_composite_health, dependency_depth, gini_coefficient, gini_label,
     modularity_score, HealthDimensions,
 };
