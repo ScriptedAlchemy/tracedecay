@@ -333,7 +333,10 @@ fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
     forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens)
 }
 
-fn threshold_pressure(current_tokens: Option<i64>, threshold_tokens: Option<i64>) -> bool {
+pub(super) fn threshold_pressure(
+    current_tokens: Option<i64>,
+    threshold_tokens: Option<i64>,
+) -> bool {
     match (current_tokens, threshold_tokens) {
         (Some(current_tokens), Some(threshold_tokens)) if threshold_tokens > 0 => {
             current_tokens >= threshold_tokens

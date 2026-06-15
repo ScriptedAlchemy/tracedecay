@@ -368,6 +368,8 @@ pub(crate) async fn preflight(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
         request.fresh_tail_count,
+        request.current_tokens,
+        request.threshold_tokens,
     );
     let decision = compression_decision::preflight_decision(PreflightDecisionInput {
         request: &request,
@@ -552,6 +554,8 @@ async fn prepare_compression_context(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
         request.fresh_tail_count,
+        request.current_tokens,
+        request.threshold_tokens,
     );
     let plan = compression_decision::compression_plan(CompressionPlanInput {
         request,
@@ -1078,6 +1082,8 @@ fn compression_window(
     raw_messages: &[LcmRawMessage],
     current_frontier_store_id: Option<i64>,
     fresh_tail_count: Option<usize>,
+    current_tokens: Option<i64>,
+    threshold_tokens: Option<i64>,
 ) -> CompressionWindow {
     let frontier_store_id = current_frontier_store_id.unwrap_or(0);
     let unsummarized = raw_messages
@@ -1085,9 +1091,17 @@ fn compression_window(
         .filter(|message| message.store_id > frontier_store_id)
         .cloned()
         .collect::<Vec<_>>();
+    let configured_fresh_tail_count = fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT);
+    let effective_fresh_tail_count = if unsummarized.len() > 1
+        && compression_decision::threshold_pressure(current_tokens, threshold_tokens)
+    {
+        configured_fresh_tail_count.min(unsummarized.len() - 1)
+    } else {
+        configured_fresh_tail_count
+    };
     let backlog_len = unsummarized
         .len()
-        .saturating_sub(fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT));
+        .saturating_sub(effective_fresh_tail_count);
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()

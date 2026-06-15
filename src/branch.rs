@@ -16,6 +16,29 @@ pub fn current_branch(project_root: &Path) -> Option<String> {
     current_branch_git(project_root)
 }
 
+/// Returns true if `branch` exists as a local `refs/heads/*` branch.
+pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    if let Ok(repo) = gix::open(project_root) {
+        let refname = format!("refs/heads/{branch}");
+        if repo.find_reference(&refname).is_ok() {
+            return true;
+        }
+    }
+    std::process::Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(project_root)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn current_branch_gix(project_root: &Path) -> Option<String> {
     let repo = gix::open(project_root).ok()?;
     let head = repo.head().ok()?;
@@ -300,10 +323,19 @@ pub async fn add_branch_tracking(
     }
     let tracedecay_dir = get_tracedecay_dir(project_root);
 
+    let _branch_lock = match try_acquire_branch_add_lock(&tracedecay_dir) {
+        Ok(lock) => lock,
+        Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
+            return Ok(BranchAddOutcome::AlreadyTracked);
+        }
+        Err(e) => return Err(e),
+    };
+
     let mut meta = branch_meta::load_branch_meta(&tracedecay_dir).unwrap_or_else(|| {
         let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
         branch_meta::BranchMeta::new_for_dir(&tracedecay_dir, &default)
     });
+    prune_missing_branch_dbs(&tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
         return Ok(BranchAddOutcome::AlreadyTracked);
@@ -343,15 +375,29 @@ pub async fn add_branch_tracking(
         }
     })?;
     let new_db_path = branches_dir.join(format!("{stem}.db"));
-    std::fs::copy(&parent_db, &new_db_path)?;
+    if let Err(e) = std::fs::copy(&parent_db, &new_db_path) {
+        remove_branch_db_files(&new_db_path);
+        return Err(e.into());
+    }
 
     // Save metadata BEFORE open() so it resolves the new branch to its DB.
     let db_file = format!("branches/{stem}.db");
     meta.add_branch(branch_name, &db_file, &parent);
-    branch_meta::save_branch_meta(&tracedecay_dir, &meta)?;
+    if let Err(e) = branch_meta::save_branch_meta(&tracedecay_dir, &meta) {
+        remove_branch_db_files(&new_db_path);
+        return Err(e.into());
+    }
 
-    let cg = crate::tracedecay::TraceDecay::open(project_root).await?;
-    let _ = cg.sync().await?;
+    let sync_result = async {
+        let cg = crate::tracedecay::TraceDecay::open(project_root).await?;
+        let _ = cg.sync().await?;
+        Ok::<(), crate::errors::TraceDecayError>(())
+    }
+    .await;
+    if let Err(e) = sync_result {
+        rollback_branch_tracking(&tracedecay_dir, branch_name, &db_file, &new_db_path);
+        return Err(e);
+    }
 
     if let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) {
         meta.touch_synced(branch_name);
@@ -359,6 +405,73 @@ pub async fn add_branch_tracking(
     }
 
     Ok(BranchAddOutcome::Added)
+}
+
+fn rollback_branch_tracking(
+    tracedecay_dir: &Path,
+    branch_name: &str,
+    db_file: &str,
+    new_db_path: &Path,
+) {
+    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
+        let should_remove = meta
+            .branches
+            .get(branch_name)
+            .is_some_and(|entry| entry.db_file == db_file);
+        if should_remove {
+            meta.remove_branch(branch_name);
+            let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
+        }
+    }
+    let still_ours = crate::branch_meta::load_branch_meta(tracedecay_dir)
+        .and_then(|meta| meta.branches.get(branch_name).cloned())
+        .is_none_or(|entry| entry.db_file == db_file);
+    if still_ours {
+        remove_branch_db_files(new_db_path);
+    }
+}
+
+fn prune_missing_branch_dbs(tracedecay_dir: &Path, meta: &mut crate::branch_meta::BranchMeta) {
+    let missing: Vec<String> = meta
+        .branches
+        .iter()
+        .filter_map(|(name, entry)| {
+            if name == &meta.default_branch {
+                return None;
+            }
+            let path = tracedecay_dir.join(&entry.db_file);
+            (!path.exists()).then(|| name.clone())
+        })
+        .collect();
+    for name in missing {
+        meta.remove_branch(&name);
+    }
+}
+
+fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
+    use fs2::FileExt;
+
+    std::fs::create_dir_all(tracedecay_dir)?;
+    let lock_path = tracedecay_dir.join(".branch-add.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    file.try_lock_exclusive()
+        .map_err(|e| crate::errors::TraceDecayError::SyncLock {
+            message: format!("branch add already running at {}: {e}", lock_path.display()),
+        })?;
+    Ok(file)
+}
+
+fn remove_branch_db_files(db_path: &Path) {
+    let _ = std::fs::remove_file(db_path);
+    let mut sidecar = db_path.to_path_buf();
+    sidecar.set_extension("db-wal");
+    let _ = std::fs::remove_file(&sidecar);
+    sidecar.set_extension("db-shm");
+    let _ = std::fs::remove_file(&sidecar);
 }
 
 #[cfg(test)]

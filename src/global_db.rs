@@ -1394,8 +1394,13 @@ impl GlobalDb {
         if fts_query.is_empty() || limit == 0 {
             return Vec::new();
         }
+        let literal_terms: Vec<String> = query
+            .split_whitespace()
+            .filter(|term| term.contains('-'))
+            .map(str::to_lowercase)
+            .collect();
 
-        let select = "SELECT
+        let mut sql = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
@@ -1405,30 +1410,41 @@ impl GlobalDb {
              FROM session_messages_fts
              JOIN session_messages m ON session_messages_fts.rowid = m.rowid
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2
-               AND (?3 IS NULL OR s.project_key = ?3)
-               AND (?4 IS NULL OR s.parent_session_id = ?4)
-               AND (?5 != 1 OR s.is_subagent = 0)
-               AND (?6 != 1 OR s.is_subagent = 1)";
-        let order = " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
-                      LIMIT ?7";
-        let parents_only = i64::from(matches!(scope, SessionSearchScope::ParentsOnly));
-        let subagents_only = i64::from(matches!(scope, SessionSearchScope::SubagentsOnly));
-        let rows_result = self
-            .conn
-            .query(
-                &format!("{select}{order}"),
-                params![
-                    fts_query.as_str(),
-                    provider,
-                    opt_text(project_key),
-                    opt_text(parent_session_id),
-                    parents_only,
-                    subagents_only,
-                    limit as i64,
-                ],
-            )
-            .await;
+             WHERE session_messages_fts MATCH ?1 AND m.provider = ?2"
+            .to_string();
+        let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_string())];
+        if let Some(project_key) = project_key {
+            query_params.push(Value::Text(project_key.to_string()));
+            sql.push_str(&format!(" AND s.project_key = ?{}", query_params.len()));
+        }
+        if let Some(parent_session_id) = parent_session_id {
+            query_params.push(Value::Text(parent_session_id.to_string()));
+            sql.push_str(&format!(
+                " AND s.parent_session_id = ?{}",
+                query_params.len()
+            ));
+        }
+        if matches!(scope, SessionSearchScope::ParentsOnly) {
+            sql.push_str(" AND s.is_subagent = 0");
+        }
+        if matches!(scope, SessionSearchScope::SubagentsOnly) {
+            sql.push_str(" AND s.is_subagent = 1");
+        }
+        for term in &literal_terms {
+            query_params.push(Value::Text(term.clone()));
+            sql.push_str(&format!(
+                " AND instr(lower(m.text), ?{}) > 0",
+                query_params.len()
+            ));
+        }
+        query_params.push(Value::Integer(limit as i64));
+        sql.push_str(&format!(
+            " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+                      LIMIT ?{}",
+            query_params.len()
+        ));
+
+        let rows_result = self.conn.query(&sql, query_params).await;
 
         let Ok(mut rows) = rows_result else {
             return Vec::new();

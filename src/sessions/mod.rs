@@ -20,7 +20,7 @@ pub mod vibe;
 
 /// Ingest transcripts from every path-discoverable agent whose sessions
 /// belong to `project_root`, into the project-local `sessions.db` (`db`).
-/// Hookless agents (Claude, Codex, …) are reconciled exclusively by this
+/// Hookless agents (Claude, Codex, ...) are reconciled exclusively by this
 /// startup catch-up sweep; Cursor additionally has live end-of-turn hooks,
 /// and its sweep entry shares the hooks' parse offsets so neither path ever
 /// re-ingests the other's work. Fail-open and incremental (unchanged files

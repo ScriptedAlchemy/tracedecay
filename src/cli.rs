@@ -310,6 +310,11 @@ pub enum Commands {
     },
     /// Live token savings monitor (global, all projects)
     Monitor,
+    /// Ingest and search local agent session transcripts
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
     /// Manage multi-branch indexing
     Branch {
         #[command(subcommand)]
@@ -331,6 +336,27 @@ pub enum Commands {
         /// List ALL tracked projects from the global DB
         #[arg(short, long)]
         all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionsAction {
+    /// Ingest Cursor and/or Codex transcript JSONL files into the global DB
+    Ingest {
+        /// Provider to ingest: cursor, codex, or all
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Search previously ingested session messages
+    Search {
+        /// Full-text query to search for
+        query: String,
+        /// Provider to search: cursor, codex, or all
+        #[arg(long)]
+        provider: Option<String>,
+        /// Maximum number of matches per provider
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
     },
 }
 
@@ -415,7 +441,7 @@ pub enum BranchAction {
 
 #[cfg(test)]
 mod cli_parse_tests {
-    use super::{BranchAction, Cli, Commands, MemoryAction};
+    use super::{BranchAction, Cli, Commands, MemoryAction, SessionsAction};
     use clap::{error::ErrorKind, Parser};
 
     #[test]
@@ -582,5 +608,45 @@ mod cli_parse_tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_sessions_ingest_and_search_commands() {
+        let ingest =
+            Cli::try_parse_from(["tracedecay", "sessions", "ingest", "--provider", "cursor"])
+                .unwrap();
+        match ingest.command {
+            Some(Commands::Sessions {
+                action: SessionsAction::Ingest { provider },
+            }) => assert_eq!(provider.as_deref(), Some("cursor")),
+            _ => panic!("expected sessions ingest command"),
+        }
+
+        let search = Cli::try_parse_from([
+            "tracedecay",
+            "sessions",
+            "search",
+            "needle",
+            "--provider",
+            "codex",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        match search.command {
+            Some(Commands::Sessions {
+                action:
+                    SessionsAction::Search {
+                        query,
+                        provider,
+                        limit,
+                    },
+            }) => {
+                assert_eq!(query, "needle");
+                assert_eq!(provider.as_deref(), Some("codex"));
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("expected sessions search command"),
+        }
     }
 }

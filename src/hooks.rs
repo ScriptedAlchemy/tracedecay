@@ -603,12 +603,12 @@ pub fn cursor_shell_sync_plan_with_current_branch(
 
 /// Returns the target branch for a branch-changing git command:
 /// `git checkout <branch>`, `git switch <branch>`, `git checkout -b <branch>`,
-/// `git switch -c <branch>`, and `git worktree add [<path>] <branch>` /
-/// `git worktree add -b <branch> <path>`.
+/// `git switch -c <branch>`, and `git worktree add <path> <branch>`.
 ///
-/// Path checkouts (`git checkout -- <file>` or obvious file pathspecs) and
-/// non-switch commands return `None`. Only commands whose first token is `git`
-/// are considered.
+/// Path checkouts (`git checkout -- <file>` or obvious file pathspecs), remote
+/// tracking shortcuts such as `git switch --track origin/feature`, and
+/// non-switch commands return `None`. Only commands whose first shell word is
+/// `git` are considered.
 pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
     let raw = shell_words(command);
     let sub_pos = git_subcommand_pos(&raw)?;
@@ -616,18 +616,28 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
 
     match sub.as_str() {
         "checkout" | "switch" => {
-            // Path checkout (`git checkout -- file`) is not a branch switch.
             let after = &raw[sub_pos + 1..];
-            let mut iter = after.iter();
-            while let Some(tok) = iter.next() {
+            let mut i = 0;
+            let mut uses_tracking_shortcut = false;
+            while i < after.len() {
+                let tok = &after[i];
                 if tok == "--" {
                     return None;
                 }
-                if matches!(tok.as_str(), "-b" | "-B" | "-c" | "-C") {
-                    return iter.find(|t| !t.starts_with('-')).cloned();
+                if matches!(tok.as_str(), "-b" | "-B" | "-c" | "-C" | "--orphan") {
+                    return after.get(i + 1).cloned();
+                }
+                if tok == "-t" || tok == "--track" || tok.starts_with("--track=") {
+                    uses_tracking_shortcut = true;
+                    i += 1;
+                    continue;
                 }
                 if tok.starts_with('-') {
+                    i += 1;
                     continue;
+                }
+                if uses_tracking_shortcut {
+                    return None;
                 }
                 if is_obvious_checkout_pathspec(tok) {
                     return None;
@@ -637,30 +647,49 @@ pub fn cursor_branch_switch_target(command: &str) -> Option<String> {
             None
         }
         "worktree" => {
-            let lower: Vec<String> = raw.iter().map(|t| t.to_ascii_lowercase()).collect();
-            let add_pos = lower.iter().position(|t| t == "add")?;
-            let after = &raw[add_pos + 1..];
-            let mut iter = after.iter();
-            while let Some(tok) = iter.next() {
-                if matches!(tok.as_str(), "-b" | "-B") {
-                    return iter.find(|t| !t.starts_with('-')).cloned();
-                }
-                if tok.starts_with('-') {
-                    continue;
-                }
-                break;
+            let action = raw.get(sub_pos + 1).map(|token| token.to_ascii_lowercase());
+            if action.as_deref() != Some("add") {
+                return None;
             }
-            // No `-b`: positionals are `<path> [<branch>]`; the branch is the
-            // second positional, if present.
-            let positionals: Vec<&str> = after
-                .iter()
-                .map(String::as_str)
-                .filter(|t| !t.starts_with('-'))
-                .collect();
-            positionals.get(1).map(|b| (*b).to_string())
+            cursor_worktree_add_target(&raw[sub_pos + 2..])
         }
         _ => None,
     }
+}
+
+fn cursor_worktree_add_target(after: &[String]) -> Option<String> {
+    let mut i = 0;
+    let mut positional = Vec::new();
+    let mut detached = false;
+    while i < after.len() {
+        let tok = &after[i];
+        if tok == "--" {
+            positional.extend(after[i + 1..].iter().cloned());
+            break;
+        }
+        if matches!(tok.as_str(), "-b" | "-B") {
+            return after.get(i + 1).cloned();
+        }
+        if tok == "-d" || tok == "--detach" {
+            detached = true;
+            i += 1;
+            continue;
+        }
+        if tok == "--reason" {
+            i += 2;
+            continue;
+        }
+        if tok.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        positional.push(tok.clone());
+        i += 1;
+    }
+    if detached {
+        return None;
+    }
+    positional.get(1).cloned()
 }
 
 fn is_obvious_checkout_pathspec(token: &str) -> bool {

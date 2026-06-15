@@ -1360,6 +1360,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 process::exit(1);
             }
         }
+        Commands::Sessions { action } => {
+            handle_sessions_action(action).await?;
+        }
         Commands::Branch { action } => {
             commands::handle_branch_action(action).await?;
         }
@@ -1403,6 +1406,108 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SessionProvider {
+    Cursor,
+    Codex,
+    All,
+}
+
+async fn handle_sessions_action(action: SessionsAction) -> tracedecay::errors::Result<()> {
+    match action {
+        SessionsAction::Ingest { provider } => {
+            let project_path = tracedecay::config::resolve_path_with_discovery(None);
+            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
+                .await
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not open project session database for {}",
+                        project_path.display()
+                    ),
+                })?;
+            let provider = parse_session_provider(provider.as_deref())?;
+            let stats = ingest_selected_session_sources(&db, &project_path, provider).await;
+            println!(
+                "ingested {} session(s), {} message(s)",
+                stats.sessions_upserted, stats.messages_upserted
+            );
+        }
+        SessionsAction::Search {
+            query,
+            provider,
+            limit,
+        } => {
+            let project_path = tracedecay::config::resolve_path_with_discovery(None);
+            let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
+                .await
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not open project session database for {}",
+                        project_path.display()
+                    ),
+                })?;
+            for provider in session_search_providers(provider.as_deref())? {
+                for result in db
+                    .search_session_messages(provider, None, &query, limit)
+                    .await
+                {
+                    println!(
+                        "[{}] {} {}: {}",
+                        result.session.provider,
+                        result.session.project_key,
+                        result.message.role,
+                        result.message.text.replace('\n', " ")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ingest_selected_session_sources(
+    db: &tracedecay::global_db::GlobalDb,
+    project_root: &std::path::Path,
+    provider: SessionProvider,
+) -> tracedecay::sessions::source::TranscriptIngestStats {
+    match provider {
+        SessionProvider::All => tracedecay::sessions::ingest_global_sources(db, project_root).await,
+        SessionProvider::Cursor => {
+            let Some(source) = tracedecay::sessions::cursor::CursorSweepSource::new() else {
+                return tracedecay::sessions::source::TranscriptIngestStats::default();
+            };
+            tracedecay::sessions::source::ingest_source(db, &source, project_root, None).await
+        }
+        SessionProvider::Codex => {
+            let Some(source) = tracedecay::sessions::codex::CodexSource::new() else {
+                return tracedecay::sessions::source::TranscriptIngestStats::default();
+            };
+            tracedecay::sessions::source::ingest_source(db, &source, project_root, None).await
+        }
+    }
+}
+
+fn parse_session_provider(provider: Option<&str>) -> tracedecay::errors::Result<SessionProvider> {
+    match provider.unwrap_or("all") {
+        "cursor" => Ok(SessionProvider::Cursor),
+        "codex" => Ok(SessionProvider::Codex),
+        "all" => Ok(SessionProvider::All),
+        other => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("unknown session provider '{other}' (expected cursor, codex, or all)"),
+        }),
+    }
+}
+
+fn session_search_providers(
+    provider: Option<&str>,
+) -> tracedecay::errors::Result<Vec<&'static str>> {
+    match parse_session_provider(provider)? {
+        SessionProvider::Cursor => Ok(vec!["cursor"]),
+        SessionProvider::Codex => Ok(vec!["codex"]),
+        SessionProvider::All => Ok(vec!["cursor", "codex"]),
+    }
 }
 
 fn should_skip_startup_maintenance(command: &Commands) -> bool {
