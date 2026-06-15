@@ -23,6 +23,8 @@ use super::{
     write_toml_file, AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext,
 };
 
+const PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
+
 /// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
 
@@ -94,12 +96,15 @@ impl AgentIntegration for CodexIntegration {
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_codex_dir = ctx.project_path.join(".codex");
+        let local_agents_md = ctx.project_path.join("AGENTS.md");
+        let has_local_prompt_rules = std::fs::read_to_string(&local_agents_md)
+            .is_ok_and(|content| content.contains(PROMPT_RULE_MARKER));
         if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || ctx.project_path.join("AGENTS.md").exists()
+            || has_local_prompt_rules
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
-            doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
+            doctor_check_prompt_file(dc, &local_agents_md);
             doctor_check_hooks(dc, &local_codex_dir.join("hooks.json"));
         } else {
             let codex_dir = ctx.home.join(".codex");
@@ -209,13 +214,12 @@ fn install_mcp_server(
 
 /// Append prompt rules to AGENTS.md (idempotent).
 fn install_prompt_rules(agents_md: &Path) -> Result<()> {
-    let marker = "## Prefer tokensave MCP tools";
     let existing = if agents_md.exists() {
         std::fs::read_to_string(agents_md).unwrap_or_default()
     } else {
         String::new()
     };
-    if existing.contains(marker) {
+    if existing.contains(PROMPT_RULE_MARKER) {
         eprintln!("  AGENTS.md already contains tokensave rules, skipping");
         return Ok(());
     }
@@ -228,7 +232,7 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
         })?;
     write!(
         f,
-        "\n{marker}\n\n\
+        "\n{PROMPT_RULE_MARKER}\n\n\
         Before reading source files or scanning the codebase, use the tokensave MCP tools \
         (`tokensave_context`, `tokensave_search`, `tokensave_callers`, `tokensave_callees`, \
         `tokensave_impact`, `tokensave_node`, `tokensave_files`, `tokensave_affected`). \

@@ -109,16 +109,35 @@ impl<'a> MemoryStore<'a> {
             ));
         };
         let mut merged_entities = existing.entities.clone();
+        let mut entities_changed = false;
         for entity in entities {
             if !merged_entities
                 .iter()
                 .any(|stored| stored.eq_ignore_ascii_case(&entity))
             {
                 merged_entities.push(entity);
+                entities_changed = true;
             }
         }
         self.replace_fact_entities(existing.fact_id, &merged_entities)
             .await?;
+        if entities_changed {
+            let merged_vector = self.encode_vector(&content, &merged_entities, "add_fact")?;
+            self.conn
+                .execute(
+                    "UPDATE memory_facts
+                     SET hrr_vector = ?1, hrr_algebra = ?2, hrr_dim = ?3
+                     WHERE fact_id = ?4",
+                    params![
+                        merged_vector,
+                        HRR_ALGEBRA,
+                        HolographicEncoder::DIMENSIONS as i64,
+                        existing.fact_id,
+                    ],
+                )
+                .await
+                .map_err(|e| db_error("add_fact", e))?;
+        }
         let fact = self.get_fact(existing.fact_id).await?.ok_or_else(|| {
             db_message(
                 "add_fact",

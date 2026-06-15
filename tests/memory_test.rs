@@ -376,6 +376,46 @@ async fn memory_store_add_list_get_and_deduplicates_by_content() {
 }
 
 #[tokio::test]
+async fn memory_store_recomputes_vector_when_duplicate_merges_new_entities() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+
+    let mut first = fact_request(
+        "Project Phoenix stores duplicate memory",
+        MemoryCategory::Decision,
+        0.72,
+    );
+    first.entities = vec!["Project Phoenix".to_string()];
+    let inserted = store.add_fact(first, DEFAULT_TRUST).await.unwrap();
+
+    let mut duplicate = fact_request(
+        "Project Phoenix stores duplicate memory",
+        MemoryCategory::Decision,
+        0.72,
+    );
+    duplicate.entities = vec!["SQLite".to_string()];
+    let merged = store.add_fact(duplicate, DEFAULT_TRUST).await.unwrap();
+
+    assert_eq!(merged.fact_id, inserted.fact_id);
+    assert!(merged.entities.contains(&"Project Phoenix".to_string()));
+    assert!(merged.entities.contains(&"SQLite".to_string()));
+
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT hrr_vector FROM memory_facts WHERE fact_id = ?1",
+            libsql::params![merged.fact_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let bytes: Vec<u8> = row.get(0).unwrap();
+    let stored = HolographicEncoder::deserialize(&bytes).unwrap();
+    let expected = HolographicEncoder.encode_fact(&merged.content, &merged.entities);
+    assert_eq!(stored, expected);
+}
+
+#[tokio::test]
 async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields() {
     let (db, _tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());
@@ -795,5 +835,39 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
             .iter()
             .any(|result| result.fact.content.contains("Older fact links")),
         "reason should find matching facts before applying the result cap"
+    );
+}
+
+#[tokio::test]
+async fn fact_retriever_reason_deduplicates_requested_entities() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let retriever = FactRetriever::new(db.conn());
+
+    let mut matching = fact_request(
+        "Project Phoenix uses SQLite memory",
+        MemoryCategory::Decision,
+        0.9,
+    );
+    matching.entities = vec!["Project Phoenix".to_string(), "SQLite".to_string()];
+    store.add_fact(matching, DEFAULT_TRUST).await.unwrap();
+
+    let results = retriever
+        .reason(
+            &[
+                "Project Phoenix".to_string(),
+                "SQLite".to_string(),
+                "Project Phoenix".to_string(),
+            ],
+            Some(MemoryCategory::Decision),
+            Some(0.3),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].fact.content,
+        "Project Phoenix uses SQLite memory"
     );
 }

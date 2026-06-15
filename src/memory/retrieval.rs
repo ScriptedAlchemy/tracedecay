@@ -164,10 +164,17 @@ impl<'a> FactRetriever<'a> {
             return Ok(Vec::new());
         }
 
+        let mut seen_entities = HashSet::new();
         let normalized: Vec<String> = entities
             .iter()
-            .map(|entity| normalize_entity(entity).to_ascii_lowercase())
-            .filter(|entity| !entity.is_empty())
+            .filter_map(|entity| {
+                let normalized = normalize_entity(entity).to_ascii_lowercase();
+                if normalized.is_empty() || !seen_entities.insert(normalized.clone()) {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            })
             .collect();
         if normalized.is_empty() {
             return Ok(Vec::new());

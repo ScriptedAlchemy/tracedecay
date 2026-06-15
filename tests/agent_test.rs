@@ -2299,6 +2299,30 @@ fn test_healthcheck_codex_local_install_checks_project_config() {
 }
 
 #[test]
+fn test_healthcheck_codex_global_install_ignores_unmanaged_project_agents_md() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let ctx = make_install_ctx(home.path());
+    CodexIntegration.install(&ctx).unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "Project-specific instructions\n",
+    )
+    .unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: project.path().to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "unmanaged project AGENTS.md should not mask a healthy global Codex install"
+    );
+}
+
+#[test]
 fn test_healthcheck_cursor_clean_install() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
