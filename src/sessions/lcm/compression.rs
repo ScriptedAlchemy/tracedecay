@@ -1963,7 +1963,10 @@ fn default_message_kind(role: &str) -> String {
 fn active_message_metadata(message: &Value, replay: &Value) -> String {
     let mut metadata = Map::new();
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
-    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), replay.clone());
+    metadata.insert(
+        ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
+        active_replay_for_metadata(replay),
+    );
     if let Some(lcm_ingest) = message.get("lcm_ingest") {
         metadata.insert("lcm_ingest".to_string(), lcm_ingest.clone());
     }
@@ -1990,8 +1993,19 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
-    metadata.insert(ACTIVE_REPLAY_MESSAGE_KEY.to_string(), replay.clone());
+    metadata.insert(
+        ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
+        active_replay_for_metadata(replay),
+    );
     Value::Object(metadata).to_string()
+}
+
+fn active_replay_for_metadata(replay: &Value) -> Value {
+    let mut replay = replay.clone();
+    if let Some(object) = replay.as_object_mut() {
+        strip_disposable_assistant_replay_sidecars(object, "");
+    }
+    replay
 }
 
 async fn update_active_replay_metadata(
@@ -2173,7 +2187,34 @@ fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value>
             Value::String(message.content.clone()),
         );
     }
+    strip_disposable_assistant_replay_sidecars(&mut replay, &message.role);
     Some(Value::Object(replay))
+}
+
+fn strip_disposable_assistant_replay_sidecars(
+    replay: &mut Map<String, Value>,
+    fallback_role: &str,
+) {
+    if !replay
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_role)
+        .eq_ignore_ascii_case("assistant")
+    {
+        return;
+    }
+
+    // Provider replay sidecars are useful before the next API call, but once
+    // LCM is rebuilding compressed history they become large derived state.
+    for key in [
+        "codex_message_items",
+        "codex_reasoning_items",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+    ] {
+        replay.remove(key);
+    }
 }
 
 fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {

@@ -1083,6 +1083,7 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
         "sha256": "user-sha256",
         "external_payload": {"kind": "user-field"},
         "ingest_protection": {"kind": "user-metadata"},
+        "reasoning": {"kind": "user-authored-field"},
     });
 
     let preflight = db
@@ -1146,6 +1147,93 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
     let mut expected = active_message;
     expected["store_id"] = Value::from(raw.store_id);
     assert_eq!(replay_from_raw.replay_messages, vec![expected]);
+}
+
+#[tokio::test]
+async fn raw_replay_strips_disposable_provider_reasoning_sidecars() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-sidecars").await;
+
+    db.lcm_preflight(LcmPreflightRequest {
+        provider: "cursor".into(),
+        session_id: "session-sidecars".into(),
+        messages: vec![json!({
+            "id": "assistant-sidecars",
+            "role": "assistant",
+            "content": "assistant visible content",
+            "reasoning": "private scratchpad",
+            "reasoning_content": "provider scratchpad",
+            "reasoning_details": [{"text": "derived reasoning"}],
+            "codex_reasoning_items": [{"encrypted_content": "large encrypted blob"}],
+            "codex_message_items": [{"type": "reasoning"}],
+        })],
+        current_tokens: Some(100),
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages: None,
+        summary_fan_in: None,
+        incremental_max_depth: None,
+        fresh_tail_count: None,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        context_length: None,
+        reserve_tokens_floor: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "assistant-sidecars")
+        .await
+        .expect("raw sidecar message should exist");
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    let stored_replay = metadata["active_replay"]
+        .as_object()
+        .expect("stored active replay should be an object");
+    for key in [
+        "codex_message_items",
+        "codex_reasoning_items",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+    ] {
+        assert!(
+            stored_replay.get(key).is_none(),
+            "persisted active replay should drop disposable provider sidecar {key}"
+        );
+    }
+
+    let replay_from_raw = db
+        .lcm_compress(compress_request(
+            "cursor",
+            "session-sidecars",
+            LcmSummarizerMode::Fake {
+                summary_text: "unused".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let replay = &replay_from_raw.replay_messages[0];
+    assert_eq!(replay["role"], "assistant");
+    assert_eq!(replay["content"], "assistant visible content");
+    for key in [
+        "codex_message_items",
+        "codex_reasoning_items",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+    ] {
+        assert!(
+            replay.get(key).is_none(),
+            "compressed raw replay should drop disposable provider sidecar {key}"
+        );
+    }
 }
 
 #[tokio::test]
