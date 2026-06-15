@@ -410,7 +410,9 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
         let orphan_path = payload_dir.join(orphan_ref);
         std::fs::write(&orphan_path, "dashboard orphan body that must not leak")
             .expect("orphan payload write");
-        std::fs::File::open(&orphan_path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&orphan_path)
             .and_then(|file| {
                 file.set_modified(
                     std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_719_000_000),
