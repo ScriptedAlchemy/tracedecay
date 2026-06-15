@@ -5413,7 +5413,9 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
         "payload_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.payload";
     let payload_path = payload_dir.join(payload_ref);
     fs::write(&payload_path, "gc mode secret body that must not leak").unwrap();
-    fs::File::open(&payload_path)
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&payload_path)
         .unwrap()
         .set_times(
             fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
