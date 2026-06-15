@@ -49,7 +49,7 @@ pub struct SessionMessageSearchResult {
     pub score: f64,
 }
 
-/// Transcript providers supported by the sample ingestion path.
+/// Transcript providers supported by local transcript ingestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIngestProvider {
     Cursor,
@@ -99,7 +99,7 @@ struct CodexFileContext {
     started_at: Option<i64>,
 }
 
-/// Ingests the small Cursor/Codex fixture shapes currently covered by tests.
+/// Ingests Cursor and Codex transcript files from explicit roots.
 pub async fn ingest_sessions_from_roots(
     db: &GlobalDb,
     provider: SessionIngestProvider,
