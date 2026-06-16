@@ -664,8 +664,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("kwargs.get(\"project_root\")"));
     assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
     assert!(
-        tools_py.contains("config_pinned_project_root()"),
-        "tool dispatch must fall back to the config-block project pin"
+        tools_py.contains("code_project_root(") && tools_py.contains("config_pinned_project_root"),
+        "tool dispatch must resolve healthy cwd before falling back to the config-block project pin"
     );
     assert!(
         tools_py.contains("PROFILE_STORE_TOOLS"),
