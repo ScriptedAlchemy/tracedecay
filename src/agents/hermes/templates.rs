@@ -169,6 +169,37 @@ def config_pinned_project_root(hermes_home=None):
         pass
     return pin
 
+def config_terminal_cwd(hermes_home=None):
+    home = hermes_home_dir(hermes_home)
+    path = os.path.join(home, "config.yaml")
+    try:
+        import yaml
+        with open(path, encoding="utf-8-sig") as config_file:
+            config = yaml.safe_load(config_file) or {{}}
+        terminal = config.get("terminal")
+        value = terminal.get("cwd") if isinstance(terminal, dict) else None
+    except Exception:
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+def _has_tracedecay_index(path):
+    if not (isinstance(path, str) and path.strip() and os.path.isabs(path)):
+        return False
+    return os.path.isdir(os.path.join(path, ".tracedecay"))
+
+def code_project_root(explicit=None, cwd=None, hermes_home=None):
+    if explicit:
+        return str(explicit)
+    session_cwd = cwd or config_terminal_cwd(hermes_home)
+    if _has_tracedecay_index(session_cwd):
+        return str(session_cwd)
+    pin = config_pinned_project_root(hermes_home)
+    if pin:
+        return pin
+    if isinstance(session_cwd, str) and os.path.isabs(session_cwd):
+        return session_cwd
+    return None
+
 def normalize_output(value) -> str:
     if value is None:
         return ""
@@ -218,7 +249,7 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
             if name in PROFILE_STORE_TOOLS:
                 project_root = hermes_home_dir()
             else:
-                project_root = config_pinned_project_root()
+                project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
         argv = [TRACEDECAY_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
@@ -949,6 +980,22 @@ def _configured_project_root(config):
         value = getattr(config, attr, None)
         if value:
             return str(value)
+    return None
+
+def _has_tracedecay_index(path):
+    if not (isinstance(path, str) and path.strip() and os.path.isabs(path)):
+        return False
+    return os.path.isdir(os.path.join(path, ".tracedecay"))
+
+def _code_project_root(explicit=None, cwd=None, configured=None):
+    if explicit:
+        return str(explicit)
+    if _has_tracedecay_index(cwd):
+        return str(cwd)
+    if configured:
+        return str(configured)
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        return str(cwd)
     return None
 
 def _resolve_hermes_home(config=None, hermes_home=None):
@@ -2264,11 +2311,10 @@ class TraceDecayContextEngine(ContextEngine):
         # Re-layer the profile's plugins.tracedecay block now that the host
         # config and hermes_home are settled for this session.
         self.config = _with_plugin_block(self._host_config, self.hermes_home)
-        next_project_root = (
-            project_root
-            or kwargs.get("project_root")
-            or _configured_project_root(self.config)
-            or kwargs.get("cwd")
+        next_project_root = _code_project_root(
+            explicit=project_root or kwargs.get("project_root"),
+            cwd=kwargs.get("cwd"),
+            configured=_configured_project_root(self.config),
         )
         if next_project_root:
             self.project_root = next_project_root

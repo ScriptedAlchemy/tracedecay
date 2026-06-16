@@ -5208,6 +5208,9 @@ plugins_cfg["tracedecay"] = {
     "summary_model": "glm-4.7",
 }
 config_path.write_text(yaml.dump(config, default_flow_style=False))
+healthy_cwd = hermes_home.parent / "healthy-cwd"
+healthy_cwd.mkdir()
+(healthy_cwd / ".tracedecay").mkdir()
 
 parent_name = "_hermes_user_config_block"
 parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
@@ -5244,11 +5247,17 @@ plugin.tools.call_tracedecay_tool("tracedecay_status", {})
 argv = captured["argv"]
 assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == "/config/block/project", argv
+plugin.tools.call_tracedecay_tool("tracedecay_status", {}, cwd=str(healthy_cwd))
+argv = captured["argv"]
+assert "--project" in argv, argv
+assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
 # The context engine layers the block under the host config: block values
 # fill gaps, host-provided values always win.
 engine = plugin.TraceDecayContextEngine()
 assert engine.project_root == "/config/block/project", engine.project_root
+engine.on_session_start(session_id="s1", cwd=str(healthy_cwd))
+assert engine.project_root == str(healthy_cwd), engine.project_root
 assert plugin._lcm_str_setting(engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"
 
 host_engine = plugin.TraceDecayContextEngine(config={"project_root": "/host/wins", "summary_model": "host-model"})
