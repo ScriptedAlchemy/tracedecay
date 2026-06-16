@@ -2056,8 +2056,9 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
     return payload
 
 def _handle_lcm_expand_query(args, **kwargs) -> str:
+    kwargs = dict(kwargs)
+    agent = kwargs.pop("agent", None)
     retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args or {}, **kwargs)
-    agent = kwargs.get("agent")
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
@@ -2539,6 +2540,7 @@ class TraceDecayContextEngine(ContextEngine):
 
     def get_status(self):
         storage = _storage_args(self.project_root, self.hermes_home)
+        hermes_home = storage.get("hermes_home")
         last_result = self.last_compress_result
         if not isinstance(last_result, dict):
             last_result = {"status": "never_ran"}
@@ -2554,6 +2556,12 @@ class TraceDecayContextEngine(ContextEngine):
             "active_session_id": self.active_session_id,
             "storage_scope": storage.get("storage_scope"),
             "hermes_home": self.hermes_home,
+            "lcm_session_db_path": (
+                str(Path(hermes_home) / ".tracedecay" / "sessions.db")
+                if hermes_home
+                else None
+            ),
+            "storage_note": "Hermes LCM conversation state is stored in the Hermes profile .tracedecay/sessions.db.",
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
             "tracedecay_binary_available": _tracedecay_binary_available(),
@@ -2658,7 +2666,9 @@ class TraceDecayContextEngine(ContextEngine):
             tool_args.setdefault("session_id", self.active_session_id)
 
         if tracedecay_name == "tracedecay_lcm_expand_query":
-            return _handle_lcm_expand_query(tool_args, agent=self.agent, **preflight_kwargs)
+            expand_kwargs = dict(preflight_kwargs)
+            agent = expand_kwargs.pop("agent", None) or self.agent
+            return _handle_lcm_expand_query(tool_args, agent=agent, **expand_kwargs)
         return tools.call_tracedecay_tool(tracedecay_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
@@ -2676,6 +2686,7 @@ class TraceDecayContextEngine(ContextEngine):
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
         retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
         synthesis_kwargs = dict(kwargs)
+        synthesis_agent = synthesis_kwargs.pop("agent", None) or self.agent
         if synthesis_kwargs.get("model") is None:
             expansion_model = _lcm_expansion_model(self.config)
             if expansion_model:
@@ -2685,7 +2696,7 @@ class TraceDecayContextEngine(ContextEngine):
             and synthesis_kwargs.get("expansion_timeout") is None
         ):
             synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
-        return _synthesize_expand_query_payload(retrieval, agent=self.agent, **synthesis_kwargs)
+        return _synthesize_expand_query_payload(retrieval, agent=synthesis_agent, **synthesis_kwargs)
 
     def _auxiliary_routes(self, summary_request=None, **kwargs):
         routes = (
@@ -3034,7 +3045,12 @@ class TraceDecayContextEngine(ContextEngine):
         if replay is None or (not replay and original):
             # No usable replay window — treat as a no-op; the host detects
             # ``compressed == messages`` and skips session rotation.
+            self._last_compress_aborted = True
+            self._last_summary_error = str(result.get("reason") or "no usable replay")
             return original
+        if replay == original and original:
+            self._last_compress_aborted = True
+            self._last_summary_error = str(result.get("reason") or "unchanged replay")
         if replay != original:
             self.compression_count += 1
         return replay
@@ -3180,6 +3196,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         self.agent_context = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_cache = {}
+        self._sync_turn_sequence = 0
 
     @property
     def name(self) -> str:
@@ -3334,6 +3351,24 @@ class TracedecayMemoryProvider(MemoryProvider):
                 turn_messages.append({"role": "assistant", "content": str(assistant_content)})
         if not turn_messages:
             return
+        self._sync_turn_sequence += 1
+        batch_id = self._sync_turn_sequence
+        timestamp_ns = time.time_ns()
+        normalized_messages = []
+        for idx, message in enumerate(turn_messages):
+            entry = dict(message) if isinstance(message, dict) else {
+                "role": "user",
+                "content": str(message),
+            }
+            if not entry.get("id") and not entry.get("message_id"):
+                role = str(entry.get("role") or "user")
+                content = _message_content(entry)
+                digest = hashlib.sha256(
+                    f"{sid}\0{batch_id}\0{timestamp_ns}\0{idx}\0{role}\0{content}".encode("utf-8")
+                ).hexdigest()[:16]
+                entry["id"] = f"tracedecay_sync_{batch_id}_{idx}_{digest}"
+            normalized_messages.append(entry)
+        turn_messages = normalized_messages
         args = _storage_args(None, self.hermes_home)
         args.update({"session_id": sid, "messages": turn_messages})
         try:
@@ -3573,11 +3608,11 @@ def register(ctx):
                         name,
                         exc,
                     )
-            else:
-                _CONTEXT_TOOL_NAMES.add(name)
+                else:
+                    _CONTEXT_TOOL_NAMES.add(name)
         else:
             logger.info(
-                "tracedecay LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
+                "tracedecay LCM registered live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers; context-engine compression still receives host messages"
             )
     else:
         logger.info(

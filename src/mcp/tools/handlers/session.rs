@@ -890,11 +890,53 @@ fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
 }
 
 fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
-    let Some(summarizer) = args.get("summarizer") else {
-        return Ok(LcmSummarizerMode::Noop);
+    let mode = match args.get("summarizer") {
+        Some(summarizer) => {
+            serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
+                message: format!("invalid summarizer: {err}"),
+            })?
+        }
+        None => LcmSummarizerMode::HermesAuxiliary,
     };
-    serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
-        message: format!("invalid summarizer: {err}"),
+    if matches!(mode, LcmSummarizerMode::Noop) && hard_compression_pressure(args) {
+        Ok(LcmSummarizerMode::HermesAuxiliary)
+    } else {
+        Ok(mode)
+    }
+}
+
+fn hard_compression_pressure(args: &Value) -> bool {
+    let Some(current_tokens) = i64_arg_value(args, "current_tokens") else {
+        return false;
+    };
+    if i64_arg_value(args, "threshold_tokens")
+        .is_some_and(|threshold| threshold > 0 && current_tokens >= threshold)
+    {
+        return true;
+    }
+    if i64_arg_value(args, "max_assembly_tokens")
+        .is_some_and(|max_tokens| max_tokens > 0 && current_tokens >= max_tokens)
+    {
+        return true;
+    }
+    match (
+        i64_arg_value(args, "context_length"),
+        i64_arg_value(args, "reserve_tokens_floor"),
+    ) {
+        (Some(context_length), Some(reserve)) if context_length > reserve && reserve > 0 => {
+            current_tokens >= context_length - reserve
+        }
+        _ => false,
+    }
+}
+
+fn i64_arg_value(args: &Value, name: &str) -> Option<i64> {
+    args.get(name).and_then(|value| {
+        value.as_i64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+        })
     })
 }
 
