@@ -299,6 +299,12 @@ assert status["storage_scope"] == "hermes_profile"
 assert status["hermes_home"] == os.environ["HERMES_HOME"]
 assert status["lcm_session_db_path"].endswith("/.tracedecay/sessions.db")
 assert "Hermes profile" in status["storage_note"]
+legacy_home = pathlib.Path(os.environ["HERMES_HOME"]).parent / "legacy-hermes"
+(legacy_home / ".tokensave").mkdir(parents=True)
+legacy_engine = plugin.TraceDecayContextEngine(hermes_home=str(legacy_home))
+legacy_engine.initialize(session_id="legacy-session", hermes_home=str(legacy_home))
+legacy_status = legacy_engine.get_status()
+assert legacy_status["lcm_session_db_path"].endswith("/.tokensave/sessions.db")
 assert status["project_root"] == "/tmp/project"
 assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
 assert isinstance(status["tracedecay_binary_available"], bool)
@@ -2235,14 +2241,23 @@ provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes")
 provider.sync_turn("repeat", "same", session_id="session-1")
 provider.sync_turn("repeat", "same", session_id="session-1")
+provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
+provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
 
 first_messages = calls[0][1]["messages"]
 second_messages = calls[1][1]["messages"]
+empty_list_first_messages = calls[2][1]["messages"]
+empty_list_second_messages = calls[3][1]["messages"]
 assert [message["role"] for message in first_messages] == ["user", "assistant"]
 assert all(message.get("id") for message in first_messages)
 assert all(message.get("id") for message in second_messages)
 assert first_messages[0]["id"] != second_messages[0]["id"]
 assert first_messages[1]["id"] != second_messages[1]["id"]
+assert [message["role"] for message in empty_list_first_messages] == ["user", "assistant"]
+assert all(message.get("id") for message in empty_list_first_messages)
+assert all(message.get("id") for message in empty_list_second_messages)
+assert empty_list_first_messages[0]["id"] != empty_list_second_messages[0]["id"]
+assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
     );

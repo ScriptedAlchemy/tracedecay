@@ -850,6 +850,14 @@ def _storage_args(project_root=None, hermes_home=None):
     home = hermes_home or _resolve_hermes_home()
     return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
 
+def _hermes_profile_session_db_path(hermes_home):
+    if not hermes_home:
+        return None
+    primary = Path(hermes_home) / ".tracedecay"
+    legacy = Path(hermes_home) / ".tokensave"
+    base = legacy if not primary.is_dir() and legacy.is_dir() else primary
+    return (base / "sessions.db").as_posix()
+
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
 # use). Keys are flat and mirror the host-config attribute names the
@@ -2555,13 +2563,13 @@ class TraceDecayContextEngine(ContextEngine):
             "session_id": self.active_session_id,
             "active_session_id": self.active_session_id,
             "storage_scope": storage.get("storage_scope"),
-            "hermes_home": self.hermes_home,
-            "lcm_session_db_path": (
-                str(Path(hermes_home) / ".tracedecay" / "sessions.db")
-                if hermes_home
-                else None
+            "hermes_home": hermes_home,
+            "lcm_session_db_path": _hermes_profile_session_db_path(hermes_home),
+            "storage_note": (
+                "Hermes LCM conversation state is stored in the Hermes profile "
+                ".tracedecay/sessions.db, or legacy .tokensave/sessions.db when "
+                "that is the existing profile store."
             ),
-            "storage_note": "Hermes LCM conversation state is stored in the Hermes profile .tracedecay/sessions.db.",
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
             "tracedecay_binary_available": _tracedecay_binary_available(),
@@ -3342,7 +3350,8 @@ class TracedecayMemoryProvider(MemoryProvider):
         sid = session_id or self.session_id
         if not sid:
             return
-        turn_messages = messages if isinstance(messages, list) else None
+        forwarded_messages = isinstance(messages, list) and bool(messages)
+        turn_messages = messages if forwarded_messages else None
         if not turn_messages:
             turn_messages = []
             if user_content:
@@ -3351,24 +3360,13 @@ class TracedecayMemoryProvider(MemoryProvider):
                 turn_messages.append({"role": "assistant", "content": str(assistant_content)})
         if not turn_messages:
             return
-        self._sync_turn_sequence += 1
-        batch_id = self._sync_turn_sequence
-        timestamp_ns = time.time_ns()
-        normalized_messages = []
-        for idx, message in enumerate(turn_messages):
-            entry = dict(message) if isinstance(message, dict) else {
-                "role": "user",
-                "content": str(message),
-            }
-            if not entry.get("id") and not entry.get("message_id"):
+        if not forwarded_messages:
+            self._sync_turn_sequence += 1
+            batch_id = self._sync_turn_sequence
+            timestamp_ns = time.time_ns()
+            for idx, entry in enumerate(turn_messages):
                 role = str(entry.get("role") or "user")
-                content = _message_content(entry)
-                digest = hashlib.sha256(
-                    f"{sid}\0{batch_id}\0{timestamp_ns}\0{idx}\0{role}\0{content}".encode("utf-8")
-                ).hexdigest()[:16]
-                entry["id"] = f"tracedecay_sync_{batch_id}_{idx}_{digest}"
-            normalized_messages.append(entry)
-        turn_messages = normalized_messages
+                entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
         args = _storage_args(None, self.hermes_home)
         args.update({"session_id": sid, "messages": turn_messages})
         try:

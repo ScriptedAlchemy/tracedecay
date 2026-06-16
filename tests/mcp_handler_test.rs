@@ -6220,6 +6220,37 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "hard-overflow explicit noop should be upgraded to auxiliary summary mode"
     );
 
+    let reserve_cap_noop_compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [],
+            "current_tokens": 8_000,
+            "context_length": 10_000,
+            "reserve_tokens_floor": 2_000,
+            "fresh_tail_count": 1,
+            "leaf_chunk_tokens": 1,
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let reserve_cap_noop_payload: Value =
+        serde_json::from_str(extract_text(&reserve_cap_noop_compress.value)).unwrap();
+    assert_eq!(reserve_cap_noop_payload["status"], "needs_summary");
+    assert_eq!(
+        reserve_cap_noop_payload["reason"],
+        "hermes_auxiliary_not_available"
+    );
+    assert!(
+        reserve_cap_noop_payload["summary_request"].is_object(),
+        "reserve-derived hard pressure should upgrade explicit noop to auxiliary summary mode"
+    );
+
     for (index, content) in [
         "old-1 token",
         "old-2 token",
