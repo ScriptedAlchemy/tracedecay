@@ -271,15 +271,18 @@ pub async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<Str
     Ok(refs)
 }
 
-pub async fn payload_metadata_refs_for_provider(
+pub async fn payload_metadata_refs_for_scope(
     conn: &Connection,
     provider: &str,
+    session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
     let mut refs = BTreeSet::new();
     let mut rows = conn
         .query(
-            "SELECT payload_ref FROM lcm_external_payloads WHERE provider = ?1",
-            params![provider],
+            "SELECT payload_ref
+             FROM lcm_external_payloads
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, util::opt_text(session_id)],
         )
         .await?;
     while let Some(row) = rows.next().await? {
@@ -341,11 +344,7 @@ pub async fn run_payload_gc_with_apply(
 
     let dir = payload::existing_payload_dir(storage_root)?;
     let all_metadata_refs = all_payload_metadata_refs(conn).await?;
-    let scoped_metadata_refs = if session_id.is_some() {
-        BTreeSet::new()
-    } else {
-        payload_metadata_refs_for_provider(conn, provider).await?
-    };
+    let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
     let metadata_bytes = payload_metadata_bytes(conn).await?;
 
@@ -1368,6 +1367,54 @@ mod tests {
             &store.storage_root,
             PROVIDER,
             None,
+            &cfg,
+            true,
+            1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(second.unreferenced.count, 1);
+        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
+            .await
+            .is_err());
+        assert!(!payload::payload_dir(&store.storage_root)
+            .join(&payload_ref)
+            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_scoped_unreferenced_payload_reaps_after_grace() -> Result<(), String> {
+        let store = test_store().await?;
+        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
+        drop_raw_reference(&store, &payload_ref).await?;
+        let cfg = LcmGcConfig {
+            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
+            backup_before_reap: false,
+            ..Default::default()
+        }
+        .normalized();
+        let first = run_payload_gc_with_apply(
+            &store.conn,
+            &store.storage_root,
+            PROVIDER,
+            Some("session-a"),
+            &cfg,
+            true,
+            1_000,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        assert_eq!(first.unreferenced.count, 0);
+        assert!(payload::load_payload_metadata(&store.conn, &payload_ref)
+            .await
+            .is_ok());
+
+        let second = run_payload_gc_with_apply(
+            &store.conn,
+            &store.storage_root,
+            PROVIDER,
+            Some("session-a"),
             &cfg,
             true,
             1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,

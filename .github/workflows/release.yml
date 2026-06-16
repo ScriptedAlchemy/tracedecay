@@ -347,9 +347,8 @@ jobs:
 
   # Rewrites the MCP registry manifest (server.json) from the actual release
   # artifacts so the version, download URLs, and fileSha256 digests always
-  # describe real uploaded assets — the in-repo copy carries placeholder
-  # hashes between releases. Skips (with a warning) when the release has no
-  # MCPB packages, since those are not yet produced by the build matrix.
+  # describe real uploaded assets. Skips (with a warning) when the release has
+  # no MCPB packages, since those are not yet produced by the build matrix.
   update-server-json:
     name: Update server.json manifest
     if: github.event_name == 'release' && !github.event.release.prerelease && !cancelled()
@@ -400,13 +399,23 @@ jobs:
 
           jq --arg v "$VERSION" --arg tag "$TAG" --arg repo "$REPO" --slurpfile map sha-map.json '
             .version = $v
-            | .packages |= map(
-                . as $p
-                | ($map[0][] | select(.platform as $pl | $p.identifier | contains("-" + $pl + ".mcp."))) as $m
-                | $p
-                | .version = $v
-                | .identifier = "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\($m.platform).\($m.ext)"
-                | .fileSha256 = $m.sha
+            | .packages = ($map[0] | map(
+                {
+                  "registryType": "mcpb",
+                  "identifier": "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\(.platform).\(.ext)",
+                  "version": $v,
+                  "fileSha256": .sha,
+                  "packageArguments": [
+                    {
+                      "type": "positional",
+                      "valueHint": "serve"
+                    }
+                  ],
+                  "transport": {
+                    "type": "stdio"
+                  }
+                }
+              )
               )
           ' server.json > server.json.tmp
           mv server.json.tmp server.json
