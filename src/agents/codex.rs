@@ -376,7 +376,7 @@ fn install_codex_marketplace_entry(
     display_name: &str,
     source_path: &str,
 ) -> Result<()> {
-    let mut marketplace = load_json_file_strict(&marketplace_path)?;
+    let mut marketplace = load_json_file_strict(marketplace_path)?;
     if !marketplace.is_object() {
         marketplace = json!({});
     }
@@ -428,7 +428,7 @@ fn install_codex_marketplace_entry(
         },
         "category": "Productivity",
     }));
-    safe_write_json_file(&marketplace_path, &marketplace, None)?;
+    safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay to Codex personal marketplace at {}",
         marketplace_path.display()
