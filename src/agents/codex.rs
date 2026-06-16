@@ -113,7 +113,6 @@ impl AgentIntegration for CodexIntegration {
             doctor_check_plugin_dir(dc, &local_plugin_dir);
         } else if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
-            || local_agents_md_has_tracedecay(&ctx.project_path.join("AGENTS.md"))
         {
             doctor_check_config(dc, &local_codex_dir.join("config.toml"));
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
@@ -153,13 +152,6 @@ impl CodexIntegration {
                 .is_some()
         })
     }
-}
-
-fn local_agents_md_has_tracedecay(path: &Path) -> bool {
-    path.exists()
-        && std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .contains("## Prefer tracedecay MCP tools")
 }
 
 // ---------------------------------------------------------------------------
