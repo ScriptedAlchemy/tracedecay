@@ -245,6 +245,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
 
     let plugin_dir = home.path().join("plugins/tracedecay");
     let codex_config = home.path().join(".codex/config.toml");
+    std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
     std::fs::write(&codex_config, "model = \"gpt-5\"\n").unwrap();
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
     let config_before = bytes(&codex_config);
@@ -258,6 +259,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert_eq!(bytes(&codex_config), config_before);
     assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
     assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
 }
 
