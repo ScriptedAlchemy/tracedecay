@@ -297,6 +297,14 @@ assert status["session_id"] == "session-1"
 assert status["active_session_id"] == "session-1"
 assert status["storage_scope"] == "hermes_profile"
 assert status["hermes_home"] == os.environ["HERMES_HOME"]
+assert status["lcm_session_db_path"].endswith("/.tracedecay/sessions.db")
+assert "Hermes profile" in status["storage_note"]
+legacy_home = pathlib.Path(os.environ["HERMES_HOME"]).parent / "legacy-hermes"
+(legacy_home / ".tokensave").mkdir(parents=True)
+legacy_engine = plugin.TraceDecayContextEngine(hermes_home=str(legacy_home))
+legacy_engine.initialize(session_id="legacy-session", hermes_home=str(legacy_home))
+legacy_status = legacy_engine.get_status()
+assert legacy_status["lcm_session_db_path"].endswith("/.tokensave/sessions.db")
 assert status["project_root"] == "/tmp/project"
 assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
 assert isinstance(status["tracedecay_binary_available"], bool)
@@ -2126,6 +2134,208 @@ assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
         "generated context engine should provide auxiliary summaries back to Rust\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn context_engine_marks_no_usable_replay_as_aborted() {
+    run_generated_plugin_script(
+        "check_no_usable_replay_abort.py",
+        r#"
+import json
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    return mcp_response({
+        "status": "ok",
+        "reason": "noop_summarizer",
+        "summary_nodes_created": 0,
+        "summary_nodes": [],
+        "replay_messages": [],
+        "replay_token_estimate": 0,
+        "replay_over_budget": False,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+messages = [{"role": "user", "content": "oversized live transcript"}]
+compressed = engine.compress(messages, current_tokens=292666)
+
+assert compressed == messages
+assert engine._last_compress_aborted is True
+assert engine._last_summary_error == "noop_summarizer"
+assert engine.last_compress_result["reason"] == "noop_summarizer"
+"#,
+        "generated context engine should mark no usable replay as an aborted compression",
+    );
+}
+
+#[test]
+fn context_engine_marks_identical_replay_as_aborted() {
+    run_generated_plugin_script(
+        "check_identical_replay_abort.py",
+        r#"
+import json
+
+messages = [{"role": "user", "content": "same replay should not count as progress"}]
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def mcp_response(inner):
+    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+
+def fake_run(argv, check, capture_output, text, timeout, shell):
+    return mcp_response({
+        "status": "ok",
+        "reason": "no_backlog_to_compress",
+        "summary_nodes_created": 0,
+        "summary_nodes": [],
+        "replay_messages": messages,
+        "replay_token_estimate": 10,
+        "replay_over_budget": False,
+    })
+
+plugin.tools.subprocess.run = fake_run
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+compressed = engine.compress(list(messages), current_tokens=292666)
+
+assert compressed == messages
+assert engine._last_compress_aborted is True
+assert engine._last_summary_error == "no_backlog_to_compress"
+assert engine.compression_count == 0
+"#,
+        "generated context engine should mark identical replay as aborted compression",
+    );
+}
+
+#[test]
+fn memory_provider_sync_turn_assigns_unique_fallback_message_ids() {
+    run_generated_plugin_script(
+        "check_sync_turn_unique_ids.py",
+        r#"
+calls = []
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, args, kwargs))
+    return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+provider = plugin.TracedecayMemoryProvider()
+provider.initialize(session_id="session-1", hermes_home="/tmp/hermes")
+provider.sync_turn("repeat", "same", session_id="session-1")
+provider.sync_turn("repeat", "same", session_id="session-1")
+provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
+provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
+
+first_messages = calls[0][1]["messages"]
+second_messages = calls[1][1]["messages"]
+empty_list_first_messages = calls[2][1]["messages"]
+empty_list_second_messages = calls[3][1]["messages"]
+assert [message["role"] for message in first_messages] == ["user", "assistant"]
+assert all(message.get("id") for message in first_messages)
+assert all(message.get("id") for message in second_messages)
+assert first_messages[0]["id"] != second_messages[0]["id"]
+assert first_messages[1]["id"] != second_messages[1]["id"]
+assert [message["role"] for message in empty_list_first_messages] == ["user", "assistant"]
+assert all(message.get("id") for message in empty_list_first_messages)
+assert all(message.get("id") for message in empty_list_second_messages)
+assert empty_list_first_messages[0]["id"] != empty_list_second_messages[0]["id"]
+assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
+"#,
+        "sync_turn fallback messages should not collapse repeated identical turns",
+    );
+}
+
+#[test]
+fn context_engine_records_all_forwarded_native_lcm_tools() {
+    run_generated_plugin_script(
+        "check_context_tool_names_bookkeeping.py",
+        r#"
+class Ctx:
+    context_engine_tool_handlers_receive_messages = True
+
+    def __init__(self):
+        self.registered = []
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_context_engine(self, engine):
+        self.engine = engine
+
+    def register_tool(self, **kwargs):
+        self.registered.append(kwargs["name"])
+
+    def register_memory_provider(self, provider):
+        self.memory_provider = provider
+
+    def register_command(self, *args, **kwargs):
+        pass
+
+ctx = Ctx()
+plugin.register(ctx)
+
+expected = sorted(schema["name"] for schema in plugin.LCM_NATIVE_SCHEMAS)
+assert sorted(plugin._CONTEXT_TOOL_NAMES) == expected
+assert set(expected).issubset(set(ctx.registered))
+"#,
+        "generated plugin should record every forwarded native LCM context tool",
+    );
+}
+
+#[test]
+fn context_engine_lcm_expand_query_tolerates_forwarded_agent_kwarg() {
+    run_generated_plugin_script(
+        "check_expand_query_forwarded_agent.py",
+        r#"
+import json
+
+def fake_call_tracedecay_json(name, args, **kwargs):
+    assert name == "tracedecay_lcm_expand_query"
+    return {
+        "status": "ok",
+        "prompt": args["prompt"],
+        "needs_synthesis": False,
+        "answer": "retrieval-only answer",
+    }
+
+plugin.call_tracedecay_json = fake_call_tracedecay_json
+
+class Aux:
+    def call_llm(self, **kwargs):
+        raise AssertionError("synthesis should not run")
+
+forwarded_agent = type("ForwardedAgent", (), {"auxiliary_client": Aux()})()
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project", agent=forwarded_agent)
+
+raw = engine.handle_tool_call(
+    "lcm_expand_query",
+    {"prompt": "What changed?"},
+    agent=forwarded_agent,
+)
+payload = json.loads(raw)
+assert payload["status"] == "ok"
+assert payload["answer"] == "retrieval-only answer"
+"#,
+        "generated context engine should not pass duplicate agent kwargs through lcm_expand_query",
     );
 }
 

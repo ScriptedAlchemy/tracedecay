@@ -850,6 +850,14 @@ def _storage_args(project_root=None, hermes_home=None):
     home = hermes_home or _resolve_hermes_home()
     return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
 
+def _hermes_profile_session_db_path(hermes_home):
+    if not hermes_home:
+        return None
+    primary = Path(hermes_home) / ".tracedecay"
+    legacy = Path(hermes_home) / ".tokensave"
+    base = legacy if not primary.is_dir() and legacy.is_dir() else primary
+    return (base / "sessions.db").as_posix()
+
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
 # use). Keys are flat and mirror the host-config attribute names the
@@ -2056,8 +2064,9 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
     return payload
 
 def _handle_lcm_expand_query(args, **kwargs) -> str:
+    kwargs = dict(kwargs)
+    agent = kwargs.pop("agent", None)
     retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args or {}, **kwargs)
-    agent = kwargs.get("agent")
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
@@ -2539,6 +2548,7 @@ class TraceDecayContextEngine(ContextEngine):
 
     def get_status(self):
         storage = _storage_args(self.project_root, self.hermes_home)
+        hermes_home = storage.get("hermes_home")
         last_result = self.last_compress_result
         if not isinstance(last_result, dict):
             last_result = {"status": "never_ran"}
@@ -2553,7 +2563,13 @@ class TraceDecayContextEngine(ContextEngine):
             "session_id": self.active_session_id,
             "active_session_id": self.active_session_id,
             "storage_scope": storage.get("storage_scope"),
-            "hermes_home": self.hermes_home,
+            "hermes_home": hermes_home,
+            "lcm_session_db_path": _hermes_profile_session_db_path(hermes_home),
+            "storage_note": (
+                "Hermes LCM conversation state is stored in the Hermes profile "
+                ".tracedecay/sessions.db, or legacy .tokensave/sessions.db when "
+                "that is the existing profile store."
+            ),
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
             "tracedecay_binary_available": _tracedecay_binary_available(),
@@ -2658,7 +2674,9 @@ class TraceDecayContextEngine(ContextEngine):
             tool_args.setdefault("session_id", self.active_session_id)
 
         if tracedecay_name == "tracedecay_lcm_expand_query":
-            return _handle_lcm_expand_query(tool_args, agent=self.agent, **preflight_kwargs)
+            expand_kwargs = dict(preflight_kwargs)
+            agent = expand_kwargs.pop("agent", None) or self.agent
+            return _handle_lcm_expand_query(tool_args, agent=agent, **expand_kwargs)
         return tools.call_tracedecay_tool(tracedecay_name, tool_args, **preflight_kwargs)
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
@@ -2676,6 +2694,7 @@ class TraceDecayContextEngine(ContextEngine):
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
         retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
         synthesis_kwargs = dict(kwargs)
+        synthesis_agent = synthesis_kwargs.pop("agent", None) or self.agent
         if synthesis_kwargs.get("model") is None:
             expansion_model = _lcm_expansion_model(self.config)
             if expansion_model:
@@ -2685,7 +2704,7 @@ class TraceDecayContextEngine(ContextEngine):
             and synthesis_kwargs.get("expansion_timeout") is None
         ):
             synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
-        return _synthesize_expand_query_payload(retrieval, agent=self.agent, **synthesis_kwargs)
+        return _synthesize_expand_query_payload(retrieval, agent=synthesis_agent, **synthesis_kwargs)
 
     def _auxiliary_routes(self, summary_request=None, **kwargs):
         routes = (
@@ -3034,7 +3053,12 @@ class TraceDecayContextEngine(ContextEngine):
         if replay is None or (not replay and original):
             # No usable replay window — treat as a no-op; the host detects
             # ``compressed == messages`` and skips session rotation.
+            self._last_compress_aborted = True
+            self._last_summary_error = str(result.get("reason") or "no usable replay")
             return original
+        if replay == original and original:
+            self._last_compress_aborted = True
+            self._last_summary_error = str(result.get("reason") or "unchanged replay")
         if replay != original:
             self.compression_count += 1
         return replay
@@ -3180,6 +3204,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         self.agent_context = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_cache = {}
+        self._sync_turn_sequence = 0
 
     @property
     def name(self) -> str:
@@ -3325,7 +3350,8 @@ class TracedecayMemoryProvider(MemoryProvider):
         sid = session_id or self.session_id
         if not sid:
             return
-        turn_messages = messages if isinstance(messages, list) else None
+        forwarded_messages = isinstance(messages, list) and bool(messages)
+        turn_messages = messages if forwarded_messages else None
         if not turn_messages:
             turn_messages = []
             if user_content:
@@ -3334,6 +3360,13 @@ class TracedecayMemoryProvider(MemoryProvider):
                 turn_messages.append({"role": "assistant", "content": str(assistant_content)})
         if not turn_messages:
             return
+        if not forwarded_messages:
+            self._sync_turn_sequence += 1
+            batch_id = self._sync_turn_sequence
+            timestamp_ns = time.time_ns()
+            for idx, entry in enumerate(turn_messages):
+                role = str(entry.get("role") or "user")
+                entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
         args = _storage_args(None, self.hermes_home)
         args.update({"session_id": sid, "messages": turn_messages})
         try:
@@ -3573,11 +3606,11 @@ def register(ctx):
                         name,
                         exc,
                     )
-            else:
-                _CONTEXT_TOOL_NAMES.add(name)
+                else:
+                    _CONTEXT_TOOL_NAMES.add(name)
         else:
             logger.info(
-                "tracedecay LCM live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers"
+                "tracedecay LCM registered live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers; context-engine compression still receives host messages"
             )
     else:
         logger.info(

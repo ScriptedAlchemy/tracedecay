@@ -9,6 +9,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::{ToolResult, MAX_RESPONSE_CHARS};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
+use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
     LcmCleanConfig, LcmCompressionRequest, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
@@ -890,12 +891,36 @@ fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
 }
 
 fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
-    let Some(summarizer) = args.get("summarizer") else {
-        return Ok(LcmSummarizerMode::Noop);
+    let mode = match args.get("summarizer") {
+        Some(summarizer) => {
+            serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
+                message: format!("invalid summarizer: {err}"),
+            })?
+        }
+        None => LcmSummarizerMode::HermesAuxiliary,
     };
-    serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
-        message: format!("invalid summarizer: {err}"),
-    })
+    if matches!(mode, LcmSummarizerMode::Noop) && hard_compression_pressure(args)? {
+        Ok(LcmSummarizerMode::HermesAuxiliary)
+    } else {
+        Ok(mode)
+    }
+}
+
+fn hard_compression_pressure(args: &Value) -> Result<bool> {
+    let Some(current_tokens) = non_negative_i64_arg(args, "current_tokens")? else {
+        return Ok(false);
+    };
+    if non_negative_i64_arg(args, "threshold_tokens")?
+        .is_some_and(|threshold| threshold > 0 && current_tokens >= threshold)
+    {
+        return Ok(true);
+    }
+    let assembly_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
+        max_assembly_tokens: non_negative_i64_arg(args, "max_assembly_tokens")?,
+        context_length: non_negative_i64_arg(args, "context_length")?,
+        reserve_tokens_floor: non_negative_i64_arg(args, "reserve_tokens_floor")?,
+    });
+    Ok(assembly_cap.is_some_and(|cap| current_tokens >= cap))
 }
 
 fn lcm_content_slice(args: &Value) -> Result<LcmContentSlice> {

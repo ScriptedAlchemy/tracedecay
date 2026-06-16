@@ -6189,6 +6189,68 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     );
     assert_eq!(compress_payload["retry_status"], Value::Null);
 
+    let unsafe_noop_compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [],
+            "current_tokens": 50_000,
+            "threshold_tokens": 1_000,
+            "fresh_tail_count": 1,
+            "leaf_chunk_tokens": 1,
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let unsafe_noop_payload: Value =
+        serde_json::from_str(extract_text(&unsafe_noop_compress.value)).unwrap();
+    assert_eq!(unsafe_noop_payload["status"], "needs_summary");
+    assert_eq!(
+        unsafe_noop_payload["reason"],
+        "hermes_auxiliary_not_available"
+    );
+    assert_eq!(unsafe_noop_payload["summary_nodes_created"], 0);
+    assert!(
+        unsafe_noop_payload["summary_request"].is_object(),
+        "hard-overflow explicit noop should be upgraded to auxiliary summary mode"
+    );
+
+    let reserve_cap_noop_compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-session",
+            "messages": [],
+            "current_tokens": 8_000,
+            "context_length": 10_000,
+            "reserve_tokens_floor": 2_000,
+            "fresh_tail_count": 1,
+            "leaf_chunk_tokens": 1,
+            "summarizer": {"mode": "noop"}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let reserve_cap_noop_payload: Value =
+        serde_json::from_str(extract_text(&reserve_cap_noop_compress.value)).unwrap();
+    assert_eq!(reserve_cap_noop_payload["status"], "needs_summary");
+    assert_eq!(
+        reserve_cap_noop_payload["reason"],
+        "hermes_auxiliary_not_available"
+    );
+    assert!(
+        reserve_cap_noop_payload["summary_request"].is_object(),
+        "reserve-derived hard pressure should upgrade explicit noop to auxiliary summary mode"
+    );
+
     for (index, content) in [
         "old-1 token",
         "old-2 token",
@@ -6240,6 +6302,76 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(
         critical_payload["retry_status"],
         "critical_pressure_catch_up"
+    );
+}
+
+#[tokio::test]
+async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
+    let (cg, _dir) = setup_project().await;
+    for (index, content) in [
+        "historical planning context alpha beta gamma",
+        "historical tool result delta epsilon zeta",
+        "fresh objective eta theta",
+    ]
+    .iter()
+    .enumerate()
+    {
+        seed_lcm_session_message(
+            &cg,
+            "lcm-default-summarizer-session",
+            &format!("lcm-default-summarizer-message-{}", index + 1),
+            *content,
+            (index + 1) as i64,
+        )
+        .await;
+    }
+
+    let compress = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_compress",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-default-summarizer-session",
+            "messages": [],
+            "current_tokens": 10_000,
+            "threshold_tokens": 100,
+            "fresh_tail_count": 1,
+            "leaf_chunk_tokens": 1,
+            "max_assembly_tokens": 20
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
+
+    assert_eq!(payload["status"], "needs_summary");
+    assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
+    assert_eq!(payload["summary_nodes_created"], 0);
+    assert_eq!(payload["compression_attempts"], 0);
+    assert_eq!(payload["fallback_used"], false);
+    assert_eq!(payload["retry_status"], Value::Null);
+    assert_eq!(
+        payload["summary_request"]["source_range"]["from_store_id"],
+        1
+    );
+    assert_eq!(payload["summary_request"]["source_range"]["to_store_id"], 1);
+    assert_eq!(
+        payload["summary_request"]["source_messages"]
+            .as_array()
+            .expect("source messages should be present")
+            .len(),
+        1
+    );
+    let replay = payload["replay_messages"]
+        .as_array()
+        .expect("bounded replay should be present");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0]["content"], "fresh objective eta theta");
+    assert!(
+        payload["replay_token_estimate"].as_i64().unwrap() <= 20,
+        "default auxiliary mode must return a bounded replay"
     );
 }
 
