@@ -11,7 +11,6 @@
 //! `/hooks` CLI before they run — newly installed or changed hooks are skipped
 //! until trusted. The installer prints that guidance after writing `hooks.json`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -19,9 +18,9 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    backup_config_file, load_json_file, load_json_file_strict, load_toml_file,
-    safe_write_json_file, safe_write_text_file, tool_names, write_toml_file, AgentIntegration,
-    DoctorCounters, HealthcheckContext, InstallContext, InstallScope, UpdatePluginOutcome,
+    load_json_file, load_json_file_strict, load_toml_file, safe_write_json_file,
+    safe_write_text_file, tool_names, write_toml_file, AgentIntegration, DoctorCounters,
+    HealthcheckContext, InstallContext, InstallScope, UpdatePluginOutcome,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -37,14 +36,8 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let codex_dir = ctx.home.join(".codex");
-        std::fs::create_dir_all(&codex_dir).ok();
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-
-        let agents_md = codex_dir.join("AGENTS.md");
-        install_prompt_rules(&agents_md)?;
-
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tracedecay_bin)?;
+        sweep_legacy_global_codex_config(&ctx.home);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -60,22 +53,16 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let codex_dir = project_path.join(".codex");
         for path in [
-            codex_dir.join("config.toml"),
-            codex_dir.join("hooks.json"),
-            project_path.join("AGENTS.md"),
+            codex_repo_plugin_install_dir(project_path).join(".codex-plugin/plugin.json"),
+            codex_repo_plugin_install_dir(project_path).join(".mcp.json"),
+            codex_repo_plugin_install_dir(project_path).join("hooks/hooks.json"),
+            codex_repo_marketplace_path(project_path),
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        std::fs::create_dir_all(&codex_dir).ok();
-        install_mcp_server(
-            &codex_dir.join("config.toml"),
-            &ctx.tracedecay_bin,
-            InstallScope::ProjectLocal,
-        )?;
-        install_prompt_rules(&project_path.join("AGENTS.md"))?;
-        install_hooks(&codex_dir.join("hooks.json"), &ctx.tracedecay_bin)?;
+        install_codex_repo_plugin(project_path, &ctx.tracedecay_bin)?;
+        sweep_legacy_project_codex_config(project_path);
         print_hook_trust_guidance();
         Ok(())
     }
@@ -114,14 +101,17 @@ impl AgentIntegration for CodexIntegration {
         let Some(target) = target else {
             return Ok(UpdatePluginOutcome::NotInstalled);
         };
-        write_codex_plugin_files(&target, &ctx.tracedecay_bin)?;
+        write_codex_plugin_files(&target, &ctx.tracedecay_bin, InstallScope::Global)?;
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCodex CLI integration\x1b[0m");
         let local_codex_dir = ctx.project_path.join(".codex");
-        if local_codex_dir.join("config.toml").exists()
+        let local_plugin_dir = codex_repo_plugin_install_dir(&ctx.project_path);
+        if local_plugin_dir.join(".codex-plugin/plugin.json").exists() {
+            doctor_check_plugin_dir(dc, &local_plugin_dir);
+        } else if local_codex_dir.join("config.toml").exists()
             || local_codex_dir.join("hooks.json").exists()
             || local_agents_md_has_tracedecay(&ctx.project_path.join("AGENTS.md"))
         {
@@ -129,15 +119,12 @@ impl AgentIntegration for CodexIntegration {
             doctor_check_prompt_file(dc, &ctx.project_path.join("AGENTS.md"));
             doctor_check_hooks(dc, &local_codex_dir.join("hooks.json"));
         } else {
-            let codex_dir = ctx.home.join(".codex");
             doctor_check_plugin(dc, &ctx.home);
-            doctor_check_prompt_file(dc, &codex_dir.join("AGENTS.md"));
-            doctor_check_hooks(dc, &codex_dir.join("hooks.json"));
         }
     }
 
     fn is_detected(&self, home: &Path) -> bool {
-        home.join(".codex").is_dir()
+        home.join(".codex").is_dir() || codex_plugin_manifest_path(home).exists()
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
@@ -190,6 +177,10 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
         "skills/reading-code-cheaply/SKILL.md",
         include_str!("../../codex-plugin/skills/reading-code-cheaply/SKILL.md"),
     ),
+    (
+        "hooks/hooks.json",
+        include_str!("../../codex-plugin/hooks/hooks.json"),
+    ),
 ];
 
 fn codex_plugin_install_dir(home: &Path) -> PathBuf {
@@ -212,17 +203,28 @@ fn codex_personal_marketplace_path(home: &Path) -> PathBuf {
     home.join(".agents/plugins/marketplace.json")
 }
 
+fn codex_repo_plugin_install_dir(project_path: &Path) -> PathBuf {
+    project_path.join("plugins/tracedecay")
+}
+
+fn codex_repo_marketplace_path(project_path: &Path) -> PathBuf {
+    project_path.join(".agents/plugins/marketplace.json")
+}
+
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_plugin_install_dir(home);
-    if let Some(parent) = install_dir.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to create {}: {e}", parent.display()),
-        })?;
-    }
-    remove_codex_plugin_install(&install_dir)?;
-    remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
-    write_codex_plugin_files(&install_dir, tracedecay_bin)?;
-    install_codex_marketplace_entry(home)?;
+    install_codex_plugin_bundle(
+        &install_dir,
+        Some(&codex_plugin_legacy_install_dir(home)),
+        tracedecay_bin,
+        InstallScope::Global,
+    )?;
+    install_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "personal",
+        "Personal",
+        "./plugins/tracedecay",
+    )?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
         install_dir.display()
@@ -230,11 +232,83 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_codex_plugin_files(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
+fn install_codex_repo_plugin(project_path: &Path, tracedecay_bin: &str) -> Result<()> {
+    let install_dir = codex_repo_plugin_install_dir(project_path);
+    install_codex_plugin_bundle(
+        &install_dir,
+        None,
+        tracedecay_bin,
+        InstallScope::ProjectLocal,
+    )?;
+    install_codex_marketplace_entry(
+        &codex_repo_marketplace_path(project_path),
+        "local-repo",
+        "Local Repo",
+        "./plugins/tracedecay",
+    )?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex repo plugin source at {}",
+        install_dir.display()
+    );
+    Ok(())
+}
+
+fn sweep_legacy_global_codex_config(home: &Path) {
+    let codex_dir = home.join(".codex");
+    uninstall_tracedecay_mcp_if_present(&codex_dir.join("config.toml"));
+    uninstall_hooks(&codex_dir.join("hooks.json"));
+    uninstall_prompt_rules(&codex_dir.join("AGENTS.md"));
+}
+
+fn sweep_legacy_project_codex_config(project_path: &Path) {
+    let codex_dir = project_path.join(".codex");
+    uninstall_tracedecay_mcp_if_present(&codex_dir.join("config.toml"));
+    uninstall_hooks(&codex_dir.join("hooks.json"));
+}
+
+fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
+    let Ok(contents) = std::fs::read_to_string(config_path) else {
+        return;
+    };
+    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+        return;
+    }
+    if let Err(err) = uninstall_mcp_server(config_path) {
+        eprintln!(
+            "  Could not remove legacy tracedecay MCP config from {}: {err}",
+            config_path.display()
+        );
+    }
+}
+
+fn install_codex_plugin_bundle(
+    install_dir: &Path,
+    legacy_dir: Option<&Path>,
+    tracedecay_bin: &str,
+    scope: InstallScope,
+) -> Result<()> {
+    if let Some(parent) = install_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to create {}: {e}", parent.display()),
+        })?;
+    }
+    remove_codex_plugin_install(install_dir)?;
+    if let Some(legacy_dir) = legacy_dir {
+        remove_codex_plugin_install(legacy_dir)?;
+    }
+    write_codex_plugin_files(install_dir, tracedecay_bin, scope)
+}
+
+fn write_codex_plugin_files(
+    install_dir: &Path,
+    tracedecay_bin: &str,
+    scope: InstallScope,
+) -> Result<()> {
     for &(relative, contents) in CODEX_EMBEDDED_PLUGIN_FILES {
         let rendered = match relative {
             ".codex-plugin/plugin.json" => codex_plugin_manifest(contents)?,
-            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin)?,
+            ".mcp.json" => codex_plugin_mcp(contents, tracedecay_bin, scope)?,
+            "hooks/hooks.json" => codex_plugin_hooks(contents, tracedecay_bin)?,
             _ => contents.to_string(),
         };
         safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
@@ -248,14 +322,68 @@ fn codex_plugin_manifest(raw: &str) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
-fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str) -> Result<String> {
+fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, scope: InstallScope) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
-    mcp["mcpServers"]["tracedecay"]["command"] = json!(tracedecay_bin);
+    let server = &mut mcp["mcpServers"]["tracedecay"];
+    server["command"] = json!(tracedecay_bin);
+    match scope {
+        InstallScope::Global => {
+            server["args"] = json!(["serve"]);
+            server["env"] = json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" });
+        }
+        InstallScope::ProjectLocal => {
+            server["args"] = json!(["serve", "--path", "."]);
+            if let Some(object) = server.as_object_mut() {
+                object.remove("env");
+            }
+        }
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
-fn install_codex_marketplace_entry(home: &Path) -> Result<()> {
-    let marketplace_path = codex_personal_marketplace_path(home);
+fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
+    let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
+    install_codex_hook_event(
+        &mut hooks,
+        "SessionStart",
+        tracedecay_bin,
+        "hook-codex-session-start",
+        5,
+        None,
+    );
+    install_codex_hook_event(
+        &mut hooks,
+        "UserPromptSubmit",
+        tracedecay_bin,
+        "hook-codex-user-prompt-submit",
+        5,
+        None,
+    );
+    install_codex_hook_event(
+        &mut hooks,
+        "SubagentStart",
+        tracedecay_bin,
+        "hook-codex-subagent-start",
+        5,
+        None,
+    );
+    install_codex_hook_event(
+        &mut hooks,
+        "PostToolUse",
+        tracedecay_bin,
+        "hook-codex-post-tool-use",
+        60,
+        Some("Bash|apply_patch"),
+    );
+    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+}
+
+fn install_codex_marketplace_entry(
+    marketplace_path: &Path,
+    marketplace_name: &str,
+    display_name: &str,
+    source_path: &str,
+) -> Result<()> {
     let mut marketplace = load_json_file_strict(&marketplace_path)?;
     if !marketplace.is_object() {
         marketplace = json!({});
@@ -265,19 +393,19 @@ fn install_codex_marketplace_entry(home: &Path) -> Result<()> {
         .and_then(|value| value.as_str())
         .is_none()
     {
-        marketplace["name"] = json!("personal");
+        marketplace["name"] = json!(marketplace_name);
     }
     if !marketplace
         .get("interface")
         .is_some_and(serde_json::Value::is_object)
     {
-        marketplace["interface"] = json!({ "displayName": "Personal" });
+        marketplace["interface"] = json!({ "displayName": display_name });
     } else if marketplace["interface"]
         .get("displayName")
         .and_then(|value| value.as_str())
         .is_none()
     {
-        marketplace["interface"]["displayName"] = json!("Personal");
+        marketplace["interface"]["displayName"] = json!(display_name);
     }
     if !marketplace
         .get("plugins")
@@ -300,7 +428,7 @@ fn install_codex_marketplace_entry(home: &Path) -> Result<()> {
         "name": "tracedecay",
         "source": {
             "source": "local",
-            "path": "./plugins/tracedecay",
+            "path": source_path,
         },
         "policy": {
             "installation": "AVAILABLE",
@@ -433,183 +561,6 @@ fn remove_codex_marketplace_entry(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Register MCP server and auto-approve tools in ~/.codex/config.toml.
-fn install_mcp_server(config_path: &Path, tracedecay_bin: &str, scope: InstallScope) -> Result<()> {
-    let mut config = load_toml_file(config_path)?;
-
-    // Ensure [mcp_servers.tracedecay] exists
-    let table = config
-        .as_table_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "config.toml is not a TOML table".to_string(),
-        })?;
-
-    let servers = table
-        .entry("mcp_servers")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "mcp_servers is not a table in config.toml".to_string(),
-        })?;
-
-    let mut server_table = toml::map::Map::new();
-    server_table.insert(
-        "command".to_string(),
-        toml::Value::String(tracedecay_bin.to_string()),
-    );
-    let args = match scope {
-        InstallScope::Global => vec![toml::Value::String("serve".to_string())],
-        InstallScope::ProjectLocal => vec![
-            toml::Value::String("serve".to_string()),
-            toml::Value::String("--path".to_string()),
-            toml::Value::String(".".to_string()),
-        ],
-    };
-    server_table.insert("args".to_string(), toml::Value::Array(args));
-    if scope == InstallScope::Global {
-        let mut env_table = toml::map::Map::new();
-        env_table.insert(
-            "TRACEDECAY_ENABLE_GLOBAL_DB".to_string(),
-            toml::Value::String("1".to_string()),
-        );
-        server_table.insert("env".to_string(), toml::Value::Table(env_table));
-    }
-
-    // Auto-approve all tracedecay tools so Codex doesn't prompt for each one
-    let mut tools_table = toml::map::Map::new();
-    for tool_name in tool_names() {
-        let mut tool_config = toml::map::Map::new();
-        tool_config.insert(
-            "approval_mode".to_string(),
-            toml::Value::String("auto".to_string()),
-        );
-        tools_table.insert(tool_name.clone(), toml::Value::Table(tool_config));
-    }
-    server_table.insert("tools".to_string(), toml::Value::Table(tools_table));
-
-    servers.insert("tracedecay".to_string(), toml::Value::Table(server_table));
-
-    write_toml_file(config_path, &config)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
-}
-
-/// Append prompt rules to AGENTS.md (idempotent).
-fn install_prompt_rules(agents_md: &Path) -> Result<()> {
-    let marker = "## Prefer tracedecay MCP tools";
-    let existing = if agents_md.exists() {
-        std::fs::read_to_string(agents_md).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    if existing.contains(marker) {
-        eprintln!("  AGENTS.md already contains tracedecay rules, skipping");
-        return Ok(());
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(agents_md)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open AGENTS.md: {e}"),
-        })?;
-    write!(
-        f,
-        "\n{marker}\n\n\
-        Before reading source files or scanning the codebase, use the tracedecay MCP tools \
-        (`tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, `tracedecay_callees`, \
-        `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
-        They provide instant semantic results from a pre-built knowledge graph and are \
-        faster than file reads.\n\n\
-        If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
-        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
-        `memory_feedback_events`). Use SQL to answer complex structural queries \
-        that go beyond what the built-in tools expose.\n\n\
-        For durable project/user facts, prefer `tracedecay_fact_store`, \
-        `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
-        prior conversation context matters. Do not store secrets, credentials, or \
-        unnecessary PII in persistent facts.\n\n\
-        If you discover a gap where an extractor, schema, or tracedecay tool could be \
-        improved to answer a question natively, propose to the user that they open an issue \
-        at https://github.com/ScriptedAlchemy/tracedecay describing the limitation. \
-        **Remind the user to strip any sensitive or proprietary code from the bug description \
-        before submitting.**\n"
-    )
-    .ok();
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
-        agents_md.display()
-    );
-    Ok(())
-}
-
-/// Register tracedecay lifecycle hooks in a Codex `hooks.json` (idempotent).
-///
-/// Codex organizes hooks as `hooks[event][] -> { matcher?, hooks: [handler] }`
-/// where only `type: "command"` handlers run today and `timeout` is in seconds.
-/// We register the tracedecay-owned group for each event, preserving any foreign
-/// groups, so reinstalls reconcile in place. Backs up an existing file first.
-fn install_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let backup = backup_config_file(hooks_path)?;
-    let mut hooks = match load_json_file_strict(hooks_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    // Steer the agent toward tracedecay MCP tools + report index freshness.
-    install_codex_hook_event(
-        &mut hooks,
-        "SessionStart",
-        tracedecay_bin,
-        "hook-codex-session-start",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "UserPromptSubmit",
-        tracedecay_bin,
-        "hook-codex-user-prompt-submit",
-        5,
-        None,
-    );
-    install_codex_hook_event(
-        &mut hooks,
-        "SubagentStart",
-        tracedecay_bin,
-        "hook-codex-subagent-start",
-        5,
-        None,
-    );
-    // Keep the index fresh: apply_patch → targeted single-file sync; Bash →
-    // branch-aware / incremental sync. Matcher targets both tool names.
-    install_codex_hook_event(
-        &mut hooks,
-        "PostToolUse",
-        tracedecay_bin,
-        "hook-codex-post-tool-use",
-        60,
-        Some("Bash|apply_patch"),
-    );
-
-    safe_write_json_file(hooks_path, &hooks, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added Codex lifecycle hooks to {}",
-        hooks_path.display()
-    );
-    Ok(())
-}
-
 /// Insert (or reconcile) the tracedecay-owned matcher group for `event`.
 ///
 /// Drops any pre-existing group that already contains our `subcommand` handler
@@ -677,11 +628,12 @@ fn print_hook_trust_guidance() {
 
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 4] = [
+    const SUBCOMMANDS: [&str; 5] = [
         "hook-codex-session-start",
         "hook-codex-user-prompt-submit",
         "hook-codex-subagent-start",
         "hook-codex-post-tool-use",
+        "hook-codex-pre-tool-use",
     ];
 
     if !hooks_path.exists() {
@@ -867,6 +819,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             mcp_path.display()
         ));
     }
+    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
 
     let marketplace_path = codex_personal_marketplace_path(home);
     let marketplace = load_json_file(&marketplace_path);
@@ -889,6 +842,49 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             marketplace_path.display()
         ));
     }
+}
+
+fn doctor_check_plugin_dir(dc: &mut DoctorCounters, plugin_dir: &Path) {
+    let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
+    let manifest = load_json_file(&manifest_path);
+    if manifest.get("name").and_then(|value| value.as_str()) == Some("tracedecay") {
+        dc.pass(&format!(
+            "Codex plugin manifest present in {}",
+            manifest_path.display()
+        ));
+    } else {
+        dc.fail(&format!(
+            "Codex plugin manifest at {} is not a tracedecay plugin",
+            manifest_path.display()
+        ));
+    }
+    match manifest.get("version").and_then(|value| value.as_str()) {
+        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
+        Some(version) => dc.warn(&format!(
+            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin --agent codex`",
+            env!("CARGO_PKG_VERSION")
+        )),
+        None => dc.warn("Codex plugin manifest does not contain a version"),
+    }
+
+    let mcp_path = plugin_dir.join(".mcp.json");
+    let mcp = load_json_file(&mcp_path);
+    if mcp
+        .get("mcpServers")
+        .and_then(|servers| servers.get("tracedecay"))
+        .is_some()
+    {
+        dc.pass(&format!(
+            "Codex plugin MCP server registered in {}",
+            mcp_path.display()
+        ));
+    } else {
+        dc.fail(&format!(
+            "Codex plugin MCP server missing in {} — rerun tracedecay Codex install",
+            mcp_path.display()
+        ));
+    }
+    doctor_check_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
 }
 
 /// Check config.toml has tracedecay registered.

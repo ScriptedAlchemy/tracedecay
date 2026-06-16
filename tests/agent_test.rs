@@ -207,42 +207,77 @@ fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {
     home.join(".agents/plugins/marketplace.json")
 }
 
-fn assert_codex_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+fn codex_repo_marketplace_path(project: &Path) -> std::path::PathBuf {
+    project.join(".agents/plugins/marketplace.json")
+}
+
+fn codex_project_plugin_install_dir(project: &Path) -> std::path::PathBuf {
+    project.join("plugins/tracedecay")
+}
+
+fn assert_codex_plugin_bundle(
+    plugin_dir: &Path,
+    expected_command: &str,
+    expected_args: serde_json::Value,
+    expected_global_env: bool,
+) {
     let manifest = read_json(&plugin_dir.join(".codex-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["skills"], "./skills/");
     assert_eq!(manifest["mcpServers"], "./.mcp.json");
-    assert!(
-        manifest.get("hooks").is_none(),
-        "Codex plugin manifests must not declare hooks until that field is supported"
-    );
+    assert_eq!(manifest["hooks"], "./hooks/hooks.json");
 
     let mcp = read_json(&plugin_dir.join(".mcp.json"));
     let server = &mcp["mcpServers"]["tracedecay"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], expected_command);
-    assert_eq!(server["args"], serde_json::json!(["serve"]));
-    assert_eq!(server["env"]["TRACEDECAY_ENABLE_GLOBAL_DB"], "1");
+    assert_eq!(server["args"], expected_args);
+    if expected_global_env {
+        assert_eq!(server["env"]["TRACEDECAY_ENABLE_GLOBAL_DB"], "1");
+    } else {
+        assert!(
+            server.get("env").is_none(),
+            "project-local Codex plugin MCP config should not opt into global DB"
+        );
+    }
+
+    let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
+    assert_codex_hooks_registered(&hooks);
+    assert_command_contains_expected_bin(
+        &hooks,
+        "SessionStart",
+        "hook-codex-session-start",
+        expected_command,
+    );
 
     let skill = std::fs::read_to_string(plugin_dir.join("skills/reading-code-cheaply/SKILL.md"))
         .expect("Codex plugin should ship tracedecay steering skills");
     assert!(skill.contains("tracedecay"));
 }
 
-fn assert_codex_marketplace_entry(home: &Path) {
-    let marketplace = read_json(&codex_personal_marketplace_path(home));
-    assert_eq!(marketplace["name"], "personal");
+fn assert_codex_marketplace_entry(
+    marketplace_path: &Path,
+    expected_name: &str,
+    expected_display_name: &str,
+    expected_source_path: &str,
+) {
+    let marketplace = read_json(marketplace_path);
+    assert_eq!(marketplace["name"], expected_name);
+    assert_eq!(
+        marketplace["interface"]["displayName"],
+        expected_display_name
+    );
     let plugins = marketplace["plugins"]
         .as_array()
         .expect("marketplace plugins should be an array");
     let entry = plugins
         .iter()
         .find(|entry| entry["name"] == "tracedecay")
-        .expect("personal marketplace should contain tracedecay");
+        .expect("marketplace should contain tracedecay");
     assert_eq!(entry["source"]["source"], "local");
-    assert_eq!(entry["source"]["path"], "./plugins/tracedecay");
+    assert_eq!(entry["source"]["path"], expected_source_path);
     assert_eq!(entry["policy"]["installation"], "AVAILABLE");
     assert_eq!(entry["policy"]["authentication"], "ON_INSTALL");
     assert_eq!(entry["category"], "Productivity");
@@ -2397,7 +2432,13 @@ fn test_local_install_supported_agents_write_project_paths() {
         ),
         (
             "codex",
-            vec![".codex/config.toml", ".codex/hooks.json", "AGENTS.md"],
+            vec![
+                ".agents/plugins/marketplace.json",
+                "plugins/tracedecay/.codex-plugin/plugin.json",
+                "plugins/tracedecay/.mcp.json",
+                "plugins/tracedecay/hooks/hooks.json",
+                "plugins/tracedecay/skills/reading-code-cheaply/SKILL.md",
+            ],
         ),
         ("gemini", vec![".gemini/settings.json", "GEMINI.md"]),
         (
@@ -2440,7 +2481,7 @@ fn test_local_install_supported_agents_write_project_paths() {
                 path.extension().and_then(|ext| ext.to_str()),
                 Some("md" | "mdc")
             );
-            if is_instruction_file {
+            if is_instruction_file && agent != "codex" {
                 assert!(
                     body.contains("tracedecay_fact_store"),
                     "{agent} local instruction file {} should mention fact memory tools",
@@ -2452,7 +2493,10 @@ fn test_local_install_supported_agents_write_project_paths() {
                     path.display()
                 );
             }
-            if !is_instruction_file {
+            let is_codex_metadata = agent == "codex"
+                && (relative == ".agents/plugins/marketplace.json"
+                    || relative.ends_with(".codex-plugin/plugin.json"));
+            if !is_instruction_file && !is_codex_metadata {
                 let expected = expected_tracedecay_bin();
                 assert!(
                     body.contains(&expected),
@@ -2624,73 +2668,145 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
     CodexIntegration.install(&ctx).unwrap();
 
     let plugin_dir = codex_plugin_install_dir(home);
-    assert_codex_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin);
-    assert_codex_marketplace_entry(home);
+    assert_codex_plugin_bundle(
+        &plugin_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+    assert_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "personal",
+        "Personal",
+        "./plugins/tracedecay",
+    );
 
-    // Global Codex installs still own hooks and AGENTS.md directly because
-    // the current Codex plugin manifest schema accepts MCP/skills but not
-    // hook declarations.
     assert!(
         !home.join(".codex/config.toml").exists(),
         "global Codex install should rely on the plugin MCP config, not mutate config.toml"
     );
-
-    // Check AGENTS.md
-    let agents_md = home.join(".codex/AGENTS.md");
-    assert!(agents_md.exists(), "AGENTS.md should exist after install");
-    let md_content = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(md_content.contains("tracedecay"));
+    assert!(
+        !home.join(".codex/hooks.json").exists(),
+        "global Codex install should bundle hooks in the plugin, not write ~/.codex/hooks.json"
+    );
+    assert!(
+        !home.join(".codex/AGENTS.md").exists(),
+        "global Codex install should use plugin skills, not write ~/.codex/AGENTS.md"
+    );
 }
 
 #[test]
-fn test_codex_local_install_still_creates_project_config() {
+fn test_codex_install_sweeps_legacy_global_config() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/old/tracedecay hook-codex-session-start","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("AGENTS.md"),
+        "## Prefer tracedecay MCP tools\n\nUse tracedecay.\n",
+    )
+    .unwrap();
+
+    let ctx = make_install_ctx(home);
+    CodexIntegration.install(&ctx).unwrap();
+
+    assert!(
+        !codex_dir.join("config.toml").exists(),
+        "legacy global Codex MCP config should be removed when it only contained tracedecay"
+    );
+    assert!(
+        !codex_dir.join("hooks.json").exists(),
+        "legacy global Codex hooks should be removed when they only contained tracedecay"
+    );
+    assert!(
+        !codex_dir.join("AGENTS.md").exists(),
+        "legacy global Codex prompt rules should be removed when they only contained tracedecay"
+    );
+    assert_codex_plugin_bundle(
+        &codex_plugin_install_dir(home),
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+}
+
+#[test]
+fn test_codex_local_install_creates_repo_plugin_bundle_and_marketplace() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
     assert_local_install_success("codex", project.path(), home.path());
 
-    // Check <project>/.codex/config.toml
-    let home = project.path();
-    let config_path = home.join(".codex/config.toml");
-    assert!(
-        config_path.exists(),
-        "config.toml should exist after local install"
+    let plugin_dir = codex_project_plugin_install_dir(project.path());
+    assert_codex_plugin_bundle(
+        &plugin_dir,
+        &expected_tracedecay_bin(),
+        serde_json::json!(["serve", "--path", "."]),
+        false,
     );
-    // Verify the file contains the expected content as text (the TOML output from
-    // toml::to_string_pretty uses dotted headers which may not round-trip through
-    // toml::Value::parse in all crate versions)
-    let content = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        content.contains("[mcp_servers.tracedecay]"),
-        "config.toml should contain [mcp_servers.tracedecay]"
+    assert_codex_marketplace_entry(
+        &codex_repo_marketplace_path(project.path()),
+        "local-repo",
+        "Local Repo",
+        "./plugins/tracedecay",
     );
     assert!(
-        !content.contains("TRACEDECAY_ENABLE_GLOBAL_DB"),
-        "local Codex config should not opt into user-level global accounting"
+        !project.path().join(".codex/config.toml").exists(),
+        "local Codex install should use the repo plugin marketplace, not write .codex/config.toml"
     );
     assert!(
-        content.contains("\"serve\""),
-        "config.toml should contain \"serve\" in args"
+        !project.path().join(".codex/hooks.json").exists(),
+        "local Codex install should bundle hooks in the repo plugin"
     );
-    for tool in tool_names() {
-        let section = format!("[mcp_servers.tracedecay.tools.{tool}]");
-        let section_start = content.find(&section).unwrap_or_else(|| {
-            panic!("Codex config should include auto-approval section {section}")
-        });
-        let section_body = content[section_start..]
-            .split_once("\n[")
-            .map_or(&content[section_start..], |(body, _)| body);
-        assert!(
-            section_body.contains("approval_mode = \"auto\""),
-            "Codex should auto-approve tracedecay tool {tool}"
-        );
-    }
+    assert!(
+        !project.path().join("AGENTS.md").exists(),
+        "local Codex install should use plugin skills, not write project AGENTS.md"
+    );
+}
 
-    // Check AGENTS.md
-    let agents_md = home.join("AGENTS.md");
-    assert!(agents_md.exists(), "AGENTS.md should exist after install");
-    let md_content = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(md_content.contains("tracedecay"));
+#[test]
+fn test_codex_local_install_sweeps_legacy_project_config() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let codex_dir = project.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "[mcp_servers.tracedecay]\ncommand = \"/old/tracedecay\"\nargs = [\"serve\", \"--path\", \".\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tokensave hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
+    )
+    .unwrap();
+
+    assert_local_install_success("codex", project.path(), home.path());
+
+    assert!(
+        !codex_dir.join("config.toml").exists(),
+        "legacy project Codex MCP config should be removed when it only contained tracedecay"
+    );
+    assert!(
+        !codex_dir.join("hooks.json").exists(),
+        "legacy project Codex hooks should be removed when they only contained tracedecay/tokensave"
+    );
+    assert_codex_plugin_bundle(
+        &codex_project_plugin_install_dir(project.path()),
+        &expected_tracedecay_bin(),
+        serde_json::json!(["serve", "--path", "."]),
+        false,
+    );
 }
 
 /// Returns true if any matcher group registered under `event` has a handler
@@ -2758,44 +2874,36 @@ fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
 }
 
 #[test]
-fn test_codex_global_install_writes_hooks() {
+fn test_codex_global_install_bundles_hooks_in_plugin() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
 
-    let hooks_path = home.join(".codex/hooks.json");
+    let hooks_path = codex_plugin_install_dir(home).join("hooks/hooks.json");
     assert!(
         hooks_path.exists(),
-        "global Codex install should write ~/.codex/hooks.json"
+        "global Codex install should bundle hooks in the plugin"
     );
     let hooks = read_json(&hooks_path);
     assert_codex_hooks_registered(&hooks);
+    assert!(
+        !home.join(".codex/hooks.json").exists(),
+        "global Codex install should not write hooks outside the plugin"
+    );
 }
 
 #[test]
-fn test_codex_local_install_writes_hooks() {
+fn test_codex_local_install_bundles_hooks_in_plugin() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
     assert_local_install_success("codex", project.path(), home.path());
 
-    let config_path = project.path().join(".codex/config.toml");
-    let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        config.contains("args = [\n    \"serve\",\n    \"--path\",\n    \".\",\n]"),
-        "local Codex config should pin serve to the project root with --path ."
-    );
-    assert!(
-        !config.contains("TRACEDECAY_DISABLE_GLOBAL_DB")
-            && !config.contains("TRACEDECAY_ENABLE_GLOBAL_DB"),
-        "local Codex config should not need env flags for repo-local mode"
-    );
-
-    let hooks_path = project.path().join(".codex/hooks.json");
+    let hooks_path = codex_project_plugin_install_dir(project.path()).join("hooks/hooks.json");
     assert!(
         hooks_path.exists(),
-        "local Codex install should write <project>/.codex/hooks.json"
+        "local Codex install should bundle hooks in the repo plugin"
     );
     let hooks = read_json(&hooks_path);
     assert_codex_hooks_registered(&hooks);
@@ -2806,9 +2914,23 @@ fn test_codex_local_install_writes_hooks() {
         !home.path().join(".codex/hooks.json").exists(),
         "local install must not write the global Codex hooks config"
     );
+    assert!(
+        !project.path().join(".codex/hooks.json").exists(),
+        "local install must not write project Codex hooks config"
+    );
 }
 
 fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &str) {
+    let expected = expected_tracedecay_bin();
+    assert_command_contains_expected_bin(hooks, event, needle, &expected);
+}
+
+fn assert_command_contains_expected_bin(
+    hooks: &serde_json::Value,
+    event: &str,
+    needle: &str,
+    expected: &str,
+) {
     let groups = hooks["hooks"][event].as_array().expect("event array");
     let command = groups
         .iter()
@@ -2822,9 +2944,8 @@ fn assert_command_contains_bin(hooks: &serde_json::Value, event: &str, needle: &
             })
         })
         .expect("handler command should exist");
-    let expected = expected_tracedecay_bin();
     assert!(
-        command.contains(&expected),
+        command.contains(expected),
         "Codex hook command must use the resolved absolute tracedecay executable, got {command}"
     );
 }
@@ -2834,28 +2955,11 @@ fn test_codex_install_reconciles_hooks_idempotently() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
 
-    // Pre-seed a hooks.json with a stale tracedecay PostToolUse group plus a
-    // foreign hook that must be preserved across reinstall.
-    let codex_dir = home.join(".codex");
-    std::fs::create_dir_all(&codex_dir).unwrap();
-    std::fs::write(
-        codex_dir.join("hooks.json"),
-        r#"{
-          "hooks": {
-            "PostToolUse": [
-              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/old/tracedecay hook-codex-post-tool-use", "timeout": 60 } ] },
-              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/usr/bin/foreign-hook", "timeout": 10 } ] }
-            ]
-          }
-        }"#,
-    )
-    .unwrap();
-
     let ctx = make_install_ctx(home);
     CodexIntegration.install(&ctx).unwrap();
     CodexIntegration.install(&ctx).unwrap();
 
-    let hooks = read_json(&codex_dir.join("hooks.json"));
+    let hooks = read_json(&codex_plugin_install_dir(home).join("hooks/hooks.json"));
     let groups = hooks["hooks"]["PostToolUse"].as_array().unwrap();
 
     let tracedecay_groups: Vec<_> = groups
@@ -2875,37 +2979,25 @@ fn test_codex_install_reconciles_hooks_idempotently() {
         1,
         "reinstall must keep exactly one tracedecay PostToolUse group, got {groups:?}"
     );
-    assert!(
-        groups.iter().any(|group| {
-            group["hooks"].as_array().is_some_and(|handlers| {
-                handlers
-                    .iter()
-                    .any(|h| h["command"].as_str() == Some("/usr/bin/foreign-hook"))
-            })
-        }),
-        "reinstall must preserve foreign hooks, got {groups:?}"
-    );
+    assert_codex_hooks_registered(&hooks);
 }
 
 #[test]
-fn test_codex_uninstall_removes_hooks() {
+fn test_codex_uninstall_removes_plugin_hooks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
 
     CodexIntegration.install(&ctx).unwrap();
-    let hooks_path = home.join(".codex/hooks.json");
+    let hooks_path = codex_plugin_install_dir(home).join("hooks/hooks.json");
     assert!(hooks_path.exists());
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
-    if hooks_path.exists() {
-        let hooks = read_json(&hooks_path);
-        assert!(
-            !codex_event_has_handler(&hooks, "SessionStart", "hook-codex-session-start"),
-            "uninstall should remove tracedecay Codex hooks"
-        );
-    }
+    assert!(
+        !hooks_path.exists(),
+        "uninstall should remove tracedecay Codex plugin hooks with the plugin bundle"
+    );
 }
 
 #[test]
@@ -3280,7 +3372,12 @@ fn test_codex_install_then_uninstall() {
     CodexIntegration.install(&ctx).unwrap();
     let plugin_dir = codex_plugin_install_dir(home);
     assert!(plugin_dir.exists());
-    assert_codex_marketplace_entry(home);
+    assert_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "personal",
+        "Personal",
+        "./plugins/tracedecay",
+    );
 
     CodexIntegration.uninstall(&ctx).unwrap();
 
@@ -3337,7 +3434,12 @@ args = [\"--flag\"]
         !home.join(".codex/config.toml.bak").exists(),
         "global Codex plugin install should not back up config.toml because it does not rewrite it"
     );
-    assert_codex_plugin_bundle(&codex_plugin_install_dir(home), &ctx.tracedecay_bin);
+    assert_codex_plugin_bundle(
+        &codex_plugin_install_dir(home),
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
 }
 
 #[test]
