@@ -717,6 +717,107 @@ def _bridge_preview(value, limit: int = 2048) -> str:
     return preview
 
 
+_LCM_CONTRACT_KEYS = frozenset((
+    "answer",
+    "context_blocks",
+    "expansion",
+    "frontier",
+    "lcm",
+    "matches",
+    "needs_synthesis",
+    "replay_messages",
+    "should_compress",
+    "status",
+    "summary_request",
+))
+_RETRIEVAL_HANDLE_KEYS = ("handle", "response_handle", "retrieval_handle")
+
+def _json_or_none(text):
+    if not isinstance(text, str):
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+def _content_text_candidates(content):
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    parts = [
+        item.get("text")
+        for item in content
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    ]
+    candidates = []
+    if parts:
+        candidates.append("".join(parts))
+        joined = "\n".join(parts)
+        if joined != candidates[0]:
+            candidates.append(joined)
+        candidates.extend(parts)
+    return candidates
+
+def _decode_content_json(content):
+    for candidate in _content_text_candidates(content):
+        decoded = _json_or_none(candidate)
+        if decoded is not None:
+            return decoded
+    return None
+
+def _looks_like_lcm_contract(value):
+    return isinstance(value, dict) and bool(_LCM_CONTRACT_KEYS.intersection(value))
+
+def _retrieval_handle(value):
+    if not isinstance(value, dict):
+        return None
+    if value.get("truncated") is not True and not value.get("retrieve_tool"):
+        if not any(key in value for key in ("response_handle", "retrieval_handle")):
+            return None
+    for key in _RETRIEVAL_HANDLE_KEYS:
+        handle = value.get(key)
+        if isinstance(handle, str) and handle.strip():
+            return handle.strip()
+    return None
+
+def _decode_tool_payload(value, name: str, kwargs: dict, depth: int = 0, seen_handles=None):
+    if depth > 8:
+        return value
+    if seen_handles is None:
+        seen_handles = set()
+    if isinstance(value, str):
+        decoded = _json_or_none(value)
+        if decoded is None:
+            return value
+        return _decode_tool_payload(decoded, name, kwargs, depth + 1, seen_handles)
+    if not isinstance(value, dict):
+        return value
+
+    handle = _retrieval_handle(value)
+    if handle and name.startswith("tracedecay_lcm_"):
+        if handle in seen_handles:
+            return value
+        seen_handles.add(handle)
+        retrieved = call_tracedecay_json(
+            "tracedecay_retrieve",
+            {"handle": handle},
+            **kwargs,
+        )
+        if isinstance(retrieved, dict) and not retrieved.get("error"):
+            return _decode_tool_payload(retrieved, name, kwargs, depth + 1, seen_handles)
+        return retrieved
+
+    if _looks_like_lcm_contract(value):
+        return value
+
+    if "content" in value:
+        decoded = _decode_content_json(value.get("content"))
+        if decoded is not None:
+            return _decode_tool_payload(decoded, name, kwargs, depth + 1, seen_handles)
+
+    return value
+
 def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
     raw = tools.call_tracedecay_tool(name, args, **kwargs)
     try:
@@ -733,46 +834,27 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    content = outer.get("content")
-    if (
-        not isinstance(content, list)
-        or not content
-        or not isinstance(content[0], dict)
-        or not isinstance(content[0].get("text"), str)
-    ):
+    if not _looks_like_lcm_contract(outer) and "content" not in outer:
         return {
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    text = content[0]["text"]
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+    if "content" in outer and not _content_text_candidates(outer.get("content")):
+        return {
+            "error": "tracedecay tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
+    payload = _decode_tool_payload(outer, name, kwargs)
+    if isinstance(payload, dict) and "content" in outer and payload is outer:
         return {
             "error": "tracedecay tool returned invalid nested JSON",
-            "text_preview": _bridge_preview(text),
+            "text_preview": _bridge_preview(outer.get("content")),
         }
-    if (
-        isinstance(payload, dict)
-        and payload.get("truncated") is True
-        and isinstance(payload.get("handle"), str)
-        and name.startswith("tracedecay_lcm_")
-    ):
-        retrieved = call_tracedecay_json(
-            "tracedecay_retrieve",
-            {"handle": payload["handle"]},
-            **kwargs,
-        )
-        if isinstance(retrieved, dict):
-            nested = retrieved.get("content")
-            if isinstance(nested, str):
-                try:
-                    decoded = json.loads(nested)
-                except json.JSONDecodeError:
-                    return retrieved
-                if isinstance(decoded, dict):
-                    return decoded
-            return retrieved
+    if not isinstance(payload, dict):
+        return {
+            "error": "tracedecay tool response missing text content",
+            "raw_preview": _bridge_preview(raw),
+        }
     return payload
 
 def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
@@ -1953,6 +2035,26 @@ def _replay_message_list(value):
             return None
     return list(value)
 
+def _compression_replay_is_compacted(result):
+    if not isinstance(result, dict):
+        return False
+    return any(bool(result.get(key)) for key in (
+        "contract_truncated",
+        "replay_messages_truncated_for_mcp",
+        "replay_messages_compacted_for_mcp",
+    ))
+
+def _compacted_lcm_result_error(result):
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload["status"] = "error"
+    payload.setdefault("reason", "mcp_compacted_compression_payload")
+    payload.setdefault(
+        "error",
+        payload.get("mcp_truncation_reason")
+        or "LCM compression payload was compacted for MCP; full replay was not recovered",
+    )
+    return payload
+
 def _bounded_expand_query_answer(text: str, max_tokens: int):
     try:
         token_budget = int(max_tokens or 2000)
@@ -2447,6 +2549,15 @@ class TraceDecayContextEngine(ContextEngine):
         """
         result = self._preflight_probe(messages, current_tokens=current_tokens, **kwargs)
         if isinstance(result, dict):
+            original = list(messages or [])
+            replay = _replay_message_list(result.get("replay_messages"))
+            if (
+                replay is not None
+                and replay != original
+                and (replay or not original)
+                and not _compression_replay_is_compacted(result)
+            ):
+                return True
             return bool(result.get("should_compress"))
         return False
 
@@ -3049,6 +3160,14 @@ class TraceDecayContextEngine(ContextEngine):
             else:
                 self._last_summary_error = "invalid compression result"
             return original
+        if _compression_replay_is_compacted(result):
+            self._last_compress_aborted = True
+            self._last_summary_error = str(
+                result.get("mcp_truncation_reason")
+                or result.get("reason")
+                or "compression replay was compacted for MCP"
+            )
+            return original
         replay = _replay_message_list(result.get("replay_messages"))
         if replay is None or (not replay and original):
             # No usable replay window — treat as a no-op; the host detects
@@ -3056,9 +3175,8 @@ class TraceDecayContextEngine(ContextEngine):
             self._last_compress_aborted = True
             self._last_summary_error = str(result.get("reason") or "no usable replay")
             return original
-        if replay == original and original:
-            self._last_compress_aborted = True
-            self._last_summary_error = str(result.get("reason") or "unchanged replay")
+        if replay == original:
+            return original
         if replay != original:
             self.compression_count += 1
         return replay
@@ -3122,6 +3240,14 @@ class TraceDecayContextEngine(ContextEngine):
 
         while attempts < max_auxiliary_attempts:
             first = call_tracedecay_json("tracedecay_lcm_compress", attempt_args, **kwargs)
+            if _compression_replay_is_compacted(first):
+                return _with_auxiliary_metadata(
+                    _compacted_lcm_result_error(first),
+                    attempts=attempts,
+                    retry_status=retry_status,
+                    error_classification=error_classification,
+                    fallback_used=fallback_used,
+                )
             if first.get("status") != "needs_summary":
                 return _with_auxiliary_metadata(
                     first,
@@ -3187,6 +3313,8 @@ class TraceDecayContextEngine(ContextEngine):
                 "route": provided_route,
             }
             result = call_tracedecay_json("tracedecay_lcm_compress", provided_args, **kwargs)
+            if _compression_replay_is_compacted(result):
+                result = _compacted_lcm_result_error(result)
             return _with_auxiliary_metadata(
                 result,
                 attempts=attempts,

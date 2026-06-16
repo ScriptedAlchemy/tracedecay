@@ -2181,9 +2181,9 @@ assert engine.last_compress_result["reason"] == "noop_summarizer"
 }
 
 #[test]
-fn context_engine_marks_identical_replay_as_aborted() {
+fn context_engine_treats_identical_replay_as_clean_noop() {
     run_generated_plugin_script(
-        "check_identical_replay_abort.py",
+        "check_identical_replay_noop.py",
         r#"
 import json
 
@@ -2216,11 +2216,115 @@ engine.initialize(session_id="session-1", project_root="/tmp/project")
 compressed = engine.compress(list(messages), current_tokens=292666)
 
 assert compressed == messages
-assert engine._last_compress_aborted is True
-assert engine._last_summary_error == "no_backlog_to_compress"
+assert engine._last_compress_aborted is False
+assert engine._last_summary_error is None
 assert engine.compression_count == 0
 "#,
-        "generated context engine should mark identical replay as aborted compression",
+        "generated context engine should treat identical valid replay as a clean no-op",
+    );
+}
+
+#[test]
+fn context_engine_adopts_decoded_replay_even_when_should_compress_false() {
+    run_generated_plugin_script(
+        "check_decoded_replay_compression.py",
+        r#"
+import json
+
+messages = [
+    {"role": "user", "content": "old oversized context"},
+    {"role": "assistant", "content": "old acknowledgement"},
+]
+replay = [{"role": "system", "content": "compressed replay"}]
+calls = []
+
+def envelope(payload):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    if name == "tracedecay_lcm_preflight":
+        return envelope({
+            "status": "ok",
+            "should_compress": False,
+            "reason": "replay_only",
+            "replay_messages": replay,
+        })
+    if name == "tracedecay_lcm_compress":
+        return envelope({"truncated": True, "handle": "compress-payload"})
+    if name == "tracedecay_retrieve":
+        assert args == {"handle": "compress-payload"}
+        return envelope({
+            "content": json.dumps({
+                "status": "ok",
+                "reason": "compressed_backlog",
+                "replay_messages": replay,
+            })
+        })
+    raise AssertionError(f"unexpected tool call: {name}")
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+
+assert engine.should_compress_preflight(list(messages), current_tokens=292666) is True
+compressed = engine.compress(list(messages), current_tokens=292666)
+
+assert compressed == replay
+assert engine._last_compress_aborted is False
+assert engine.compression_count == 1
+assert engine.last_compress_result["status"] == "ok"
+assert engine.last_compress_result["reason"] == "compressed_backlog"
+assert [call[0] for call in calls] == [
+    "tracedecay_lcm_preflight",
+    "tracedecay_lcm_compress",
+    "tracedecay_retrieve",
+]
+"#,
+        "generated context engine should adopt decoded replay payloads as compression progress",
+    );
+}
+
+#[test]
+fn context_engine_rejects_compacted_compression_replay() {
+    run_generated_plugin_script(
+        "check_compacted_replay_abort.py",
+        r#"
+import json
+
+messages = [
+    {"role": "user", "content": "old oversized context"},
+    {"role": "assistant", "content": "old acknowledgement"},
+]
+compacted_replay = [{"role": "system", "content": "truncated replay"}]
+
+def envelope(payload):
+    return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    assert name == "tracedecay_lcm_compress"
+    return envelope({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "contract_truncated": True,
+        "mcp_truncation_reason": "lcm-compress response compacted to preserve Hermes bridge contract",
+        "replay_messages": compacted_replay,
+        "replay_messages_truncated_for_mcp": True,
+    })
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+compressed = engine.compress(list(messages), current_tokens=292666)
+
+assert compressed == messages
+assert engine._last_compress_aborted is True
+assert "compacted" in engine._last_summary_error
+assert engine.compression_count == 0
+"#,
+        "generated context engine should never adopt compacted MCP replay as live transcript",
     );
 }
 
@@ -4000,46 +4104,11 @@ assert agent.auxiliary_client.calls[0]["timeout"] == 30.0
 }
 
 #[test]
-fn call_tracedecay_json_normalizes_malformed_mcp_envelopes() {
-    let home = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(home.path()))
-        .unwrap();
-
-    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    assert_python_compiles(&[
-        &plugin_dir.join("tools.py"),
-        &plugin_dir.join("schemas.py"),
-        &plugin_dir.join("__init__.py"),
-    ]);
-
-    let script = plugin_dir.join("check_bridge_error_normalization.py");
-    std::fs::write(
-        &script,
+fn call_tracedecay_json_normalizes_and_decodes_mcp_envelopes() {
+    run_generated_plugin_script(
+        "check_bridge_envelope_decoding.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 responses = []
 
@@ -4097,20 +4166,50 @@ assert [call[0] for call in calls] == [
     "tracedecay_retrieve",
     "tracedecay_fact_store",
 ]
-"#,
-    )
-    .unwrap();
 
-    let output = Command::new("python3")
-        .arg(&script)
-        .arg(plugin_dir)
-        .output()
-        .expect("python3 should run generated Hermes bridge error normalization check");
-    assert!(
-        output.status.success(),
-        "generated JSON bridge should normalize malformed MCP envelopes\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+split_payload = json.dumps({"status": "ok", "source": "split-content"})
+responses.append(json.dumps({
+    "content": [
+        {"type": "text", "text": split_payload[:12]},
+        {"type": "text", "text": split_payload[12:]},
+    ]
+}))
+split_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+assert split_content == {"status": "ok", "source": "split-content"}
+
+nested_payload = {"content": json.dumps({"status": "ok", "source": "nested-content"})}
+responses.append(envelope(nested_payload))
+nested_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+assert nested_content == {"status": "ok", "source": "nested-content"}
+
+response_handle_calls = []
+
+def fake_response_handle_call(name, args, **kwargs):
+    response_handle_calls.append((name, args, kwargs))
+    if name == "tracedecay_lcm_compress":
+        return envelope({"truncated": True, "response_handle": "payload-2"})
+    if name == "tracedecay_retrieve":
+        assert args == {"handle": "payload-2"}
+        return envelope({
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"status": "ok", "source": "response-handle"}),
+                }
+            ]
+        })
+    raise AssertionError(f"unexpected tool call: {name}")
+
+plugin.tools.call_tracedecay_tool = fake_response_handle_call
+response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_compress", {})
+assert response_handle_payload == {"status": "ok", "source": "response-handle"}
+assert [call[0] for call in response_handle_calls] == [
+    "tracedecay_lcm_compress",
+    "tracedecay_retrieve",
+]
+"#,
+        "generated JSON bridge should normalize malformed envelopes and decode LCM payloads",
     );
 }
 

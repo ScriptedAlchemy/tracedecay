@@ -6404,28 +6404,13 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
     .unwrap();
 
     let text = extract_text(&compress.value);
-    let envelope: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(envelope["truncated"], true);
-    assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
-    assert!(text.len() <= 15_000);
-
-    let handle = envelope["handle"]
-        .as_str()
-        .expect("oversized needs-summary payload should include retrieve handle");
-    let retrieved = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        json!({ "handle": handle }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
-    let payload: Value =
-        serde_json::from_str(retrieved_payload["content"].as_str().unwrap()).unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
     assert_eq!(payload["status"], "needs_summary");
     assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
+    assert_eq!(payload["mcp_response_truncated"], true);
+    assert_eq!(payload["contract_truncated"], true);
+    assert!(payload.get("truncated").is_none());
+    assert!(text.len() <= 15_000);
     assert!(
         payload["replay_messages"]
             .as_array()
@@ -6438,11 +6423,18 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
     );
     let source_messages = payload["summary_request"]["source_messages"]
         .as_array()
-        .expect("retrieved needs-summary payload should retain exact source messages");
+        .expect("compacted needs-summary payload should retain bounded source messages");
     assert!(!source_messages.is_empty());
     assert_eq!(
-        source_messages[0]["content"].as_str(),
-        Some(huge_source.as_str())
+        source_messages[0]["content_truncated_for_mcp"].as_bool(),
+        Some(true)
+    );
+    assert!(source_messages[0]["content"]
+        .as_str()
+        .is_some_and(|content| content.len() <= 512));
+    assert_eq!(
+        payload["summary_request"]["source_messages_truncated_for_mcp"].as_bool(),
+        Some(true)
     );
 }
 

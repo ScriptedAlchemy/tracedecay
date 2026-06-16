@@ -87,7 +87,7 @@ fn compact_lcm_preflight_payload(
             object.insert(key.to_string(), field.clone());
         }
     }
-    let (replay_messages, replay_truncated, replay_compacted) = compact_replay_messages(
+    let (replay_messages, replay_truncated, replay_compacted) = compact_messages_for_mcp(
         value.get("replay_messages"),
         replay_limit,
         replay_content_chars,
@@ -114,20 +114,25 @@ fn compact_lcm_preflight_payload(
     Value::Object(object)
 }
 
-fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
+fn lcm_compress_tool_json(_project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
-    } else if value.get("status").and_then(Value::as_str) == Some("needs_summary") {
+    } else {
         let compact = compact_lcm_compress_payload(value, formatted.len(), false, 8, 512);
         let compact_text = serde_json::to_string_pretty(&compact).unwrap_or_default();
         if compact_text.len() <= MAX_RESPONSE_CHARS {
             compact_text
         } else {
-            truncated_json_envelope_with_handle(project_root, &formatted)
+            let minimal = compact_lcm_compress_payload(value, formatted.len(), true, 4, 256);
+            let minimal_text = serde_json::to_string_pretty(&minimal).unwrap_or_default();
+            if minimal_text.len() <= MAX_RESPONSE_CHARS {
+                minimal_text
+            } else {
+                let floor = compact_lcm_compress_payload(value, formatted.len(), true, 1, 64);
+                bounded_lcm_contract_text(&floor)
+            }
         }
-    } else {
-        truncated_json_envelope_with_handle(project_root, &formatted)
     };
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
@@ -139,8 +144,8 @@ fn compact_lcm_compress_payload(
     value: &Value,
     original_chars: usize,
     minimal: bool,
-    replay_limit: usize,
-    replay_content_chars: usize,
+    message_limit: usize,
+    message_content_chars: usize,
 ) -> Value {
     let mut object = Map::new();
     let keys: &[&str] = if minimal {
@@ -163,14 +168,11 @@ fn compact_lcm_compress_payload(
             "session_id",
             "reason",
             "summary_nodes_created",
-            "summary_nodes",
-            "replay_messages",
             "replay_token_estimate",
             "replay_over_budget",
             "compression_attempts",
             "fallback_used",
             "retry_status",
-            "frontier",
         ]
     };
     for key in keys {
@@ -178,22 +180,20 @@ fn compact_lcm_compress_payload(
             object.insert((*key).to_string(), field.clone());
         }
     }
-    if minimal {
-        let (replay_messages, replay_truncated, replay_compacted) = compact_replay_messages(
-            value.get("replay_messages"),
-            replay_limit,
-            replay_content_chars,
-        );
-        object.insert("replay_messages".to_string(), replay_messages);
-        object.insert(
-            "replay_messages_truncated_for_mcp".to_string(),
-            json!(replay_truncated),
-        );
-        object.insert(
-            "replay_messages_compacted_for_mcp".to_string(),
-            json!(replay_compacted),
-        );
-    }
+    let (replay_messages, replay_truncated, replay_compacted) = compact_messages_for_mcp(
+        value.get("replay_messages"),
+        message_limit,
+        message_content_chars,
+    );
+    object.insert("replay_messages".to_string(), replay_messages);
+    object.insert(
+        "replay_messages_truncated_for_mcp".to_string(),
+        json!(replay_truncated),
+    );
+    object.insert(
+        "replay_messages_compacted_for_mcp".to_string(),
+        json!(replay_compacted),
+    );
 
     if let Some(summary_request) = value.get("summary_request").and_then(Value::as_object) {
         let mut compact_request = Map::new();
@@ -210,14 +210,16 @@ fn compact_lcm_compress_payload(
             }
         }
         if let Some(field) = summary_request.get("source_messages") {
-            compact_request.insert("source_messages".to_string(), field.clone());
+            let (source_messages, source_truncated, source_compacted) =
+                compact_messages_for_mcp(Some(field), message_limit, message_content_chars);
+            compact_request.insert("source_messages".to_string(), source_messages);
             compact_request.insert(
                 "source_messages_truncated_for_mcp".to_string(),
-                json!(false),
+                json!(source_truncated),
             );
             compact_request.insert(
                 "source_messages_compacted_for_mcp".to_string(),
-                json!(false),
+                json!(source_compacted),
             );
         }
         compact_request.insert("prompt_omitted_for_mcp".to_string(), json!(true));
@@ -241,12 +243,12 @@ fn compact_lcm_compress_payload(
     );
     object.insert(
         "mcp_truncation_reason".to_string(),
-        json!("lcm-compress needs-summary response compacted to preserve Hermes bridge contract"),
+        json!("lcm-compress response compacted to preserve Hermes bridge contract"),
     );
     Value::Object(object)
 }
 
-fn compact_replay_messages(
+fn compact_messages_for_mcp(
     value: Option<&Value>,
     limit: usize,
     content_chars: usize,
