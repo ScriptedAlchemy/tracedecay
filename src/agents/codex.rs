@@ -1195,9 +1195,16 @@ mod tests {
     /// (with a reason) in `CODEX_SKILL_DIVERGENCES`.
     #[test]
     fn codex_skills_match_the_cursor_source_for_parity() {
-        // Skills deliberately specialized for Codex. Empty today — every shared
-        // skill is a verbatim mirror of the Cursor source.
-        const CODEX_SKILL_DIVERGENCES: &[&str] = &[];
+        // Skills deliberately specialized for Codex (host-specific bodies that
+        // are not byte-compared against the Cursor source):
+        //
+        // - `curating-project-memory`: the Cursor source hands the "add a
+        //   researched subject from scratch" flow off to the `memorizing-subject`
+        //   skill, an explicit-invoke (`disable-model-invocation: true`) slash
+        //   workflow Codex intentionally does not ship. The Codex copy inlines
+        //   that flow's guardrails (read-only research, dedupe, cited facts,
+        //   secret/PII rejection) instead of pointing at a skill absent here.
+        const CODEX_SKILL_DIVERGENCES: &[&str] = &["curating-project-memory"];
         let root = repo_root();
         for &skill in crate::hooks::CURSOR_PLUGIN_SKILLS {
             let codex_path = root
@@ -1225,5 +1232,57 @@ mod tests {
                  CODEX_SKILL_DIVERGENCES if a host-specific version is intended)"
             );
         }
+    }
+
+    /// Extracts the `<name>` from every `tracedecay:<name>` skill handoff in a
+    /// body. MCP tool calls use `tracedecay_*` (underscore) and are ignored.
+    fn skill_handoff_references(body: &str) -> Vec<String> {
+        const MARKER: &str = "tracedecay:";
+        let mut refs = Vec::new();
+        let mut rest = body;
+        while let Some(pos) = rest.find(MARKER) {
+            rest = &rest[pos + MARKER.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+                .collect();
+            if !name.is_empty() {
+                refs.push(name);
+            }
+        }
+        refs
+    }
+
+    /// Every `tracedecay:<skill>` handoff inside the embedded Codex skill bodies
+    /// must resolve to a skill this bundle actually ships. A dangling reference
+    /// (e.g. to a Cursor-only explicit-invoke skill like `memorizing-subject`)
+    /// would point a Codex agent at a workflow that does not exist here.
+    #[test]
+    fn codex_skill_cross_references_resolve_to_shipped_skills() {
+        let shipped: std::collections::BTreeSet<String> = CODEX_EMBEDDED_PLUGIN_FILES
+            .iter()
+            .filter_map(|&(relative, _)| {
+                relative
+                    .strip_prefix("skills/")
+                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+                    .map(str::to_string)
+            })
+            .collect();
+
+        let mut dangling: Vec<String> = Vec::new();
+        for &(relative, contents) in CODEX_EMBEDDED_PLUGIN_FILES {
+            if !relative.starts_with("skills/") {
+                continue;
+            }
+            for reference in skill_handoff_references(contents) {
+                if !shipped.contains(&reference) {
+                    dangling.push(format!("{relative} -> tracedecay:{reference}"));
+                }
+            }
+        }
+        assert!(
+            dangling.is_empty(),
+            "Codex skill bodies reference skills absent from the bundle: {dangling:?}"
+        );
     }
 }

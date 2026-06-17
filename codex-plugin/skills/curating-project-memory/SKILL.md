@@ -5,7 +5,7 @@ description: Use when reviewing, updating, merging, deleting, pruning, or repair
 
 # Curating project memory
 
-This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`; for adding a researched subject from scratch, use `tracedecay:memorizing-subject`.
+This skill owns memory lifecycle changes. For read-only recall, start with `tracedecay:recalling-project-memory`. To add a researched subject from scratch, use the research-then-`add` flow in the Handoff section.
 
 ## Workflow
 
@@ -23,7 +23,7 @@ This skill owns memory lifecycle changes. For read-only recall, start with `trac
 
 ## Handoff
 
-- Need to remember a new subject with research fan-out → `tracedecay:memorizing-subject`.
+- Need to remember a new subject with research fan-out → research read-only first, dedupe via `tracedecay_fact_store` `action: "search"`, then store durable, cited facts with `action: "add"`; reject secrets, credentials, and PII.
 - Need raw session messages or summary-DAG replay → `tracedecay:recalling-session-context`.
 - Need only index/server status, not memory mutation → `tracedecay:project-status`.
 
