@@ -166,12 +166,111 @@ const CODEX_EMBEDDED_PLUGIN_FILES: &[(&str, &str)] = &[
     (".mcp.json", include_str!("../../codex-plugin/.mcp.json")),
     ("README.md", include_str!("../../codex-plugin/README.md")),
     (
+        "hooks/hooks.json",
+        include_str!("../../codex-plugin/hooks/hooks.json"),
+    ),
+    // Codex auto-discovers every `SKILL.md` under the manifest `skills/` dir by
+    // its `name`/`description` frontmatter. The Codex bundle mirrors the
+    // model-invocable Cursor skills (`hooks::CURSOR_PLUGIN_SKILLS`) so both
+    // hosts steer agents toward the same tracedecay workflows; the parity is
+    // enforced by `codex_skills_match_the_cursor_source_for_parity`. The
+    // Cursor-only slash dispatchers (`tracedecay-*`) and explicit-invoke memory
+    // skills are intentionally omitted (Codex has no slash-command surface).
+    (
+        "skills/architecture-overview/SKILL.md",
+        include_str!("../../codex-plugin/skills/architecture-overview/SKILL.md"),
+    ),
+    (
+        "skills/assessing-test-coverage/SKILL.md",
+        include_str!("../../codex-plugin/skills/assessing-test-coverage/SKILL.md"),
+    ),
+    (
+        "skills/atomic-code-edits/SKILL.md",
+        include_str!("../../codex-plugin/skills/atomic-code-edits/SKILL.md"),
+    ),
+    (
+        "skills/auditing-code-safety/SKILL.md",
+        include_str!("../../codex-plugin/skills/auditing-code-safety/SKILL.md"),
+    ),
+    (
+        "skills/cleaning-up-dead-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/cleaning-up-dead-code/SKILL.md"),
+    ),
+    (
+        "skills/code-health-report/SKILL.md",
+        include_str!("../../codex-plugin/skills/code-health-report/SKILL.md"),
+    ),
+    (
+        "skills/cross-branch-investigation/SKILL.md",
+        include_str!("../../codex-plugin/skills/cross-branch-investigation/SKILL.md"),
+    ),
+    (
+        "skills/curating-project-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/curating-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/drafting-commit-and-pr/SKILL.md",
+        include_str!("../../codex-plugin/skills/drafting-commit-and-pr/SKILL.md"),
+    ),
+    (
+        "skills/exploring-types-and-traits/SKILL.md",
+        include_str!("../../codex-plugin/skills/exploring-types-and-traits/SKILL.md"),
+    ),
+    (
+        "skills/finding-duplicate-logic/SKILL.md",
+        include_str!("../../codex-plugin/skills/finding-duplicate-logic/SKILL.md"),
+    ),
+    (
+        "skills/finding-impacted-areas/SKILL.md",
+        include_str!("../../codex-plugin/skills/finding-impacted-areas/SKILL.md"),
+    ),
+    (
+        "skills/fixing-build-and-type-errors/SKILL.md",
+        include_str!("../../codex-plugin/skills/fixing-build-and-type-errors/SKILL.md"),
+    ),
+    (
+        "skills/porting-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/porting-code/SKILL.md"),
+    ),
+    (
+        "skills/project-status/SKILL.md",
+        include_str!("../../codex-plugin/skills/project-status/SKILL.md"),
+    ),
+    (
         "skills/reading-code-cheaply/SKILL.md",
         include_str!("../../codex-plugin/skills/reading-code-cheaply/SKILL.md"),
     ),
     (
-        "hooks/hooks.json",
-        include_str!("../../codex-plugin/hooks/hooks.json"),
+        "skills/recalling-project-memory/SKILL.md",
+        include_str!("../../codex-plugin/skills/recalling-project-memory/SKILL.md"),
+    ),
+    (
+        "skills/recalling-session-context/SKILL.md",
+        include_str!("../../codex-plugin/skills/recalling-session-context/SKILL.md"),
+    ),
+    (
+        "skills/refactoring-safely/SKILL.md",
+        include_str!("../../codex-plugin/skills/refactoring-safely/SKILL.md"),
+    ),
+    (
+        "skills/reviewing-a-diff/SKILL.md",
+        include_str!("../../codex-plugin/skills/reviewing-a-diff/SKILL.md"),
+    ),
+    (
+        "skills/running-impacted-tests/SKILL.md",
+        include_str!("../../codex-plugin/skills/running-impacted-tests/SKILL.md"),
+    ),
+    (
+        "skills/searching-for-code/SKILL.md",
+        include_str!("../../codex-plugin/skills/searching-for-code/SKILL.md"),
+    ),
+    (
+        "skills/tracing-functions/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracing-functions/SKILL.md"),
+    ),
+    (
+        "skills/tracking-session-health/SKILL.md",
+        include_str!("../../codex-plugin/skills/tracking-session-health/SKILL.md"),
     ),
 ];
 
@@ -1015,4 +1114,116 @@ fn codex_hook_present(hooks: &serde_json::Value, event: &str, command: &str) -> 
             })
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    }
+
+    fn relative_paths_under(root: &Path) -> Vec<String> {
+        let mut paths: Vec<String> = collect_regular_files(root)
+            .expect("plugin source bundle should be readable")
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .expect("collected paths live under root")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// The embedded writer is the single source of truth for released installs
+    /// (the binary ships without the repo `codex-plugin/` tree), so the list
+    /// must cover every file actually present in the source bundle — otherwise
+    /// a freshly added skill file would silently never reach Codex users.
+    #[test]
+    fn codex_embedded_file_list_covers_the_whole_source_bundle() {
+        let on_disk = relative_paths_under(&repo_root().join("codex-plugin"));
+        let mut expected: Vec<String> = CODEX_EMBEDDED_PLUGIN_FILES
+            .iter()
+            .map(|&(relative, _)| relative.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            on_disk, expected,
+            "CODEX_EMBEDDED_PLUGIN_FILES must cover every codex-plugin file"
+        );
+    }
+
+    /// Codex auto-discovers skills by description (it has no slash-command or
+    /// `disable-model-invocation` surface), so the Codex bundle ships exactly
+    /// the *model-invocable* Cursor skills — the same set the Cursor plugin
+    /// advertises via [`crate::hooks::CURSOR_PLUGIN_SKILLS`]. The Cursor-only
+    /// slash dispatchers (`tracedecay-*`) and explicit-invoke memory skills are
+    /// intentionally not mirrored: their workflows are covered by these skills.
+    #[test]
+    fn codex_bundle_ships_exactly_the_model_invocable_cursor_skills() {
+        let mut shipped: Vec<String> = CODEX_EMBEDDED_PLUGIN_FILES
+            .iter()
+            .filter_map(|&(relative, _)| {
+                relative
+                    .strip_prefix("skills/")
+                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+                    .map(str::to_string)
+            })
+            .collect();
+        shipped.sort();
+        let mut expected: Vec<String> = crate::hooks::CURSOR_PLUGIN_SKILLS
+            .iter()
+            .map(|skill| (*skill).to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            shipped, expected,
+            "Codex must embed exactly the model-invocable Cursor skills for parity"
+        );
+    }
+
+    /// Each Codex skill is a byte-identical mirror of its Cursor source so the
+    /// two host plugins never drift. Codex reads only the `name`/`description`
+    /// frontmatter for invocation and ignores extra keys, and the skill bodies
+    /// reference host-neutral `tracedecay_*` MCP tools, so the same content is
+    /// correct in both hosts. Intentional per-skill divergences must be listed
+    /// (with a reason) in `CODEX_SKILL_DIVERGENCES`.
+    #[test]
+    fn codex_skills_match_the_cursor_source_for_parity() {
+        // Skills deliberately specialized for Codex. Empty today — every shared
+        // skill is a verbatim mirror of the Cursor source.
+        const CODEX_SKILL_DIVERGENCES: &[&str] = &[];
+        let root = repo_root();
+        for &skill in crate::hooks::CURSOR_PLUGIN_SKILLS {
+            let codex_path = root
+                .join("codex-plugin/skills")
+                .join(skill)
+                .join("SKILL.md");
+            assert!(
+                codex_path.exists(),
+                "Codex plugin must ship the `{skill}` skill for parity with Cursor"
+            );
+            if CODEX_SKILL_DIVERGENCES.contains(&skill) {
+                continue;
+            }
+            let cursor_body = std::fs::read_to_string(
+                root.join("cursor-plugin/skills")
+                    .join(skill)
+                    .join("SKILL.md"),
+            )
+            .expect("cursor skill source should be readable");
+            let codex_body = std::fs::read_to_string(&codex_path)
+                .expect("codex skill source should be readable");
+            assert_eq!(
+                codex_body, cursor_body,
+                "Codex `{skill}` skill must mirror the Cursor source (add it to \
+                 CODEX_SKILL_DIVERGENCES if a host-specific version is intended)"
+            );
+        }
+    }
 }
