@@ -114,138 +114,17 @@ fn compact_lcm_preflight_payload(
     Value::Object(object)
 }
 
-fn lcm_compress_tool_json(_project_root: Option<&Path>, value: &Value) -> ToolResult {
+fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
     let text = if formatted.len() <= MAX_RESPONSE_CHARS {
         formatted
     } else {
-        let compact = compact_lcm_compress_payload(value, formatted.len(), false, 8, 512);
-        let compact_text = serde_json::to_string_pretty(&compact).unwrap_or_default();
-        if compact_text.len() <= MAX_RESPONSE_CHARS {
-            compact_text
-        } else {
-            let minimal = compact_lcm_compress_payload(value, formatted.len(), true, 4, 256);
-            let minimal_text = serde_json::to_string_pretty(&minimal).unwrap_or_default();
-            if minimal_text.len() <= MAX_RESPONSE_CHARS {
-                minimal_text
-            } else {
-                let floor = compact_lcm_compress_payload(value, formatted.len(), true, 1, 64);
-                bounded_lcm_contract_text(&floor)
-            }
-        }
+        truncated_json_envelope_with_handle(project_root, &formatted)
     };
     ToolResult {
         value: json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files: Vec::new(),
     }
-}
-
-fn compact_lcm_compress_payload(
-    value: &Value,
-    original_chars: usize,
-    minimal: bool,
-    message_limit: usize,
-    message_content_chars: usize,
-) -> Value {
-    let mut object = Map::new();
-    let keys: &[&str] = if minimal {
-        &[
-            "status",
-            "provider",
-            "session_id",
-            "reason",
-            "summary_nodes_created",
-            "replay_token_estimate",
-            "replay_over_budget",
-            "compression_attempts",
-            "fallback_used",
-            "retry_status",
-        ]
-    } else {
-        &[
-            "status",
-            "provider",
-            "session_id",
-            "reason",
-            "summary_nodes_created",
-            "replay_token_estimate",
-            "replay_over_budget",
-            "compression_attempts",
-            "fallback_used",
-            "retry_status",
-        ]
-    };
-    for key in keys {
-        if let Some(field) = value.get(key) {
-            object.insert((*key).to_string(), field.clone());
-        }
-    }
-    let (replay_messages, replay_truncated, replay_compacted) = compact_messages_for_mcp(
-        value.get("replay_messages"),
-        message_limit,
-        message_content_chars,
-    );
-    object.insert("replay_messages".to_string(), replay_messages);
-    object.insert(
-        "replay_messages_truncated_for_mcp".to_string(),
-        json!(replay_truncated),
-    );
-    object.insert(
-        "replay_messages_compacted_for_mcp".to_string(),
-        json!(replay_compacted),
-    );
-
-    if let Some(summary_request) = value.get("summary_request").and_then(Value::as_object) {
-        let mut compact_request = Map::new();
-        for key in [
-            "provider",
-            "session_id",
-            "focus_topic",
-            "source_range",
-            "token_budget",
-            "routes",
-        ] {
-            if let Some(field) = summary_request.get(key) {
-                compact_request.insert(key.to_string(), field.clone());
-            }
-        }
-        if let Some(field) = summary_request.get("source_messages") {
-            let (source_messages, source_truncated, source_compacted) =
-                compact_messages_for_mcp(Some(field), message_limit, message_content_chars);
-            compact_request.insert("source_messages".to_string(), source_messages);
-            compact_request.insert(
-                "source_messages_truncated_for_mcp".to_string(),
-                json!(source_truncated),
-            );
-            compact_request.insert(
-                "source_messages_compacted_for_mcp".to_string(),
-                json!(source_compacted),
-            );
-        }
-        compact_request.insert("prompt_omitted_for_mcp".to_string(), json!(true));
-        compact_request.insert(
-            "extraction_request_omitted_for_mcp".to_string(),
-            json!(true),
-        );
-        object.insert(
-            "summary_request".to_string(),
-            Value::Object(compact_request),
-        );
-    } else if let Some(field) = value.get("summary_request") {
-        object.insert("summary_request".to_string(), field.clone());
-    }
-
-    object.insert("mcp_response_truncated".to_string(), json!(true));
-    object.insert("contract_truncated".to_string(), json!(true));
-    object.insert(
-        "mcp_original_response_chars".to_string(),
-        json!(original_chars),
-    );
-    object.insert(
-        "mcp_truncation_reason".to_string(),
-        json!("lcm-compress response compacted to preserve Hermes bridge contract"),
-    );
-    Value::Object(object)
 }
 
 fn compact_messages_for_mcp(
@@ -309,6 +188,21 @@ fn bounded_lcm_contract_text(value: &Value) -> String {
         "replay_messages_compacted_for_mcp": true,
     }))
     .unwrap_or_default()
+}
+
+fn lcm_response_handle_root(project_root: Option<&Path>, args: &Value) -> Option<PathBuf> {
+    if let Some(root) = project_root {
+        return Some(root.to_path_buf());
+    }
+    for key in ["response_handle_project_root", "project_root"] {
+        if let Some(root) = string_arg(args, key) {
+            return Some(PathBuf::from(root));
+        }
+    }
+    if string_arg(args, "storage_scope") == Some("hermes_profile") {
+        return string_arg(args, "hermes_home").map(PathBuf::from);
+    }
+    None
 }
 
 fn lcm_expand_query_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
@@ -1881,6 +1775,7 @@ pub(super) async fn handle_lcm_compress(
 ) -> Result<ToolResult> {
     let provider = provider_arg(&args);
     let session_id = required_string_arg(&args, "session_id")?;
+    let response_handle_root = lcm_response_handle_root(project_root, &args);
     let storage = lcm_open_storage!(project_root, &args);
     let response = storage
         .db
@@ -1913,7 +1808,7 @@ pub(super) async fn handle_lcm_compress(
         .await
         .map_err(lcm_error)?;
     Ok(lcm_compress_tool_json(
-        project_root,
+        response_handle_root.as_deref(),
         &json!({
             "status": response.status,
             "provider": provider,

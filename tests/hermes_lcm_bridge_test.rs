@@ -1461,6 +1461,7 @@ else:
 assert args == {
     "storage_scope": "hermes_profile",
     "hermes_home": os.path.expanduser("~/.hermes"),
+    "response_handle_project_root": "/tmp/project",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -2254,6 +2255,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
         return envelope({"truncated": True, "handle": "compress-payload"})
     if name == "tracedecay_retrieve":
         assert args == {"handle": "compress-payload"}
+        assert kwargs.get("project_root") == "/tmp/project", kwargs
         return envelope({
             "content": json.dumps({
                 "status": "ok",

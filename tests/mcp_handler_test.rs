@@ -229,6 +229,32 @@ fn extract_text(value: &Value) -> &str {
         .unwrap_or("<missing text>")
 }
 
+async fn extract_lcm_json_following_handle(cg: &TraceDecay, value: &Value) -> Value {
+    let payload: Value = serde_json::from_str(extract_text(value)).unwrap();
+    if payload.get("truncated").and_then(Value::as_bool) != Some(true) {
+        return payload;
+    }
+    let handle = payload["handle"]
+        .as_str()
+        .expect("truncated LCM payload should include a retrieve handle");
+    let retrieved = handle_tool_call(
+        cg,
+        "tracedecay_retrieve",
+        json!({"handle": handle}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    serde_json::from_str(
+        retrieved_payload["content"]
+            .as_str()
+            .expect("retrieved LCM payload should carry original JSON content"),
+    )
+    .unwrap()
+}
+
 fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
     match result {
         Ok(_) => panic!("expected tool call to fail"),
@@ -6207,8 +6233,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     )
     .await
     .unwrap();
-    let unsafe_noop_payload: Value =
-        serde_json::from_str(extract_text(&unsafe_noop_compress.value)).unwrap();
+    let unsafe_noop_payload =
+        extract_lcm_json_following_handle(&cg, &unsafe_noop_compress.value).await;
     assert_eq!(unsafe_noop_payload["status"], "needs_summary");
     assert_eq!(
         unsafe_noop_payload["reason"],
@@ -6239,8 +6265,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     )
     .await
     .unwrap();
-    let reserve_cap_noop_payload: Value =
-        serde_json::from_str(extract_text(&reserve_cap_noop_compress.value)).unwrap();
+    let reserve_cap_noop_payload =
+        extract_lcm_json_following_handle(&cg, &reserve_cap_noop_compress.value).await;
     assert_eq!(reserve_cap_noop_payload["status"], "needs_summary");
     assert_eq!(
         reserve_cap_noop_payload["reason"],
@@ -6376,7 +6402,7 @@ async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
 }
 
 #[tokio::test]
-async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
+async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
     let (cg, _dir) = setup_project().await;
     let huge_source = "alpha oversized context ".repeat(8_000);
 
@@ -6405,37 +6431,55 @@ async fn lcm_compress_oversized_needs_summary_preserves_bridge_contract() {
 
     let text = extract_text(&compress.value);
     let payload: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(payload["status"], "needs_summary");
-    assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
-    assert_eq!(payload["mcp_response_truncated"], true);
-    assert_eq!(payload["contract_truncated"], true);
-    assert!(payload.get("truncated").is_none());
+    assert_eq!(payload["truncated"], true);
+    assert!(payload["handle"].as_str().is_some());
+    assert_eq!(payload["retrieve_tool"], "tracedecay_retrieve");
+    assert!(payload.get("contract_truncated").is_none());
+    assert!(payload.get("replay_messages_truncated_for_mcp").is_none());
     assert!(text.len() <= 15_000);
+    let retrieved = handle_tool_call(
+        &cg,
+        "tracedecay_retrieve",
+        json!({"handle": payload["handle"].as_str().unwrap()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
+    let full_payload: Value = serde_json::from_str(
+        retrieved_payload["content"]
+            .as_str()
+            .expect("retrieved content should be the full original JSON string"),
+    )
+    .unwrap();
+    assert_eq!(full_payload["status"], "needs_summary");
+    assert_eq!(full_payload["reason"], "hermes_auxiliary_not_available");
+    assert!(full_payload.get("contract_truncated").is_none());
     assert!(
-        payload["replay_messages"]
+        full_payload["replay_messages"]
             .as_array()
             .is_some_and(|messages| !messages.is_empty()),
-        "bridge must retain replay messages, got {payload:#}"
+        "full bridge payload must retain replay messages, got {full_payload:#}"
     );
     assert!(
-        payload["summary_request"].is_object(),
-        "bridge must retain summary request metadata, got {payload:#}"
+        full_payload["summary_request"].is_object(),
+        "full bridge payload must retain summary request metadata, got {full_payload:#}"
     );
-    let source_messages = payload["summary_request"]["source_messages"]
+    let source_messages = full_payload["summary_request"]["source_messages"]
         .as_array()
-        .expect("compacted needs-summary payload should retain bounded source messages");
+        .expect("retrieved needs-summary payload should retain source messages");
     assert!(!source_messages.is_empty());
     assert_eq!(
-        source_messages[0]["content_truncated_for_mcp"].as_bool(),
-        Some(true)
+        source_messages[0]["content"].as_str(),
+        Some(huge_source.as_str())
     );
-    assert!(source_messages[0]["content"]
-        .as_str()
-        .is_some_and(|content| content.len() <= 512));
-    assert_eq!(
-        payload["summary_request"]["source_messages_truncated_for_mcp"].as_bool(),
-        Some(true)
-    );
+    assert!(source_messages[0]
+        .get("content_truncated_for_mcp")
+        .is_none());
+    assert!(full_payload["summary_request"]
+        .get("source_messages_truncated_for_mcp")
+        .is_none());
 }
 
 #[tokio::test]

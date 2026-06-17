@@ -781,7 +781,19 @@ def _retrieval_handle(value):
             return handle.strip()
     return None
 
-def _decode_tool_payload(value, name: str, kwargs: dict, depth: int = 0, seen_handles=None):
+def _lcm_retrieve_kwargs(args: dict, kwargs: dict) -> dict:
+    retrieve_kwargs = dict(kwargs or {})
+    if retrieve_kwargs.get("project_root"):
+        return retrieve_kwargs
+    if isinstance(args, dict):
+        root = args.get("response_handle_project_root") or args.get("project_root")
+        if not root and args.get("storage_scope") == "hermes_profile":
+            root = args.get("hermes_home")
+        if isinstance(root, str) and root.strip():
+            retrieve_kwargs["project_root"] = root.strip()
+    return retrieve_kwargs
+
+def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int = 0, seen_handles=None):
     if depth > 8:
         return value
     if seen_handles is None:
@@ -790,7 +802,7 @@ def _decode_tool_payload(value, name: str, kwargs: dict, depth: int = 0, seen_ha
         decoded = _json_or_none(value)
         if decoded is None:
             return value
-        return _decode_tool_payload(decoded, name, kwargs, depth + 1, seen_handles)
+        return _decode_tool_payload(decoded, name, args, kwargs, depth + 1, seen_handles)
     if not isinstance(value, dict):
         return value
 
@@ -802,10 +814,10 @@ def _decode_tool_payload(value, name: str, kwargs: dict, depth: int = 0, seen_ha
         retrieved = call_tracedecay_json(
             "tracedecay_retrieve",
             {"handle": handle},
-            **kwargs,
+            **_lcm_retrieve_kwargs(args, kwargs),
         )
         if isinstance(retrieved, dict) and not retrieved.get("error"):
-            return _decode_tool_payload(retrieved, name, kwargs, depth + 1, seen_handles)
+            return _decode_tool_payload(retrieved, name, args, kwargs, depth + 1, seen_handles)
         return retrieved
 
     if _looks_like_lcm_contract(value):
@@ -814,7 +826,7 @@ def _decode_tool_payload(value, name: str, kwargs: dict, depth: int = 0, seen_ha
     if "content" in value:
         decoded = _decode_content_json(value.get("content"))
         if decoded is not None:
-            return _decode_tool_payload(decoded, name, kwargs, depth + 1, seen_handles)
+            return _decode_tool_payload(decoded, name, args, kwargs, depth + 1, seen_handles)
 
     return value
 
@@ -844,7 +856,7 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    payload = _decode_tool_payload(outer, name, kwargs)
+    payload = _decode_tool_payload(outer, name, args, kwargs)
     if isinstance(payload, dict) and "content" in outer and payload is outer:
         return {
             "error": "tracedecay tool returned invalid nested JSON",
@@ -2779,6 +2791,8 @@ class TraceDecayContextEngine(ContextEngine):
         storage_args = _storage_args(self.project_root, self.hermes_home)
         for key, value in storage_args.items():
             tool_args.setdefault(key, value)
+        if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
+            tool_args.setdefault("response_handle_project_root", self.project_root)
         if native_name in ("lcm_status", "lcm_doctor"):
             tool_args.update(_lcm_gc_config_args(self.config))
         if self.active_session_id:
@@ -3216,6 +3230,8 @@ class TraceDecayContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
+        if self.project_root:
+            args["response_handle_project_root"] = self.project_root
         _apply_lcm_option_overrides(args, kwargs, lcm_option_keys)
         if force and not args.get("max_assembly_tokens"):
             try:
