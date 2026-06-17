@@ -2024,6 +2024,50 @@ async fn compress_forces_overflow_recovery_with_reserve_derived_cap() {
 }
 
 #[tokio::test]
+async fn forced_overflow_summary_replay_keeps_latest_message_when_nothing_fits() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let huge_tail = "tool-output ".repeat(5_000);
+    insert_raw_messages_with_roles(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            ("user", "start"),
+            ("assistant", huge_tail.as_str()),
+            ("tool", huge_tail.as_str()),
+            ("assistant", huge_tail.as_str()),
+        ],
+    )
+    .await;
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "summary too large for cap".into(),
+        },
+        Some(1),
+        None,
+        Some(1),
+    );
+    request.current_tokens = Some(20_000);
+    request.fresh_tail_count = Some(2);
+
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(
+        response.reason,
+        "forced_overflow_recovery_replay_over_budget"
+    );
+    assert!(!response.replay_messages.is_empty());
+    let latest = response.replay_messages.last().unwrap();
+    assert_eq!(latest["role"], "assistant");
+    assert_eq!(latest["content"], huge_tail);
+}
+
+#[tokio::test]
 async fn preflight_requests_compression_for_maintenance_debt() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

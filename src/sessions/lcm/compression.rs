@@ -797,19 +797,32 @@ async fn persist_and_replay_backlog_compression(
     // The summaries created above are already persisted in this transaction,
     // so the shared assembler replays them together with any earlier
     // uncondensed summary history (hermes-lcm `_assemble_context`).
-    let replay_messages = assemble_replay_context(
-        conn,
-        &request.provider,
-        &request.session_id,
-        &context.raw_messages,
-        ReplayWindowParts {
-            pinned_anchors: &context.window.pinned_anchors,
-            deferred_backlog: &write_result.remaining_backlog,
-            fresh_tail: &context.window.fresh_tail,
-        },
-        request.max_assembly_tokens,
-    )
-    .await?;
+    let replay_parts = ReplayWindowParts {
+        pinned_anchors: &context.window.pinned_anchors,
+        deferred_backlog: &write_result.remaining_backlog,
+        fresh_tail: &context.window.fresh_tail,
+    };
+    let replay_messages = if context.plan.forced_overflow_recovery {
+        assemble_overflow_recovery_replay(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            replay_parts,
+            context.overflow_assembly_cap,
+        )
+        .await?
+    } else {
+        assemble_replay_context(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            replay_parts,
+            request.max_assembly_tokens,
+        )
+        .await?
+    };
     let mut status = "ok";
     let mut reason = if context.plan.forced_overflow_recovery {
         "forced_overflow_recovery"
