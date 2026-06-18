@@ -1,4 +1,6 @@
 [workspace]
+allow_dirty = true
+dependencies_update = false
 repo_url = "https://github.com/ScriptedAlchemy/tracedecay"
 release_always = false
 git_release_enable = true
@@ -12,5 +14,6 @@ git_tag_name = "v{{ version }}"
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
 publish = true
+publish_allow_dirty = true
 publish_timeout = "1h"
-semver_check = true
+semver_check = false

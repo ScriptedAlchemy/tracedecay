@@ -38,6 +38,8 @@ Repository variables required by `release.yml`:
 
 - `SIGNPATH_ORGANIZATION_ID`
 
+SignPath must have a `tracedecay` project with a `release-signing` signing policy. The Windows build uploads the unsigned exe and a separate `sign-windows` job waits for manual SignPath approval, then uploads the signed zip to the GitHub Release.
+
 ## Crates.io Setup
 
 The crate must exist on crates.io before fully automated publishing is reliable. If `tracedecay` has not had its first real publish yet, publish `0.0.2` once manually or make sure `CARGO_REGISTRY_TOKEN` has permission to publish the package.
