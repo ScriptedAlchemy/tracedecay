@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,8 +69,15 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="dry-run-${GITHUB_SHA::7}"
+            VERSION="${TAG#v}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       # --- Binary archive (all platforms) ---
 
@@ -76,63 +85,45 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../tracedecay-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tracedecay
+          tar czf ../../../tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
+
+      - name: Generate archive attestation (unix)
+        if: matrix.archive == 'tar.gz' && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
       - name: Upload binary archive (unix)
         if: matrix.archive == 'tar.gz' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
-      # --- Windows: Authenticode signing via SignPath ---
-      # The unsigned .exe is uploaded as a workflow artifact (upload-artifact wraps the
-      # single file in a ZIP), submitted to SignPath, and the signed .exe is repackaged
-      # into the release zip. Signing only runs for real releases, not workflow_dispatch.
-
-      - name: Upload unsigned binary for signing
-        if: matrix.archive == 'zip' && github.event_name == 'release'
-        id: upload-unsigned
-        uses: actions/upload-artifact@v4
-        with:
-          name: tracedecay-windows-unsigned
-          path: target/${{ matrix.target }}/release/tracedecay.exe
-          if-no-files-found: error
-
-      - name: Submit signing request to SignPath
-        if: matrix.archive == 'zip' && github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          # NOTE: SignPath is an external service — the project must also be
-          # renamed tokensave -> tracedecay in the SignPath dashboard, or
-          # signing will fail with an unknown project-slug error.
-          project-slug: tracedecay
-          # Test certificate while bootstrapping; switch to release-signing for production.
-          signing-policy-slug: test-signing
-          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-
-      - name: Package signed binary (windows)
-        if: matrix.archive == 'zip' && github.event_name == 'release'
+      - name: Package binary (windows)
+        if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path signed/tracedecay.exe -DestinationPath tracedecay-${{ github.ref_name }}-${{ matrix.name }}.zip -Force
+          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip -Force
 
-      - name: Upload signed binary archive
+      - name: Generate archive attestation (windows)
+        if: matrix.archive == 'zip' && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
+
+      - name: Upload binary archive (windows)
         if: matrix.archive == 'zip' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
       - name: Package Homebrew bottle
-        if: matrix.bottle_tag && github.event_name == 'release'
+        if: matrix.bottle_tag
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BOTTLE_TAG="${{ matrix.bottle_tag }}"
@@ -141,9 +132,15 @@ jobs:
           chmod +x tracedecay/${VERSION}/bin/tracedecay
           tar czf "tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay/
 
+      - name: Generate bottle attestation
+        if: matrix.bottle_tag && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.version }}.${{ matrix.bottle_tag }}.bottle.tar.gz
+
       - name: Upload bottle artifact
         if: matrix.bottle_tag && github.event_name == 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bottle-${{ matrix.bottle_tag }}
           path: "tracedecay-*.bottle.tar.gz"
@@ -163,7 +160,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download bottle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: bottles
           merge-multiple: true
@@ -178,7 +175,6 @@ jobs:
 
       - name: Download source tarball
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" -o "source.tar.gz"
 
       - name: Compute SHA256 hashes
@@ -207,6 +203,7 @@ jobs:
           X86_64_LINUX_SHA="${{ steps.hashes.outputs.x86_64_linux_sha }}"
 
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
+          mkdir -p tap/Formula
 
           cat > tap/Formula/tracedecay.rb << EOF
           class Tracedecay < Formula
@@ -242,37 +239,6 @@ jobs:
           git add Formula/tracedecay.rb
           git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push
-
-  publish-crate:
-    name: Publish to crates.io
-    if: github.event_name == 'release' && !github.event.release.prerelease
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      # The crate package ships the prebuilt dashboard dist bundles (see
-      # `package.include` in Cargo.toml), so they must exist before publish.
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # NOTE: publishes the renamed `tracedecay` crate — a new crate name on
-      # crates.io; the legacy `tokensave` crate is not updated by this job.
-      - name: Publish
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-scoop:
     name: Update Scoop bucket
