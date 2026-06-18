@@ -311,6 +311,13 @@ pub async fn handle_tool_call(
         "tracedecay_impact" => graph::handle_impact(cg, args).await,
         "tracedecay_node" => graph::handle_node(cg, args).await,
         "tracedecay_status" => info::handle_status(cg, server_stats, scope_prefix).await,
+        "tracedecay_active_project" => {
+            Ok(info::handle_active_project(cg, server_stats, scope_prefix))
+        }
+        "tracedecay_storage_status" => info::handle_storage_status(cg, scope_prefix).await,
+        "tracedecay_project_list" => info::handle_project_list(args).await,
+        "tracedecay_project_search" => info::handle_project_search(args).await,
+        "tracedecay_project_context" => info::handle_project_context(cg, args).await,
         "tracedecay_files" => info::handle_files(cg, args, scope_prefix).await,
         "tracedecay_affected" => git::handle_affected(cg, args).await,
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
@@ -578,9 +585,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            89
+            94
         } else {
-            88
+            93
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -604,6 +611,11 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_impact"));
         assert!(tool_names.contains(&"tracedecay_node"));
         assert!(tool_names.contains(&"tracedecay_status"));
+        assert!(tool_names.contains(&"tracedecay_active_project"));
+        assert!(tool_names.contains(&"tracedecay_storage_status"));
+        assert!(tool_names.contains(&"tracedecay_project_list"));
+        assert!(tool_names.contains(&"tracedecay_project_search"));
+        assert!(tool_names.contains(&"tracedecay_project_context"));
         assert!(tool_names.contains(&"tracedecay_files"));
         assert!(tool_names.contains(&"tracedecay_affected"));
         assert!(tool_names.contains(&"tracedecay_dead_code"));
@@ -768,10 +780,18 @@ mod tests {
             always_load.contains(&"tracedecay_status"),
             "tracedecay_status must be alwaysLoad"
         );
+        assert!(
+            always_load.contains(&"tracedecay_active_project"),
+            "tracedecay_active_project must be alwaysLoad"
+        );
+        assert!(
+            always_load.contains(&"tracedecay_storage_status"),
+            "tracedecay_storage_status must be alwaysLoad"
+        );
         assert_eq!(
             always_load.len(),
-            3,
-            "exactly 3 tools should be alwaysLoad, got {:?}",
+            5,
+            "exactly 5 tools should be alwaysLoad, got {:?}",
             always_load
         );
     }

@@ -1398,6 +1398,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 commands::handle_memory_action(other).await?;
             }
         },
+        Commands::Migrate { action } => {
+            commands::handle_migrate_action(action).await?;
+        }
         Commands::Wipe { all } => {
             commands::handle_wipe(all).await?;
         }
@@ -1518,6 +1521,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::Migrate { .. }
             | Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -1562,8 +1566,8 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     break that contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
-    //   - `Doctor`: a read-only diagnostic — must not mutate agent configs as
-    //     a side effect (per the original #84 intent).
+    //   - `Doctor` / `Migrate`: read-only diagnostics — must not mutate agent
+    //     configs as a side effect.
     //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
     //     reinstall scan there too.
     // Every other command (the normal everyday invocations) runs maintenance.
@@ -1575,6 +1579,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::UpdatePlugin
             | Commands::Uninstall { .. }
             | Commands::Doctor { .. }
+            | Commands::Migrate { .. }
             | Commands::Tool { .. }
     )
 }

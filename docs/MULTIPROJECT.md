@@ -1,12 +1,18 @@
 # Multiproject Support
 
+> Terminology note: this document describes the older **monorepo multiproject**
+> design: one indexed repository, several logical subprojects, and a `project`
+> column used as an in-database filter. Profile-storage **code projects** are
+> registered repositories with stable `project_id` values and active project
+> stores; cross-repository tools should use `project_id` or `project_root`.
+
 ## Problem
 
 The global git post-commit hook runs `tracedecay sync` in every repo. Before the init/sync separation (see `tracedecay init`), this silently created databases in non-enrolled repos. Even with that fix, tracedecay currently assumes one project per database. Monorepos and multi-app workspaces (e.g. `Code/App1/`, `Code/App2/`) have no way to scope queries to a single sub-project.
 
 ## Goal
 
-A single `.tracedecay` database can cover multiple projects. Each node and file belongs to exactly one project. Queries gain an optional `project` filter. New cross-project queries enable comparison (e.g. "which project has the most god classes?").
+A single active project store can cover multiple logical subprojects inside one repository. In repo-local mode that means one `.tracedecay` database; profile-backed storage may place that database in the repository's profile shard. Each node and file belongs to exactly one monorepo subproject. Queries gain an optional `project` filter for intra-repository comparisons such as "which subproject has the most god classes?".
 
 ## Concepts
 

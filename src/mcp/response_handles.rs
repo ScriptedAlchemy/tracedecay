@@ -1,6 +1,6 @@
 //! Local response-handle cache for reversible MCP truncation.
 //!
-//! Handles are project-local and stored under `.tracedecay/response-handles`.
+//! Handles are stored in the resolved project store's `response-handles` root.
 //! They are only references to local files, never external URLs or remote
 //! identifiers.
 
@@ -14,13 +14,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::config::get_tracedecay_dir;
 use crate::errors::{Result, TraceDecayError};
+use crate::storage::resolve_response_handle_root;
 
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 
-const CACHE_DIR_NAME: &str = "response-handles";
 const HANDLE_HEX_CHARS: usize = 24;
 const HANDLE_PREFIX: &str = "rh_";
 
@@ -263,7 +262,7 @@ pub fn store_response_handle(
             expires_at: now.saturating_add(RESPONSE_HANDLE_TTL_SECS),
             content: content.to_string(),
         };
-        let dir = response_handle_dir(project_root);
+        let dir = response_handle_dir(project_root)?;
         fs::create_dir_all(&dir)?;
         let path = response_handle_path(project_root, &handle)?;
         let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
@@ -401,7 +400,7 @@ pub fn cleanup_expired_response_handles(project_root: &Path, now: i64) -> Result
     let telemetry = telemetry();
     telemetry.cleanup_runs.fetch_add(1, Ordering::Relaxed);
     let result = (|| {
-        let dir = response_handle_dir(project_root);
+        let dir = response_handle_dir(project_root)?;
         if !dir.exists() {
             return Ok(0);
         }
@@ -463,13 +462,13 @@ fn response_handle_for(content: &str) -> String {
     format!("{HANDLE_PREFIX}{hex}")
 }
 
-fn response_handle_dir(project_root: &Path) -> PathBuf {
-    get_tracedecay_dir(project_root).join(CACHE_DIR_NAME)
+fn response_handle_dir(project_root: &Path) -> Result<PathBuf> {
+    resolve_response_handle_root(project_root)
 }
 
 fn response_handle_path(project_root: &Path, handle: &str) -> Result<PathBuf> {
     validate_handle(handle)?;
-    Ok(response_handle_dir(project_root).join(format!("{handle}.json")))
+    Ok(response_handle_dir(project_root)?.join(format!("{handle}.json")))
 }
 
 fn validate_handle(handle: &str) -> Result<()> {
@@ -541,8 +540,11 @@ pub fn note_response_handle_store_skipped_no_project_root() {
 }
 
 fn response_handle_cache_snapshot(project_root: &Path) -> ResponseHandleCacheSnapshot {
-    let dir = response_handle_dir(project_root);
     let mut snapshot = ResponseHandleCacheSnapshot::default();
+    let Ok(dir) = response_handle_dir(project_root) else {
+        snapshot.scan_failures = 1;
+        return snapshot;
+    };
     if !dir.exists() {
         return snapshot;
     }

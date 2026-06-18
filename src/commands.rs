@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::cli::{BranchAction, MemoryAction};
+use crate::cli::{BranchAction, MemoryAction, MigrateAction};
 use crate::global;
 use crate::Spinner;
 use tracedecay::tracedecay::TraceDecay;
@@ -62,6 +62,153 @@ fn read_llm_ops_payload(source: &str) -> tracedecay::errors::Result<serde_json::
     serde_json::from_str(&text).map_err(|e| tracedecay::errors::TraceDecayError::Config {
         message: format!("--llm-ops payload is not valid JSON: {e}"),
     })
+}
+
+pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
+    match action {
+        MigrateAction::Plan {
+            roots,
+            follow_symlinks,
+            manifest,
+            profile_root,
+            project_id,
+            json,
+        } => {
+            let scan_roots = if roots.is_empty() {
+                vec![std::env::current_dir().map_err(|e| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: format!("could not determine current directory: {e}"),
+                    }
+                })?]
+            } else {
+                roots.into_iter().map(PathBuf::from).collect()
+            };
+            let report = tracedecay::migrate::inventory::build_inventory(
+                tracedecay::migrate::inventory::MigrationInventoryOptions {
+                    roots: scan_roots,
+                    follow_symlinks,
+                    ..tracedecay::migrate::inventory::MigrationInventoryOptions::default()
+                },
+            )
+            .await?;
+            if let Some(manifest_path) = manifest {
+                let profile_root =
+                    profile_root.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "--profile-root is required with --manifest".to_string(),
+                    })?;
+                let project_id =
+                    project_id.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "--project-id is required with --manifest".to_string(),
+                    })?;
+                let migration_id = format!("mig_{}", tracedecay::tracedecay::current_timestamp());
+                let confirmation_token = format!("confirm-{migration_id}");
+                let manifest = tracedecay::migrate::manifest::build_plan_manifest(
+                    report,
+                    tracedecay::migrate::manifest::MigrationPlanOptions {
+                        manifest_path: PathBuf::from(manifest_path),
+                        migration_id,
+                        tracedecay_version: env!("CARGO_PKG_VERSION").to_string(),
+                        created_at_unix: tracedecay::tracedecay::current_timestamp(),
+                        confirmation_token,
+                        target_profile_root: PathBuf::from(profile_root),
+                        project_id,
+                    },
+                )
+                .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+                tracedecay::migrate::manifest::save_manifest(&manifest)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                } else {
+                    println!(
+                        "migration manifest: {} ({} artifact(s))",
+                        manifest.protocol.manifest_path.display(),
+                        manifest.artifacts.len()
+                    );
+                    println!("confirmation token: {}", manifest.confirmation_token);
+                }
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "migration inventory: {} store(s), {} skipped path(s)",
+                    report.stores.len(),
+                    report.skipped.len()
+                );
+                if let Some(global) = report.global_db {
+                    println!(
+                        "global db: {} (projects: {}, sessions: {})",
+                        global.path.display(),
+                        global.project_count,
+                        global.session_count
+                    );
+                }
+            }
+        }
+        MigrateAction::Apply {
+            manifest,
+            confirm_token,
+        } => {
+            let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            if manifest.confirmation_token != confirm_token {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "confirmation token does not match migration manifest".to_string(),
+                });
+            }
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "migrate apply is not enabled yet; run migrate verify and wait for profile-shard copy support".to_string(),
+            });
+        }
+        MigrateAction::Verify { manifest, json } => {
+            let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            let report = tracedecay::migrate::manifest::verify_migration_manifest(&manifest);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "migration verify: {} artifact(s), {} planned target(s), {} missing target(s)",
+                    report.artifact_count, report.planned_targets, report.missing_targets
+                );
+                println!(
+                    "registry reconstruction: {} plan(s), {} store manifest(s), {} issue(s)",
+                    report.registry_plan_count,
+                    report.store_manifest_count,
+                    report.issues.len()
+                );
+                println!("apply supported: no");
+            }
+        }
+        MigrateAction::Reconstruct { profile_root, json } => {
+            let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+                &PathBuf::from(profile_root),
+                tracedecay::tracedecay::current_timestamp(),
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "registry reconstruction: {} plan(s), {} issue(s)",
+                    report.plans.len(),
+                    report.issues.len()
+                );
+                println!("apply supported: no");
+            }
+        }
+        MigrateAction::Rollback {
+            manifest,
+            confirm_token,
+        } => {
+            let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            if manifest.confirmation_token != confirm_token {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "confirmation token does not match migration manifest".to_string(),
+                });
+            }
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "migrate rollback is not enabled yet; migrate apply is disabled and no rollback state is written".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {

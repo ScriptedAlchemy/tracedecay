@@ -12,6 +12,7 @@ use crate::sessions::source::{
     TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
+use crate::storage::{project_local_layout, resolve_project_session_db_path};
 
 const PROJECT_SESSION_DB_FILENAME: &str = "sessions.db";
 
@@ -22,11 +23,13 @@ pub struct CursorTranscriptIngestStats {
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
-    crate::config::get_tracedecay_dir(project_root).join(PROJECT_SESSION_DB_FILENAME)
+    resolve_project_session_db_path(project_root)
+        .unwrap_or_else(|_| project_local_layout(project_root).sessions_db_path)
 }
 
 pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
-    GlobalDb::open_at(&project_session_db_path(project_root)).await
+    let db_path = resolve_project_session_db_path(project_root).ok()?;
+    GlobalDb::open_at(&db_path).await
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {

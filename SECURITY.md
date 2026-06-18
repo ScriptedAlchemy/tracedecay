@@ -26,7 +26,7 @@ When a vulnerability is found, the fix is shipped as a new release — there are
 
 ### What tracedecay stores
 
-tracedecay builds a **local** code graph stored in a SQLite (libSQL) database (`.tracedecay/tracedecay.db`) inside your project directory (a legacy `.tokensave/` data directory from before the rename is still honored as a fallback). The database contains:
+tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tokensave/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
 
 - Symbol names, signatures, and docstrings
 - File paths, sizes, and content hashes
@@ -35,9 +35,9 @@ tracedecay builds a **local** code graph stored in a SQLite (libSQL) database (`
 - Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
 - A response cache for `tracedecay_read` (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
-Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The database is local-only — there is no cloud sync, remote database, or server-side storage.
+Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Project-local Cursor transcript search is stored in the repository's `.tracedecay/sessions.db`, which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both databases remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
 
 ### Network access
 
@@ -69,10 +69,16 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 - `tracedecay_replace_symbol` — replace a symbol's body
 - `tracedecay_ast_grep_rewrite` — structural rewrite via the external `ast-grep` binary
 
-**Local-state tools** (write only inside `.tracedecay/`, never your source):
+**Local-state tools** (write only inside the active TraceDecay store, never your source):
 
 - `tracedecay_session_start`, `tracedecay_session_end` — health-metric baselines
 - `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status` — store fact text, entity names, feedback events, trust-score inputs, and memory-bank repair state in the local project database.
+
+### Support bundles and storage diagnostics
+
+Storage status, doctor, quota, and support-bundle output must report the active project and store class (`project_local`, `profile_sharded`, `hermes_profile`, global/accounting, or legacy) without exposing sensitive payloads by default. A redacted support bundle may include manifests, schema versions, aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
+
+Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle and fixture contract.
 
 **Test execution:**
 
@@ -113,8 +119,8 @@ The Windows-elevation `unsafe` documented in earlier versions was removed alongs
 
 ## Best Practices
 
-- Add `.tracedecay/` (and, for projects indexed before the rename, `.tokensave/`) to your `.gitignore` to avoid committing the local database.
-- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Adding `.tracedecay/` to `.gitignore` keeps both out of version control.
+- Add `.tracedecay/` (and, for projects indexed before the rename, `.tokensave/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
+- If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.
 

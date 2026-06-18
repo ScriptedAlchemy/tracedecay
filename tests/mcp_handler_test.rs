@@ -3,6 +3,7 @@
 //! Each test exercises a real `TraceDecay` instance with indexed test data,
 //! ensuring that the MCP dispatch layer formats results correctly.
 
+use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
@@ -12,6 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
@@ -21,6 +23,50 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
+
+static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+struct GlobalDbEnvGuard {
+    previous: Option<OsString>,
+}
+
+impl GlobalDbEnvGuard {
+    fn set(db_path: &Path) -> Self {
+        let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
+        std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
+        Self { previous }
+    }
+}
+
+impl Drop for GlobalDbEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("TRACEDECAY_GLOBAL_DB", value),
+            None => std::env::remove_var("TRACEDECAY_GLOBAL_DB"),
+        }
+    }
+}
+
+struct HomeEnvGuard {
+    previous: Option<OsString>,
+}
+
+impl HomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self { previous }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -262,6 +308,123 @@ fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
     }
 }
 
+async fn seed_project_registry(db_path: &Path, project_root: &Path) {
+    let db = GlobalDb::open_at(db_path).await.unwrap();
+    let project = db
+        .upsert_code_project(
+            "proj_alpha",
+            project_root,
+            None,
+            Some("https://example.test/alpha.git"),
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    let store = db
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: "store_alpha".to_string(),
+            project_id: project.project_id.clone(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_alpha".to_string(),
+            manifest_relpath: Some("projects/proj_alpha/store_manifest.json".to_string()),
+            last_verified_at: Some(1_800_000_001),
+            last_write_at: None,
+        })
+        .await
+        .unwrap();
+    db.upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+        graph_scope_id: "scope_alpha_main".to_string(),
+        project_id: project.project_id.clone(),
+        store_id: store.store_id.clone(),
+        branch_name: "main".to_string(),
+        db_relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+        parent_scope_id: None,
+        last_synced_at: Some(1_800_000_002),
+        writable: true,
+    })
+    .await
+    .unwrap();
+    db.upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
+        store_id: store.store_id,
+        artifact_kind: "graph_db".to_string(),
+        relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+        size_bytes: Some(128),
+        schema_version: Some("1".to_string()),
+        updated_at: Some(1_800_000_003),
+    })
+    .await
+    .unwrap();
+    db.upsert_code_project(
+        "proj_beta",
+        &project_root.with_file_name("beta"),
+        None,
+        Some("https://example.test/beta.git"),
+        Some("main"),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn project_registry_tools_are_bounded_read_only_and_contextual() {
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let (cg, _project_dir) = setup_project().await;
+    let registry_dir = TempDir::new().unwrap();
+    let registry_path = registry_dir.path().join("global.db");
+    seed_project_registry(&registry_path, cg.project_root()).await;
+    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
+
+    let list = handle_tool_call(
+        &cg,
+        "tracedecay_project_list",
+        json!({"limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
+    assert_eq!(list_payload["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(list_payload["limit"], 1);
+    assert_eq!(list_payload["truncated"], true);
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_project_search",
+        json!({"query": "alpha", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    let search_projects = search_payload["projects"].as_array().unwrap();
+    assert_eq!(search_projects.len(), 1);
+    assert_eq!(search_projects[0]["project_id"], "proj_alpha");
+
+    let context = handle_tool_call(
+        &cg,
+        "tracedecay_project_context",
+        json!({"project_id": "proj_alpha"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
+    assert_eq!(context_payload["stores"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        context_payload["stores"][0]["graph_scopes"][0]["branch_name"],
+        "main"
+    );
+    assert_eq!(
+        context_payload["stores"][0]["artifacts"][0]["artifact_kind"],
+        "graph_db"
+    );
+}
+
 fn tool_schema<'a>(tools: &'a [tracedecay::mcp::ToolDefinition], name: &str) -> &'a Value {
     &tools
         .iter()
@@ -344,6 +507,130 @@ fn assert_action_schema_requires(
         actual, expected_required,
         "{tool_name} schema conditional requirements for action={action} drifted from handler parser expectations"
     );
+}
+
+#[test]
+fn active_project_and_storage_status_tools_are_advertised_readonly() {
+    let tools = get_tool_definitions();
+    for name in ["tracedecay_active_project", "tracedecay_storage_status"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing MCP tool definition for {name}"));
+        assert_eq!(tool.input_schema["type"], "object");
+        assert!(
+            tool.input_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| properties.is_empty()),
+            "{name} should not require callers to pass resolver internals"
+        );
+        assert_eq!(
+            tool.annotations
+                .as_ref()
+                .and_then(|annotations| annotations["readOnlyHint"].as_bool()),
+            Some(true),
+            "{name} must be advertised read-only"
+        );
+        assert!(
+            !tool.description.contains(".tracedecay/tracedecay.db"),
+            "{name} description must not hardcode the repo-local graph DB path"
+        );
+    }
+}
+
+#[tokio::test]
+async fn active_project_tool_reports_resolved_store_metadata() {
+    let (cg, _dir) = setup_project().await;
+    let project_root = cg.project_root().display().to_string();
+    let graph_db_path = cg.db_path().display().to_string();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_active_project",
+        json!({}),
+        Some(json!({"transport": "stdio"})),
+        Some("src"),
+    )
+    .await
+    .unwrap();
+
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(
+        payload["project_root"].as_str(),
+        Some(project_root.as_str())
+    );
+    assert_eq!(payload["scope_prefix"].as_str(), Some("src"));
+    assert_eq!(
+        payload["resolution_source"].as_str(),
+        Some("active_project")
+    );
+    assert_eq!(payload["storage"]["class"].as_str(), Some("code_project"));
+    assert_eq!(payload["storage"]["mode"].as_str(), Some("project_local"));
+    assert_eq!(
+        payload["storage"]["graph_db_path"].as_str(),
+        Some(graph_db_path.as_str())
+    );
+    assert!(payload["storage"]["data_root"]
+        .as_str()
+        .is_some_and(|path| path.ends_with(".tracedecay")));
+    assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn storage_status_tool_summarizes_active_project_store_health() {
+    let (cg, _dir) = setup_project().await;
+    let layout = cg.store_layout();
+    let project_root = cg.project_root().display().to_string();
+    let graph_db_path = cg.db_path().display().to_string();
+    let config_path = layout.config_path.display().to_string();
+    let sync_lock_path = layout.sync_lock_path.display().to_string();
+    let branch_add_lock_path = layout.branch_add_lock_path.display().to_string();
+
+    let result = handle_tool_call(&cg, "tracedecay_storage_status", json!({}), None, None)
+        .await
+        .unwrap();
+
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"].as_str(), Some("ok"));
+    assert_eq!(
+        payload["active_project"]["project_root"].as_str(),
+        Some(project_root.as_str())
+    );
+    assert_eq!(
+        payload["active_project"]["storage"]["graph_db_path"].as_str(),
+        Some(graph_db_path.as_str())
+    );
+    assert_eq!(
+        payload["active_project"]["storage"]["class"],
+        "code_project"
+    );
+    assert_eq!(payload["writable"].as_bool(), Some(true));
+    assert!(payload["warnings"]
+        .as_array()
+        .is_some_and(|warnings| warnings.is_empty()));
+    assert_eq!(
+        payload["paths"]["graph_db_path"].as_str(),
+        Some(graph_db_path.as_str())
+    );
+    assert_eq!(
+        payload["paths"]["config_path"].as_str(),
+        Some(config_path.as_str())
+    );
+    assert_eq!(
+        payload["locks"]["sync_lock_path"].as_str(),
+        Some(sync_lock_path.as_str())
+    );
+    assert_eq!(
+        payload["locks"]["branch_add_lock_path"].as_str(),
+        Some(branch_add_lock_path.as_str())
+    );
+    assert_eq!(payload["locks"]["sync_lock_exists"].as_bool(), Some(false));
+    assert_eq!(
+        payload["locks"]["branch_add_lock_exists"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(payload["quotas"]["enforced"].as_bool(), Some(false));
+    assert_eq!(payload["quotas"]["graph_db_size_limit_bytes"], Value::Null);
 }
 
 fn assert_schema_has_required_alternatives(
@@ -4706,6 +4993,97 @@ async fn message_search_reads_project_local_session_db() {
         subagent_parsed["results"][0]["session"]["is_subagent"],
         true
     );
+}
+
+#[tokio::test]
+async fn message_search_reads_profile_sharded_session_db() {
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let shard_root = home.join(".tracedecay/projects/proj_123");
+    fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    fs::create_dir_all(&shard_root).unwrap();
+    fs::write(
+        project.join(".tracedecay/enrollment.json"),
+        r#"{"project_id":"proj_123","storage_mode":"profile_sharded"}"#,
+    )
+    .unwrap();
+    let _home_guard = HomeEnvGuard::set(&home);
+    let config = tracedecay::config::TraceDecayConfig {
+        root_dir: project.to_string_lossy().to_string(),
+        ..tracedecay::config::TraceDecayConfig::default()
+    };
+    fs::write(
+        shard_root.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    Database::initialize(&shard_root.join("tracedecay.db"))
+        .await
+        .unwrap();
+    let meta = tracedecay::branch_meta::BranchMeta::new_for_dir(&shard_root, "main");
+    tracedecay::branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
+    let cg = TraceDecay::open(&project).await.unwrap();
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("profile-sharded session db should open");
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: "profile-session".to_string(),
+            project_key: project.to_string_lossy().to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            title: Some("Profile shard".to_string()),
+            started_at: Some(10),
+            ended_at: None,
+            transcript_path: Some("profile-session.jsonl".to_string()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: "profile-message".to_string(),
+            session_id: "profile-session".to_string(),
+            role: "user".to_string(),
+            timestamp: Some(11),
+            ordinal: 1,
+            text: "Profile shard transcript search is working.".to_string(),
+            kind: Some("message".to_string()),
+            model: Some("test-model".to_string()),
+            tool_names: None,
+            source_path: Some("profile-session.jsonl".to_string()),
+            source_offset: Some(0),
+            metadata_json: None,
+        })
+        .await
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({"query": "profile shard transcript", "provider": "cursor", "limit": 5}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["count"], 1);
+    assert_eq!(
+        parsed["results"][0]["message"]["message_id"],
+        "profile-message"
+    );
+    assert!(shard_root.join("sessions.db").is_file());
+    assert!(!project.join(".tracedecay/sessions.db").exists());
 }
 
 async fn seed_lcm_session_message(
