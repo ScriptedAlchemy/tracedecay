@@ -8,8 +8,9 @@ name: Release (Beta)
 #      trigger.
 #   2. Removing the `BETA_CHANNEL_ENABLED` guard from every job (`if:`).
 #
-# While the guard is `false`, the workflow can still be exercised
-# manually via `workflow_dispatch` for debugging — the jobs simply skip.
+# While the repository variable is unset or not `true`, the workflow can still
+# be exercised manually via `workflow_dispatch` for debugging — the jobs simply
+# skip.
 on:
   workflow_dispatch:
 
@@ -20,14 +21,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Single toggle that gates every job in this workflow. Flip to `true`
-  # (or remove the guard from each `if:` line below) to re-enable.
-  BETA_CHANNEL_ENABLED: 'false'
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -70,6 +68,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-beta-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-beta-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -123,7 +133,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew tap (beta)
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -151,7 +161,6 @@ jobs:
 
       - name: Download source tarball
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" -o "source.tar.gz"
 
       - name: Compute SHA256 hashes
@@ -197,7 +206,7 @@ jobs:
 
             depends_on "rust" => :build
 
-            conflicts_with "tracedecay", because: "both install a `tracedecay` binary"
+            conflicts_with "tracedecay", because: "both install a 'tracedecay' binary"
 
             def install
               system "cargo", "install", *std_cargo_args
@@ -218,7 +227,7 @@ jobs:
 
   update-scoop:
     name: Update Scoop bucket (beta)
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
     needs: build
     runs-on: ubuntu-latest
     steps:

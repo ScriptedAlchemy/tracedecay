@@ -45,9 +45,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          prefix-key: v1-rust-test
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
 
       - name: Run tests
         run: cargo test --workspace
@@ -74,7 +82,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets
 
@@ -133,15 +151,24 @@ jobs:
               exit 1
             fi
           done
+          # shellcheck disable=SC2086
           sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
           npm run build
           sha256sum -c /tmp/dashboard-dist.sha
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          prefix-key: v1-rust-dashboard
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-dashboard-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dashboard-
+            ${{ runner.os }}-cargo-
 
       - name: Run dashboard integration tests
         run: cargo test --test dashboard_api_test
@@ -220,9 +247,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          prefix-key: v1-rust-hermes-integration
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-hermes-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-hermes-integration-
+            ${{ runner.os }}-cargo-
 
       - name: Build tracedecay binary
         run: cargo build --bin tracedecay

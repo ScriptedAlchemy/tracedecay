@@ -43,6 +43,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-release-plz-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-plz-release-
+            ${{ runner.os }}-cargo-
+
       - name: Run release-plz release
         uses: release-plz/action@v0.5
         with:
@@ -69,6 +81,18 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-release-plz-pr-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-plz-pr-
+            ${{ runner.os }}-cargo-
 
       - name: Run release-plz release-pr
         uses: release-plz/action@v0.5
