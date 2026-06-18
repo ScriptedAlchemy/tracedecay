@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.0.2] - 2026-06-18
+
 ### Changed
 - **Project renamed: TokenSave → TraceDecay.** The crate, binary, CLI command, and MCP server are now `tracedecay`, and the MCP tools are prefixed `tracedecay_*`. The data directory is now `.tracedecay/` (an existing `.tokensave/` directory is still honored as a fallback), and environment variables use the `TRACEDECAY_*` prefix (legacy `TOKENSAVE_*` variables are still honored as a fallback). All entries below predate the rename and intentionally retain the historical `tokensave`/`TokenSave` names.
 - **Version reset for the rebranded crate.** `tracedecay` now restarts at `0.0.2` as a fresh crate line; `0.0.1` is already occupied on crates.io by the name-reservation placeholder, so `0.0.2` is the first publishable release number.
@@ -1402,3 +1405,4 @@ tokensave sync --force           # re-index to pick up new language extractors
 - Core types and error handling scaffold
 [6.1.1]: https://github.com/ScriptedAlchemy/tokensave/releases/tag/v6.1.1
 [--help]: https://github.com/ScriptedAlchemy/tokensave/releases/tag/v--help
+[0.0.2]: https://github.com/ScriptedAlchemy/tracedecay/releases/tag/v0.0.2
