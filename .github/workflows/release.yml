@@ -243,37 +243,6 @@ jobs:
           git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push
 
-  publish-crate:
-    name: Publish to crates.io
-    if: github.event_name == 'release' && !github.event.release.prerelease
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      # The crate package ships the prebuilt dashboard dist bundles (see
-      # `package.include` in Cargo.toml), so they must exist before publish.
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # NOTE: publishes the renamed `tracedecay` crate — a new crate name on
-      # crates.io; the legacy `tokensave` crate is not updated by this job.
-      - name: Publish
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   update-scoop:
     name: Update Scoop bucket
     if: github.event_name == 'release' && !github.event.release.prerelease && !cancelled()
