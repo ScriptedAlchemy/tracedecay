@@ -25,7 +25,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
 const SHELL_JS: &[u8] = include_bytes!("../../dashboard/shell/dist/shell.js");
 const SHELL_CSS: &[u8] = include_bytes!("../../dashboard/shell/dist/shell.css");
-// Plugin bundles are embedded as &str (they are UTF-8 esbuild output) so the
+// Plugin bundles are embedded as &str (they are UTF-8 JavaScript output) so the
 // Hermes installer (src/agents/hermes/dashboard_wrapper.rs) can reuse the exact same
 // embedded data when writing the wrapper plugin's dist files to disk.
 pub(crate) const HOLOGRAPHIC_JS: &str = include_str!("../../dashboard/holographic/dist/index.js");

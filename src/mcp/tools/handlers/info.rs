@@ -1379,14 +1379,19 @@ pub(super) async fn handle_body(
 
     for result in &chosen {
         let n = &result.node;
-        let abs_path = project_root.join(&n.file_path);
-        let body = match crate::sync::read_source_file(&abs_path) {
-            Ok(source) => extract_lines(&source, n.start_line, n.end_line),
-            Err(_) => String::from("<file unreadable>"),
+        let project_path = ProjectPath::resolve(project_root, Path::new(&n.file_path));
+        let body = match project_path {
+            Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
+                Ok(source) => {
+                    if !touched.contains(&n.file_path) {
+                        touched.push(n.file_path.clone());
+                    }
+                    extract_lines(&source, n.start_line, n.end_line)
+                }
+                Err(_) => String::from("<file unreadable>"),
+            },
+            Err(_) => String::from("<file path outside project>"),
         };
-        if !touched.contains(&n.file_path) {
-            touched.push(n.file_path.clone());
-        }
         matches.push(json!({
             "id": n.id,
             "name": n.name,
@@ -1533,8 +1538,10 @@ pub(super) async fn handle_todos(
                 continue;
             }
         }
-        let abs_path = project_root.join(&file.path);
-        let Ok(source) = crate::sync::read_source_file(&abs_path) else {
+        let Ok(project_path) = ProjectPath::resolve(project_root, Path::new(&file.path)) else {
+            continue;
+        };
+        let Ok(source) = crate::sync::read_source_file(&project_path.absolute_path()) else {
             continue;
         };
         // Cache nodes per file so enclosing-symbol lookup is one DB call per
