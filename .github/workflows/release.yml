@@ -234,6 +234,7 @@ jobs:
           X86_64_LINUX_SHA="${{ steps.hashes.outputs.x86_64_linux_sha }}"
 
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ScriptedAlchemy/homebrew-tap.git" tap
+          mkdir -p tap/Formula
 
           cat > tap/Formula/tracedecay.rb << EOF
           class Tracedecay < Formula
