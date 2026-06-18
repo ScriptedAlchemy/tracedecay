@@ -1088,10 +1088,13 @@ The dashboard frontend source lives in `dashboard/`:
 | Directory | Contents |
 |-----------|----------|
 | `dashboard/shell/` | Standalone host shell (React 19, Hermes-compatible SDK) |
-| `dashboard/holographic/` | Holographic memory plugin bundle |
-| `dashboard/lcm/` | LCM plugin bundle |
+| `dashboard/holographic/` | Holographic memory plugin bundle (Tailwind v4) |
+| `dashboard/lcm/` | LCM plugin bundle (TSX) |
 | `dashboard/graph/` | Code Graph explorer plugin bundle |
-| `dashboard/hermes-wrapper/` | Hermes-side thin wrapper |
+| `dashboard/savings/` | Savings & Cost plugin bundle |
+| `dashboard/hermes-wrapper/` | Hermes-side thin wrapper (concatenated child bundles) |
+| `dashboard/lib/` | Shared plugin shims (React/JSX-runtime shims; canonical `cn.ts`) |
+| `dashboard/dev/` | Rsbuild HMR dev server entry |
 
 ### Building
 
@@ -1101,12 +1104,32 @@ npm install
 npm run build
 ```
 
-This command:
-1. Builds the shell bundle (React 19 + esbuild)
-2. Rebuilds the holographic bundle from source
-3. Builds the LCM bundle
-4. Builds the Code Graph bundle
-5. Assembles the hermes-wrapper dist (including `graph.js`)
+`npm run build` runs `node build.mjs`, which builds every artifact with
+**Rspack** (`@rspack/core`, using the built-in SWC loader for TS/TSX/JSX):
+
+1. **Shell** — the React 19 host (`shell/dist/shell.js` + `shell.css`).
+2. **Plugins** — holographic, graph, savings, and lcm, each built from its
+   `src/entry.tsx` into a single-file IIFE at `<plugin>/dist/index.js`. Each
+   plugin **externalizes React onto the host SDK** via in-tree shims
+   (`react`, `react/jsx-runtime`, `react/jsx-dev-runtime` → `dashboard/lib/*`),
+   so every plugin shares the single React instance the shell/wrapper
+   provides rather than bundling its own.
+3. **Holographic styles** are compiled with **real Tailwind v4**
+   (`@tailwindcss/node` + `@tailwindcss/oxide`, invoked programmatically in
+   `build.mjs`): it scans `holographic/src` for class candidates, strips
+   `@layer theme` and `@layer base` so the plugin never clobbers the host's
+   `:root` theme vars or preflight, wraps the output in
+   `@layer hermes-plugin`, and minifies it to `holographic/dist/style.css`.
+   (graph/savings/lcm ship hand-rolled CSS, copied as-is to `dist/style.css`.)
+4. **LCM** is a regular TSX plugin bundle (built like the others), replacing
+   the old hand-written vanilla-JS IIFE.
+5. **Hermes wrapper** — `build.mjs` assembles `hermes-wrapper/dist/` by
+   concatenating the child plugin bundles (`holographic.js`, `lcm.js`,
+   `graph.js`, `savings.js`) and merging all plugin stylesheets into a single
+   `style.css`.
+
+esbuild is no longer part of the build pipeline — it remains only as a
+unit-test bundler helper.
 
 ### Smoke Testing
 
@@ -1122,7 +1145,19 @@ TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-nonempty.db npm run smoke -- 
 
 ### Asset Embedding
 
-Static assets are embedded at compile time via `include_bytes!` in `src/dashboard/assets.rs`. After building the frontend, you must rebuild the Rust binary to pick up new assets:
+The shipped binary has **no Node or Rspack dependency at launch**: Rspack runs
+only at build time, and the resulting `dist/` files are embedded at compile
+time via `include_bytes!` / `include_str!` in `src/dashboard/assets.rs`. The
+embedded paths are:
+
+- `dashboard/shell/dist/shell.js`, `shell.css`
+- `dashboard/holographic/dist/index.js`, `style.css`
+- `dashboard/lcm/dist/index.js`, `style.css`
+- `dashboard/graph/dist/index.js`, `style.css`
+- `dashboard/savings/dist/index.js`, `style.css`
+
+After rebuilding the frontend you must rebuild the Rust binary to pick up the
+new assets:
 
 ```bash
 cd dashboard && npm run build
@@ -1149,18 +1184,37 @@ result. If npm is not on PATH, the build fails fast with instructions instead.
 
 ### Development Workflow
 
-For rapid frontend iteration without rebuilding Rust:
+For fast frontend iteration use the dev server (HMR, no Rust rebuild):
 
 ```bash
-# 1. Build once to generate dist/
-cd dashboard && npm run build
+# Terminal 1: keep the real backend running (it owns the data APIs)
+tracedecay dashboard                 # listens on http://127.0.0.1:7341/
 
-# 2. Serve with a tool that supports live reload for static files
-# (The dashboard server serves embedded bytes, not filesystem files)
+# Terminal 2: Rsbuild dev server with HMR, proxies /api/* to the backend
+cd dashboard && npm run dev          # listens on http://127.0.0.1:7342/
+```
 
-# 3. After frontend changes, rebuild and restart the server
-npm run build
-cargo run -- dashboard
+`npm run dev` (`dashboard/dev/run.mjs`) starts an **Rsbuild** dev server that:
+
+- Serves the shell + every plugin from source with hot-module replacement.
+- Proxies `/api/*` to a running `tracedecay dashboard` instance, configured by
+  `TRACEDECAY_DEV_API` (default `http://127.0.0.1:7341`).
+- Listens on `TRACEDECAY_DEV_PORT` (default `7342`), and on success prints the
+  stable line `tracedecay dev listening on http://127.0.0.1:7342/`.
+- Imports the plugin entries directly (no `/api/dashboard/plugins` fetch in
+  dev), and builds the SDK on `window.__HERMES_PLUGIN_SDK__` before any plugin
+  entry runs, mirroring the prod shell.
+
+Note that in **dev** React is *not* aliased onto the window-SDK shim — a single
+Rsbuild bundle already shares one real React instance, and `react-dom/client`
+needs the real `react` module — so the per-plugin React externalization is a
+**prod** concern only.
+
+To validate the production build (the shipped UI is always embedded bytes):
+
+```bash
+cd dashboard && npm run build        # Rspack → dist/
+cd .. && cargo run -- dashboard      # rebuild Rust to embed the new assets
 ```
 
 ---
