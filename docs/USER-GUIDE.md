@@ -72,7 +72,7 @@ cd /path/to/your/project
 tracedecay init
 ```
 
-TraceDecay will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in a local database at `.tracedecay/tracedecay.db`. (Projects indexed before the rename keep working: an existing `.tokensave/` directory is still honored as a fallback.) You'll see a spinner with file-by-file progress and an ETA.
+TraceDecay will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tokensave/` directories are still honored. Profile-backed projects keep graph/session artifacts in a private profile shard. You'll see a spinner with file-by-file progress and an ETA.
 
 Once it finishes, run `tracedecay status` to see what was indexed:
 
@@ -92,11 +92,11 @@ For machine-readable output, use `--json`.
 
 Initialization (`tracedecay init`) and incremental updates (`tracedecay sync`) are deliberately separate commands.
 
-TraceDecay installs a global git post-commit hook that runs `tracedecay sync` after every commit to keep the index fresh. If `sync` were allowed to create a new database when none existed, it would silently bootstrap a `.tracedecay/` directory in every git repository on your machine -- even ones you never intended to index. By requiring an explicit `init`, only projects you opt into get a database. The hook runs harmlessly (exits with a non-zero status, output suppressed) in all other repos.
+TraceDecay installs a global git post-commit hook that runs `tracedecay sync` after every commit to keep the index fresh. If `sync` were allowed to create a new store when none existed, it would silently bootstrap TraceDecay state in every git repository on your machine -- even ones you never intended to index. By requiring an explicit `init`, only projects you opt into get a store. The hook runs harmlessly (exits with a non-zero status, output suppressed) in all other repos.
 
 In short:
-- **`tracedecay init`** -- one-time setup. Creates the database and performs a full index. Errors if already initialized.
-- **`tracedecay sync`** -- ongoing updates. Requires an existing database. Errors if the project was never initialized.
+- **`tracedecay init`** -- one-time setup. Creates the active project store and performs a full index. Errors if already initialized.
+- **`tracedecay sync`** -- ongoing updates. Requires an existing project store. Errors if the project was never initialized.
 
 ### Incremental syncs
 
@@ -159,7 +159,7 @@ tracedecay gitignore on           # enable (default)
 tracedecay gitignore off          # disable — index everything
 ```
 
-Don't forget to add `.tracedecay` to your `.gitignore` so the database doesn't get committed:
+Don't forget to add `.tracedecay` to your `.gitignore` so repo-local databases or enrollment markers do not get committed:
 
 ```bash
 echo .tracedecay >> .gitignore
@@ -299,13 +299,13 @@ Cursor install is plugin-based:
 
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
 - `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
-- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace/repo-local `.tracedecay/` DB instead of the plugin directory.
+- The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory.
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
-- The plugin bundles Cursor-specific, fail-open hooks (each acts only when a `.tracedecay/` index exists):
+- The plugin bundles Cursor-specific, fail-open hooks (each acts only when it finds an initialized TraceDecay project store):
   - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
   - `subagentStart` denies research/explore subagents with Cursor's documented hook response shape; the plugin's own `code-explorer`/`code-health-auditor`/`session-historian` agents are allow-listed.
   - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
-  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into `.tracedecay/sessions.db` when `transcript_path` is present.
+  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
   - `afterFileEdit` (unmatched, so every Agent edit tool counts) runs a **targeted single-file** sync of only the edited path(s) — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
   - `afterShellExecution` makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
   - `workspaceOpen` ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
@@ -334,7 +334,7 @@ below.
 
 #### Codex lifecycle hooks
 
-Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tracedecay hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when a `.tracedecay/` index exists.
+Codex supports a Claude-style lifecycle hook system (enabled by default; verified against Codex 0.136.0). Both global (`~/.codex/hooks.json`) and project-local (`<root>/.codex/hooks.json`) installs register tracedecay hooks using Codex's nested config shape — `hooks[event] -> [ { matcher?, hooks: [ { type: "command", command, timeout } ] } ]` — and reconcile them idempotently while preserving any foreign hooks. Each hook reads Codex's single stdin JSON event (`session_id`, `cwd`, `hook_event_name`, plus event-specific fields) and writes Codex-shaped stdout. The project root is resolved from the event `cwd`, and every hook is fail-open and only acts when it finds an initialized project store.
 
 - `SessionStart` — emits `hookSpecificOutput.additionalContext` steering the agent toward tracedecay MCP tools and reporting index freshness (suggests `tracedecay init` when uninitialized).
 - `UserPromptSubmit` — resets the per-project local token counter for the new turn and injects the same steering context.
@@ -798,15 +798,16 @@ tracedecay sync --force
 
 ## Configuration Files
 
-TraceDecay stores data in two places.
+TraceDecay stores data in two local store classes.
 
-### Per-project: `.tracedecay/`
+### Active project store
 
-Created inside each project you index. Contains:
+Repo-local projects create `.tracedecay/` inside each project you index. Profile-backed storage may instead keep the code project's graph/session artifacts in a private profile shard such as `~/.tracedecay/projects/<project_id>/`, with only a small enrollment marker in the repository. The active project store contains:
 
 - `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
+- `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard previews when those features are used
 
-Add `.tracedecay` to your `.gitignore`.
+Add `.tracedecay` to your `.gitignore` so repo-local databases or enrollment markers are not committed.
 
 Projects indexed before the TraceDecay rename may still have a `.tokensave/` directory with a `tokensave.db` inside — it is still honored as a fallback, so you don't need to re-index.
 
@@ -816,6 +817,7 @@ Created in your home directory. Contains:
 
 - `config.toml` — user preferences (upload opt-in/out, cached version info, pending upload count)
 - `global.db` — cross-project database that tracks tokens saved across all your projects
+- `projects/<project_id>/` — profile-sharded code-project stores when profile storage is enabled
 
 The `config.toml` is plain TOML and fully transparent:
 
@@ -833,7 +835,7 @@ last_worldwide_fetch_at = 1711375200
 
 ### "tracedecay not initialized"
 
-The `.tracedecay/` directory doesn't exist in your current project. Run:
+TraceDecay could not find an initialized project store for your current directory. Run:
 
 ```bash
 tracedecay init

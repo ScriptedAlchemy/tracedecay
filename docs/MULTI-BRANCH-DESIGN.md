@@ -8,7 +8,7 @@ Created: 2026-04-02 | Implemented: 2026-04-06
 
 ## The Problem
 
-The tracedecay database lives at `<project>/.tracedecay/tracedecay.db`. Since `.tracedecay/` is (and should be) gitignored, there is **one single DB shared across all branches**. When a user switches branches:
+The tracedecay database lives in the active project store. In repo-local mode this is `<project>/.tracedecay/tracedecay.db`; profile-backed projects resolve the same logical graph DB through their profile shard. Without multi-branch tracking, there is **one single DB shared across all branches**. When a user switches branches:
 
 1. Files that exist on branch A but not branch B leave **ghost nodes/edges** in the DB.
 2. Files that differ between branches have **stale data** until the next sync.
