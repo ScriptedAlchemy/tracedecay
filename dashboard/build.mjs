@@ -4,45 +4,82 @@
  *   npm install && npm run build      (from dashboard/)
  *
  * Outputs:
- *   shell/dist/shell.js + shell.css   Standalone host shell (bundles React 19,
- *                                     exposes a Hermes-compatible plugin SDK on
- *                                     window, loads the plugin bundles below).
- *   holographic/dist/index.js         Holographic-memory plugin bundle, rebuilt
- *                                     from holographic/src (esbuild IIFE; React
- *                                     externalized onto the host SDK via shims,
- *                                     exactly like the original Hermes build).
- *   holographic/dist/style.css        Copied from holographic/src/styles.css
- *                                     (hand-rolled token stylesheet).
- *   lcm/dist/index.js + style.css     Copied from lcm/src (hand-written,
- *                                     unbundled JS — no build step needed).
- *   graph/dist/index.js + style.css   Code graph explorer plugin bundle
- *                                     (esbuild IIFE; React externalized).
+ *   shell/dist/shell.js + shell.css   Standalone host shell.
+ *   holographic/dist/index.js         Holographic-memory plugin bundle.
+ *   graph/dist/index.js               Code graph explorer plugin bundle.
+ *   savings/dist/index.js             Savings plugin bundle.
+ *   lcm/dist/index.js + style.css     Copied from lcm/src.
+ *   hermes-wrapper/dist/*             Combined Hermes dashboard plugin.
  *
- * The Rust binary embeds these dist files at compile time (src/dashboard/assets.rs),
- * so run this before `cargo build` when the UI changed.
+ * The Rust binary embeds these dist files at compile time
+ * (src/dashboard/assets.rs), so run this before `cargo build` when the UI
+ * changed.
  */
 
+import { rspack } from "@rspack/core";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import esbuild from "esbuild";
 import path from "node:path";
 import fs from "node:fs/promises";
-import esbuild from "esbuild";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(path.join(root, "package.json"));
+
+function swcRule(syntax, test) {
+  const isTs = syntax === "typescript";
+  return {
+    test,
+    exclude: /node_modules/,
+    use: {
+      loader: "builtin:swc-loader",
+      options: {
+        jsc: {
+          parser: isTs
+            ? { syntax: "typescript", tsx: true }
+            : { syntax: "ecmascript", jsx: true },
+          transform: { react: { runtime: "automatic" } },
+        },
+        env: { targets: "defaults" },
+      },
+    },
+  };
+}
+
+function run(config) {
+  return new Promise((resolve, reject) => {
+    rspack(config, (err, stats) => {
+      if (err) return reject(err);
+      if (stats.hasErrors()) {
+        const info = stats.toJson({ all: false, errors: true });
+        return reject(new Error(info.errors.map((e) => e.message).join("\n")));
+      }
+      resolve(stats);
+    });
+  });
+}
+
+const RULES = [swcRule("ecmascript", /\.(jsx|js)$/), swcRule("typescript", /\.(tsx|ts)$/)];
+
+function shellConfig() {
+  return {
+    mode: "production",
+    context: root,
+    entry: { shell: "./shell/src/main.jsx" },
+    output: {
+      path: path.join(root, "shell/dist"),
+      filename: "shell.js",
+      clean: true,
+    },
+    resolve: { extensions: [".jsx", ".js", ".json", ".ts", ".tsx"] },
+    module: { rules: RULES },
+    optimization: { minimize: true, splitChunks: false, runtimeChunk: false },
+    performance: { hints: false },
+  };
+}
 
 async function buildShell() {
-  await esbuild.build({
-    entryPoints: [path.join(root, "shell/src/main.jsx")],
-    outfile: path.join(root, "shell/dist/shell.js"),
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: ["es2020"],
-    jsx: "automatic",
-    minify: true,
-    legalComments: "none",
-    define: { "process.env.NODE_ENV": '"production"' },
-    logLevel: "warning",
-  });
+  await run(shellConfig());
   await fs.copyFile(
     path.join(root, "shell/src/styles.css"),
     path.join(root, "shell/dist/shell.css"),
@@ -50,42 +87,102 @@ async function buildShell() {
 }
 
 /**
- * Builds one plugin bundle (`<dir>/src/entry.tsx` → `<dir>/dist/index.js`),
- * externalizing React onto the host SDK (Hermes or the standalone shell) via
- * the shims; everything else (@observablehq/plot, d3-force, lucide-react) is
- * bundled.
- *
- * Shims default to the shared `lib/` copies. holographic/ overrides with its
- * own in-tree shims: that source mirrors the upstream Hermes plugin
- * byte-for-byte (see build.from-hermes.mjs) and must stay self-contained.
+ * Builds one plugin bundle with React externalized onto the host SDK via shims.
  */
-async function buildPlugin(dir, bannerLabel, { shimDir = path.join(root, "lib") } = {}) {
+function pluginConfig(dir, shimDir, bannerLabel) {
   const srcDir = path.join(root, dir, "src");
-  await esbuild.build({
-    entryPoints: [path.join(srcDir, "entry.tsx")],
-    outfile: path.join(root, dir, "dist/index.js"),
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: ["es2020"],
-    jsx: "automatic",
-    minify: true,
-    legalComments: "none",
-    define: { "process.env.NODE_ENV": '"production"' },
-    alias: {
-      react: path.join(shimDir, "react-shim.ts"),
-      "react/jsx-runtime": path.join(shimDir, "jsx-runtime.ts"),
-      "react/jsx-dev-runtime": path.join(shimDir, "jsx-runtime.ts"),
+  return {
+    mode: "production",
+    context: root,
+    target: "web",
+    entry: { index: path.join(srcDir, "entry.tsx") },
+    output: {
+      path: path.join(root, dir, "dist"),
+      filename: "index.js",
+      clean: true,
     },
-    banner: {
-      js: `/* tracedecay ${bannerLabel} dashboard plugin — bundled with esbuild. Do not edit; see src/. */`,
+    resolve: {
+      extensions: [".tsx", ".ts", ".jsx", ".js", ".json"],
+      alias: {
+        "react$": path.join(shimDir, "react-shim.ts"),
+        "react/jsx-runtime$": path.join(shimDir, "jsx-runtime.ts"),
+        "react/jsx-dev-runtime$": path.join(shimDir, "jsx-runtime.ts"),
+      },
     },
-    logLevel: "warning",
-  });
-  await fs.copyFile(
-    path.join(srcDir, "styles.css"),
-    path.join(root, dir, "dist/style.css"),
-  );
+    module: { rules: RULES },
+    optimization: { minimize: true, splitChunks: false, runtimeChunk: false },
+    performance: { hints: false },
+    plugins: [
+      new rspack.BannerPlugin({
+        banner: `tracedecay ${bannerLabel} dashboard plugin - bundled with Rspack. Do not edit; see src/.`,
+        entryOnly: true,
+      }),
+    ],
+  };
+}
+
+async function buildPlugin(
+  dir,
+  bannerLabel,
+  { shimDir = path.join(root, "lib"), tailwind = false } = {},
+) {
+  await run(pluginConfig(dir, shimDir, bannerLabel));
+  if (tailwind) {
+    await compileTailwindCss(path.join(root, dir, "src"), path.join(root, dir, "dist/style.css"));
+  } else {
+    await fs.copyFile(
+      path.join(root, dir, "src/styles.css"),
+      path.join(root, dir, "dist/style.css"),
+    );
+  }
+}
+
+/**
+ * Compile a plugin stylesheet with real Tailwind v4 (programmatic Oxide scan +
+ * @tailwindcss/node compile). Mirrors the proven build.from-hermes.mjs path:
+ *
+ *   - scan the plugin src for class candidates;
+ *   - strip @layer theme + @layer base so the plugin never clobbers the host's
+ *     :root vars or preflight (utilities resolve --color-* against the host);
+ *   - confine the sheet to the host's `hermes-plugin` cascade layer;
+ *   - minify with esbuild (preserves @supports color-mix blocks that
+ *     lightningcss would strip).
+ */
+async function compileTailwindCss(srcDir, outFile) {
+  const { compile } = require("@tailwindcss/node");
+  const { Scanner } = require("@tailwindcss/oxide");
+  const input = await fs.readFile(path.join(srcDir, "styles.css"), "utf8");
+  const compiler = await compile(input, { base: root, onDependency: () => {} });
+  const scanner = new Scanner({ sources: [{ base: srcDir, pattern: "**/*", negated: false }] });
+  const candidates = scanner.scan();
+  let css = compiler.build(candidates);
+  css = stripTopLevelAtLayer(css, "theme");
+  css = stripTopLevelAtLayer(css, "base");
+  css = `@layer hermes-plugin{\n${css}\n}`;
+  css = (await esbuild.transform(css, { loader: "css", minify: true })).code;
+  await fs.writeFile(outFile, css, "utf8");
+}
+
+/** Remove a top-level `@layer <name> { ... }` block via brace matching.
+ *  Matches `@layer name{` or `@layer name {` (any whitespace). */
+function stripTopLevelAtLayer(css, name) {
+  const re = new RegExp(`@layer\\s+${name}\\s*\\{`, "g");
+  let out = css;
+  let m;
+  while ((m = re.exec(out)) !== null) {
+    const idx = m.index;
+    let i = idx + m[0].length;
+    let depth = 1;
+    while (i < out.length && depth > 0) {
+      const ch = out[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    out = out.slice(0, idx) + out.slice(i);
+    re.lastIndex = idx;
+  }
+  return out;
 }
 
 async function copyLcm() {
@@ -96,23 +193,13 @@ async function copyLcm() {
 }
 
 /**
- * The Hermes wrapper plugin reuses the exact bundles above: its dist gets the
- * wrapper entry (registers the combined "tracedecay" tab), copies of
- * the child bundles, and a concatenated stylesheet. Deploy by copying
- * hermes-wrapper/{manifest.json,plugin_api.py,dist} into
- * hermes-agent/plugins/hermes_intelligence/dashboard/.
+ * Builds the combined Hermes plugin from the child dashboard bundles.
  */
 async function buildHermesWrapper() {
   const dist = path.join(root, "hermes-wrapper/dist");
   await fs.mkdir(dist, { recursive: true });
-  await fs.copyFile(
-    path.join(root, "hermes-wrapper/src/entry.js"),
-    path.join(dist, "index.js"),
-  );
-  await fs.copyFile(
-    path.join(root, "holographic/dist/index.js"),
-    path.join(dist, "holographic.js"),
-  );
+  await fs.copyFile(path.join(root, "hermes-wrapper/src/entry.js"), path.join(dist, "index.js"));
+  await fs.copyFile(path.join(root, "holographic/dist/index.js"), path.join(dist, "holographic.js"));
   await fs.copyFile(path.join(root, "lcm/dist/index.js"), path.join(dist, "lcm.js"));
   await fs.copyFile(path.join(root, "graph/dist/index.js"), path.join(dist, "graph.js"));
   await fs.copyFile(path.join(root, "savings/dist/index.js"), path.join(dist, "savings.js"));
@@ -132,6 +219,7 @@ async function main() {
     buildShell(),
     buildPlugin("holographic", "holographic-memory", {
       shimDir: path.join(root, "holographic/src"),
+      tailwind: true,
     }),
     buildPlugin("graph", "code graph"),
     buildPlugin("savings", "savings & cost"),

@@ -27,7 +27,18 @@ export const Badge: any = components.Badge;
 export const Button: any = components.Button;
 export const Input: any = components.Input;
 
-export const cn: (...args: any[]) => string =
-  utils.cn || ((...a: any[]) => a.filter(Boolean).join(" "));
+// Keep this in-tree copy so holographic stays self-contained.
+export function cn(...args: unknown[]): string {
+  const out: string[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const v of value) visit(v);
+    } else if (typeof value === "string" && value.length > 0) {
+      out.push(value);
+    }
+  };
+  for (const a of args) visit(a);
+  return out.join(" ");
+}
 export const timeAgo: ((ts: number) => string) | undefined = utils.timeAgo;
 export const useI18n: any = SDK.useI18n;
