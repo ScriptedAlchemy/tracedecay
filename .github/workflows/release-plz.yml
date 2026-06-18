@@ -65,6 +65,7 @@ jobs:
   release-plz-pr:
     name: Open or update release PR
     if: github.repository == 'ScriptedAlchemy/tracedecay'
+    needs: release-plz-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
