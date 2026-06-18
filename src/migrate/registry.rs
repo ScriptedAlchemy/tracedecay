@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::branch_meta;
-use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::storage::{
     read_store_manifest, validate_project_id, StorageMode, StoreKind, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION,
@@ -31,6 +31,101 @@ pub struct RegistryReconstructionPlan {
 pub struct RegistryReconstructionReport {
     pub plans: Vec<RegistryReconstructionPlan>,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RegistryReconstructionApplyReport {
+    pub projects: usize,
+    pub aliases: usize,
+    pub stores: usize,
+    pub graph_scopes: usize,
+    pub artifacts: usize,
+}
+
+pub async fn apply_registry_reconstruction_report(
+    db: &GlobalDb,
+    report: &RegistryReconstructionReport,
+) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
+    if !report.issues.is_empty() {
+        return Err(report.issues.clone());
+    }
+
+    let mut applied = RegistryReconstructionApplyReport::default();
+    let mut issues = Vec::new();
+    for plan in &report.plans {
+        let project = &plan.project;
+        if db
+            .upsert_code_project(
+                &project.project_id,
+                &project.project_root,
+                None,
+                None,
+                project.default_branch.as_deref(),
+            )
+            .await
+            .is_none()
+        {
+            issues.push(format!(
+                "failed to upsert code project '{}'",
+                project.project_id
+            ));
+            continue;
+        }
+        applied.projects += 1;
+
+        for alias in &project.aliases {
+            if db
+                .upsert_project_alias(alias, &project.project_id)
+                .await
+                .is_some()
+            {
+                applied.aliases += 1;
+            } else {
+                issues.push(format!(
+                    "failed to upsert alias '{}' for project '{}'",
+                    alias.display(),
+                    project.project_id
+                ));
+            }
+        }
+
+        if db.upsert_store_instance(plan.store.clone()).await.is_some() {
+            applied.stores += 1;
+        } else {
+            issues.push(format!(
+                "failed to upsert store '{}' for project '{}'",
+                plan.store.store_id, project.project_id
+            ));
+            continue;
+        }
+
+        for scope in &plan.graph_scopes {
+            if db.upsert_graph_scope(scope.clone()).await.is_some() {
+                applied.graph_scopes += 1;
+            } else {
+                issues.push(format!(
+                    "failed to upsert graph scope '{}'",
+                    scope.graph_scope_id
+                ));
+            }
+        }
+        for artifact in &plan.artifacts {
+            if db.upsert_store_artifact(artifact.clone()).await.is_some() {
+                applied.artifacts += 1;
+            } else {
+                issues.push(format!(
+                    "failed to upsert store artifact '{}:{}'",
+                    artifact.artifact_kind, artifact.relpath
+                ));
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(applied)
+    } else {
+        Err(issues)
+    }
 }
 
 pub fn scan_profile_store_manifests(

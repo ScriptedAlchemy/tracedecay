@@ -452,6 +452,32 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
     }
 }
 
+#[test]
+fn profile_storage_docs_do_not_overclaim_unimplemented_bundle_or_quota_support() {
+    let docs = include_str!("../docs/PROFILE-STORAGE-SUPPORT.md");
+    assert!(
+        !docs.contains("tracedecay support bundle --redact"),
+        "profile-storage docs must not present support-bundle behavior as implemented"
+    );
+    assert!(
+        !docs.contains("quota status"),
+        "profile-storage docs must not claim quota status is emitted before quota support exists"
+    );
+}
+
+#[test]
+fn hermes_dashboard_wrapper_docs_describe_deployed_profile_default() {
+    let wrapper = include_str!("../dashboard/hermes-wrapper/plugin_api.py");
+    assert!(
+        wrapper.contains("deploy-time default"),
+        "Hermes dashboard wrapper docs should describe the deployed project default"
+    );
+    assert!(
+        !wrapper.contains("defaults to the Hermes process cwd"),
+        "Hermes dashboard wrapper docs must not hide the deployed profile/pin default"
+    );
+}
+
 fn assert_hermes_config_enables_tracedecay_memory(config_path: &Path) -> String {
     let config = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
         panic!(

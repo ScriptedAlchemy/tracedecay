@@ -1,6 +1,6 @@
 # Profile Storage Support Requirements
 
-This document captures support, privacy, and test-fixture requirements for profile-backed project storage. It is intentionally limited to contracts that can be documented before the core resolver, registry, and migration APIs land.
+This document captures support, privacy, and test-fixture requirements for profile-backed project storage.
 
 ## Storage wording
 
@@ -14,14 +14,16 @@ Repo-local behavior remains the default:
 
 Profile storage adds profile-sharded code-project stores such as `~/.tracedecay/projects/<project_id>/`. A repository may then have only an enrollment marker while graph DBs, sessions, payloads, response handles, branch DBs, and dashboard sidecars live in the profile shard. Hermes profile stores remain separate from code-project shards.
 
-## Support Bundle Privacy
+## Planned Support Bundle Privacy
 
-`tracedecay support bundle --redact` should default to metadata only. The bundle may include:
+Support-bundle export is not implemented yet. When it lands, the redacted mode should default to metadata only and may include:
 
 - Resolved active project identity, storage mode, store class, and resolution source.
-- Store manifests, schema versions, aggregate table counts, artifact sizes, health states, lock/dirty/quota status, and migration manifest IDs.
+- Store manifests, schema versions, aggregate table counts, artifact sizes, health states, lock or dirty indicators, and migration manifest IDs.
 - Redacted aliases and path classes sufficient to explain which store was selected.
 - Error codes and high-level diagnostics that do not embed payload contents.
+
+Quota reporting is planned separately and should only be documented here once a concrete storage/status surface exists.
 
 The redacted bundle must not include:
 
@@ -34,7 +36,7 @@ Any opt-in mode that includes paths or payload excerpts should mark the bundle a
 
 ## Fixture Contract
 
-Migration and storage-status tests should share fixture builders once the resolver and migration types are available. Until then, fixture work should avoid reimplementing core storage behavior in tests.
+Migration and storage-status tests should share fixture builders instead of reimplementing core storage behavior in tests.
 
 Reusable fixtures should cover:
 

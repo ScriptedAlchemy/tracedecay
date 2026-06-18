@@ -323,7 +323,7 @@ impl TraceDecay {
     /// Creates the `.tracedecay` directory, writes a default configuration,
     /// and initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
-        let store_layout = storage::project_local_layout(project_root);
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
@@ -331,6 +331,9 @@ impl TraceDecay {
         save_config(project_root, &config)?;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
+        if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
+            storage::write_store_manifest(&store_layout)?;
+        }
 
         // Bootstrap branch metadata if we can detect a default branch
         let active_branch = branch::current_branch(project_root);
@@ -1803,16 +1806,12 @@ impl TraceDecay {
     }
 
     /// Resolves a path to a relative path string.
-    /// If the path is already relative, returns it as-is.
+    /// If the path is already relative, validates that it stays in the project.
     /// If absolute, strips the `project_root` prefix.
     fn resolve_path(&self, path: &str) -> Option<String> {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            let relative = path.strip_prefix(&self.project_root).ok()?;
-            Some(relative.to_string_lossy().replace('\\', "/"))
-        } else {
-            Some(path.to_string_lossy().replace('\\', "/"))
-        }
+        crate::storage::ProjectPath::resolve(&self.project_root, Path::new(path))
+            .ok()
+            .map(|path| path.relative_path_string())
     }
 
     /// Gets the absolute path for a relative path.

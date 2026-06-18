@@ -12,6 +12,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::branch;
 use tracedecay::dashboard;
+use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::memory::encoding::HolographicEncoder;
 use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
@@ -554,6 +555,18 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
+async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str) {
+    for attempt in 0..20 {
+        match cg.index_all().await {
+            Ok(_) => return,
+            Err(TraceDecayError::SyncLock { .. }) if attempt < 19 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(err) => panic!("{context}: {err}"),
+        }
+    }
+}
+
 #[test]
 fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -674,9 +687,7 @@ fn dashboard_reports_resolved_branch_db_path() {
             Ok(cg) => cg,
             Err(err) => panic!("failed to initialize fixture project: {err}"),
         };
-        if let Err(err) = main.index_all().await {
-            panic!("failed to index main branch fixture: {err}");
-        }
+        index_all_retrying_sync_lock(&main, "failed to index main branch fixture").await;
         drop(main);
 
         git(&project_root, &["checkout", "-b", "feature/dashboard-path"]);

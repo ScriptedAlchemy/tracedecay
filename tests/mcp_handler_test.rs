@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracedecay::db::Database;
+use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
 use tracedecay::sessions::cursor::open_project_session_db;
@@ -25,6 +26,18 @@ use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
+    for attempt in 0..20 {
+        match cg.index_all().await {
+            Ok(_) => return,
+            Err(TraceDecayError::SyncLock { .. }) if attempt < 19 => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(err) => panic!("failed to index test fixture: {err}"),
+        }
+    }
+}
 
 struct GlobalDbEnvGuard {
     previous: Option<OsString>,
@@ -122,7 +135,7 @@ fn test_helper() { assert!(!helper().is_empty()); }
     .unwrap();
 
     let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
+    index_all_retrying_sync_lock(&cg).await;
     (cg, dir)
 }
 
@@ -315,7 +328,7 @@ async fn seed_project_registry(db_path: &Path, project_root: &Path) {
             "proj_alpha",
             project_root,
             None,
-            Some("https://example.test/alpha.git"),
+            Some("https://token:secret@example.test/alpha.git"),
             Some("main"),
         )
         .await
@@ -388,6 +401,11 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert_eq!(list_payload["projects"].as_array().unwrap().len(), 1);
     assert_eq!(list_payload["limit"], 1);
     assert_eq!(list_payload["truncated"], true);
+    let list_text = extract_text(&list.value);
+    assert!(
+        !list_text.contains("secret") && !list_text.contains("git_remote_url"),
+        "project list must not expose credential-bearing remotes: {list_text}"
+    );
 
     let search = handle_tool_call(
         &cg,
@@ -402,6 +420,11 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let search_projects = search_payload["projects"].as_array().unwrap();
     assert_eq!(search_projects.len(), 1);
     assert_eq!(search_projects[0]["project_id"], "proj_alpha");
+    let search_text = extract_text(&search.value);
+    assert!(
+        !search_text.contains("secret") && !search_text.contains("git_remote_url"),
+        "project search must not expose credential-bearing remotes: {search_text}"
+    );
 
     let context = handle_tool_call(
         &cg,
@@ -414,6 +437,11 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     .unwrap();
     let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
     assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
+    let context_text = extract_text(&context.value);
+    assert!(
+        !context_text.contains("secret") && !context_text.contains("git_remote_url"),
+        "project context must not expose credential-bearing remotes: {context_text}"
+    );
     assert_eq!(context_payload["stores"].as_array().unwrap().len(), 1);
     assert_eq!(
         context_payload["stores"][0]["graph_scopes"][0]["branch_name"],
@@ -2050,7 +2078,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     .unwrap();
 
     let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
+    index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2471,7 +2499,7 @@ async fn test_changelog_with_real_git() {
         .unwrap();
 
     let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
+    index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2838,6 +2866,116 @@ async fn test_str_replace_success() {
     let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
     assert!(content.contains("fn hello_updated() {}"));
     assert!(!content.contains("fn hello() {}"));
+}
+
+#[tokio::test]
+async fn path_containment_config_rejects_parent_traversal_before_serving_config() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(
+        dir.path().join("outside.toml"),
+        "token = \"OUTSIDE_SECRET\"\n",
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_config",
+        json!({"path": "../outside.toml", "key": "token"}),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "config read should reject parent traversal, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(dir.path().join("outside.rs"), "fn leaked() {}\n").unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_read",
+        json!({"file": "../outside.rs", "mode": "full"}),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "read should reject parent traversal before serving outside files, got {result:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn path_containment_config_rejects_symlink_escape_before_serving_config() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let outside_dir = dir.path().join("outside");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(
+        outside_dir.join("secret.toml"),
+        "token = \"SYMLINK_SECRET\"\n",
+    )
+    .unwrap();
+    unix_fs::symlink(&outside_dir, project.join("escape")).unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_config",
+        json!({"path": "escape/secret.toml", "key": "token"}),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "config read should reject symlink escape, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn project_selector_is_rejected_before_write_tool_parsing() {
+    let (cg, _dir) = setup_project().await;
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_str_replace",
+        json!({"project_selector": {"include_all_registered": true}}),
+        None,
+        None,
+    )
+    .await;
+    let message = expect_tool_error(result);
+
+    assert!(
+        message.contains("does not accept project_selector"),
+        "write tool should reject project_selector before parser errors, got {message}"
+    );
 }
 
 #[tokio::test]

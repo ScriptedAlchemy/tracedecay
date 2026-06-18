@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{global_db_path, GlobalDb};
-use crate::storage::{StorageMode, StoreKind};
+use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
@@ -328,6 +328,14 @@ fn registry_missing_payload() -> Value {
     })
 }
 
+fn registry_project_value(project: &crate::global_db::CodeProjectRecord) -> Value {
+    let mut value = serde_json::to_value(project).unwrap_or_else(|_| json!({}));
+    if let Value::Object(map) = &mut value {
+        map.remove("git_remote_url");
+    }
+    value
+}
+
 /// Handles `tracedecay_project_list` tool calls.
 pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
@@ -340,6 +348,7 @@ pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
     let mut projects = db.list_code_projects(limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
+    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
     Ok(registry_result(&json!({
         "status": "ok",
         "registry_path": display_path(&registry_path),
@@ -368,6 +377,7 @@ pub(super) async fn handle_project_search(args: Value) -> Result<ToolResult> {
     let mut projects = db.search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
+    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
     Ok(registry_result(&json!({
         "status": "ok",
         "registry_path": display_path(&registry_path),
@@ -413,7 +423,7 @@ pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Resu
     Ok(registry_result(&json!({
         "status": "ok",
         "registry_path": display_path(&registry_path),
-        "project": context.project,
+        "project": registry_project_value(&context.project),
         "aliases": context.aliases,
         "stores": context.stores,
     })))
@@ -1615,20 +1625,9 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
     let project_root = cg.project_root().to_path_buf();
     let project_id = project_root.to_string_lossy().to_string();
-    let rel_path = file.trim_start_matches('/').to_string();
-    let abs_path = if std::path::Path::new(file).is_absolute() {
-        std::path::PathBuf::from(file)
-    } else {
-        project_root.join(&rel_path)
-    };
-    let display_file = if abs_path.starts_with(&project_root) {
-        abs_path
-            .strip_prefix(&project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(rel_path.clone())
-    } else {
-        rel_path.clone()
-    };
+    let project_path = ProjectPath::resolve(&project_root, std::path::Path::new(file))?;
+    let abs_path = project_path.absolute_path();
+    let display_file = project_path.relative_path_string();
 
     let mtime_ns = read_cache::file_mtime_ns(&abs_path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read file metadata for '{file}': {e}"),
@@ -1757,20 +1756,8 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
     });
 
     let project_root = cg.project_root();
-    let rel_path = file.trim_start_matches('/').to_string();
-    let abs_path = if std::path::Path::new(file).is_absolute() {
-        std::path::PathBuf::from(file)
-    } else {
-        project_root.join(&rel_path)
-    };
-    let display_file = if abs_path.starts_with(project_root) {
-        abs_path
-            .strip_prefix(project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(rel_path.clone())
-    } else {
-        rel_path.clone()
-    };
+    let project_path = ProjectPath::resolve(project_root, Path::new(file))?;
+    let display_file = project_path.relative_path_string();
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
     let value = render_map(cg.db(), &display_file, kinds_slice).await?;
@@ -1810,7 +1797,8 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let project_root = cg.project_root().to_path_buf();
     let mut files: Vec<String> = Vec::new();
     if let Some(p) = path {
-        files.push(p.to_string());
+        let project_path = ProjectPath::resolve(&project_root, Path::new(p))?;
+        files.push(project_path.relative_path_string());
     } else if let Some(pat) = glob_pat {
         let combined = project_root.join(pat);
         let walker =
@@ -1818,8 +1806,8 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
                 message: format!("invalid glob '{pat}': {e}"),
             })?;
         for entry in walker.flatten() {
-            if let Ok(rel) = entry.strip_prefix(&project_root) {
-                files.push(rel.to_string_lossy().to_string());
+            if let Ok(project_path) = ProjectPath::resolve(&project_root, &entry) {
+                files.push(project_path.relative_path_string());
             }
         }
         files.sort();
@@ -1828,11 +1816,13 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let mut matches: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for rel in &files {
-        let abs = project_root.join(rel);
+        let project_path = ProjectPath::resolve(&project_root, Path::new(rel))?;
+        let abs = project_path.absolute_path();
+        let rel = project_path.relative_path_string();
         let Ok(contents) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        let parsed = match config_format(rel) {
+        let parsed = match config_format(&rel) {
             Some(ConfigFormat::Toml) => match toml::from_str::<toml::Value>(&contents) {
                 Ok(v) => toml_to_json(&v),
                 Err(e) => {
@@ -1862,7 +1852,7 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
             None => None,
         };
 
-        if !touched.contains(rel) {
+        if !touched.contains(&rel) {
             touched.push(rel.clone());
         }
 

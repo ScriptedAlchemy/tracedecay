@@ -302,6 +302,13 @@ pub async fn handle_tool_call(
         tool_name.starts_with("tracedecay_"),
         "tool_name must start with 'tracedecay_' prefix"
     );
+    if args.get("project_selector").is_some() && tool_rejects_project_selector(tool_name) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{tool_name} is scoped to the active project and does not accept project_selector"
+            ),
+        });
+    }
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, scope_prefix).await,
         "tracedecay_retrieve" => handle_retrieve(cg, &args),
@@ -427,6 +434,28 @@ pub async fn handle_tool_call(
             message: format!("unknown tool: {tool_name}"),
         }),
     }
+}
+
+fn tool_rejects_project_selector(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_run_affected_tests"
+            | "tracedecay_session_start"
+            | "tracedecay_session_end"
+            | "tracedecay_fact_store"
+            | "tracedecay_fact_feedback"
+            | "tracedecay_memory_status"
+            | "tracedecay_lcm_doctor"
+            | "tracedecay_lcm_preflight"
+            | "tracedecay_lcm_compress"
+            | "tracedecay_lcm_session_boundary"
+    )
 }
 
 /// Dispatches only the storage-scoped LCM tools that can run without an

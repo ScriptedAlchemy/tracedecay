@@ -139,12 +139,44 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
     let Some(gdb) = crate::global_db::GlobalDb::open().await else {
         return;
     };
-    let stale: Vec<String> = gdb
-        .list_project_paths()
+    let project_paths = gdb.list_project_paths().await;
+    let mut repo_local = 0usize;
+    let mut profile_sharded = 0usize;
+    let mut reconstructable = Vec::new();
+    let mut stale = Vec::new();
+
+    let profile_root = crate::config::user_data_dir();
+    for project_path in &project_paths {
+        match classify_project_storage_with_registry(
+            Path::new(project_path),
+            &gdb,
+            profile_root.as_deref(),
+        )
         .await
-        .into_iter()
-        .filter(|p| !crate::config::get_project_db_path(Path::new(p)).exists())
-        .collect();
+        {
+            DoctorStorageStatus::RepoLocal => repo_local += 1,
+            DoctorStorageStatus::ProfileSharded => profile_sharded += 1,
+            DoctorStorageStatus::ManifestReconstructable => {
+                reconstructable.push(project_path.clone());
+            }
+            DoctorStorageStatus::Stale => stale.push(project_path.clone()),
+        }
+    }
+
+    dc.pass(&format!(
+        "Storage registry: {repo_local} repo-local, {profile_sharded} profile-sharded"
+    ));
+    if !reconstructable.is_empty() {
+        dc.warn(&format!(
+            "{} manifest-reconstructable project(s) need registry repair",
+            reconstructable.len()
+        ));
+        for p in reconstructable.iter().take(10) {
+            dc.info(&format!("  • {p}"));
+        }
+    }
+
+    check_orphan_store_manifests(dc, &project_paths);
     if stale.is_empty() {
         dc.pass("No stale projects in global DB");
         return;
@@ -187,6 +219,117 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     let purged = gdb.delete_projects(&stale).await;
     dc.pass(&format!("Purged {purged} stale project(s)"));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStorageStatus {
+    RepoLocal,
+    ProfileSharded,
+    ManifestReconstructable,
+    Stale,
+}
+
+fn classify_project_storage(project_root: &Path) -> DoctorStorageStatus {
+    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) else {
+        return DoctorStorageStatus::Stale;
+    };
+    let graph_exists = layout.graph_db_path.exists();
+    let manifest_exists = layout
+        .manifest_path
+        .as_ref()
+        .is_some_and(|path| path.is_file());
+    match layout.storage_mode {
+        crate::storage::StorageMode::ProjectLocal if graph_exists => DoctorStorageStatus::RepoLocal,
+        crate::storage::StorageMode::ProfileSharded if graph_exists => {
+            DoctorStorageStatus::ProfileSharded
+        }
+        crate::storage::StorageMode::ProfileSharded if manifest_exists => {
+            DoctorStorageStatus::ManifestReconstructable
+        }
+        _ => DoctorStorageStatus::Stale,
+    }
+}
+
+async fn classify_project_storage_with_registry(
+    project_root: &Path,
+    global_db: &crate::global_db::GlobalDb,
+    profile_root: Option<&Path>,
+) -> DoctorStorageStatus {
+    let status = classify_project_storage(project_root);
+    if status != DoctorStorageStatus::Stale {
+        return status;
+    }
+    let Some(profile_root) = profile_root else {
+        return status;
+    };
+    let Some(resolution) = global_db.resolve_project_store_by_alias(project_root).await else {
+        return status;
+    };
+    classify_registry_storage(profile_root, &resolution.store).unwrap_or(status)
+}
+
+fn classify_registry_storage(
+    profile_root: &Path,
+    store: &crate::global_db::StoreInstanceRecord,
+) -> Option<DoctorStorageStatus> {
+    if store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    let data_root =
+        crate::storage::StoreArtifactPath::resolve(profile_root, Path::new(&store.store_relpath))
+            .ok()?
+            .absolute_path();
+    let graph_exists = data_root
+        .join(crate::config::db_filename(&data_root))
+        .exists();
+    let manifest_path = store
+        .manifest_relpath
+        .as_ref()
+        .and_then(|relpath| {
+            crate::storage::StoreArtifactPath::resolve(&data_root, Path::new(relpath))
+                .ok()
+                .map(|path| path.absolute_path())
+        })
+        .unwrap_or_else(|| data_root.join(crate::storage::STORE_MANIFEST_FILENAME));
+    let manifest_exists = manifest_path.is_file();
+    if graph_exists {
+        Some(DoctorStorageStatus::ProfileSharded)
+    } else if manifest_exists {
+        Some(DoctorStorageStatus::ManifestReconstructable)
+    } else {
+        Some(DoctorStorageStatus::Stale)
+    }
+}
+
+fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String]) {
+    let Some(profile_root) = crate::config::user_data_dir() else {
+        return;
+    };
+    let registered: std::collections::HashSet<String> = project_paths
+        .iter()
+        .map(|path| crate::global_db::GlobalDb::canonical_project_key(std::path::Path::new(path)))
+        .collect();
+    let report = crate::migrate::registry::scan_profile_store_manifests(
+        &profile_root,
+        crate::tracedecay::current_timestamp(),
+    );
+    for issue in report.issues.iter().take(10) {
+        dc.warn(&format!("Store manifest issue: {issue}"));
+    }
+    let orphan_count = report
+        .plans
+        .iter()
+        .filter(|plan| {
+            let key = crate::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
+            !registered.contains(&key)
+        })
+        .count();
+    if orphan_count > 0 {
+        dc.warn(&format!(
+            "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
+        ));
+        dc.info("    Run `tracedecay migrate reconstruct --profile-root <profile> --apply` after review.");
+    }
 }
 
 /// Check user config file.
@@ -250,6 +393,7 @@ fn print_summary(dc: &DoctorCounters) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_db::StoreInstanceUpsert;
 
     #[test]
     fn format_bytes_boundaries() {
@@ -270,5 +414,89 @@ mod tests {
         assert_eq!(format_bytes(2048), "2.0 KB");
         // 1536 = 1.5 KB
         assert_eq!(format_bytes(1536), "1.5 KB");
+    }
+
+    #[tokio::test]
+    async fn registry_backed_profile_shard_is_not_stale_without_marker(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let profile_root = dir.path().join("profile");
+        let project_root = dir.path().join("repo");
+        let shard_root = profile_root.join("projects/proj_doctor");
+        std::fs::create_dir_all(&project_root)?;
+        std::fs::create_dir_all(&shard_root)?;
+        std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
+        let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+        db.upsert(&project_root, 42).await;
+        db.upsert_code_project("proj_doctor", &project_root, None, None, Some("main"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_doctor:profile_sharded".to_string(),
+            project_id: "proj_doctor".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_doctor".to_string(),
+            manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
+
+        assert_eq!(
+            classify_project_storage(&project_root),
+            DoctorStorageStatus::Stale
+        );
+        assert_eq!(
+            classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+            DoctorStorageStatus::ProfileSharded
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_backed_profile_shard_rejects_unsafe_store_relpath(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let profile_root = dir.path().join("profile");
+        let project_root = dir.path().join("repo");
+        let outside_root = dir.path().join("outside");
+        std::fs::create_dir_all(&project_root)?;
+        std::fs::create_dir_all(&outside_root)?;
+        std::fs::write(outside_root.join("tracedecay.db"), b"graph")?;
+        let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+        db.upsert(&project_root, 42).await;
+        db.upsert_code_project(
+            "proj_doctor_escape",
+            &project_root,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_doctor_escape:profile_sharded".to_string(),
+            project_id: "proj_doctor_escape".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "../outside".to_string(),
+            manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
+
+        assert_eq!(
+            classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+            DoctorStorageStatus::Stale
+        );
+        Ok(())
     }
 }

@@ -354,6 +354,93 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
     assert_eq!(store.registry_status, RegistryStatus::Registered);
 }
 
+#[test]
+fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let scan_root = dir.path().join("scan-root");
+    let discovered = scan_root.join("discovered");
+    let unrelated = dir.path().join("unrelated-registered");
+    fs::create_dir_all(&discovered).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    make_project_store(&discovered);
+    make_project_store(&unrelated);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let db = GlobalDb::open_at(&db_path).await.unwrap();
+        db.upsert(&discovered, 42).await;
+        db.upsert(&unrelated, 99).await;
+    });
+
+    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
+        block_on_inventory(MigrationInventoryOptions {
+            roots: vec![scan_root],
+            global_db_path: Some(db_path),
+            ..MigrationInventoryOptions::default()
+        })
+        .unwrap()
+    });
+
+    assert_eq!(
+        report.stores.len(),
+        1,
+        "unexpected stores: {:?}",
+        report
+            .stores
+            .iter()
+            .map(|store| (&store.project_root, &store.role, &store.registry_status))
+            .collect::<Vec<_>>()
+    );
+    let store = report
+        .stores
+        .iter()
+        .find(|store| store.project_root == discovered)
+        .expect("discovered store should be inventoried");
+    assert_eq!(store.registry_status, RegistryStatus::Registered);
+    assert!(!report
+        .stores
+        .iter()
+        .any(|store| store.project_root == unrelated));
+}
+
+#[test]
+fn explicit_roots_can_include_all_registered_projects_when_requested() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let scan_root = dir.path().join("scan-root");
+    let discovered = scan_root.join("discovered");
+    let unrelated = dir.path().join("unrelated-registered");
+    fs::create_dir_all(&discovered).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    make_project_store(&discovered);
+    make_project_store(&unrelated);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let db = GlobalDb::open_at(&db_path).await.unwrap();
+        db.upsert(&discovered, 42).await;
+        db.upsert(&unrelated, 99).await;
+    });
+
+    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
+        block_on_inventory(MigrationInventoryOptions {
+            roots: vec![scan_root],
+            global_db_path: Some(db_path),
+            include_all_registered: true,
+            ..MigrationInventoryOptions::default()
+        })
+        .unwrap()
+    });
+
+    assert!(report
+        .stores
+        .iter()
+        .any(|store| store.project_root == discovered
+            && store.registry_status == RegistryStatus::Registered));
+    assert!(report
+        .stores
+        .iter()
+        .any(|store| store.project_root == unrelated
+            && store.registry_status == RegistryStatus::Registered));
+}
+
 #[tokio::test]
 async fn inventory_reports_registered_project_with_missing_local_store() {
     let dir = TempDir::new().unwrap();
