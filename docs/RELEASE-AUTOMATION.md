@@ -30,12 +30,14 @@ gh api \
 Add these repository secrets:
 
 - `RELEASE_PLZ_TOKEN`: fine-grained PAT or GitHub App token with read/write `Contents` and `Pull requests` access. This token is important because releases created with the default `GITHUB_TOKEN` do not trigger the follow-up `release.yml` workflow.
-- `CARGO_REGISTRY_TOKEN`: crates.io token with publish access for `tracedecay`.
+- `CARGO_REGISTRY_TOKEN`: crates.io token with publish access for `tracedecay`. This is used as a bootstrap fallback until crates.io Trusted Publishing is configured after `release-plz.yml` lands on `master`.
 - `TAP_GITHUB_TOKEN`: token that can push to `ScriptedAlchemy/homebrew-tap` and `ScriptedAlchemy/scoop-bucket`.
 
 ## Crates.io Setup
 
-The crate must exist on crates.io before fully automated publishing is reliable. If `tracedecay` has not had its first real publish yet, publish `0.0.2` once manually or make sure `CARGO_REGISTRY_TOKEN` has permission to publish the package.
+The `tracedecay` crate should use crates.io Trusted Publishing once `release-plz.yml` exists on `master`. Configure the trusted publisher as GitHub Actions for `ScriptedAlchemy/tracedecay`, workflow `release-plz.yml`, environment `crates-io`.
+
+The first version of a crate must exist before trusted publishing can be configured. `tracedecay` already exists on crates.io, so after this PR is merged crates.io can be configured for OIDC publishing and `CARGO_REGISTRY_TOKEN` can be removed from `.github/workflows/release-plz.yml`.
 
 After that, release-plz detects unpublished changes from crates.io, opens a release PR, and publishes on merge.
 

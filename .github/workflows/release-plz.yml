@@ -16,6 +16,7 @@ jobs:
     name: Publish crate and create GitHub release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
+    environment: crates-io
     permissions:
       contents: write
       pull-requests: read

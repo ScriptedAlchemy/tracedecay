@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,8 +69,15 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="dry-run-${GITHUB_SHA::7}"
+            VERSION="${TAG#v}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       # --- Binary archive (all platforms) ---
 
@@ -76,33 +85,45 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../tracedecay-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tracedecay
+          tar czf ../../../tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
+
+      - name: Generate archive attestation (unix)
+        if: matrix.archive == 'tar.gz' && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
       - name: Upload binary archive (unix)
         if: matrix.archive == 'tar.gz' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       - name: Package binary (windows)
-        if: matrix.archive == 'zip' && github.event_name == 'release'
+        if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ github.ref_name }}-${{ matrix.name }}.zip -Force
+          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.zip -Force
+
+      - name: Generate archive attestation (windows)
+        if: matrix.archive == 'zip' && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
 
       - name: Upload binary archive (windows)
         if: matrix.archive == 'zip' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
       - name: Package Homebrew bottle
-        if: matrix.bottle_tag && github.event_name == 'release'
+        if: matrix.bottle_tag
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           BOTTLE_TAG="${{ matrix.bottle_tag }}"
@@ -110,6 +131,12 @@ jobs:
           cp target/${{ matrix.target }}/release/tracedecay tracedecay/${VERSION}/bin/tracedecay
           chmod +x tracedecay/${VERSION}/bin/tracedecay
           tar czf "tracedecay-${VERSION}.${BOTTLE_TAG}.bottle.tar.gz" tracedecay/
+
+      - name: Generate bottle attestation
+        if: matrix.bottle_tag && github.event_name == 'release'
+        uses: actions/attest@v4
+        with:
+          subject-path: tracedecay-${{ steps.version.outputs.version }}.${{ matrix.bottle_tag }}.bottle.tar.gz
 
       - name: Upload bottle artifact
         if: matrix.bottle_tag && github.event_name == 'release'
