@@ -32,13 +32,6 @@ Add these repository secrets:
 - `RELEASE_PLZ_TOKEN`: fine-grained PAT or GitHub App token with read/write `Contents` and `Pull requests` access. This token is important because releases created with the default `GITHUB_TOKEN` do not trigger the follow-up `release.yml` workflow.
 - `CARGO_REGISTRY_TOKEN`: crates.io token with publish access for `tracedecay`.
 - `TAP_GITHUB_TOKEN`: token that can push to `ScriptedAlchemy/homebrew-tap` and `ScriptedAlchemy/scoop-bucket`.
-- `SIGNPATH_API_TOKEN`: only needed while Windows signing remains enabled.
-
-Repository variables required by `release.yml`:
-
-- `SIGNPATH_ORGANIZATION_ID`
-
-SignPath must have a `tracedecay` project with a `release-signing` signing policy. The Windows build uploads the unsigned exe and a separate `sign-windows` job waits for manual SignPath approval, then uploads the signed zip to the GitHub Release.
 
 ## Crates.io Setup
 

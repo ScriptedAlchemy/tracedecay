@@ -86,33 +86,18 @@ jobs:
         shell: bash
         run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
-      # --- Windows: Authenticode signing via SignPath (build half) ---
-      # Production signing uses a SignPath certificate that can require manual approval,
-      # so signing is split out into the sign-windows job. Here we only upload the
-      # unsigned .exe and record its artifact id, freeing the Windows runner instead of
-      # blocking it while the signing request waits.
-
-      - name: Upload unsigned binary for signing
+      - name: Package binary (windows)
         if: matrix.archive == 'zip' && github.event_name == 'release'
-        id: upload-unsigned
-        uses: actions/upload-artifact@v6
-        with:
-          name: tracedecay-windows-unsigned
-          path: target/${{ matrix.target }}/release/tracedecay.exe
-          if-no-files-found: error
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-${{ github.ref_name }}-${{ matrix.name }}.zip -Force
 
-      - name: Record unsigned artifact id
+      - name: Upload binary archive (windows)
         if: matrix.archive == 'zip' && github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: echo "${{ steps.upload-unsigned.outputs.artifact-id }}" > unsigned-artifact-id.txt
-
-      - name: Upload artifact id for signing job
-        if: matrix.archive == 'zip' && github.event_name == 'release'
-        uses: actions/upload-artifact@v6
-        with:
-          name: windows-unsigned-artifact-id
-          path: unsigned-artifact-id.txt
-          if-no-files-found: error
+        run: gh release upload ${{ github.ref_name }} tracedecay-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
@@ -132,49 +117,6 @@ jobs:
         with:
           name: bottle-${{ matrix.bottle_tag }}
           path: "tracedecay-*.bottle.tar.gz"
-
-  sign-windows:
-    name: Sign Windows binary
-    if: github.event_name == 'release' && !github.event.release.prerelease && !cancelled()
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - name: Download unsigned artifact id
-        uses: actions/download-artifact@v7
-        with:
-          name: windows-unsigned-artifact-id
-
-      - name: Read unsigned artifact id
-        id: meta
-        run: echo "artifact-id=$(cat unsigned-artifact-id.txt)" >> "$GITHUB_OUTPUT"
-
-      - name: Submit signing request to SignPath
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          # NOTE: SignPath is an external service — the project must also be
-          # renamed tokensave -> tracedecay in the SignPath dashboard, or
-          # signing will fail with an unknown project-slug error.
-          project-slug: tracedecay
-          signing-policy-slug: release-signing
-          github-artifact-id: ${{ steps.meta.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 3600
-          output-artifact-directory: signed
-
-      - name: Package signed binary
-        run: |
-          cd signed
-          zip "../tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" tracedecay.exe
-
-      - name: Upload signed binary archive
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" "tracedecay-${GITHUB_REF_NAME}-x86_64-windows.zip" --clobber --repo "$GITHUB_REPOSITORY"
 
   update-homebrew:
     name: Update Homebrew tap
@@ -274,7 +216,7 @@ jobs:
   update-scoop:
     name: Update Scoop bucket
     if: github.event_name == 'release' && !github.event.release.prerelease && !cancelled()
-    needs: sign-windows
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
