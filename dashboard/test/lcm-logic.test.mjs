@@ -1,69 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import vm from "node:vm";
-import { readFile } from "node:fs/promises";
+import { importBundledModule } from "./helpers/module-loader.mjs";
 
-const lcmPath = path.resolve(process.cwd(), "lcm/src/index.js");
+const root = process.cwd();
 
-async function loadLcmExports() {
-  const source = await readFile(lcmPath, "utf8");
-  const instrumented = source.replace(
-    /\}\)\(\);\s*$/,
-    `
-globalThis.__LCM_TEST_EXPORTS__ = {
-  stripMd,
-  summaryTitle,
-  sessionLabel,
-  sessionTail,
-  parseLeadingJSON,
-  ratioStr,
-  mergeRows,
-  mergeSearchPayload,
-  TimelineChart
+// Pure helpers live in helpers.ts (no React). TimelineChart is a React
+// component in components.tsx; the module-loader bundles real `react` from
+// node_modules, so JSX yields real element trees the assertions can walk.
+const [helpers, components] = await Promise.all([
+  importBundledModule(path.join(root, "lcm/src/helpers.ts")),
+  importBundledModule(path.join(root, "lcm/src/components.tsx")),
+]);
+
+const lcm = {
+  stripMd: helpers.stripMd,
+  summaryTitle: helpers.summaryTitle,
+  sessionLabel: helpers.sessionLabel,
+  sessionTail: helpers.sessionTail,
+  parseLeadingJSON: helpers.parseLeadingJSON,
+  ratioStr: helpers.ratioStr,
+  mergeRows: helpers.mergeRows,
+  mergeSearchPayload: helpers.mergeSearchPayload,
+  TimelineChart: components.TimelineChart,
 };
-})();
-`,
-  );
-
-  if (instrumented === source) {
-    throw new Error("Failed to instrument lcm/src/index.js for tests");
-  }
-
-  const noop = () => {};
-  const context = {
-    window: {
-      __HERMES_PLUGIN_SDK__: {
-        React: {
-          createElement: (type, props, ...children) => ({
-            type,
-            props: { ...(props || {}), children: children.length <= 1 ? children[0] : children },
-          }),
-        },
-        hooks: {
-          useEffect: noop,
-          useMemo: (fn) => fn(),
-          useState: (value) => [value, noop],
-          useCallback: (fn) => fn,
-        },
-        utils: {},
-      },
-      __HERMES_PLUGINS__: {
-        register: noop,
-      },
-    },
-  };
-  context.globalThis = context;
-
-  vm.runInNewContext(instrumented, context, { filename: "lcm/src/index.js" });
-  const exports = context.__LCM_TEST_EXPORTS__;
-  if (!exports) {
-    throw new Error("LCM test exports were not captured");
-  }
-  return exports;
-}
-
-const lcm = await loadLcmExports();
 
 test("stripMd flattens markdown syntax into readable plain text", () => {
   const input = `
@@ -156,7 +116,9 @@ function flattenText(node, out = []) {
     node.forEach((child) => flattenText(child, out));
     return out;
   }
-  if (node.props) flattenText(node.props.children, out);
+  // Real React elements and the JSX runtime both expose children via .props.
+  const props = node.props || {};
+  if ("children" in props) flattenText(props.children, out);
   return out;
 }
 
@@ -172,7 +134,9 @@ test("TimelineChart drops null buckets and reports undated messages honestly", (
     undatedCount: 500,
   });
   const bars = rendered.props.children[0];
-  assert.equal(bars.props.children.length, 2);
+  // bars.props.children is the array of column elements (2 dated buckets).
+  const cols = Array.isArray(bars.props.children) ? bars.props.children : [bars.props.children];
+  assert.equal(cols.length, 2);
   const text = flattenText(rendered).join(" ");
   assert.match(text, /500 undated messages not shown/);
 });
