@@ -69,6 +69,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-beta-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-beta-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
