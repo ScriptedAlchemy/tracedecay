@@ -115,10 +115,12 @@ export default function SavingsExplorer() {
       <div className="tss-toolbar">
         <div className="tss-toolbar-left">
           <span className="tss-kicker">Savings &amp; Cost</span>
-          <div className="tss-views" role="group" aria-label="Savings views">
+          <div className="tss-views" role="tablist" aria-label="Savings views">
             {VIEWS.map((entry) => (
               <button
                 key={entry.id}
+                role="tab"
+                aria-selected={view === entry.id}
                 className={cn("tss-view-tab", view === entry.id && "tss-view-tab-active")}
                 onClick={() => setView(entry.id)}
               >

@@ -51,6 +51,16 @@ import type { Bin } from "./viz/scale";
 const INSPECTOR_ROW_LIMIT = 25;
 const GRAPH_ROW_LIMIT = 500;
 
+type ViewKey = "inspector" | "map" | "graph" | "similarity" | "curation";
+
+const VIEW_TABS: Array<{ key: ViewKey; label: string; icon: ReactNode }> = [
+  { key: "inspector", label: "Inspector", icon: <Table2 className="h-3.5 w-3.5" /> },
+  { key: "map", label: "Semantic Map", icon: <Sparkles className="h-3.5 w-3.5" /> },
+  { key: "graph", label: "Graph", icon: <Network className="h-3.5 w-3.5" /> },
+  { key: "similarity", label: "Similarity", icon: <Copy className="h-3.5 w-3.5" /> },
+  { key: "curation", label: "Curation", icon: <Wand2 className="h-3.5 w-3.5" /> },
+];
+
 /** Render a JSON-array string ("[\"a\",\"b\"]") as chips; hide empty/invalid. */
 function JsonChips({ raw, label }: { raw?: string | null; label: string }) {
   const items = useMemo(() => {
@@ -575,7 +585,11 @@ function CoverageGauge({ pct, status }: { pct: number; status: string }) {
   const r = 15.915;
   const clamped = Math.max(0, Math.min(100, pct));
   return (
-    <div className="relative h-16 w-16 shrink-0">
+    <div
+      className="relative h-16 w-16 shrink-0"
+      role="img"
+      aria-label={`${pct}% HRR coverage, ${status.replaceAll("_", " ")}`}
+    >
       <svg viewBox="0 0 36 36" className="h-full w-full -rotate-90">
         <circle
           cx="18"
@@ -891,7 +905,6 @@ function HolographicView({
   onApplied?: () => void;
 }) {
   const overview = data.holographic.overview;
-  type ViewKey = "inspector" | "map" | "graph" | "similarity" | "curation";
   const [view, setViewState] = useState<ViewKey>(() => {
     const initial = new URLSearchParams(window.location.search).get("view");
     return initial === "map" ||
@@ -925,14 +938,6 @@ function HolographicView({
     },
     [setView],
   );
-
-  const VIEW_TABS: Array<{ key: ViewKey; label: string; icon: ReactNode }> = [
-    { key: "inspector", label: "Inspector", icon: <Table2 className="h-3.5 w-3.5" /> },
-    { key: "map", label: "Semantic Map", icon: <Sparkles className="h-3.5 w-3.5" /> },
-    { key: "graph", label: "Graph", icon: <Network className="h-3.5 w-3.5" /> },
-    { key: "similarity", label: "Similarity", icon: <Copy className="h-3.5 w-3.5" /> },
-    { key: "curation", label: "Curation", icon: <Wand2 className="h-3.5 w-3.5" /> },
-  ];
 
   return (
     <div className="flex min-w-0 w-full max-w-full flex-col gap-4">
