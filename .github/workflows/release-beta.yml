@@ -20,14 +20,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Single toggle that gates every job in this workflow. Flip to `true`
-  # (or remove the guard from each `if:` line below) to re-enable.
-  BETA_CHANNEL_ENABLED: 'false'
+  # Beta is also gated by the BETA_CHANNEL_ENABLED repository variable in
+  # every job below. Set that variable to `true` when restoring the release
+  # trigger, or remove the guards entirely.
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event_name == 'release' && github.event.release.prerelease
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -123,7 +123,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew tap (beta)
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event_name == 'release' && github.event.release.prerelease && !cancelled()
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -218,7 +218,7 @@ jobs:
 
   update-scoop:
     name: Update Scoop bucket (beta)
-    if: env.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && !cancelled()
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event_name == 'release' && github.event.release.prerelease && !cancelled()
     needs: build
     runs-on: ubuntu-latest
     steps:
