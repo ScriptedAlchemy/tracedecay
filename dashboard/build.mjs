@@ -123,7 +123,7 @@ function pluginConfig(dir, shimDir, bannerLabel) {
 async function buildPlugin(
   dir,
   bannerLabel,
-  { shimDir = path.join(root, "lib"), tailwind = false } = {},
+  { shimDir = path.join(root, "lib"), tailwind = false, primitives = false } = {},
 ) {
   await run(pluginConfig(dir, shimDir, bannerLabel));
   if (tailwind) {
@@ -133,6 +133,17 @@ async function buildPlugin(
       path.join(root, dir, "src/styles.css"),
       path.join(root, dir, "dist/style.css"),
     );
+  }
+  if (primitives) {
+    // Prepend the shared lib/primitives.css so the tdp-* classes reach both
+    // hosts (standalone shell loads <plugin>/dist/style.css; the Hermes
+    // wrapper concatenates the same file).
+    const distCss = path.join(root, dir, "dist/style.css");
+    const [prim, plugin] = await Promise.all([
+      fs.readFile(path.join(root, "lib/primitives.css"), "utf8"),
+      fs.readFile(distCss, "utf8"),
+    ]);
+    await fs.writeFile(distCss, `${prim}\n${plugin}`, "utf8");
   }
 }
 
@@ -228,7 +239,7 @@ async function main() {
       shimDir: path.join(root, "holographic/src"),
       tailwind: true,
     }),
-    buildPlugin("graph", "code graph"),
+    buildPlugin("graph", "code graph", { primitives: true }),
     buildPlugin("savings", "savings & cost"),
     buildPlugin("lcm", "LCM"),
   ]);
