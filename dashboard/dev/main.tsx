@@ -30,7 +30,7 @@
  * react-dom/client (used below for createRoot) needs the real `react` module
  * with its internal symbols. We still expose real React + hooks on
  * window.__HERMES_PLUGIN_SDK__ so plugin code that reads the SDK (e.g.
- * dashboard/lib/sdk.ts, lcm/src/index.js) behaves exactly like in prod.
+ * dashboard/lib/sdk.ts, lcm/src/entry.tsx) behaves exactly like in prod.
  */
 
 import { useState, useEffect, useSyncExternalStore } from "react";
@@ -43,9 +43,12 @@ import "../shell/src/styles.css";
 import "../graph/src/styles.css";
 import "../savings/src/styles.css";
 import "../lcm/src/styles.css";
-// Holographic styles begin with `@import "tailwindcss"` (Tailwind v4). The
-// `@rsbuild/plugin-tailwindcss` plugin (registered in dev/run.mjs) compiles it,
-// so the full utility set + hv-* polish apply in dev too.
+// Holographic styles begin with `@import "tailwindcss"` (Tailwind v4). In this
+// execution environment both Tailwind-v4 integrations Rsbuild documents make
+// createRsbuild() segfault, so the dev server (dev/run.mjs) ships NO Tailwind
+// pipeline — this CSS is passed through uncompiled and holographic renders
+// unstyled in dev. The prod build (`npm run build`) is the source of truth for
+// holographic's Tailwind styles. See run.mjs for the full divergence note.
 import "../holographic/src/styles.css";
 
 // ---------------------------------------------------------------------------
@@ -99,34 +102,25 @@ try {
 // Plugin discovery + registration (dynamic, fault-tolerant).
 //
 // Each entry is imported AFTER the SDK/registry exist on window. Missing or
-// erroring entries (e.g. lcm/src/entry.tsx while a concurrent TSX migration is
-// in flight) are warned and skipped so the dev server stays usable. LCM falls
-// back to its existing index.js IIFE if entry.tsx is absent.
+// erroring entries are warned and skipped so the dev server stays usable.
 // ---------------------------------------------------------------------------
 
 const PLUGIN_ENTRIES = [
   { name: "holographic", spec: "../holographic/src/entry.tsx" },
   { name: "graph", spec: "../graph/src/entry.tsx" },
   { name: "savings", spec: "../savings/src/entry.tsx" },
-  {
-    name: "hermes-lcm",
-    spec: "../lcm/src/entry.tsx",
-    fallback: "../lcm/src/index.js",
-  },
+  { name: "hermes-lcm", spec: "../lcm/src/entry.tsx" },
 ];
 
 async function loadPlugins() {
   await Promise.all(
     PLUGIN_ENTRIES.map(async (p) => {
-      const candidates = [p.spec, p.fallback].filter(Boolean);
-      for (const spec of candidates) {
-        try {
-          await import(/* @vite-ignore */ spec);
-          return;
-        } catch (err) {
-          // Rsbuild leaves a stack in `err`; keep the console line scannable.
-          console.warn(`[tracedecay dev] failed to load "${spec}":`, err);
-        }
+      try {
+        await import(/* @vite-ignore */ p.spec);
+        return;
+      } catch (err) {
+        // Rsbuild leaves a stack in `err`; keep the console line scannable.
+        console.warn(`[tracedecay dev] failed to load "${p.spec}":`, err);
       }
       console.warn(`[tracedecay dev] plugin "${p.name}" has no loadable entry — skipping.`);
     }),

@@ -23,7 +23,6 @@
   "devDependencies": {
     "@rsbuild/core": "^2.0.15",
     "@rsbuild/plugin-react": "^2.1.0",
-    "@rsbuild/plugin-tailwindcss": "^2.0.3",
     "@rspack/core": "^2.0.8",
     "@tailwindcss/node": "^4.3.1",
     "@tailwindcss/oxide": "^4.3.1",
