@@ -29,6 +29,52 @@
   --ts-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
   --ts-radius: 18px;
 
+  /* Semantic component tokens — flip with [data-theme="light"] (see the matching
+     block below) so component rules can be authored once. Each dark value here
+     mirrors the original dark component rule byte-for-byte; the light values in
+     :root[data-theme="light"] mirror the former per-component overrides. */
+  --ts-page-bg:
+    radial-gradient(circle at 12% -10%, rgba(117, 244, 210, 0.2), transparent 28rem),
+    radial-gradient(circle at 80% 0%, rgba(122, 167, 255, 0.18), transparent 30rem),
+    linear-gradient(180deg, #06100f 0%, #030607 100%);
+  --ts-grid-image:
+    linear-gradient(rgba(117, 244, 210, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(117, 244, 210, 0.05) 1px, transparent 1px);
+  --ts-grid-opacity: 0.34;
+  --ts-header-bg:
+    linear-gradient(90deg, rgba(7, 16, 15, 0.92), rgba(13, 27, 26, 0.82)),
+    rgba(7, 16, 15, 0.78);
+  --ts-header-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  --ts-logo-bg: radial-gradient(circle at 35% 25%, rgba(117, 244, 210, 0.35), transparent 55%);
+  --ts-logo-border: rgba(117, 244, 210, 0.35);
+  --ts-logo-shadow: 0 0 28px rgba(117, 244, 210, 0.16);
+  --ts-tabs-bg: rgba(3, 6, 7, 0.42);
+  --ts-tab-active-bg: linear-gradient(180deg, rgba(117, 244, 210, 0.18), rgba(122, 167, 255, 0.1));
+  --ts-tab-active-border: rgba(117, 244, 210, 0.36);
+  --ts-tab-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 22px rgba(117, 244, 210, 0.12);
+  --ts-card-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    rgba(13, 27, 26, 0.78);
+  --ts-button-bg-2: #42d7bd;
+  --ts-button-border: rgba(117, 244, 210, 0.65);
+  --ts-button-fg: #03100e;
+  --ts-button-secondary-bg: rgba(3, 6, 7, 0.18);
+  --ts-button-hover-bg: rgba(117, 244, 210, 0.08);
+  --ts-button-hover-border: rgba(117, 244, 210, 0.42);
+  --ts-button-destructive-bg-2: #d84f5d;
+  --ts-button-destructive-border: color-mix(in srgb, var(--ts-red) 70%, transparent);
+  --ts-input-bg: rgba(3, 6, 7, 0.42);
+  --ts-input-focus-bg: rgba(3, 6, 7, 0.62);
+  --ts-input-focus-border: rgba(117, 244, 210, 0.52);
+  --ts-input-focus-shadow: 0 0 0 4px rgba(117, 244, 210, 0.08);
+  --ts-badge-bg: rgba(3, 6, 7, 0.28);
+  --ts-conn-bg: transparent;
+  --ts-toggle-hover-bg: rgba(117, 244, 210, 0.07);
+  --ts-loading-bg: rgba(13, 27, 26, 0.62);
+  --ts-scrollbar-track: rgba(255, 255, 255, 0.03);
+  --ts-scrollbar-thumb: rgba(117, 244, 210, 0.18);
+  --ts-scrollbar-thumb-border: rgba(3, 6, 7, 0.85);
+
   /* Hermes-compatible host vars used by the plugin styles. */
   --background: var(--ts-bg);
   --background-base: 7 16 15;
@@ -89,10 +135,7 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background:
-    radial-gradient(circle at 12% -10%, rgba(117, 244, 210, 0.2), transparent 28rem),
-    radial-gradient(circle at 80% 0%, rgba(122, 167, 255, 0.18), transparent 30rem),
-    linear-gradient(180deg, #06100f 0%, #030607 100%);
+  background: var(--ts-page-bg);
   color: var(--foreground);
   font-family: var(--theme-font-sans);
   font-size: 14px;
@@ -132,12 +175,12 @@ select:focus-visible {
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--ts-scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(117, 244, 210, 0.18);
-  border: 2px solid rgba(3, 6, 7, 0.85);
+  background: var(--ts-scrollbar-thumb);
+  border: 2px solid var(--ts-scrollbar-thumb-border);
   border-radius: 999px;
 }
 
@@ -155,10 +198,8 @@ select:focus-visible {
   pointer-events: none;
   position: fixed;
   inset: 0;
-  opacity: 0.34;
-  background-image:
-    linear-gradient(rgba(117, 244, 210, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(117, 244, 210, 0.05) 1px, transparent 1px);
+  opacity: var(--ts-grid-opacity);
+  background-image: var(--ts-grid-image);
   background-size: 44px 44px;
   mask-image: linear-gradient(to bottom, black, transparent 75%);
   z-index: -1;
@@ -171,14 +212,12 @@ select:focus-visible {
   gap: 1.25rem;
   padding: 0.85rem clamp(1rem, 3vw, 2.25rem);
   border-bottom: 1px solid var(--ts-line);
-  background:
-    linear-gradient(90deg, rgba(7, 16, 15, 0.92), rgba(13, 27, 26, 0.82)),
-    rgba(7, 16, 15, 0.78);
+  background: var(--ts-header-bg);
   backdrop-filter: blur(18px) saturate(1.2);
   position: sticky;
   top: 0;
   z-index: 50;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--ts-header-shadow);
 }
 
 .ts-shell-brand {
@@ -193,10 +232,10 @@ select:focus-visible {
   place-items: center;
   width: 2rem;
   height: 2rem;
-  border: 1px solid rgba(117, 244, 210, 0.35);
+  border: 1px solid var(--ts-logo-border);
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 25%, rgba(117, 244, 210, 0.35), transparent 55%);
-  box-shadow: 0 0 28px rgba(117, 244, 210, 0.16);
+  background: var(--ts-logo-bg);
+  box-shadow: var(--ts-logo-shadow);
   color: var(--color-primary);
   font-size: 1.05rem;
 }
@@ -230,7 +269,7 @@ select:focus-visible {
   padding: 0.25rem;
   border: 1px solid var(--ts-line);
   border-radius: 999px;
-  background: rgba(3, 6, 7, 0.42);
+  background: var(--ts-tabs-bg);
 }
 
 .ts-shell-tab {
@@ -254,10 +293,10 @@ select:focus-visible {
 }
 
 .ts-shell-tab-active {
-  background: linear-gradient(180deg, rgba(117, 244, 210, 0.18), rgba(122, 167, 255, 0.1));
-  border-color: rgba(117, 244, 210, 0.36);
+  background: var(--ts-tab-active-bg);
+  border-color: var(--ts-tab-active-border);
   color: var(--ts-text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 22px rgba(117, 244, 210, 0.12);
+  box-shadow: var(--ts-tab-active-shadow);
 }
 
 .ts-shell-main {
@@ -282,15 +321,13 @@ select:focus-visible {
   text-align: center;
   border: 1px solid var(--ts-line);
   border-radius: var(--ts-radius);
-  background: rgba(13, 27, 26, 0.62);
+  background: var(--ts-loading-bg);
 }
 
 /* ------------------------------------------------- SDK component shims */
 
 .ts-card {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
-    rgba(13, 27, 26, 0.78);
+  background: var(--ts-card-bg);
   border: 1px solid var(--ts-line);
   border-radius: var(--ts-radius);
   box-shadow: var(--ts-shadow);
@@ -325,7 +362,7 @@ select:focus-visible {
   font-family: var(--theme-font-mono);
   font-size: 0.7rem;
   color: var(--ts-text-2);
-  background: rgba(3, 6, 7, 0.28);
+  background: var(--ts-badge-bg);
 }
 
 .ts-button {
@@ -335,10 +372,10 @@ select:focus-visible {
   justify-content: center;
   gap: 0.35rem;
   min-height: 2.1rem;
-  background: linear-gradient(180deg, var(--ts-cyan), #42d7bd);
-  border: 1px solid rgba(117, 244, 210, 0.65);
+  background: linear-gradient(180deg, var(--ts-cyan), var(--ts-button-bg-2));
+  border: 1px solid var(--ts-button-border);
   border-radius: 999px;
-  color: #03100e;
+  color: var(--ts-button-fg);
   cursor: pointer;
   font-family: var(--theme-font-mono);
   font-size: 0.76rem;
@@ -367,7 +404,7 @@ select:focus-visible {
 .ts-button-outline,
 .ts-button-ghost,
 .ts-button-secondary {
-  background: rgba(3, 6, 7, 0.18);
+  background: var(--ts-button-secondary-bg);
   border-color: var(--ts-line);
   color: var(--ts-text-2);
 }
@@ -380,14 +417,14 @@ select:focus-visible {
 .ts-button-outline:hover:not(:disabled),
 .ts-button-ghost:hover:not(:disabled),
 .ts-button-secondary:hover:not(:disabled) {
-  border-color: rgba(117, 244, 210, 0.42);
+  border-color: var(--ts-button-hover-border);
   color: var(--ts-text);
-  background: rgba(117, 244, 210, 0.08);
+  background: var(--ts-button-hover-bg);
 }
 
 .ts-button-destructive {
-  background: linear-gradient(180deg, var(--ts-red), #d84f5d);
-  border-color: color-mix(in srgb, var(--ts-red) 70%, transparent);
+  background: linear-gradient(180deg, var(--ts-red), var(--ts-button-destructive-bg-2));
+  border-color: var(--ts-button-destructive-border);
   color: #fff;
 }
 
@@ -404,7 +441,7 @@ select:focus-visible {
 }
 
 .ts-input {
-  background: rgba(3, 6, 7, 0.42);
+  background: var(--ts-input-bg);
   border: 1px solid var(--ts-line);
   border-radius: 999px;
   color: var(--ts-text);
@@ -418,9 +455,9 @@ select:focus-visible {
 }
 
 .ts-input:focus {
-  border-color: rgba(117, 244, 210, 0.52);
-  background: rgba(3, 6, 7, 0.62);
-  box-shadow: 0 0 0 4px rgba(117, 244, 210, 0.08);
+  border-color: var(--ts-input-focus-border);
+  background: var(--ts-input-focus-bg);
+  box-shadow: var(--ts-input-focus-shadow);
   outline: none;
 }
 
@@ -471,7 +508,7 @@ select:focus-visible {
 /* Connection indicator */
 .ts-conn-indicator {
   appearance: none;
-  background: transparent;
+  background: var(--ts-conn-bg);
   border: 1px solid var(--ts-line);
   border-radius: 999px;
   cursor: default;
@@ -548,7 +585,7 @@ select:focus-visible {
 .ts-theme-toggle:hover {
   border-color: var(--ts-line-strong);
   color: var(--ts-text);
-  background: rgba(117, 244, 210, 0.07);
+  background: var(--ts-toggle-hover-bg);
 }
 
 /* ------------------------------------------------------------- disconnected banner */
@@ -617,8 +654,10 @@ select:focus-visible {
 
 /* ========================================================= LIGHT THEME ===
  * Dark values (above) are the default.  When <html data-theme="light"> is set
- * by the theme toggle, these overrides take precedence.  Plugin bundles consume
- * the same custom properties, so they pick up the light palette automatically.
+ * by the theme toggle, this block redefines every themed custom property —
+ * both the palette tokens and the semantic component tokens — so component
+ * rules (above) theme automatically with no per-rule overrides.  Plugin
+ * bundles consume the same custom properties and pick up the light palette too.
  * ======================================================================== */
 
 :root[data-theme="light"] {
@@ -644,6 +683,50 @@ select:focus-visible {
   --ts-red: #c0283a;
   --ts-green: #1a7a48;
   --ts-shadow: 0 24px 80px rgba(0, 0, 0, 0.1);
+
+  /* Semantic component tokens — light values (verbatim from the former
+     per-component [data-theme="light"] overrides, now removed). */
+  --ts-page-bg:
+    radial-gradient(circle at 12% -10%, rgba(0, 137, 123, 0.1), transparent 28rem),
+    radial-gradient(circle at 80% 0%, rgba(58, 95, 192, 0.07), transparent 30rem),
+    linear-gradient(180deg, #eef4f2 0%, #e5f0ed 100%);
+  --ts-grid-image:
+    linear-gradient(rgba(0, 120, 100, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 120, 100, 0.03) 1px, transparent 1px);
+  --ts-grid-opacity: 0.6;
+  --ts-header-bg:
+    linear-gradient(90deg, rgba(245, 250, 248, 0.96), rgba(235, 248, 243, 0.9)),
+    rgba(245, 250, 248, 0.88);
+  --ts-header-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  --ts-logo-bg: radial-gradient(circle at 35% 25%, rgba(0, 137, 123, 0.25), transparent 55%);
+  --ts-logo-border: rgba(0, 137, 123, 0.3);
+  --ts-logo-shadow: 0 0 20px rgba(0, 137, 123, 0.1);
+  --ts-tabs-bg: rgba(230, 244, 240, 0.5);
+  --ts-tab-active-bg: linear-gradient(180deg, rgba(0, 137, 123, 0.14), rgba(58, 95, 192, 0.08));
+  --ts-tab-active-border: rgba(0, 137, 123, 0.32);
+  --ts-tab-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 0 16px rgba(0, 137, 123, 0.1);
+  --ts-card-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(245, 250, 248, 0.8)),
+    rgba(255, 255, 255, 0.85);
+  --ts-button-bg-2: #00695f;
+  --ts-button-border: rgba(0, 121, 107, 0.6);
+  --ts-button-fg: #ffffff;
+  --ts-button-secondary-bg: rgba(245, 250, 248, 0.7);
+  --ts-button-hover-bg: rgba(0, 137, 123, 0.08);
+  --ts-button-hover-border: rgba(0, 137, 123, 0.36);
+  --ts-button-destructive-bg-2: #a0202e;
+  --ts-button-destructive-border: color-mix(in srgb, var(--ts-red) 65%, transparent);
+  --ts-input-bg: rgba(255, 255, 255, 0.8);
+  --ts-input-focus-bg: rgba(255, 255, 255, 0.95);
+  --ts-input-focus-border: rgba(0, 137, 123, 0.5);
+  --ts-input-focus-shadow: 0 0 0 4px rgba(0, 137, 123, 0.08);
+  --ts-badge-bg: rgba(0, 137, 123, 0.06);
+  --ts-conn-bg: rgba(245, 250, 248, 0.6);
+  --ts-toggle-hover-bg: rgba(0, 137, 123, 0.07);
+  --ts-loading-bg: rgba(255, 255, 255, 0.7);
+  --ts-scrollbar-track: rgba(0, 0, 0, 0.04);
+  --ts-scrollbar-thumb: rgba(0, 137, 123, 0.22);
+  --ts-scrollbar-thumb-border: rgba(240, 248, 244, 0.9);
 
   /* Hermes-compatible host vars */
   --background: var(--ts-bg);
@@ -672,130 +755,11 @@ select:focus-visible {
   --color-success: var(--ts-green);
 }
 
-/* Light body background (overrides the dark gradient on html/body) */
-[data-theme="light"] body {
-  background:
-    radial-gradient(circle at 12% -10%, rgba(0, 137, 123, 0.1), transparent 28rem),
-    radial-gradient(circle at 80% 0%, rgba(58, 95, 192, 0.07), transparent 30rem),
-    linear-gradient(180deg, #eef4f2 0%, #e5f0ed 100%);
-}
-
-/* Light grid overlay */
-[data-theme="light"] .ts-shell::before {
-  background-image:
-    linear-gradient(rgba(0, 120, 100, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 120, 100, 0.03) 1px, transparent 1px);
-  opacity: 0.6;
-}
-
-/* Light header */
-[data-theme="light"] .ts-shell-header {
-  background:
-    linear-gradient(90deg, rgba(245, 250, 248, 0.96), rgba(235, 248, 243, 0.9)),
-    rgba(245, 250, 248, 0.88);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
-}
-
-/* Light logo */
-[data-theme="light"] .ts-shell-logo {
-  background: radial-gradient(circle at 35% 25%, rgba(0, 137, 123, 0.25), transparent 55%);
-  border-color: rgba(0, 137, 123, 0.3);
-  box-shadow: 0 0 20px rgba(0, 137, 123, 0.1);
-}
-
-/* Light tab pill container */
-[data-theme="light"] .ts-shell-tabs {
-  background: rgba(230, 244, 240, 0.5);
-}
-
-/* Light active tab */
-[data-theme="light"] .ts-shell-tab-active {
-  background: linear-gradient(180deg, rgba(0, 137, 123, 0.14), rgba(58, 95, 192, 0.08));
-  border-color: rgba(0, 137, 123, 0.32);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 0 16px rgba(0, 137, 123, 0.1);
-}
-
-/* Light card */
-[data-theme="light"] .ts-card {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(245, 250, 248, 0.8)),
-    rgba(255, 255, 255, 0.85);
-}
-
-/* Light buttons */
-[data-theme="light"] .ts-button {
-  background: linear-gradient(180deg, var(--ts-cyan), #00695f);
-  border-color: rgba(0, 121, 107, 0.6);
-  color: #ffffff;
-}
-
-[data-theme="light"] .ts-button-outline,
-[data-theme="light"] .ts-button-ghost,
-[data-theme="light"] .ts-button-secondary {
-  background: rgba(245, 250, 248, 0.7);
-  border-color: var(--ts-line);
-  color: var(--ts-text-2);
-}
-
-[data-theme="light"] .ts-button-ghost {
-  background: transparent;
-  border-color: transparent;
-}
-
-[data-theme="light"] .ts-button-outline:hover:not(:disabled),
-[data-theme="light"] .ts-button-ghost:hover:not(:disabled),
-[data-theme="light"] .ts-button-secondary:hover:not(:disabled) {
-  background: rgba(0, 137, 123, 0.08);
-  border-color: rgba(0, 137, 123, 0.36);
-  color: var(--ts-text);
-}
-
-[data-theme="light"] .ts-button-destructive {
-  background: linear-gradient(180deg, var(--ts-red), #a0202e);
-  border-color: color-mix(in srgb, var(--ts-red) 65%, transparent);
-  color: #fff;
-}
-
-/* Light inputs */
-[data-theme="light"] .ts-input {
-  background: rgba(255, 255, 255, 0.8);
-  color: var(--ts-text);
-}
-
-[data-theme="light"] .ts-input:focus {
-  background: rgba(255, 255, 255, 0.95);
-  border-color: rgba(0, 137, 123, 0.5);
-  box-shadow: 0 0 0 4px rgba(0, 137, 123, 0.08);
-}
-
-/* Light badge */
-[data-theme="light"] .ts-badge {
-  background: rgba(0, 137, 123, 0.06);
-}
-
-/* Light controls */
-[data-theme="light"] .ts-conn-indicator {
-  background: rgba(245, 250, 248, 0.6);
-}
-
-[data-theme="light"] .ts-theme-toggle:hover {
-  background: rgba(0, 137, 123, 0.07);
-}
-
-/* Light loading / error panels */
-[data-theme="light"] .ts-shell-loading {
-  background: rgba(255, 255, 255, 0.7);
-}
-
-/* Light scrollbars */
-[data-theme="light"] ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.04);
-}
-
-[data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: rgba(0, 137, 123, 0.22);
-  border-color: rgba(240, 248, 244, 0.9);
-}
+/* Per-component [data-theme="light"] overrides were here historically. They
+   have been folded into the semantic component tokens defined in
+   :root and :root[data-theme="light"] above, so each component rule is now
+   authored once and themes automatically. No rule was left as an explicit
+   override — every former override reduced cleanly to a full-value token swap. */
 
 /* ---------------------------------------------------------------- responsive */
 
