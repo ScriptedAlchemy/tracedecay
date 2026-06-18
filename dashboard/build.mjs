@@ -19,7 +19,6 @@
 import { rspack } from "@rspack/core";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import esbuild from "esbuild";
 import path from "node:path";
 import fs from "node:fs/promises";
 
@@ -145,8 +144,8 @@ async function buildPlugin(
  *   - strip @layer theme + @layer base so the plugin never clobbers the host's
  *     :root vars or preflight (utilities resolve --color-* against the host);
  *   - confine the sheet to the host's `hermes-plugin` cascade layer;
- *   - minify with esbuild (preserves @supports color-mix blocks that
- *     lightningcss would strip).
+ *   - minify with a small CSS compactor (preserves @supports color-mix blocks
+ *     that lightningcss would strip; no esbuild dependency).
  */
 async function compileTailwindCss(srcDir, outFile) {
   const { compile } = require("@tailwindcss/node");
@@ -159,8 +158,23 @@ async function compileTailwindCss(srcDir, outFile) {
   css = stripTopLevelAtLayer(css, "theme");
   css = stripTopLevelAtLayer(css, "base");
   css = `@layer hermes-plugin{\n${css}\n}`;
-  css = (await esbuild.transform(css, { loader: "css", minify: true })).code;
+  css = minifyCss(css);
   await fs.writeFile(outFile, css, "utf8");
+}
+
+/**
+ * Small CSS minifier: strip comments, collapse whitespace, drop space around
+ * CSS punctuation. Safe for selector/declaration CSS (no @import/url string
+ * surgery). Preserves @supports and content:"..." strings (spaces inside
+ * strings aren't adjacent to the punctuation we trim).
+ */
+function minifyCss(css) {
+  return css
+    .replace(/\/\*[^*]*\*+(?:[^/*][^*]*\*+)*\//g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s*([{}:;,>])\s*/g, "$1")
+    .replace(/;}/g, "}")
+    .trim();
 }
 
 /** Remove a top-level `@layer <name> { ... }` block via brace matching.
@@ -183,13 +197,6 @@ function stripTopLevelAtLayer(css, name) {
     re.lastIndex = idx;
   }
   return out;
-}
-
-async function copyLcm() {
-  const dist = path.join(root, "lcm/dist");
-  await fs.mkdir(dist, { recursive: true });
-  await fs.copyFile(path.join(root, "lcm/src/index.js"), path.join(dist, "index.js"));
-  await fs.copyFile(path.join(root, "lcm/src/style.css"), path.join(dist, "style.css"));
 }
 
 /**
@@ -223,7 +230,7 @@ async function main() {
     }),
     buildPlugin("graph", "code graph"),
     buildPlugin("savings", "savings & cost"),
-    copyLcm(),
+    buildPlugin("lcm", "LCM"),
   ]);
   await buildHermesWrapper();
   for (const f of [
