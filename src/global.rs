@@ -3,6 +3,146 @@ use std::path::Path;
 use crate::current_unix_timestamp;
 use tracedecay::tracedecay::TraceDecay;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectStorageStatus {
+    RepoLocal,
+    ProfileSharded,
+    ManifestReconstructable,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectStorageLocation {
+    pub project_root: std::path::PathBuf,
+    pub data_root: std::path::PathBuf,
+    pub marker_root: Option<std::path::PathBuf>,
+    pub status: ProjectStorageStatus,
+}
+
+impl ProjectStorageStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::RepoLocal => "repo-local",
+            Self::ProfileSharded => "profile-sharded",
+            Self::ManifestReconstructable => "manifest-reconstructable",
+            Self::Stale => "stale",
+        }
+    }
+
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::RepoLocal | Self::ProfileSharded)
+    }
+}
+
+pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
+    match tracedecay::storage::resolve_layout_for_current_profile(project_root) {
+        Ok(layout) => classify_layout_storage(project_root, layout),
+        Err(_) => ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root: tracedecay::config::get_tracedecay_dir(project_root),
+            marker_root: None,
+            status: ProjectStorageStatus::Stale,
+        },
+    }
+}
+
+pub(crate) async fn classify_project_storage_with_registry(
+    project_root: &Path,
+    global_db: Option<&tracedecay::global_db::GlobalDb>,
+    profile_root: Option<&Path>,
+) -> ProjectStorageLocation {
+    let location = classify_project_storage(project_root);
+    if location.status != ProjectStorageStatus::Stale {
+        return location;
+    }
+    let Some(db) = global_db else {
+        return location;
+    };
+    let Some(profile_root) = profile_root else {
+        return location;
+    };
+    let Some(resolution) = db.resolve_project_store_by_alias(project_root).await else {
+        return location;
+    };
+    classify_registry_storage(project_root, profile_root, &resolution.store).unwrap_or(location)
+}
+
+fn classify_layout_storage(
+    project_root: &Path,
+    layout: tracedecay::storage::StoreLayout,
+) -> ProjectStorageLocation {
+    let graph_exists = layout.graph_db_path.exists();
+    let manifest_exists = layout
+        .manifest_path
+        .as_ref()
+        .is_some_and(|path| path.is_file());
+    let status = match layout.storage_mode {
+        tracedecay::storage::StorageMode::ProjectLocal if graph_exists => {
+            ProjectStorageStatus::RepoLocal
+        }
+        tracedecay::storage::StorageMode::ProfileSharded if graph_exists => {
+            ProjectStorageStatus::ProfileSharded
+        }
+        tracedecay::storage::StorageMode::ProfileSharded if manifest_exists => {
+            ProjectStorageStatus::ManifestReconstructable
+        }
+        _ => ProjectStorageStatus::Stale,
+    };
+    let marker_root = (layout.storage_mode == tracedecay::storage::StorageMode::ProfileSharded)
+        .then(|| project_root.join(tracedecay::config::TRACEDECAY_DIR));
+    ProjectStorageLocation {
+        project_root: project_root.to_path_buf(),
+        data_root: layout.data_root,
+        marker_root,
+        status,
+    }
+}
+
+fn classify_registry_storage(
+    project_root: &Path,
+    profile_root: &Path,
+    store: &tracedecay::global_db::StoreInstanceRecord,
+) -> Option<ProjectStorageLocation> {
+    if store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    let data_root = tracedecay::storage::StoreArtifactPath::resolve(
+        profile_root,
+        std::path::Path::new(&store.store_relpath),
+    )
+    .ok()?
+    .absolute_path();
+    let graph_exists = data_root
+        .join(tracedecay::config::db_filename(&data_root))
+        .exists();
+    let manifest_path = store
+        .manifest_relpath
+        .as_ref()
+        .and_then(|relpath| {
+            tracedecay::storage::StoreArtifactPath::resolve(
+                &data_root,
+                std::path::Path::new(relpath),
+            )
+            .ok()
+            .map(|path| path.absolute_path())
+        })
+        .unwrap_or_else(|| data_root.join(tracedecay::storage::STORE_MANIFEST_FILENAME));
+    let manifest_exists = manifest_path.is_file();
+    let status = if graph_exists {
+        ProjectStorageStatus::ProfileSharded
+    } else if manifest_exists {
+        ProjectStorageStatus::ManifestReconstructable
+    } else {
+        ProjectStorageStatus::Stale
+    };
+    Some(ProjectStorageLocation {
+        project_root: project_root.to_path_buf(),
+        data_root,
+        marker_root: Some(project_root.join(tracedecay::config::TRACEDECAY_DIR)),
+        status,
+    })
+}
+
 /// Returns how many seconds have elapsed since a persisted timestamp.
 ///
 /// User config timestamps can land in the future because of clock skew,
@@ -322,7 +462,7 @@ pub(crate) fn find_descendant_tracedecay(
 }
 
 /// Prints the big flashing warning shown before a wipe.
-pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
+pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation]) {
     // Banner is `INNER_WIDTH` display columns wide. The colored title row is
     // padded with red-background spaces so the highlight reaches the same
     // width as the `═` rules above and below — a fixed-width visual block
@@ -364,9 +504,13 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
         eprintln!("Targets:");
         for t in targets {
             eprintln!(
-                "  \x1b[31m✗\x1b[0m {}",
-                tracedecay::config::get_tracedecay_dir(t).display()
+                "  \x1b[31m✗\x1b[0m {} [{}]",
+                t.data_root.display(),
+                t.status.label()
             );
+            if let Some(marker_root) = &t.marker_root {
+                eprintln!("    marker: {}", marker_root.display());
+            }
         }
     }
     if all {

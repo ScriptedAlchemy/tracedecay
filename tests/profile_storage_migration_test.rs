@@ -1,15 +1,63 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
+use tracedecay::config::TraceDecayConfig;
+use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use tracedecay::migrate::inventory::{
+    MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
+    StoreStatus,
+};
+use tracedecay::migrate::manifest::{
+    apply_migration_manifest, build_plan_manifest, finalize_migration_apply,
+    verify_migration_manifest, MigrationPlanOptions,
+};
 use tracedecay::migrate::registry::{
-    reconstruct_registry_from_store_manifest, scan_profile_store_manifests,
+    apply_registry_reconstruction_report, reconstruct_registry_from_store_manifest,
+    scan_profile_store_manifests,
 };
+use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::storage::{
-    StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
+    StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
+use tracedecay::tracedecay::TraceDecay;
+
+static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct HomeEnvGuard {
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+}
+
+impl HomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        Self {
+            previous_home,
+            previous_userprofile,
+        }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+    }
+}
 
 async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
@@ -234,4 +282,221 @@ async fn delete_project_uses_same_canonical_key_as_upsert() {
     db.delete_project(&project_root.join(".")).await;
 
     assert_eq!(db.get_project_tokens(&project_root).await, 0);
+}
+
+#[tokio::test]
+async fn staged_migration_resumes_cutover_after_registry_and_marker() {
+    let dir = TempDir::new().unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let project = dir.path().join("repo");
+    let data_dir = project.join(".tracedecay");
+    let graph_db = data_dir.join("tracedecay.db");
+    let profile_root = dir.path().join("profile");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(&graph_db, b"graph").unwrap();
+    fs::write(
+        data_dir.join("branch-meta.json"),
+        r#"{"default_branch":"main","branches":{}}"#,
+    )
+    .unwrap();
+    let graph_db_path = graph_db.clone();
+    let mut manifest = build_plan_manifest(
+        MigrationInventory {
+            stores: vec![StoreInventory {
+                project_root: project.clone(),
+                data_dir,
+                db_path: graph_db,
+                brand: StoreBrand::TraceDecay,
+                role: StoreRole::CodeProjectStore,
+                registry_status: RegistryStatus::Unregistered,
+                size_bytes: 128,
+                statuses: vec![StoreStatus::Ok],
+                artifacts: vec![StoreArtifact {
+                    kind: "graph_db".to_string(),
+                    path: graph_db_path,
+                    size_bytes: 5,
+                }],
+            }],
+            skipped: Vec::new(),
+            global_db: None,
+        },
+        MigrationPlanOptions {
+            manifest_path,
+            migration_id: "mig_123".to_string(),
+            tracedecay_version: "0.0.2".to_string(),
+            created_at_unix: 1_800_000_000,
+            confirmation_token: "confirm-mig_123".to_string(),
+            target_profile_root: profile_root,
+            project_id: "proj_123".to_string(),
+        },
+    )
+    .unwrap();
+
+    apply_migration_manifest(&mut manifest).unwrap();
+    let staged = verify_migration_manifest(&manifest);
+    assert!(staged.cutover_ready);
+    assert!(!staged.apply_supported);
+    assert!(read_enrollment_marker(&project).unwrap().is_none());
+
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    apply_registry_reconstruction_report(&db, &staged.registry_reconstruction)
+        .await
+        .unwrap();
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_123".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    finalize_migration_apply(&mut manifest).unwrap();
+
+    assert!(verify_migration_manifest(&manifest).apply_supported);
+}
+
+#[tokio::test]
+async fn applies_registry_reconstruction_records_from_manifest() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
+    let report =
+        reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+
+    let applied = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+
+    assert_eq!(applied.projects, 1);
+    assert_eq!(applied.aliases, 1);
+    assert_eq!(applied.stores, 1);
+    assert_eq!(applied.graph_scopes, 1);
+    assert_eq!(applied.artifacts, 4);
+    let resolved = db
+        .resolve_project_store_by_alias(&project_root.join("."))
+        .await
+        .unwrap();
+    assert_eq!(resolved.project.project_id, "proj_123");
+    assert_eq!(resolved.store.storage_mode, "profile_sharded");
+    assert_eq!(
+        resolved.store.manifest_relpath.as_deref(),
+        Some("projects/proj_123/store_manifest.json")
+    );
+}
+
+#[tokio::test]
+async fn cursor_session_db_uses_registry_profile_shard_without_marker() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let profile_root = home.join(".tracedecay");
+    let project_root = dir.path().join("repo");
+    let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
+    let session_db = profile_root.join("projects/proj_123/sessions.db");
+    fs::remove_file(&session_db).unwrap();
+    GlobalDb::open_at(&session_db).await.unwrap();
+    let _home_guard = HomeEnvGuard::set(&home);
+    let report =
+        reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
+    let global = GlobalDb::open_at(&profile_root.join("global.db"))
+        .await
+        .unwrap();
+    apply_registry_reconstruction_report(&global, &report)
+        .await
+        .unwrap();
+
+    let db = open_project_session_db(&project_root).await;
+
+    assert!(
+        db.is_some(),
+        "session ingest should open the registry-backed profile session DB"
+    );
+    assert!(session_db.is_file());
+    assert!(
+        !project_root.join(".tracedecay/sessions.db").exists(),
+        "session ingest must not create a repo-local sessions DB for registry-backed profile stores"
+    );
+}
+
+#[tokio::test]
+async fn trace_decay_init_uses_profile_shard_when_enrolled() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let profile_root = home.join(".tracedecay");
+    let project = dir.path().join("repo");
+    let shard_root = profile_root.join("projects/proj_init");
+    fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeEnvGuard::set(&home);
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_init".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+
+    assert_eq!(cg.store_layout().data_root, shard_root);
+    assert_eq!(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert!(shard_root.join("config.json").is_file());
+    assert!(shard_root.join(STORE_MANIFEST_FILENAME).is_file());
+    assert!(
+        !project.join(".tracedecay/tracedecay.db").exists(),
+        "profile-sharded init must not create a repo-local graph DB"
+    );
+}
+
+#[tokio::test]
+async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let profile_root = home.join(".tracedecay");
+    let project = dir.path().join("repo");
+    let shard_root = profile_root.join("projects/proj_branch");
+    let branch_db = shard_root.join("branches/feature_profile.db");
+    fs::create_dir_all(branch_db.parent().unwrap()).unwrap();
+    fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    let _home_guard = HomeEnvGuard::set(&home);
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_branch".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let config = TraceDecayConfig {
+        root_dir: project.to_string_lossy().to_string(),
+        ..TraceDecayConfig::default()
+    };
+    fs::write(
+        shard_root.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    Database::initialize(&shard_root.join("tracedecay.db"))
+        .await
+        .unwrap();
+    Database::initialize(&branch_db).await.unwrap();
+    let mut meta = BranchMeta::new_for_dir(&shard_root, "main");
+    meta.add_branch("feature/profile", "branches/feature_profile.db", "main");
+    branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
+
+    let cg = TraceDecay::open_branch(&project, "feature/profile")
+        .await
+        .unwrap();
+
+    assert_eq!(cg.store_layout().data_root, shard_root);
+    assert_eq!(cg.db_path(), branch_db);
+    assert_eq!(cg.serving_branch(), Some("feature/profile"));
 }

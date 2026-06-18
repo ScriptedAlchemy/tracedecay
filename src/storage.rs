@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,46 @@ pub fn read_enrollment_marker(project_root: &Path) -> Result<Option<EnrollmentMa
     Ok(Some(marker))
 }
 
+pub fn write_enrollment_marker(project_root: &Path, marker: &EnrollmentMarker) -> Result<()> {
+    validate_enrollment_marker(marker, &enrollment_marker_path(project_root))?;
+    let path = enrollment_marker_path(project_root);
+    let text = serde_json::to_vec_pretty(marker).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to serialize enrollment marker '{}': {e}",
+            path.display()
+        ),
+    })?;
+    PrivateStoreIo::write_file(&path, &text).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to write enrollment marker '{}': {e}",
+            path.display()
+        ),
+    })
+}
+
+pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result<bool> {
+    let path = enrollment_marker_path(project_root);
+    let Some(marker) = read_enrollment_marker(project_root)? else {
+        return Ok(false);
+    };
+    if marker.project_id != project_id || marker.storage_mode != StorageMode::ProfileSharded {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to remove enrollment marker '{}': it does not match project_id '{}'",
+                path.display(),
+                project_id
+            ),
+        });
+    }
+    fs::remove_file(&path).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to remove enrollment marker '{}': {e}",
+            path.display()
+        ),
+    })?;
+    Ok(true)
+}
+
 pub fn project_local_layout(project_root: &Path) -> StoreLayout {
     let data_root = config::get_tracedecay_dir(project_root);
     StoreLayout::new(
@@ -236,7 +277,7 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
             ),
         })?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
+        PrivateStoreIo::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to create store manifest directory '{}': {e}",
                 parent.display()
@@ -250,7 +291,7 @@ pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
             path.display()
         ),
     })?;
-    fs::write(path, text).map_err(|e| TraceDecayError::Config {
+    PrivateStoreIo::write_file(path, text.as_bytes()).map_err(|e| TraceDecayError::Config {
         message: format!("failed to write store manifest '{}': {e}", path.display()),
     })?;
     Ok(manifest)
@@ -342,6 +383,10 @@ impl ProjectPath {
     pub fn relative_path(&self) -> &Path {
         &self.relative_path
     }
+
+    pub fn relative_path_string(&self) -> String {
+        self.relative_path.to_string_lossy().replace('\\', "/")
+    }
 }
 
 impl StoreArtifactPath {
@@ -357,6 +402,11 @@ impl StoreArtifactPath {
             });
         }
         let absolute_path = store_root.join(relpath);
+        reject_symlink_components(&absolute_path, "store artifact path").map_err(|e| {
+            TraceDecayError::Config {
+                message: format!("store artifact path '{}' is unsafe: {e}", relpath.display()),
+            }
+        })?;
         Ok(Self {
             absolute_path,
             relative_path: relpath.to_path_buf(),
@@ -373,36 +423,117 @@ impl StoreArtifactPath {
 }
 
 impl PrivateStoreIo {
-    pub fn create_dir_all(path: &Path) -> std::io::Result<()> {
-        if path
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "private store directory must not be a symlink",
-            ));
-        }
+    pub fn create_dir_all(path: &Path) -> io::Result<()> {
+        reject_symlink_components(path, "private store directory")?;
         fs::create_dir_all(path)?;
         set_private_dir_permissions(path)
     }
 
-    pub fn write_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    pub fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
-        if path
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "private store file must not be a symlink",
-            ));
-        }
+        reject_symlink_components(path, "private store file")?;
         fs::write(path, contents)?;
         set_private_file_permissions(path)
     }
+
+    pub fn write_file_atomically(path: &Path, temp_path: &Path, contents: &[u8]) -> io::Result<()> {
+        if path_parent(path) != path_parent(temp_path) {
+            return Err(invalid_input(
+                "private store atomic write temp path must share the target directory",
+            ));
+        }
+        if path == temp_path {
+            return Err(invalid_input(
+                "private store atomic write temp path must differ from the target",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            Self::create_dir_all(parent)?;
+        }
+        reject_symlink_components(path, "private store file")?;
+        reject_symlink_components(temp_path, "private store temp file")?;
+        fs::write(temp_path, contents)?;
+        set_private_file_permissions(temp_path)?;
+        fs::rename(temp_path, path)?;
+        set_private_file_permissions(path)
+    }
+
+    pub fn copy_artifact(source: &Path, target: &Path) -> io::Result<u64> {
+        let meta = source.symlink_metadata()?;
+        if meta.file_type().is_symlink() {
+            return Err(invalid_input(
+                "private store artifact source must not be a symlink",
+            ));
+        }
+        reject_symlink_components(target, "private store artifact target")?;
+        if meta.is_dir() {
+            return Self::copy_dir(source, target);
+        }
+        if let Some(parent) = target.parent() {
+            Self::create_dir_all(parent)?;
+        }
+        let bytes = fs::copy(source, target)?;
+        set_private_file_permissions(target)?;
+        Ok(bytes)
+    }
+
+    fn copy_dir(source: &Path, target: &Path) -> io::Result<u64> {
+        Self::create_dir_all(target)?;
+        let mut bytes = 0;
+        let mut entries = fs::read_dir(source)?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::path);
+        for entry in entries {
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            let meta = source_path.symlink_metadata()?;
+            if meta.file_type().is_symlink() {
+                return Err(invalid_input(
+                    "private store artifact source must not contain symlinks",
+                ));
+            }
+            if meta.is_dir() {
+                bytes += Self::copy_dir(&source_path, &target_path)?;
+            } else if meta.is_file() {
+                bytes += Self::copy_artifact(&source_path, &target_path)?;
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(invalid_input(format!("{subject} path must be normalized")));
+            }
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(invalid_input(format!(
+                    "{subject} path must not contain symlinks"
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn path_parent(path: &Path) -> &Path {
+    path.parent().unwrap_or_else(|| Path::new(""))
 }
 
 fn relative_to_data_root(path: &Path, data_root: &Path) -> PathBuf {
@@ -460,7 +591,11 @@ pub(crate) fn validate_project_id(project_id: &str) -> std::result::Result<(), &
     if project_id.is_empty() {
         return Err("project_id must not be empty");
     }
-    if project_id.contains('/') || project_id.contains('\\') || project_id.contains("..") {
+    if project_id.starts_with('.')
+        || project_id.contains('/')
+        || project_id.contains('\\')
+        || project_id.contains("..")
+    {
         return Err("project_id must be a single safe path segment");
     }
     if !project_id

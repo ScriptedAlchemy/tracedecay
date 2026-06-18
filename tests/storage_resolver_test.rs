@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracedecay::branch_meta::{self, BranchMeta};
@@ -97,6 +99,28 @@ fn invalid_enrollment_marker_is_not_treated_as_initialized() {
     assert_eq!(discover_project_root(root), None);
     assert!(!TraceDecay::is_initialized(root));
     assert!(read_enrollment_marker(root).is_err());
+}
+
+#[test]
+fn profile_sharded_layout_rejects_dot_and_hidden_project_ids() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let profile = dir.path().join("profile");
+    fs::create_dir_all(&project).unwrap();
+
+    for project_id in [".", ".hidden"] {
+        let marker = EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        };
+
+        let err = profile_sharded_layout(&project, &profile, &marker).unwrap_err();
+
+        assert!(
+            err.to_string().contains("single safe path segment"),
+            "project_id {project_id:?} should be rejected, got {err}"
+        );
+    }
 }
 
 #[test]
@@ -211,6 +235,34 @@ fn store_manifest_roundtrips_from_profile_sharded_layout() {
     assert_eq!(manifest.graph_db_relpath, Path::new("tracedecay.db"));
     assert_eq!(manifest.sessions_db_relpath, Path::new("sessions.db"));
     assert_eq!(manifest.branch_meta_relpath, Path::new("branch-meta.json"));
+}
+
+#[cfg(unix)]
+#[test]
+fn store_manifest_write_rejects_symlinked_parent_components() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    let profile = dir.path().join("profile");
+    let projects_link = profile.join("projects");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&profile).unwrap();
+    symlink(&outside, &projects_link).unwrap();
+    write_enrollment(&project);
+    let marker = read_enrollment_marker(&project).unwrap().unwrap();
+    let layout = profile_sharded_layout(&project, &profile, &marker).unwrap();
+
+    let err = write_store_manifest(&layout).unwrap_err();
+
+    assert!(err.to_string().contains("symlink"));
+    assert!(
+        !outside.join("proj_123").exists(),
+        "manifest writer must not create directories through a symlinked parent"
+    );
+    assert!(!outside
+        .join(format!("proj_123/{STORE_MANIFEST_FILENAME}"))
+        .exists());
 }
 
 #[test]
@@ -360,6 +412,24 @@ fn store_artifact_path_accepts_only_normalized_relative_paths() {
     assert!(StoreArtifactPath::resolve(&store_root, Path::new("bad\0name")).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn store_artifact_path_rejects_symlinked_relative_components() {
+    let dir = TempDir::new().unwrap();
+    let store_root = dir.path().join("store");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&store_root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, store_root.join("escape")).unwrap();
+
+    let err = StoreArtifactPath::resolve(&store_root, Path::new("escape/abc.json")).unwrap_err();
+
+    assert!(
+        err.to_string().contains("symlink") || err.to_string().contains("escapes"),
+        "symlinked store artifact relpath should be rejected, got {err}"
+    );
+}
+
 #[test]
 fn private_store_io_creates_private_dirs_and_files() {
     let dir = TempDir::new().unwrap();
@@ -384,6 +454,23 @@ fn private_store_io_creates_private_dirs_and_files() {
             0o600
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn private_store_io_rejects_symlinked_parent_components() {
+    let dir = TempDir::new().unwrap();
+    let outside = dir.path().join("outside");
+    let private_root = dir.path().join("private");
+    let link = private_root.join("link");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&private_root).unwrap();
+    symlink(&outside, &link).unwrap();
+
+    let err = PrivateStoreIo::write_file(&link.join("nested/config.json"), b"{}").unwrap_err();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!outside.join("nested/config.json").exists());
 }
 
 #[tokio::test]

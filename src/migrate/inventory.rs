@@ -14,6 +14,7 @@ pub struct MigrationInventoryOptions {
     pub roots: Vec<PathBuf>,
     pub global_db_path: Option<PathBuf>,
     pub follow_symlinks: bool,
+    pub include_all_registered: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,31 +143,34 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
         .map(|global| canonical_path_set(&global.registered_project_paths))
         .unwrap_or_default();
 
-    if let Some(global) = &global_db {
-        for root in &global.registered_project_paths {
-            let before = stores.len();
-            inspect_data_dir_candidate(
-                root,
-                TRACEDECAY_DIR,
-                options.follow_symlinks,
-                &mut seen_data_dirs,
-                &mut stores,
-                &mut skipped,
-                StoreRole::CodeProjectStore,
-            )
-            .await?;
-            inspect_data_dir_candidate(
-                root,
-                LEGACY_TOKENSAVE_DIR,
-                options.follow_symlinks,
-                &mut seen_data_dirs,
-                &mut stores,
-                &mut skipped,
-                StoreRole::CodeProjectStore,
-            )
-            .await?;
-            if stores.len() == before {
-                stores.push(missing_registered_store(root));
+    let include_registered_roots = options.roots.is_empty() || options.include_all_registered;
+    if include_registered_roots {
+        if let Some(global) = &global_db {
+            for root in &global.registered_project_paths {
+                let before = stores.len();
+                inspect_data_dir_candidate(
+                    root,
+                    TRACEDECAY_DIR,
+                    options.follow_symlinks,
+                    &mut seen_data_dirs,
+                    &mut stores,
+                    &mut skipped,
+                    StoreRole::CodeProjectStore,
+                )
+                .await?;
+                inspect_data_dir_candidate(
+                    root,
+                    LEGACY_TOKENSAVE_DIR,
+                    options.follow_symlinks,
+                    &mut seen_data_dirs,
+                    &mut stores,
+                    &mut skipped,
+                    StoreRole::CodeProjectStore,
+                )
+                .await?;
+                if stores.len() == before {
+                    stores.push(missing_registered_store(root));
+                }
             }
         }
     }
@@ -747,10 +751,12 @@ fn hermes_home_candidates(roots: &[PathBuf], include_default_home: bool) -> Vec<
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     let mut has_env_home = false;
-    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
-        if !env_home.is_empty() {
-            has_env_home = true;
-            push_unique_path(&mut candidates, &mut seen, PathBuf::from(env_home));
+    if roots.is_empty() {
+        if let Some(env_home) = std::env::var_os("HERMES_HOME") {
+            if !env_home.is_empty() {
+                has_env_home = true;
+                push_unique_path(&mut candidates, &mut seen, PathBuf::from(env_home));
+            }
         }
     }
     if include_default_home && !has_env_home {
