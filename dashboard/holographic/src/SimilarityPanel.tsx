@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type Key, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw, Sparkles, X } from "lucide-react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle } from "./sdk";
 import { api } from "./api";
@@ -105,6 +105,7 @@ function PairRow({
 }: {
   pair: MemorySimilarityPair;
   onShowOnMap?: (pair: MemorySimilarityPair) => void;
+  key?: Key;
 }) {
   const diff = useMemo(
     () => diffPair(pair.a_content, pair.b_content),

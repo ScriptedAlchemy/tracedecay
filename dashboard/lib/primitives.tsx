@@ -206,7 +206,11 @@ export function BarList<Row extends Record<string, unknown>>({
             {value !== undefined && <span className="tdp-bar-value">{String(value)}</span>}
           </>
         );
-        const rowClassName = cn("tdp-bar-row", proportional && "tdp-bar-row-prop");
+        const rowClassName = cn(
+          "tdp-bar-row",
+          proportional && "tdp-bar-row-prop",
+          onPick && "tdp-bar-row-pickable",
+        );
         return onPick ? (
           <button
             key={key}

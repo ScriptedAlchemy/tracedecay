@@ -15,6 +15,7 @@ const SHIM_DIR = path.join(dashboardRoot, "lib");
 export const EMBEDDED_DIST_FILES = [
   "shell/dist/shell.js",
   "shell/dist/shell.css",
+  "shell/dist/source-stamp",
   "holographic/dist/index.js",
   "holographic/dist/style.css",
   "lcm/dist/index.js",
@@ -33,6 +34,27 @@ export const HERMES_WRAPPER_DIST_FILES = [
   "hermes-wrapper/dist/savings.js",
   "hermes-wrapper/dist/style.css",
 ];
+
+export const DASHBOARD_SOURCE_FILES = [
+  "build.mjs",
+  "build.shared.mjs",
+  "package.json",
+  "package-lock.json",
+];
+
+export const DASHBOARD_SOURCE_DIRS = [
+  "graph/src",
+  "holographic/src",
+  "lcm/src",
+  "lib",
+  "savings/src",
+  "shell/src",
+];
+
+const DIST_SOURCE_STAMP = "shell/dist/source-stamp";
+const FNV_OFFSET_BASIS = 0xcbf29ce484222325n;
+const FNV_PRIME = 0x100000001b3n;
+const FNV_MASK = 0xffffffffffffffffn;
 
 function rsbuildEntry(importPath) {
   return { import: importPath, html: false };
@@ -262,6 +284,76 @@ export async function buildHermesWrapper() {
     fs.readFile(path.join(dashboardRoot, "savings/dist/style.css"), "utf8"),
   ]);
   await fs.writeFile(path.join(dist, "style.css"), css.join("\n"), "utf8");
+}
+
+function fnvHashBytes(hash, bytes) {
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = (hash * FNV_PRIME) & FNV_MASK;
+  }
+  return hash;
+}
+
+function normalizedSourcePath(file) {
+  return path.join("dashboard", file).split(path.sep).join("/");
+}
+
+async function collectSourceDir(dir, out) {
+  let entries;
+  try {
+    entries = await fs.readdir(path.join(dashboardRoot, dir), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const relative = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectSourceDir(relative, out);
+    } else if (entry.isFile()) {
+      out.push(relative);
+    }
+  }
+}
+
+async function collectDashboardSourceInputs() {
+  const inputs = [];
+  for (const file of DASHBOARD_SOURCE_FILES) {
+    try {
+      const stat = await fs.stat(path.join(dashboardRoot, file));
+      if (stat.isFile()) inputs.push(file);
+    } catch {
+      // Missing source inputs are normal in packaged crates.
+    }
+  }
+  for (const dir of DASHBOARD_SOURCE_DIRS) {
+    await collectSourceDir(dir, inputs);
+  }
+  return inputs.sort((a, b) => {
+    const left = normalizedSourcePath(a);
+    const right = normalizedSourcePath(b);
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
+export async function dashboardSourceStamp() {
+  const inputs = await collectDashboardSourceInputs();
+  if (!inputs.length) return null;
+  let hash = FNV_OFFSET_BASIS;
+  for (const file of inputs) {
+    hash = fnvHashBytes(hash, Buffer.from(normalizedSourcePath(file)));
+    hash = fnvHashBytes(hash, [0]);
+    hash = fnvHashBytes(hash, await fs.readFile(path.join(dashboardRoot, file)));
+    hash = fnvHashBytes(hash, [0]);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+export async function writeDashboardSourceStamp() {
+  const stamp = await dashboardSourceStamp();
+  if (!stamp) return;
+  const outFile = path.join(dashboardRoot, DIST_SOURCE_STAMP);
+  await fs.mkdir(path.dirname(outFile), { recursive: true });
+  await fs.writeFile(outFile, `${stamp}\n`, "utf8");
 }
 
 export async function logBuiltFiles(files) {

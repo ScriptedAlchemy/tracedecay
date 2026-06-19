@@ -1237,25 +1237,26 @@ cd dashboard && npm run dev          # listens on http://127.0.0.1:7342/
 - Imports the plugin entries directly (no `/api/dashboard/plugins` fetch in
   dev), and builds the SDK on `window.__HERMES_PLUGIN_SDK__` before any plugin
   entry runs, mirroring the prod shell.
+- Compiles the holographic plugin's Tailwind v4 stylesheet once with the same
+  programmatic compiler used by production, writes
+  `dashboard/holographic/dist/style.css`, and imports that generated CSS into
+  the dev entry before Rsbuild starts.
 
 Note that in **dev** React is *not* aliased onto the window-SDK shim — a single
 Rsbuild bundle already shares one real React instance, and `react-dom/client`
 needs the real `react` module — so the per-plugin React externalization is a
 **prod** concern only.
 
-> **Note (dev/prod divergence — holographic styles):** the dev server is
-> `pluginReact()`-only and ships **no Tailwind pipeline**. In some sandboxes
-> both Tailwind-v4 integrations Rsbuild documents — `@rsbuild/plugin-tailwindcss`
-> and `@tailwindcss/postcss` wired through `tools.postcss` — segfault natively
-> inside `createRsbuild()` (hard native crash, no stdout/stderr), while
-> `pluginReact()` alone and the `@rspack/core`-based prod build run fine. To
-> keep the dev server usable (HMR + every non-holographic plugin styled), the
-> Tailwind code path is intentionally omitted there. As a result the
-> **holographic plugin renders unstyled in dev** (its `@import "tailwindcss"`
-> is never compiled); every other plugin's hand-rolled CSS loads normally. The
-> **prod build is the source of truth** for holographic Tailwind styles —
-> verify holographic styling via `npm run build` + the embedded binary, not the
-> dev server.
+The dev server intentionally does **not** install Tailwind as an Rsbuild
+plugin. In some sandboxes both Tailwind-v4 integrations Rsbuild documents —
+`@rsbuild/plugin-tailwindcss` and `@tailwindcss/postcss` wired through
+`tools.postcss` — segfault natively inside `createRsbuild()` (hard native
+crash, no stdout/stderr), while `pluginReact()` alone and the
+`@rspack/core`-based prod build run fine. To keep HMR usable without native
+crashes, `dashboard/dev/run.mjs` performs the Tailwind compile as a preflight
+step and the dev entry imports the generated `holographic/dist/style.css`.
+That keeps holographic styled in dev while preserving production as the source
+of truth for the embedded dashboard assets.
 
 To validate the production build (the shipped UI is always embedded bytes):
 

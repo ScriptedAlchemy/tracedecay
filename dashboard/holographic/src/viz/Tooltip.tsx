@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type Key, type ReactNode } from "react";
 
 export interface TooltipState {
   /** Cursor x/y in the chart container's coordinate space (px). */
@@ -47,7 +47,7 @@ export function VizTooltip({ tip }: { tip: TooltipState | null }) {
 }
 
 /** Consistent label/value row used inside tooltips across all charts. */
-export function TipRow({ label, value }: { label: string; value: ReactNode }) {
+export function TipRow({ label, value }: { label: string; value: ReactNode; key?: Key }) {
   return (
     <div className="hv-tooltip-row">
       <span className="hv-tooltip-label">{label}</span>

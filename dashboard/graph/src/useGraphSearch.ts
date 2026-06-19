@@ -50,7 +50,9 @@ export function useGraphSearch({
         return;
       }
       if (!searchOpen || results.length === 0) return;
-      const buttons = Array.from(box.querySelectorAll<HTMLButtonElement>(".tsg-search-pop button"));
+      const buttons: HTMLButtonElement[] = Array.from(
+        box.querySelectorAll<HTMLButtonElement>(".tsg-search-pop button"),
+      );
       const active = document.activeElement as HTMLElement | null;
       const index = buttons.indexOf(active as HTMLButtonElement);
       if (event.key === "Enter") {

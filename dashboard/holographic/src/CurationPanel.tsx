@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useState } from "react";
+import { type Key, type ReactNode, type RefObject, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -258,7 +258,7 @@ function TagBucket({
   );
 }
 
-function ActionRow({ action }: { action: MemoryCurateAction }) {
+function ActionRow({ action }: { action: MemoryCurateAction; key?: Key }) {
   const content = action.content ?? "";
   const [expanded, setExpanded] = useState(false);
   const risk = actionRisk(action.op);
@@ -425,6 +425,7 @@ function ActionGroup({
 }: {
   group: ActionGroupDef & { actions: MemoryCurateAction[] };
   defaultOpen: boolean;
+  key?: Key;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   if (group.actions.length === 0) return null;

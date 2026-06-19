@@ -454,6 +454,7 @@ export function ToolResult(props: { name: any; content: any }): React.ReactEleme
 // --- list rows -------------------------------------------------------------
 
 export function SearchResultCard(props: {
+  key?: React.Key;
   item: any;
   kind: string;
   query: any;
@@ -507,6 +508,7 @@ export function SearchResultCard(props: {
 }
 
 export function MessageItem(props: {
+  key?: React.Key;
   m: any;
   onOpenMessage?: (m: any) => void;
   active?: boolean;
@@ -561,7 +563,7 @@ export function MessageItem(props: {
   );
 }
 
-export function NodeRef(props: { n: any; onOpen: (id: any) => void; active?: boolean }): React.ReactElement {
+export function NodeRef(props: { key?: React.Key; n: any; onOpen: (id: any) => void; active?: boolean }): React.ReactElement {
   const n = props.n;
   const onOpen = props.onOpen;
   return (

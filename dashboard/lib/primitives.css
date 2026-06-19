@@ -178,13 +178,16 @@
   border-radius: 12px;
   background: color-mix(in srgb, var(--color-background) 26%, transparent);
   color: var(--color-foreground);
-  cursor: pointer;
   padding: 0.42rem 0.6rem;
   font: inherit;
 }
 
 /* Ports `.tsg-hub:hover`. */
-.tdp-bar-row:hover {
+.tdp-bar-row-pickable {
+  cursor: pointer;
+}
+
+.tdp-bar-row-pickable:hover {
   border-color: color-mix(in srgb, var(--color-primary) 42%, transparent);
   background: color-mix(in srgb, var(--color-primary) 8%, transparent);
 }

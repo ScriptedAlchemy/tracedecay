@@ -9,6 +9,7 @@ use std::{
 const DASHBOARD_ASSET_FILES: &[&str] = &[
     "dashboard/shell/dist/shell.js",
     "dashboard/shell/dist/shell.css",
+    "dashboard/shell/dist/source-stamp",
     "dashboard/holographic/dist/index.js",
     "dashboard/holographic/dist/style.css",
     "dashboard/lcm/dist/index.js",
@@ -22,24 +23,22 @@ const DASHBOARD_ASSET_FILES: &[&str] = &[
 const DASHBOARD_SOURCE_FILES: &[&str] = &[
     "dashboard/build.mjs",
     "dashboard/build.shared.mjs",
-    "dashboard/holographic/build.from-hermes.mjs",
     "dashboard/package.json",
     "dashboard/package-lock.json",
-    "dashboard/run-unit-tests.mjs",
-    "dashboard/smoke.mjs",
-    "dashboard/vitest.config.mjs",
 ];
 
 const DASHBOARD_SOURCE_DIRS: &[&str] = &[
-    "dashboard/dev",
     "dashboard/graph/src",
-    "dashboard/hermes-wrapper/src",
     "dashboard/holographic/src",
     "dashboard/lcm/src",
     "dashboard/lib",
     "dashboard/savings/src",
     "dashboard/shell/src",
 ];
+
+const DASHBOARD_DIST_SOURCE_STAMP: &str = "dashboard/shell/dist/source-stamp";
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 /// Locates a working npm executable (`npm.cmd` is the Windows launcher).
 fn npm_program() -> Option<&'static str> {
@@ -137,10 +136,21 @@ fn auto_build_dashboard_assets(reason: &str, affected: &[&str]) {
     println!("cargo::warning=dashboard assets: npm build finished; embedding fresh dist files");
 }
 
-/// Content hash of the dashboard source inputs (each input's path + bytes),
-/// independent of filesystem mtimes. Returns `None` when there are no source
-/// inputs - e.g. a published crate that ships only the prebuilt dist - so a
-/// stamp is never recorded and a rebuild is never triggered for crates.io.
+fn fnv_hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn normalized_dashboard_source_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Content hash of the production dashboard source inputs (each input's path +
+/// bytes), independent of filesystem mtimes. Returns `None` when there are no
+/// source inputs - e.g. a published crate that ships only the prebuilt dist -
+/// so a stamp is never recorded and a rebuild is never triggered for crates.io.
 fn dashboard_source_stamp(source_inputs: &[PathBuf]) -> Option<String> {
     if source_inputs.is_empty() {
         return None;
@@ -149,16 +159,21 @@ fn dashboard_source_stamp(source_inputs: &[PathBuf]) -> Option<String> {
     // not on the unspecified `read_dir` traversal order.
     let mut paths: Vec<&PathBuf> = source_inputs.iter().collect();
     paths.sort();
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = FNV_OFFSET_BASIS;
     for path in paths {
         // Hashing the path makes adds/removes/renames flip the stamp even when
         // the surviving files are byte-identical.
-        path.to_string_lossy().hash(&mut hasher);
+        fnv_hash_bytes(
+            &mut hasher,
+            normalized_dashboard_source_path(path).as_bytes(),
+        );
+        fnv_hash_bytes(&mut hasher, &[0]);
         if let Ok(bytes) = fs::read(path) {
-            bytes.hash(&mut hasher);
+            fnv_hash_bytes(&mut hasher, &bytes);
         }
+        fnv_hash_bytes(&mut hasher, &[0]);
     }
-    Some(format!("{:016x}", hasher.finish()))
+    Some(format!("{hasher:016x}"))
 }
 
 /// True when the dashboard source inputs differ from the content stamp recorded
@@ -166,10 +181,8 @@ fn dashboard_source_stamp(source_inputs: &[PathBuf]) -> Option<String> {
 /// rather than just having their mtimes rewritten by a `git checkout`/`pull`.
 ///
 /// A build with no recorded stamp (a fresh checkout, a clean target dir, or a
-/// crates.io build that ships only dist) trusts the committed/shipped dist and
-/// returns false, so it is never forced to run `npm run build`. The genuine
-/// "source edited but dist not rebuilt" case is still caught on every later
-/// build because the stamp from this run is persisted afterward.
+/// crates.io build that ships only dist) returns false here; the dist-carried
+/// source stamp is checked separately before this OUT_DIR fallback is used.
 fn dashboard_sources_changed(current_stamp: Option<&str>) -> bool {
     let Some(current) = current_stamp else {
         return false;
@@ -177,6 +190,19 @@ fn dashboard_sources_changed(current_stamp: Option<&str>) -> bool {
     match read_dashboard_source_stamp() {
         Some(previous) => previous != current,
         None => false,
+    }
+}
+
+/// True when the committed/generated dist was built from a different set of
+/// production sources. Unlike the OUT_DIR stamp, this survives `cargo clean`
+/// because `npm run build` writes it next to the dist assets that Cargo embeds.
+fn dashboard_dist_stale(current_stamp: Option<&str>) -> bool {
+    let Some(current) = current_stamp else {
+        return false;
+    };
+    match fs::read_to_string(DASHBOARD_DIST_SOURCE_STAMP) {
+        Ok(contents) => contents.trim() != current,
+        Err(_) => true,
     }
 }
 
@@ -196,8 +222,8 @@ fn read_dashboard_source_stamp() -> Option<String> {
 }
 
 fn store_dashboard_source_stamp(stamp: &str) {
-    // Best-effort: if the stamp can't be written, the next build simply falls
-    // back to trusting the existing dist, which is still safe.
+    // Best-effort: if the stamp can't be written, the next build still checks
+    // the source stamp that `npm run build` wrote next to the dist assets.
     if let Some(path) = dashboard_source_stamp_path() {
         let _ = fs::write(path, stamp);
     }
@@ -244,6 +270,8 @@ fn emit_dashboard_asset_inputs() -> String {
     let source_stamp = dashboard_source_stamp(&source_inputs);
     if !missing.is_empty() {
         auto_build_dashboard_assets("missing", &missing);
+    } else if dashboard_dist_stale(source_stamp.as_deref()) {
+        auto_build_dashboard_assets("stale", &[]);
     } else if dashboard_sources_changed(source_stamp.as_deref()) {
         auto_build_dashboard_assets("stale", &[]);
     }
