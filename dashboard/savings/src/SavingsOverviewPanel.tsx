@@ -5,7 +5,7 @@
 
 import React from "react";
 import { Badge, Card, CardContent, CardHeader, CardTitle } from "../../lib/sdk";
-import { Stat } from "../../lib/primitives";
+import { EmptyState, Stat } from "../../lib/primitives";
 import { fillDailySeries, fmtTokens, fmtUsd, projectLabel } from "./logic";
 import { savedTokensUsd } from "./pricing";
 import type { PriceTable } from "./pricing";
@@ -22,19 +22,19 @@ export default function SavingsOverviewPanel({
   prices: PriceTable;
 }) {
   if (!overview) {
-    return <div className="tss-empty">Loading savings analytics…</div>;
+    return <EmptyState variant="dashed">Loading savings analytics…</EmptyState>;
   }
   const savings = overview.savings;
   if (!savings.available) {
     return (
-      <div className="tss-empty">
+      <EmptyState variant="dashed">
         <h3>Global accounting database unavailable</h3>
         <p>
           The savings ledger lives in <code>~/.tracedecay/global.db</code>{" "}
           (override: <code>TRACEDECAY_GLOBAL_DB</code>), which could not be
           opened.
         </p>
-      </div>
+      </EmptyState>
     );
   }
 

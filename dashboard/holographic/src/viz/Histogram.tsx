@@ -1,3 +1,4 @@
+import type * as React from "react";
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { AxisBottom } from "./Axis";
 import { scaleLinear, type Bin } from "./scale";

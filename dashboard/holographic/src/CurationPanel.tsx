@@ -17,11 +17,18 @@ import {
   isBookkeepingTag,
   splitTags,
 } from "./curation/format";
-import { actionRisk, groupActions, riskClass, type ActionRisk } from "./curation/risk";
-import { useCurationData } from "./curation/useCurationData";
+import {
+  actionRisk,
+  groupActions,
+  riskClass,
+  type ActionGroupDef,
+  type ActionRisk,
+} from "./curation/risk";
+import { useCurationData, type CurationTab } from "./curation/useCurationData";
 import type {
   MemoryCurateAction,
   MemoryCuratorActivityEvent,
+  MemoryOplogEvent,
 } from "./types";
 
 const DIAGNOSTIC_COUNT_KEYS = new Set([
@@ -568,9 +575,9 @@ export default function CurationPanel({
   } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];
-  const counts = report?.counts ?? {};
+  const counts: Record<string, number> = report?.counts ?? {};
   const isPlan = report?.dry_run ?? true;
-  const shownCounts = isPlan ? counts : (report?.applied_counts ?? counts);
+  const shownCounts: Record<string, number> = isPlan ? counts : (report?.applied_counts ?? counts);
   const actionCounts = Object.entries(shownCounts).filter(
     ([key]) => !DIAGNOSTIC_COUNT_KEYS.has(key),
   );

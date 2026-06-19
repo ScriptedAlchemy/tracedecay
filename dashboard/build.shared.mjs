@@ -1,5 +1,6 @@
 import { createRsbuild, rspack } from "@rsbuild/core";
 import { pluginReact } from "@rsbuild/plugin-react";
+import { pluginTypeCheck } from "@rsbuild/plugin-type-check";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -9,6 +10,7 @@ export const dashboardRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const require = createRequire(path.join(dashboardRoot, "package.json"));
 const EXTENSIONS = [".tsx", ".ts", ".jsx", ".js", ".json"];
+const SHIM_DIR = path.join(dashboardRoot, "lib");
 
 export const EMBEDDED_DIST_FILES = [
   "shell/dist/shell.js",
@@ -78,7 +80,7 @@ function createBundleConfig({ entryName, entry, outDir, filename, alias = {}, ba
       chunkSplit: { strategy: "all-in-one" },
       printFileSize: false,
     },
-    plugins: [pluginReact()],
+    plugins: [pluginReact(), pluginTypeCheck()],
     tools: {
       rspack(config) {
         applySingleBundleOutput(config, bannerLabel);
@@ -99,7 +101,6 @@ export function createShellBuildConfig() {
 export function createPluginBuildConfig(
   dir,
   bannerLabel,
-  { shimDir = path.join(dashboardRoot, "lib") } = {},
 ) {
   return createBundleConfig({
     entryName: "index",
@@ -108,9 +109,9 @@ export function createPluginBuildConfig(
     filename: "index.js",
     bannerLabel,
     alias: {
-      "react$": path.join(shimDir, "react-shim.ts"),
-      "react/jsx-runtime$": path.join(shimDir, "jsx-runtime.ts"),
-      "react/jsx-dev-runtime$": path.join(shimDir, "jsx-runtime.ts"),
+      "react$": path.join(SHIM_DIR, "react-shim.ts"),
+      "react/jsx-runtime$": path.join(SHIM_DIR, "jsx-runtime.ts"),
+      "react/jsx-dev-runtime$": path.join(SHIM_DIR, "jsx-runtime.ts"),
     },
   });
 }
@@ -135,7 +136,7 @@ export function createDashboardDevConfig({ apiTarget, host, port }) {
         },
       },
     },
-    plugins: [pluginReact()],
+    plugins: [pluginReact(), pluginTypeCheck()],
   };
 }
 
@@ -162,9 +163,9 @@ export async function buildShell() {
 export async function buildPlugin(
   dir,
   bannerLabel,
-  { shimDir = path.join(dashboardRoot, "lib"), tailwind = false, primitives = false } = {},
+  { tailwind = false, primitives = false } = {},
 ) {
-  await runRsbuildConfig(createPluginBuildConfig(dir, bannerLabel, { shimDir }));
+  await runRsbuildConfig(createPluginBuildConfig(dir, bannerLabel));
   const distCss = path.join(dashboardRoot, dir, "dist/style.css");
   await fs.mkdir(path.dirname(distCss), { recursive: true });
   if (tailwind) {
@@ -183,7 +184,6 @@ export async function buildPlugin(
 
 export async function buildHolographicPlugin() {
   await buildPlugin("holographic", "holographic-memory", {
-    shimDir: path.join(dashboardRoot, "holographic/src"),
     tailwind: true,
   });
 }

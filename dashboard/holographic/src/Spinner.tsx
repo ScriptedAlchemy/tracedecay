@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 /**
  * Minimal braille spinner — local stand-in for `@nous-research/ui`'s `Spinner`,
@@ -9,7 +9,7 @@ const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "
 
 interface SpinnerProps {
   className?: string;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
   "aria-label"?: string;
 }
 

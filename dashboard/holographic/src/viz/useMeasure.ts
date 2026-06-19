@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 /**
  * Track the rendered width of a container so SVG charts can fill the
@@ -6,7 +6,7 @@ import { useLayoutEffect, useRef, useState } from "react";
  */
 export function useMeasuredWidth<T extends HTMLElement>(
   initial = 720,
-): [React.RefObject<T | null>, number] {
+): [RefObject<T | null>, number] {
   const ref = useRef<T>(null);
   const [width, setWidth] = useState(initial);
 

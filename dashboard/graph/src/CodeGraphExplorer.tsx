@@ -406,6 +406,10 @@ export default function CodeGraphExplorer() {
           )}
         </div>
         {overview && (
+          /* Compact inline mono stat strip (nodes/edges/files). Left as a
+           * hand-rolled `.tsg-totals` span row on purpose: the shared `Stat`
+           * tiles are large bordered cards meant for dashboards, far too heavy
+           * for this one-line toolbar. This is not a Stat duplicate. */
           <div className="tsg-totals">
             <span>{fmt(overview.totals.nodes)} nodes</span>
             <span>{fmt(overview.totals.edges)} edges</span>
