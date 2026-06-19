@@ -146,9 +146,13 @@ fn ambiguous_state_changes_fall_back_to_current_branch_when_available() {
 async fn hook_branch_tracking_writes_profile_sharded_branch_db() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home");
+    let root = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let home = root.join("home");
     let profile_root = home.join(".tracedecay");
-    let project = dir.path().join("project");
+    let project = root.join("project");
     let shard_root = profile_root.join("projects/proj_hook");
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn hook_marker() {}\n").unwrap();
