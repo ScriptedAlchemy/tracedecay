@@ -98,7 +98,7 @@ impl Database {
     /// Opens an existing database in read-only mode.
     ///
     /// This intentionally skips write-oriented PRAGMAs and migrations so
-    /// status/verification paths can inspect read-only SQLite files without
+    /// status/verification paths can inspect read-only `SQLite` files without
     /// creating WAL files or attempting schema updates.
     pub async fn open_read_only(db_path: &Path) -> Result<(Self, bool)> {
         let db = Builder::new_local(db_path)
