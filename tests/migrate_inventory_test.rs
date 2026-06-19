@@ -61,6 +61,14 @@ fn same_path(left: &Path, right: &Path) -> bool {
     inventory_path(left) == inventory_path(right)
 }
 
+fn inventory_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    inventory_path(left) == inventory_path(right)
+}
+
 fn block_on_inventory(
     options: MigrationInventoryOptions,
 ) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
