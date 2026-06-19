@@ -3,7 +3,7 @@
 //! Checks the binary, project index, global DB, user config, agent
 //! integrations, and network connectivity.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::display::{format_bytes, format_token_count};
@@ -278,23 +278,29 @@ fn classify_registry_storage(
     let profile_root = profile_root
         .canonicalize()
         .unwrap_or_else(|_| profile_root.to_path_buf());
-    let data_root =
-        crate::storage::StoreArtifactPath::resolve(&profile_root, Path::new(&store.store_relpath))
-            .ok()?
-            .absolute_path();
+    let store_relpath = registry_relpath(&store.store_relpath);
+    let data_root = crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        .ok()?
+        .absolute_path();
     let graph_exists = data_root
         .join(crate::config::db_filename(&data_root))
         .exists();
-    let manifest_path = store
+    let manifest_exists = store
         .manifest_relpath
         .as_ref()
-        .and_then(|relpath| {
-            crate::storage::StoreArtifactPath::resolve(&data_root, Path::new(relpath))
-                .ok()
-                .map(|path| path.absolute_path())
+        .map(|relpath| {
+            let relpath = registry_relpath(relpath);
+            [&profile_root, &data_root].iter().any(|root| {
+                crate::storage::StoreArtifactPath::resolve(root, &relpath)
+                    .ok()
+                    .is_some_and(|path| path.absolute_path().is_file())
+            })
         })
-        .unwrap_or_else(|| data_root.join(crate::storage::STORE_MANIFEST_FILENAME));
-    let manifest_exists = manifest_path.is_file();
+        .unwrap_or_else(|| {
+            data_root
+                .join(crate::storage::STORE_MANIFEST_FILENAME)
+                .is_file()
+        });
     if graph_exists {
         Some(DoctorStorageStatus::ProfileSharded)
     } else if manifest_exists {
@@ -302,6 +308,21 @@ fn classify_registry_storage(
     } else {
         Some(DoctorStorageStatus::Stale)
     }
+}
+
+fn registry_relpath(value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return path.to_path_buf();
+    }
+    value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String]) {
@@ -438,7 +459,8 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let profile_root = dir.path().join("profile");
         let project_root = dir.path().join("repo");
-        let shard_root = profile_root.join("projects/proj_doctor");
+        let shard_relpath = Path::new("projects").join("proj_doctor");
+        let shard_root = profile_root.join(&shard_relpath);
         std::fs::create_dir_all(&project_root)?;
         std::fs::create_dir_all(&shard_root)?;
         let profile_root = canonical_temp_path(&profile_root);
@@ -458,7 +480,7 @@ mod tests {
             project_id: "proj_doctor".to_string(),
             store_kind: "code_project".to_string(),
             storage_mode: "profile_sharded".to_string(),
-            store_relpath: "projects/proj_doctor".to_string(),
+            store_relpath: shard_relpath.to_string_lossy().to_string(),
             manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
             last_verified_at: Some(1_800_000_000),
             last_write_at: Some(1_800_000_000),
@@ -488,6 +510,51 @@ mod tests {
                 DoctorStorageStatus::ProfileSharded
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let profile_root = canonical_temp_path(&dir.path().join("profile"));
+        let project_root = canonical_temp_path(&dir.path().join("repo"));
+        let shard_relpath = Path::new("projects").join("proj_doctor_manifest");
+        let manifest_relpath = shard_relpath.join(crate::storage::STORE_MANIFEST_FILENAME);
+        let shard_root = profile_root.join(&shard_relpath);
+        std::fs::create_dir_all(&project_root)?;
+        std::fs::create_dir_all(&shard_root)?;
+        std::fs::write(profile_root.join(&manifest_relpath), b"manifest")?;
+        let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .ok_or_else(|| std::io::Error::other("could not open global db"))?;
+        db.upsert(&project_root, 42).await;
+        db.upsert_code_project(
+            "proj_doctor_manifest",
+            &project_root,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_doctor_manifest:profile_sharded".to_string(),
+            project_id: "proj_doctor_manifest".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: shard_relpath.to_string_lossy().to_string(),
+            manifest_relpath: Some(manifest_relpath.to_string_lossy().to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
+
+        assert_eq!(
+            classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
+            DoctorStorageStatus::ManifestReconstructable
+        );
         Ok(())
     }
 
