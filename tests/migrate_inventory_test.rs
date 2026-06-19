@@ -43,7 +43,14 @@ fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T 
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 fn block_on_inventory(

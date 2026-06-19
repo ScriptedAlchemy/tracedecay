@@ -16,7 +16,14 @@ use tracedecay::storage::{
 };
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 fn profile_root(home: &Path) -> PathBuf {
