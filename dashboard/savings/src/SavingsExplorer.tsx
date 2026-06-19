@@ -179,7 +179,7 @@ export default function SavingsExplorer() {
       )}
 
       {view === "savings" && (
-        <SavingsOverviewPanel overview={overview} ledger={ledger} prices={prices} />
+        <SavingsOverviewPanel overview={overview} ledger={ledger} range={range} prices={prices} />
       )}
       {view === "sessions" && (
         <SessionsPanel

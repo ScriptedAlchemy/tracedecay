@@ -15,10 +15,12 @@ import type { LedgerResponse, SavingsOverview } from "./types";
 export default function SavingsOverviewPanel({
   overview,
   ledger,
+  range,
   prices,
 }: {
   overview: SavingsOverview | null;
   ledger: LedgerResponse | null;
+  range: string;
   prices: PriceTable;
 }) {
   if (!overview) {
@@ -38,12 +40,15 @@ export default function SavingsOverviewPanel({
     );
   }
 
-  const total = ledger?.total || savings.ledger?.all_time || { saved_tokens: 0, calls: 0 };
+  const currentLedger = ledger?.range === range ? ledger : null;
+  const total =
+    currentLedger?.total ||
+    (range === "all" ? savings.ledger?.all_time : undefined) || { saved_tokens: 0, calls: 0 };
   const usd = savedTokensUsd(total.saved_tokens, prices);
   const lifetime = savings.lifetime_counters;
   const recording = savings.recording;
   const series = fillDailySeries(
-    (ledger?.by_day || []).map((day) => ({ day: day.day, value: day.saved_tokens })),
+    (currentLedger?.by_day || []).map((day) => ({ day: day.day, value: day.saved_tokens })),
     (row) => row.value,
   );
   const ledgerEmpty = total.calls === 0;
@@ -52,7 +57,7 @@ export default function SavingsOverviewPanel({
     <div className="tss-grid">
       <div className="tss-stat-row">
         <Stat
-          label={`Tokens saved (${ledger?.range || "all"})`}
+          label={`Tokens saved (${range})`}
           value={fmtTokens(total.saved_tokens)}
           hint={`${fmtTokens(total.calls)} tool calls in the ledger`}
         />
@@ -100,7 +105,7 @@ export default function SavingsOverviewPanel({
       {ledgerEmpty && (!recording || recording.enabled) && (
         <div className="tss-note" role="note">
           The savings ledger has no events
-          {ledger?.range && ledger.range !== "all" ? ` in range "${ledger.range}"` : ""} yet —
+          {range !== "all" ? ` in range "${range}"` : ""} yet —
           rows are appended when tracedecay MCP tools return trimmed context
           (each row records before/after token counts per tool call).
           Recording is enabled in this environment, so an empty all-time
@@ -132,7 +137,7 @@ export default function SavingsOverviewPanel({
           </CardHeader>
           <CardContent>
             <HBarChart
-              rows={(ledger?.by_tool || []).slice(0, 12).map((row) => ({
+              rows={(currentLedger?.by_tool || []).slice(0, 12).map((row) => ({
                 label: row.tool,
                 count: row.saved_tokens,
                 meta: `· ${fmtTokens(row.calls)} calls`,
@@ -148,7 +153,7 @@ export default function SavingsOverviewPanel({
           </CardHeader>
           <CardContent>
             <HBarChart
-              rows={(ledger?.by_project || []).slice(0, 12).map((row) => ({
+              rows={(currentLedger?.by_project || []).slice(0, 12).map((row) => ({
                 label: projectLabel(row.project),
                 count: row.saved_tokens,
               }))}
