@@ -163,7 +163,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
 }
 
 #[tokio::test]
-async fn branch_diagnostics_reports_fallback_target_and_nearest_ancestor() {
+async fn branch_diagnostics_reports_auto_tracked_live_branch() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -179,24 +179,25 @@ async fn branch_diagnostics_reports_fallback_target_and_nearest_ancestor() {
 
     let cg = TraceDecay::open(project).await.unwrap();
     let diagnostics = cg.branch_diagnostics();
-    assert!(diagnostics.is_fallback);
-    assert_eq!(diagnostics.branch_resolution, "fallback_ancestor");
+    assert!(!diagnostics.is_fallback);
+    assert_eq!(diagnostics.branch_resolution, "exact");
     assert_eq!(
         diagnostics.current_branch.as_deref(),
         Some("feature/untracked")
     );
-    assert_eq!(diagnostics.fallback_target.as_deref(), Some("main"));
+    assert_eq!(diagnostics.fallback_target, None);
+    assert_eq!(diagnostics.nearest_tracked_ancestor, None);
     assert_eq!(
-        diagnostics.nearest_tracked_ancestor.as_deref(),
-        Some("main")
+        diagnostics.serving_branch.as_deref(),
+        Some("feature/untracked")
     );
-    assert_eq!(diagnostics.serving_branch.as_deref(), Some("main"));
-    assert!(!diagnostics.live_branch_tracked);
+    assert!(diagnostics.live_branch_tracked);
+    assert_eq!(diagnostics.live_branch_db_exists, Some(true));
     drop(cg);
 }
 
 #[tokio::test]
-async fn branch_diagnostics_flags_missing_tracked_branch_db() {
+async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -227,15 +228,16 @@ async fn branch_diagnostics_flags_missing_tracked_branch_db() {
     let cg = TraceDecay::open(project).await.unwrap();
     let diagnostics = cg.branch_diagnostics();
     assert!(diagnostics.live_branch_tracked);
-    assert_eq!(diagnostics.live_branch_db_exists, Some(false));
-    assert!(diagnostics.is_fallback);
-    assert_eq!(diagnostics.fallback_target.as_deref(), Some("main"));
+    assert_eq!(diagnostics.live_branch_db_exists, Some(true));
+    assert!(!diagnostics.is_fallback);
+    assert_eq!(diagnostics.fallback_target, None);
+    assert_eq!(
+        diagnostics.serving_branch.as_deref(),
+        Some("feature/tracked")
+    );
     assert!(
-        diagnostics
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("feature/tracked") && warning.contains("missing")),
-        "expected missing-db warning for tracked branch, got: {:?}",
+        diagnostics.warnings.is_empty(),
+        "expected auto-repaired branch DB without warnings, got: {:?}",
         diagnostics.warnings
     );
     drop(cg);

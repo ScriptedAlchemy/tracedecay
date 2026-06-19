@@ -392,7 +392,7 @@ pub async fn add_branch_tracking(
     }
 
     let sync_result = async {
-        let cg = crate::tracedecay::TraceDecay::open(project_root).await?;
+        let cg = crate::tracedecay::TraceDecay::open_branch(project_root, branch_name).await?;
         let _ = cg.sync().await?;
         Ok::<(), crate::errors::TraceDecayError>(())
     }

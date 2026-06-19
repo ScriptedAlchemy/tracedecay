@@ -363,15 +363,17 @@ impl TraceDecay {
 
     /// Opens an existing `TraceDecay` project at the given root.
     ///
-    /// If branch metadata exists, resolves the current git branch and opens
-    /// the corresponding DB. Falls back to the nearest tracked ancestor DB
-    /// with a warning if the current branch is untracked.
+    /// If branch metadata exists, resolves the current git branch, auto-adds
+    /// it to branch tracking when needed, and opens the corresponding DB.
+    /// Falls back to the nearest tracked ancestor DB with a warning only when
+    /// the live branch cannot be auto-tracked, such as detached HEAD.
     /// If the previous operation was interrupted (dirty sentinel exists),
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
         let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
+        Self::auto_track_active_branch(project_root, active_branch.as_deref()).await?;
 
         let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
@@ -518,6 +520,17 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
         })
+    }
+
+    async fn auto_track_active_branch(
+        project_root: &Path,
+        active_branch: Option<&str>,
+    ) -> Result<()> {
+        let Some(branch_name) = active_branch else {
+            return Ok(());
+        };
+        let _ = branch::add_branch_tracking(project_root, branch_name).await?;
+        Ok(())
     }
 
     /// Resolves which DB file to open for a given branch.
