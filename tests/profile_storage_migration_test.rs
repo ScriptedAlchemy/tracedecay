@@ -78,6 +78,10 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
+fn portable_relpath(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -157,8 +161,8 @@ fn reconstructs_registry_records_from_profile_store_manifest() {
     assert_eq!(plan.store.storage_mode, "profile_sharded");
     assert_eq!(plan.store.store_relpath, "projects/proj_123");
     assert_eq!(
-        plan.store.manifest_relpath.as_deref(),
-        Some("projects/proj_123/store_manifest.json")
+        plan.store.manifest_relpath.as_deref().map(portable_relpath),
+        Some("projects/proj_123/store_manifest.json".to_string())
     );
     assert_eq!(plan.store.last_verified_at, Some(1_800_000_001));
     assert!(plan
@@ -403,8 +407,12 @@ async fn applies_registry_reconstruction_records_from_manifest() {
     assert_eq!(resolved.project.project_id, "proj_123");
     assert_eq!(resolved.store.storage_mode, "profile_sharded");
     assert_eq!(
-        resolved.store.manifest_relpath.as_deref(),
-        Some("projects/proj_123/store_manifest.json")
+        resolved
+            .store
+            .manifest_relpath
+            .as_deref()
+            .map(portable_relpath),
+        Some("projects/proj_123/store_manifest.json".to_string())
     );
 }
 

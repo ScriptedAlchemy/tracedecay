@@ -61,22 +61,43 @@ impl Drop for GlobalDbEnvGuard {
 }
 
 struct HomeEnvGuard {
-    previous: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
 }
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let previous = std::env::var_os("HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
         std::env::set_var("HOME", home);
-        Self { previous }
+        std::env::set_var("USERPROFILE", home);
+        std::env::set_var(
+            tracedecay::config::USER_DATA_DIR_ENV,
+            home.join(tracedecay::config::TRACEDECAY_DIR),
+        );
+        Self {
+            previous_home,
+            previous_userprofile,
+            previous_data_dir,
+        }
     }
 }
 
 impl Drop for HomeEnvGuard {
     fn drop(&mut self) {
-        match self.previous.take() {
+        match self.previous_home.take() {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
         }
     }
 }
