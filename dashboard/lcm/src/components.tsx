@@ -23,6 +23,7 @@ import {
   parseJsonArray,
   parseLeadingJSON,
   queryTerms,
+  ratioStr,
   sessionLabel,
   short,
   stripMd,
