@@ -48,14 +48,24 @@ import "../lcm/src/styles.css";
 // compiler path as production before Rsbuild resolves this import.
 import "../holographic/dist/style.css";
 
+// Type-only: the standalone shell (shell/src/main.jsx) and this dev entry both
+// install the Hermes plugin SDK + registry on `window`. Declared loose (`any`)
+// because the SDK is a host-provided bag of React/hooks/components/utils.
+declare global {
+  interface Window {
+    __HERMES_PLUGIN_SDK__: any;
+    __HERMES_PLUGINS__: any;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SDK + plugin registry — populated BEFORE plugin entries are imported.
 // ---------------------------------------------------------------------------
 
 window.__HERMES_PLUGIN_SDK__ = buildSDK();
 
-const registered = new Map();
-const listeners = new Set();
+const registered = new Map<string, any>();
+const listeners = new Set<() => void>();
 let registryVersion = 0;
 
 function notify() {
@@ -70,7 +80,7 @@ function notify() {
 }
 
 window.__HERMES_PLUGINS__ = {
-  register(name, component) {
+  register(name: string, component: any) {
     registered.set(name, component);
     notify();
   },
@@ -103,21 +113,21 @@ try {
 // ---------------------------------------------------------------------------
 
 const PLUGIN_ENTRIES = [
-  { name: "holographic", spec: "../holographic/src/entry.tsx" },
-  { name: "graph", spec: "../graph/src/entry.tsx" },
-  { name: "savings", spec: "../savings/src/entry.tsx" },
-  { name: "hermes-lcm", spec: "../lcm/src/entry.tsx" },
+  { name: "holographic", load: () => import("../holographic/src/entry") },
+  { name: "graph", load: () => import("../graph/src/entry") },
+  { name: "savings", load: () => import("../savings/src/entry") },
+  { name: "hermes-lcm", load: () => import("../lcm/src/entry") },
 ];
 
 async function loadPlugins() {
   await Promise.all(
     PLUGIN_ENTRIES.map(async (p) => {
       try {
-        await import(/* @vite-ignore */ p.spec);
+        await p.load();
         return;
       } catch (err) {
         // Rsbuild leaves a stack in `err`; keep the console line scannable.
-        console.warn(`[tracedecay dev] failed to load "${p.spec}":`, err);
+        console.warn(`[tracedecay dev] failed to load "${p.name}":`, err);
       }
       console.warn(`[tracedecay dev] plugin "${p.name}" has no loadable entry — skipping.`);
     }),
