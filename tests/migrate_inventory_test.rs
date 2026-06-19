@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
@@ -14,6 +14,17 @@ use tracedecay::migrate::manifest::{
     build_plan_manifest, load_manifest, save_manifest, MigrationManifest, MigrationPlanOptions,
     MigrationProtocol, StoreArtifactPath, StoreArtifactPathValidationError,
 };
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
 
 fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -129,7 +140,7 @@ fn manifest_save_generates_token_and_records_protocol_context() {
 #[test]
 fn manifest_atomic_save_roundtrips_and_cleans_protocol_files() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("migration-manifest.json");
+    let manifest_path = canonical_temp_path(dir.path()).join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let manifest = MigrationManifest::new(
         "mig_123",
@@ -300,9 +311,10 @@ async fn inventory_records_project_store_sidecar_artifacts() {
 #[tokio::test]
 async fn inventory_reports_global_db_metadata() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
+    let root = canonical_temp_path(dir.path());
+    let db_path = root.join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
-    let project = dir.path().join("registered");
+    let project = root.join("registered");
     fs::create_dir_all(&project).unwrap();
     db.upsert(&project, 42).await;
     assert!(db.ensure_token_count_cache().await);
@@ -330,8 +342,9 @@ async fn inventory_reports_global_db_metadata() {
 #[tokio::test]
 async fn inventory_discovers_registered_project_outside_scan_roots() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let registered = dir.path().join("registered");
+    let root = canonical_temp_path(dir.path());
+    let db_path = root.join("global.db");
+    let registered = root.join("registered");
     fs::create_dir_all(&registered).unwrap();
     make_project_store(&registered);
     let db = GlobalDb::open_at(&db_path).await.unwrap();
@@ -405,10 +418,11 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
 #[test]
 fn explicit_roots_can_include_all_registered_projects_when_requested() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let scan_root = dir.path().join("scan-root");
+    let root = canonical_temp_path(dir.path());
+    let db_path = root.join("global.db");
+    let scan_root = root.join("scan-root");
     let discovered = scan_root.join("discovered");
-    let unrelated = dir.path().join("unrelated-registered");
+    let unrelated = root.join("unrelated-registered");
     fs::create_dir_all(&discovered).unwrap();
     fs::create_dir_all(&unrelated).unwrap();
     make_project_store(&discovered);
@@ -419,15 +433,18 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
         db.upsert(&unrelated, 99).await;
     });
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
-        block_on_inventory(MigrationInventoryOptions {
-            roots: vec![scan_root],
-            global_db_path: Some(db_path),
-            include_all_registered: true,
-            ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+    let report = with_env_vars(
+        &[("HERMES_HOME", None), ("HOME", Some(root.as_path()))],
+        || {
+            block_on_inventory(MigrationInventoryOptions {
+                roots: vec![scan_root],
+                global_db_path: Some(db_path),
+                include_all_registered: true,
+                ..MigrationInventoryOptions::default()
+            })
+            .unwrap()
+        },
+    );
 
     assert!(report
         .stores
@@ -444,8 +461,9 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
 #[tokio::test]
 async fn inventory_reports_registered_project_with_missing_local_store() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let registered = dir.path().join("registered_missing");
+    let root = canonical_temp_path(dir.path());
+    let db_path = root.join("global.db");
+    let registered = root.join("registered_missing");
     fs::create_dir_all(&registered).unwrap();
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     db.upsert(&registered, 42).await;
