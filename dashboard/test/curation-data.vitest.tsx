@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function makeApi(overrides = {}) {
+function makeApi(overrides = {}): any {
   return {
     getMemoryCuratorPreview: vi.fn().mockResolvedValue({ report: null, saved_at: null }),
     getMemoryCuratorActivity: vi.fn().mockResolvedValue({ events: [] }),

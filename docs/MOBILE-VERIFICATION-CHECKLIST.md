@@ -114,7 +114,7 @@ Breakpoint reference (current code):
   `xl:`(1280) + a custom `@media (max-width: 720px)`
   (`dashboard/holographic/src/styles.css:407,416,423,436,452`).
 - **LCM:** `@media (max-width: 760px)` — top bar / heads / result foot /
-  pager go columnar (`dashboard/lcm/src/style.css:1189`).
+  pager go columnar (`dashboard/lcm/src/styles.css`).
 
 ---
 
@@ -323,18 +323,18 @@ imperative Canvas2D surface with `touch-action:none`.
 ## 6. LCM dashboard (`/lcm`)
 
 Route: `?tab=hermes-lcm` (manifest `tab.path: /lcm`). Source:
-`dashboard/lcm/src/index.js` (hand-written vanilla JS via
-`React.createElement` — no build step). It has a search interface (search head,
-result cards, pager), recent-sessions list, and a modal **Drawer** for
-session/message/node detail (`role="dialog"`, `aria-modal`), plus
-CompressionBars/TimelineChart/markdown rendering.
+`dashboard/lcm/src/entry.tsx` + `dashboard/lcm/src/styles.css`, built by
+`dashboard/build.mjs` to `dashboard/lcm/dist/{index.js,style.css}`. It has a
+search interface (search head, result cards, pager), recent-sessions list, and
+a modal **Drawer** for session/message/node detail (`role="dialog"`,
+`aria-modal`), plus CompressionBars/TimelineChart/markdown rendering.
 
 1. **Responsive column collapse at ≤760px:** the top bar, search/section/msg
    heads, and result foot stack vertically; the pager stretches full-width.
-   (`lcm/src/style.css:1189`)
+   (`lcm/src/styles.css`)
 2. **Tables / wide rows scroll horizontally** (`overflow-x:auto`), they must not
    blow out the page width. WATCH: any element using `min-width:max-content`
-   (`lcm/src/style.css:730`) is a likely horizontal-overflow source on a 360px
+   (`lcm/src/styles.css`) is a likely horizontal-overflow source on a 360px
    phone — confirm it scrolls, not the page.
 3. **Search:** the box is tappable; typing returns result cards; the pager is
    usable by touch; snippets highlight query terms and wrap without clipping.
@@ -352,7 +352,7 @@ CompressionBars/TimelineChart/markdown rendering.
      header/footer (test on SE 667px).
 5. **Keyboard shortcuts** (BT): the page-level `onKeyDown` (and
    `isPanelHidden()` gating) must not fire while focus is in an input, the
-   drawer, or a scroll region. (`lcm/src/index.js:1518-1561`)
+   drawer, or a scroll region. (`lcm/src/entry.tsx`)
 6. **Recent Sessions / empty state:** both render correctly at phone widths; the
    empty-state orb + message are centered and not clipped. (The existing
    `smoke.mjs --expect-lcm=` asserts which state appears.)
@@ -431,7 +431,7 @@ Apply these across all three dashboards:
 
 1. **No page-level horizontal scrollbar** on any dashboard at 360–414px widths.
    Known likely sources to scrutinize: LCM `min-width:max-content`
-  (`lcm/src/style.css:730`); any `grid-cols-[fixed fixed …]` that doesn't collapse
+  (`lcm/src/styles.css`); any `grid-cols-[fixed fixed …]` that doesn't collapse
    below the holographic `720px` breakpoint; wide tables in LCM (must use their
    `overflow-x:auto` containers).
 2. **`vh` vs `dvh` on mobile:** the shell uses `min-height:100vh`

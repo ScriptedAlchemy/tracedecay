@@ -1,6 +1,10 @@
 /**
  * Compact hand-rolled SVG charts in the shared design-token vocabulary
  * (same approach as the Code Graph tab — no charting dependency).
+ *
+ * `HBarChart` is a true SVG chart (proportional bars laid out on a pixel
+ * grid with inline value labels), NOT a duplicate of the shared `BarList`
+ * primitive (which is a label/value row list) — so it stays plugin-local.
  */
 
 import React from "react";

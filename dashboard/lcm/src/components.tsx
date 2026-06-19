@@ -29,7 +29,7 @@ import {
   stripMd,
   summaryTitle,
 } from "./helpers";
-import { EmptyState } from "../../lib/primitives";
+import { EmptyState, Stat } from "../../lib/primitives";
 
 // --- search-highlight rendering -------------------------------------------
 
@@ -77,30 +77,6 @@ function codeBlock(text: any): React.ReactElement {
 
 export function toolBadge(label: any, kind?: string): React.ReactElement {
   return <span className={"hermes-lcm-tag" + (kind ? " hermes-lcm-tag-" + kind : "")}>{label}</span>;
-}
-
-export function Stat(props: { value: any; label: any }): React.ReactElement {
-  return (
-    <div className="hermes-lcm-stat">
-      <div className="hermes-lcm-stat-v">{props.value}</div>
-      <div className="hermes-lcm-stat-k">{props.label}</div>
-    </div>
-  );
-}
-
-export function SkeletonLines(props: { count?: number; widths?: any }): React.ReactElement {
-  const count = props.count || 3;
-  const lines: React.ReactElement[] = [];
-  for (let i = 0; i < count; i++) {
-    lines.push(
-      <div
-        key={"sk" + i}
-        className="hermes-lcm-skel-line"
-        style={props.widths && props.widths[i] ? { width: props.widths[i] } : undefined}
-      />,
-    );
-  }
-  return <div className="hermes-lcm-skeleton-block">{lines}</div>;
 }
 
 export function Pager(props: { totalPages?: number; page: number; onChange: (n: number) => void }): React.ReactElement | null {
@@ -168,39 +144,12 @@ export function CopyButton(props: { text: any; label?: string; title?: string })
 }
 
 // --- chart-ish presentational components -----------------------------------
-
-export function BarList(props: { rows?: any[]; keyName: string; onPick?: (label: string) => void }): React.ReactElement {
-  const rows = props.rows || [];
-  const keyName = props.keyName;
-  const onPick = props.onPick;
-  const total = rows.reduce((acc, row) => acc + (Number(row.count) || 0), 0) || 1;
-  if (!rows.length) return <EmptyState className="hermes-lcm-empty">No data</EmptyState>;
-  return (
-    <div className="hermes-lcm-bars">
-      {rows.map(function (row, idx) {
-        const label = String(row[keyName] == null ? "(none)" : row[keyName]);
-        const count = Number(row.count) || 0;
-        const pct = Math.max(2, Math.round((count / total) * 100));
-        const clickable = typeof onPick === "function";
-        return (
-          <div
-            key={label + ":" + idx}
-            className={"hermes-lcm-bar-row" + (clickable ? " hermes-lcm-clk" : "")}
-            onClick={clickable ? function () { onPick!(label); } : undefined}
-          >
-            <div className="hermes-lcm-bar-head">
-              <span className="hermes-lcm-k">{label}</span>
-              <span className="hermes-lcm-v">{fmtInt(count)}</span>
-            </div>
-            <div className="hermes-lcm-bar-track">
-              <div className="hermes-lcm-bar-fill" style={{ width: pct + "%" }} />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+// NOTE: BarList (label/value rows with proportional fills) now uses the shared
+// `tdp-bar-list` primitive (lib/primitives.tsx, `proportional` mode), which
+// ports this component's head + fill-track layout verbatim. The genuinely
+// chart-shaped presentational components below (TimelineChart, CompressionBars)
+// are NOT BarList duplicates — they render dated histograms and dual kept/saved
+// bars respectively — so they stay plugin-local.
 
 /** Responsive CSS bar chart (no SVG stretching, so bars stay crisp and the
  *  summary markers render as true round dots regardless of bucket count). */
@@ -840,10 +789,11 @@ export function SessionDetail(props: {
   return (
     <div className="hermes-lcm-detail">
       <div className="hermes-lcm-statrow">
-        <Stat value={fmtInt(c.message_count)} label="messages" />
-        <Stat value={fmtInt(c.summary_node_count)} label="summaries" />
-        <Stat value={fmtInt(c.token_estimate_total)} label="msg tokens" />
+        <Stat variant="compact" value={fmtInt(c.message_count)} label="messages" />
+        <Stat variant="compact" value={fmtInt(c.summary_node_count)} label="summaries" />
+        <Stat variant="compact" value={fmtInt(c.token_estimate_total)} label="msg tokens" />
         <Stat
+          variant="compact"
           value={ratioStr(c.source_token_count, c.summary_token_count)}
           label="compression"
         />

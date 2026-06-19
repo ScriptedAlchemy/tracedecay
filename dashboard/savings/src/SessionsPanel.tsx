@@ -5,6 +5,7 @@
 
 import React, { useState } from "react";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, cn, timeAgo } from "../../lib/sdk";
+import { EmptyState } from "../../lib/primitives";
 import { BASIS_LABELS, cleanTitle, fmtTokens, fmtUsd } from "./logic";
 import type { CostBasis } from "./logic";
 import { rowCost, summarizeCosts } from "./pricing";
@@ -103,26 +104,26 @@ export default function SessionsPanel({
   const [expanded, setExpanded] = useState<string | null>(null);
 
   if (!data) {
-    return <div className="tss-empty">Loading session accounting…</div>;
+    return <EmptyState variant="dashed">Loading session accounting…</EmptyState>;
   }
   if (!data.available) {
     return (
-      <div className="tss-empty">
+      <EmptyState variant="dashed">
         <h3>Session store unavailable</h3>
         <p>No session database could be opened for this project.</p>
-      </div>
+      </EmptyState>
     );
   }
   if (!data.sessions.length) {
     return (
-      <div className="tss-empty">
+      <EmptyState variant="dashed">
         <h3>No sessions in this range</h3>
         <p>
           Sessions appear here once agent transcripts are ingested into the
           session store ({data.db}). Sessions without timestamps are only
           listed in the “All time” range.
         </p>
-      </div>
+      </EmptyState>
     );
   }
 

@@ -48,6 +48,16 @@ import "../lcm/src/styles.css";
 // compiler path as production before Rsbuild resolves this import.
 import "../holographic/dist/style.css";
 
+// Type-only: the standalone shell (shell/src/main.jsx) and this dev entry both
+// install the Hermes plugin SDK + registry on `window`. Declared loose (`any`)
+// because the SDK is a host-provided bag of React/hooks/components/utils.
+declare global {
+  interface Window {
+    __HERMES_PLUGIN_SDK__: any;
+    __HERMES_PLUGINS__: any;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SDK + plugin registry — populated BEFORE plugin entries are imported.
 // ---------------------------------------------------------------------------
@@ -55,7 +65,7 @@ import "../holographic/dist/style.css";
 window.__HERMES_PLUGIN_SDK__ = buildSDK();
 
 const registered = new Map();
-const listeners = new Set();
+const listeners = new Set<() => void>();
 let registryVersion = 0;
 
 function notify() {

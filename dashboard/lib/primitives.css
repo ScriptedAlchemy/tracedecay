@@ -22,6 +22,32 @@
   padding: 0.75rem;
 }
 
+/* `variant="dashed"`: ports savings `.tss-empty` — a left-aligned dashed-border
+ * box for no-data panels that carry an <h3>/<p> explanation. Overrides the
+ * centered base (equal specificity, declared later). */
+.tdp-empty-dashed {
+  place-items: start;
+  min-height: 0;
+  padding: 1.4rem 1.2rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--ts-radius, 12px);
+  color: var(--color-muted-foreground);
+  text-align: start;
+  gap: 0.4rem;
+}
+
+.tdp-empty-dashed h3 {
+  color: var(--color-foreground);
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.tdp-empty-dashed p {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
 /* ----------------------------------------------------------- ErrorPanel */
 /* Ports `.tsg-error` verbatim (--ts-red -> --color-destructive,
  * --ts-radius -> var(--ts-radius, 18px) so it resolves to graph's 18px in the
@@ -107,6 +133,30 @@
   font-size: 0.68rem;
 }
 
+/* `variant="compact"`: ports LCM's headline `.hermes-lcm-stat` tile — smaller,
+ * tighter, with an uppercase label and a tabular (non-mono) value, sized to
+ * sit several abreast in a flex strip. */
+.tdp-stat-compact {
+  flex: 1 1 120px;
+  border-radius: 8px;
+  background: var(--color-card);
+  padding: 0.55rem 0.7rem;
+}
+
+.tdp-stat-compact .tdp-stat-value {
+  font-family: inherit;
+  font-size: 1.2rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tdp-stat-compact .tdp-stat-label {
+  font-size: 0.72rem;
+  color: var(--color-muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 /* -------------------------------------------------------------- BarList */
 /* Ports `.tsg-hub-list`. */
 .tdp-bar-list {
@@ -168,4 +218,49 @@
   font-family: var(--font-mono);
   font-size: 0.68rem;
   white-space: nowrap;
+}
+
+/* `proportional` mode: ports LCM's `.hermes-lcm-bar-*` — a head row (muted
+ * label + tabular value) over a fill track whose width is ∝ the row's value.
+ * The modifier collapses the 4-column row grid into a single stacked column. */
+.tdp-bar-row-prop {
+  grid-template-columns: 1fr;
+  gap: 0.3rem;
+}
+
+.tdp-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* In the proportional head the label is muted (not bold foreground) and the
+ * value inherits the foreground color with tabular figures — matching the LCM
+ * source/role/depth bars. */
+.tdp-bar-head .tdp-bar-label {
+  color: var(--color-muted-foreground);
+  font-weight: inherit;
+}
+
+.tdp-bar-head .tdp-bar-value {
+  color: var(--color-foreground);
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.tdp-bar-track {
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
+  overflow: hidden;
+}
+
+.tdp-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 65%, white 10%);
 }

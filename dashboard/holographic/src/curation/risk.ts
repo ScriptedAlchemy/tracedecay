@@ -2,7 +2,7 @@ import type { MemoryCurateAction } from "../types";
 
 export type ActionRisk = "low" | "medium" | "high" | "review";
 
-interface ActionGroupDef {
+export interface ActionGroupDef {
   key: string;
   label: string;
   description: string;

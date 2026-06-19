@@ -17,15 +17,28 @@ import { Button } from "./sdk";
  * looks identical to the original hand-rolled markup.
  */
 
-/** Centered, muted placeholder (ports `.tsg-empty`). */
+/**
+ * Muted placeholder for empty/loading states.
+ *
+ * `variant`:
+ *  - `"centered"` (default, ports `.tsg-empty`): centered muted block.
+ *  - `"dashed"`: left-aligned dashed-border box (ports savings `.tss-empty`),
+ *    for no-data panels that carry an `<h3>`/`<p>` explanation.
+ */
 export function EmptyState({
   children,
+  variant = "centered",
   className,
 }: {
   children: React.ReactNode;
+  variant?: "centered" | "dashed";
   className?: string;
 }) {
-  return <div className={cn("tdp-empty", className)}>{children}</div>;
+  return (
+    <div className={cn("tdp-empty", variant === "dashed" && "tdp-empty-dashed", className)}>
+      {children}
+    </div>
+  );
 }
 
 /**
@@ -81,20 +94,30 @@ export function SkeletonLines({
   );
 }
 
-/** Big-value + small-label stat tile (ports the `.tss-stat` shape). */
+/**
+ * Big-value + small-label stat tile (ports the `.tss-stat` shape).
+ *
+ * `variant`:
+ *  - `"default"`: bordered card tile with a large mono value (graph/savings).
+ *  - `"compact"`: smaller, tighter tile with an uppercase label and tabular
+ *    value (ports the LCM headline `.hermes-lcm-stat` row, which sits several
+ *    abreast in a flex strip).
+ */
 export function Stat({
   label,
   value,
   hint,
+  variant = "default",
   className,
 }: {
   label: string;
   value: React.ReactNode;
   hint?: string;
+  variant?: "default" | "compact";
   className?: string;
 }) {
   return (
-    <div className={cn("tdp-stat", className)}>
+    <div className={cn("tdp-stat", variant === "compact" && "tdp-stat-compact", className)}>
       <div className="tdp-stat-value">{value}</div>
       <div className="tdp-stat-label">{label}</div>
       {hint && <div className="tdp-stat-hint">{hint}</div>}
@@ -108,6 +131,17 @@ export function Stat({
  *
  * `keyName` selects the row field used as the visible label and default key.
  * Each row may also carry optional `value`, `meta`, and `color` fields.
+ *
+ * Options:
+ *  - `proportional`: render each row as a head (label + value) over a fill
+ *    track whose width is proportional to the row's numeric magnitude, ports
+ *    the LCM `.hermes-lcm-bar-*` source/role/depth bars. The magnitude is read
+ *    from `valueName` (default `"value"`); the displayed value is still the
+ *    row's `value` field (a pre-formatted string), so the caller controls both
+ *    the fill ratio and the exact rendered text.
+ *  - `valueName`: field holding the numeric fill magnitude (default `"value"`).
+ *  - `emptyText`: when set and `rows` is empty, renders an `EmptyState` with
+ *    this text instead of an empty container.
  */
 export function BarList<Row extends Record<string, unknown>>({
   rows,
@@ -116,6 +150,9 @@ export function BarList<Row extends Record<string, unknown>>({
   rowKey,
   titleFor,
   className,
+  proportional,
+  valueName = "value",
+  emptyText,
 }: {
   rows: Array<Row>;
   keyName: string;
@@ -123,7 +160,16 @@ export function BarList<Row extends Record<string, unknown>>({
   rowKey?: (row: Row) => string;
   titleFor?: (row: Row) => string;
   className?: string;
+  proportional?: boolean;
+  valueName?: string;
+  emptyText?: string;
 }) {
+  if (!rows.length) {
+    return emptyText ? <EmptyState>{emptyText}</EmptyState> : <div className={cn("tdp-bar-list", className)} />;
+  }
+  const total = proportional
+    ? rows.reduce((acc, row) => acc + (Number(row[valueName]) || 0), 0) || 1
+    : 0;
   return (
     <div className={cn("tdp-bar-list", className)}>
       {rows.map((row) => {
@@ -133,7 +179,24 @@ export function BarList<Row extends Record<string, unknown>>({
         const value = "value" in row ? row.value : undefined;
         const meta = "meta" in row ? row.meta : undefined;
         const color = "color" in row ? row.color : undefined;
-        const inner = (
+        const inner = proportional ? (
+          <>
+            <div className="tdp-bar-head">
+              <span className="tdp-bar-label">{label}</span>
+              {value !== undefined && <span className="tdp-bar-value">{String(value)}</span>}
+            </div>
+            <div className="tdp-bar-track" aria-hidden="true">
+              <span
+                className="tdp-bar-fill"
+                style={{
+                  width:
+                    Math.max(2, Math.round(((Number(row[valueName]) || 0) / total) * 100)) +
+                    "%",
+                }}
+              />
+            </div>
+          </>
+        ) : (
           <>
             {color !== undefined && (
               <span className="tdp-bar-dot" style={{ background: String(color) }} />
@@ -143,18 +206,19 @@ export function BarList<Row extends Record<string, unknown>>({
             {value !== undefined && <span className="tdp-bar-value">{String(value)}</span>}
           </>
         );
+        const rowClassName = cn("tdp-bar-row", proportional && "tdp-bar-row-prop");
         return onPick ? (
           <button
             key={key}
             type="button"
-            className="tdp-bar-row"
+            className={rowClassName}
             title={title}
             onClick={() => onPick(row)}
           >
             {inner}
           </button>
         ) : (
-          <div key={key} className="tdp-bar-row" title={title}>
+          <div key={key} className={rowClassName} title={title}>
             {inner}
           </div>
         );

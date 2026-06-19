@@ -131,7 +131,11 @@ describe("code graph explorer hooks", () => {
     );
 
     const { result } = renderHook(() =>
-      useGraphInspection({ loadNode, loadNeighbors, onError: vi.fn() }),
+      useGraphInspection({
+        loadNode: loadNode as any,
+        loadNeighbors: loadNeighbors as any,
+        onError: vi.fn(),
+      }),
     );
 
     await act(async () => {

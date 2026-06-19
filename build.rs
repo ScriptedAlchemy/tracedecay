@@ -1,6 +1,10 @@
 use std::hash::{Hash, Hasher};
 use std::process::{Command, Stdio};
-use std::{collections::hash_map::DefaultHasher, fs, path::Path};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    path::{Path, PathBuf},
+};
 
 const DASHBOARD_ASSET_FILES: &[&str] = &[
     "dashboard/shell/dist/shell.js",
@@ -13,6 +17,28 @@ const DASHBOARD_ASSET_FILES: &[&str] = &[
     "dashboard/graph/dist/style.css",
     "dashboard/savings/dist/index.js",
     "dashboard/savings/dist/style.css",
+];
+
+const DASHBOARD_SOURCE_FILES: &[&str] = &[
+    "dashboard/build.mjs",
+    "dashboard/build.shared.mjs",
+    "dashboard/holographic/build.from-hermes.mjs",
+    "dashboard/package.json",
+    "dashboard/package-lock.json",
+    "dashboard/run-unit-tests.mjs",
+    "dashboard/smoke.mjs",
+    "dashboard/vitest.config.mjs",
+];
+
+const DASHBOARD_SOURCE_DIRS: &[&str] = &[
+    "dashboard/dev",
+    "dashboard/graph/src",
+    "dashboard/hermes-wrapper/src",
+    "dashboard/holographic/src",
+    "dashboard/lcm/src",
+    "dashboard/lib",
+    "dashboard/savings/src",
+    "dashboard/shell/src",
 ];
 
 /// Locates a working npm executable (`npm.cmd` is the Windows launcher).
@@ -64,18 +90,22 @@ fn run_npm(npm: &str, args: &[&str], dir: &Path) -> Result<(), String> {
 }
 
 /// Builds the dashboard frontend (`cd dashboard && npm ci/install && npm run
-/// build`) when dist assets are missing, so plain `cargo build` / `cargo
+/// build`) when dist assets are missing or stale, so plain `cargo build` / `cargo
 /// install --path .` work from a fresh checkout. Published crates ship the
 /// prebuilt dist files (see `package.include` in Cargo.toml), so this never
-/// runs for crates.io builds.
-fn auto_build_dashboard_assets(missing: &[&str]) {
+/// runs for crates.io builds unless those packaged files are incomplete.
+fn auto_build_dashboard_assets(reason: &str, affected: &[&str]) {
     let fail_fast = |detail: &str| -> ! {
+        let affected = if affected.is_empty() {
+            "dashboard source files changed since the embedded dist assets were built".to_string()
+        } else {
+            affected.join("\n  ")
+        };
         panic!(
-            "\n\nmissing dashboard dist assets:\n  {}\n\n\
+            "\n\ndashboard dist assets are {reason}:\n  {affected}\n\n\
              The dashboard UI is embedded into the binary at compile time\n\
              (src/dashboard/assets.rs), so the frontend must be built first:\n\n  \
              cd dashboard && npm ci && npm run build\n\n{detail}\n",
-            missing.join("\n  ")
         );
     };
 
@@ -108,14 +138,121 @@ fn auto_build_dashboard_assets(missing: &[&str]) {
     println!("cargo::warning=dashboard assets: npm build finished; embedding fresh dist files");
 }
 
+/// Content hash of the dashboard source inputs (each input's path + bytes),
+/// independent of filesystem mtimes. Returns `None` when there are no source
+/// inputs - e.g. a published crate that ships only the prebuilt dist - so a
+/// stamp is never recorded and a rebuild is never triggered for crates.io.
+fn dashboard_source_stamp(source_inputs: &[PathBuf]) -> Option<String> {
+    if source_inputs.is_empty() {
+        return None;
+    }
+    // Hash in a stable path order so the stamp depends only on file content,
+    // not on the unspecified `read_dir` traversal order.
+    let mut paths: Vec<&PathBuf> = source_inputs.iter().collect();
+    paths.sort();
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        // Hashing the path makes adds/removes/renames flip the stamp even when
+        // the surviving files are byte-identical.
+        path.to_string_lossy().hash(&mut hasher);
+        if let Ok(bytes) = fs::read(path) {
+            bytes.hash(&mut hasher);
+        }
+    }
+    Some(format!("{:016x}", hasher.finish()))
+}
+
+/// True when the dashboard source inputs differ from the content stamp recorded
+/// by the previous build in this `OUT_DIR` - i.e. the sources genuinely changed
+/// rather than just having their mtimes rewritten by a `git checkout`/`pull`.
+///
+/// A build with no recorded stamp (a fresh checkout, a clean target dir, or a
+/// crates.io build that ships only dist) trusts the committed/shipped dist and
+/// returns false, so it is never forced to run `npm run build`. The genuine
+/// "source edited but dist not rebuilt" case is still caught on every later
+/// build because the stamp from this run is persisted afterward.
+fn dashboard_sources_changed(current_stamp: Option<&str>) -> bool {
+    let Some(current) = current_stamp else {
+        return false;
+    };
+    match read_dashboard_source_stamp() {
+        Some(previous) => previous != current,
+        None => false,
+    }
+}
+
+/// Location of the persisted source stamp inside cargo's `OUT_DIR`. Keeping it
+/// in the build output (never the source tree) keeps `cargo package`
+/// verification - which forbids build scripts from editing tracked files -
+/// happy.
+fn dashboard_source_stamp_path() -> Option<PathBuf> {
+    let out_dir = std::env::var_os("OUT_DIR")?;
+    Some(Path::new(&out_dir).join("dashboard-source-stamp"))
+}
+
+fn read_dashboard_source_stamp() -> Option<String> {
+    let contents = fs::read_to_string(dashboard_source_stamp_path()?).ok()?;
+    let stamp = contents.trim();
+    (!stamp.is_empty()).then(|| stamp.to_string())
+}
+
+fn store_dashboard_source_stamp(stamp: &str) {
+    // Best-effort: if the stamp can't be written, the next build simply falls
+    // back to trusting the existing dist, which is still safe.
+    if let Some(path) = dashboard_source_stamp_path() {
+        let _ = fs::write(path, stamp);
+    }
+}
+
+fn collect_dashboard_source_inputs() -> Vec<PathBuf> {
+    let mut inputs = Vec::new();
+    for relative in DASHBOARD_SOURCE_FILES {
+        println!("cargo::rerun-if-changed={relative}");
+        let path = PathBuf::from(relative);
+        if path.is_file() {
+            inputs.push(path);
+        }
+    }
+    for relative in DASHBOARD_SOURCE_DIRS {
+        println!("cargo::rerun-if-changed={relative}");
+        collect_dashboard_source_dir(Path::new(relative), &mut inputs);
+    }
+    inputs
+}
+
+fn collect_dashboard_source_dir(dir: &Path, inputs: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dashboard_source_dir(&path, inputs);
+        } else if path.is_file() {
+            println!("cargo::rerun-if-changed={}", path.display());
+            inputs.push(path);
+        }
+    }
+}
+
 fn emit_dashboard_asset_inputs() -> String {
+    let source_inputs = collect_dashboard_source_inputs();
     let missing: Vec<&str> = DASHBOARD_ASSET_FILES
         .iter()
         .copied()
         .filter(|relative| !Path::new(relative).exists())
         .collect();
+    let source_stamp = dashboard_source_stamp(&source_inputs);
     if !missing.is_empty() {
-        auto_build_dashboard_assets(&missing);
+        auto_build_dashboard_assets("missing", &missing);
+    } else if dashboard_sources_changed(source_stamp.as_deref()) {
+        auto_build_dashboard_assets("stale", &[]);
+    }
+    // Record the source content hash we just accepted so the next build can
+    // distinguish a genuine source edit from a mtime-only churn (git
+    // checkout/pull). Skipped when no source inputs ship (crates.io).
+    if let Some(stamp) = source_stamp.as_deref() {
+        store_dashboard_source_stamp(stamp);
     }
 
     let mut hasher = DefaultHasher::new();

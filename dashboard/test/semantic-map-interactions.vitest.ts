@@ -13,7 +13,7 @@ import {
   selectIdsInScreenRect,
 } from "../holographic/src/semanticMap/gestures";
 
-const placed = [
+const placed: any[] = [
   { point: { fact_id: 11 }, x: 60, y: 60, r: 6 },
   { point: { fact_id: 22 }, x: 150, y: 140, r: 8 },
   { point: { fact_id: 33 }, x: 280, y: 160, r: 10 },
@@ -40,7 +40,7 @@ describe("semantic map transform helpers", () => {
       [
         { point: { fact_id: 1 }, x: 100, y: 100, r: 4 },
         { point: { fact_id: 2 }, x: 101, y: 102, r: 4 },
-      ],
+      ] as any[],
       600,
       400,
     );

@@ -1,3 +1,4 @@
+import type * as React from "react";
 import { useMemo, useState } from "react";
 import { scaleLinear } from "./scale";
 import { useMeasuredWidth } from "./useMeasure";

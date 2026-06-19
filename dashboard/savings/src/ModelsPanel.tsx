@@ -6,6 +6,7 @@
 
 import React from "react";
 import { Badge, Card, CardContent, CardHeader, CardTitle, timeAgo } from "../../lib/sdk";
+import { EmptyState } from "../../lib/primitives";
 import { fillDailySeries, fmtTokens, fmtUsd } from "./logic";
 import { rowCost } from "./pricing";
 import type { PriceTable } from "./pricing";
@@ -55,7 +56,7 @@ export default function ModelsPanel({
   prices: PriceTable;
 }) {
   if (!data) {
-    return <div className="tss-empty">Loading model aggregates…</div>;
+    return <EmptyState variant="dashed">Loading model aggregates…</EmptyState>;
   }
 
   const dailyTokens = fillDailySeries(

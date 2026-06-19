@@ -26,7 +26,6 @@ import {
   summaryTitle,
 } from "./helpers";
 import {
-  BarList,
   CompressionBars,
   Drawer,
   DrawerError,
@@ -35,13 +34,11 @@ import {
   Pager,
   SearchResultCard,
   SessionDetail,
-  SkeletonLines,
-  Stat,
   TimelineChart,
   TimeText,
   toolBadge,
 } from "./components";
-import { EmptyState, ErrorPanel } from "../../lib/primitives";
+import { BarList, EmptyState, ErrorPanel, SkeletonLines, Stat } from "../../lib/primitives";
 
 function App(): React.ReactElement {
   const [q, setQ] = useState("");
@@ -231,7 +228,7 @@ function App(): React.ReactElement {
     const params = new URLSearchParams();
     params.set("limit", String(SESSION_FETCH_BATCH));
     params.set("offset", String(offset || 0));
-    fetchJSON(`${API}/session/${encodeURIComponent(id)}?${params.toString()}`).then(function (json) {
+    fetchJSON<any>(`${API}/session/${encodeURIComponent(id)}?${params.toString()}`).then(function (json) {
       updateStackEntry(function (entry) {
         return entry.kind === "session" && String(entry.id) === String(id);
       }, function (entry) {
@@ -840,11 +837,11 @@ function App(): React.ReactElement {
           genuinely "empty database", never a masked fetch failure. */}
       {data ? (
         <div className="hermes-lcm-statrow">
-          <Stat value={fmtInt(overview.messages_total)} label="messages" />
-          <Stat value={fmtInt(overview.sessions_total)} label="sessions" />
-          <Stat value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
-          <Stat value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
-          <Stat value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
+          <Stat variant="compact" value={fmtInt(overview.messages_total)} label="messages" />
+          <Stat variant="compact" value={fmtInt(overview.sessions_total)} label="sessions" />
+          <Stat variant="compact" value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
+          <Stat variant="compact" value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
+          <Stat variant="compact" value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
         </div>
       ) : (overviewLoading ? (
         <div className="hermes-lcm-statrow">
@@ -903,18 +900,47 @@ function App(): React.ReactElement {
           <div className="hermes-lcm-card">
             <h3>By Source</h3>
             <BarList
-              rows={sources}
+              rows={(sources || []).map(function (s) {
+                return {
+                  source: s.source == null ? "(none)" : s.source,
+                  count: s.count,
+                  value: fmtInt(s.count),
+                };
+              })}
               keyName="source"
-              onPick={function (v) { setSource(v === "(none)" ? "unknown" : v); }}
+              proportional
+              valueName="count"
+              emptyText="No data"
+              onPick={function (row) {
+                const v = String(row.source);
+                setSource(v === "(none)" ? "unknown" : v);
+              }}
             />
           </div>
           <div className="hermes-lcm-card">
             <h3>By Role</h3>
-            <BarList rows={overview.role_counts || []} keyName="role" onPick={function (v) { setRole(v); }} />
+            <BarList
+              rows={(overview.role_counts || []).map(function (r) {
+                return { role: r.role == null ? "(none)" : r.role, count: r.count, value: fmtInt(r.count) };
+              })}
+              keyName="role"
+              proportional
+              valueName="count"
+              emptyText="No data"
+              onPick={function (row) { setRole(String(row.role)); }}
+            />
           </div>
           <div className="hermes-lcm-card">
             <h3>Summary Depth</h3>
-            <BarList rows={overview.depth_counts || []} keyName="depth" />
+            <BarList
+              rows={(overview.depth_counts || []).map(function (r) {
+                return { depth: r.depth == null ? "(none)" : r.depth, count: r.count, value: fmtInt(r.count) };
+              })}
+              keyName="depth"
+              proportional
+              valueName="count"
+              emptyText="No data"
+            />
           </div>
         </div>
       )}
