@@ -47,7 +47,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-test
+          prefix-key: v2-rust-test
+          cache-targets: false
 
       - name: Run tests
         run: cargo test --workspace
