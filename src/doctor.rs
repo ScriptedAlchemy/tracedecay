@@ -422,12 +422,10 @@ mod tests {
         let dir = tempfile::TempDir::new()?;
         let profile_root = dir.path().join("profile");
         let project_root = dir.path().join("repo");
-        let shard_root = profile_root.join("projects/proj_doctor");
+        let shard_root = crate::storage::profile_sharded_data_root(&profile_root, "proj_doctor");
         std::fs::create_dir_all(&project_root)?;
         std::fs::create_dir_all(&shard_root)?;
-        let profile_root = profile_root.canonicalize()?;
         let project_root = project_root.canonicalize()?;
-        let shard_root = profile_root.join("projects/proj_doctor");
         std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
         let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
             .await
