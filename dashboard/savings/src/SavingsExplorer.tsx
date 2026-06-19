@@ -6,6 +6,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/sdk";
+import { ErrorPanel } from "../../lib/primitives";
 import { api } from "./api";
 import { fmtTokens } from "./logic";
 import type { PriceTable } from "./pricing";
@@ -171,12 +172,7 @@ export default function SavingsExplorer() {
       )}
 
       {error && (
-        <div className="tss-error" role="alert">
-          Failed to load savings data: {error}{" "}
-          <button className="tss-retry" onClick={retry}>
-            Retry
-          </button>
-        </div>
+        <ErrorPanel error={`Failed to load savings data: ${error}`} onRetry={retry} />
       )}
 
       {view === "savings" && (

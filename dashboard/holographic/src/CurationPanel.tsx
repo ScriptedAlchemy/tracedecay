@@ -564,6 +564,7 @@ export default function CurationPanel({
     preview,
     apply,
     loadActivity,
+    loadStatus,
   } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];

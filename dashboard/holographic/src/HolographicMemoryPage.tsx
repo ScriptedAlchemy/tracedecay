@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -117,11 +118,13 @@ function Stat({
   /** Plain-language explanation surfaced as a native tooltip. */
   hint?: string;
 }) {
+  const hintId = useId();
   return (
     <div
       className="border border-border bg-background/50 px-3 py-2"
       title={hint}
       style={hint ? { cursor: "help" } : undefined}
+      aria-describedby={hint ? hintId : undefined}
     >
       <div className="font-mono-ui text-lg leading-none text-foreground">
         {value}
@@ -129,6 +132,25 @@ function Stat({
       <div className="mt-1 text-xs tracking-[0.08em] text-text-tertiary">
         {label}
       </div>
+      {hint && (
+        <span
+          id={hintId}
+          style={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            padding: 0,
+            margin: -1,
+            overflow: "hidden",
+            clip: "rect(0, 0, 0, 0)",
+            clipPath: "inset(50%)",
+            whiteSpace: "nowrap",
+            border: 0,
+          }}
+        >
+          {hint}
+        </span>
+      )}
     </div>
   );
 }
