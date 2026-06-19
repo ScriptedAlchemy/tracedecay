@@ -1678,9 +1678,13 @@ mod tests {
             "payload_2222222222222222222222222222222222222222222222222222222222222222.payload";
         fs::write(payload_path(&store, orphan_a), b"orphan-a").map_err(|err| err.to_string())?;
         fs::write(payload_path(&store, orphan_b), b"orphan-b").map_err(|err| err.to_string())?;
-        let oldest_mtime = file_mtime_seconds(
+        let orphan_a_mtime = file_mtime_seconds(
             &fs::symlink_metadata(payload_path(&store, orphan_a)).map_err(|err| err.to_string())?,
         );
+        let orphan_b_mtime = file_mtime_seconds(
+            &fs::symlink_metadata(payload_path(&store, orphan_b)).map_err(|err| err.to_string())?,
+        );
+        let newest_orphan_mtime = orphan_a_mtime.max(orphan_b_mtime);
         let cfg = LcmGcConfig {
             grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
             backup_before_reap: false,
@@ -1694,7 +1698,7 @@ mod tests {
             None,
             &cfg,
             true,
-            oldest_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
+            newest_orphan_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
         )
         .await
         .map_err(|err| err.to_string())?;
