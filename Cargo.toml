@@ -107,25 +107,14 @@ libsql = "0.9.30"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
 tokensave-large-treesitters = { version = "0.5.0", git = "https://github.com/aovestdipaperino/tokensave-large-treesitters" }
-# Force tree-sitter-dart 0.2 — 0.1 fails to wrap top-level declarations
-# in `top_level_variable_declaration` / `function_declaration` nodes,
-# breaking the dart extractor and most dart_extraction_test cases.
-# medium-treesitters declares `tree-sitter-dart = "0.1"` which won't
-# pick up 0.2 via SemVer; pulling it directly here forces the lock file
-# to resolve to 0.2 for the whole workspace.
-tree-sitter-dart = "0.2"
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
-ndarray = "0.17"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 ureq = { version = "3", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.11"
 glob = "0.3"
 walkdir = "2"
@@ -153,7 +142,6 @@ tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_IO"] }
 
 [build-dependencies]
 logo-art = "0.2"
