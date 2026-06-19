@@ -58,10 +58,11 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
 }
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
+    let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);
     std::fs::create_dir_all(&shard_root).unwrap();
     write_enrollment_marker(
-        project,
+        &project,
         &EnrollmentMarker {
             project_id: "proj_cli".to_string(),
             storage_mode: StorageMode::ProfileSharded,
@@ -80,7 +81,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         project_id: Some("proj_cli".to_string()),
         store_kind: StoreKind::CodeProject,
         storage_mode: StorageMode::ProfileSharded,
-        project_root: project.to_path_buf(),
+        project_root: project,
         data_root: shard_root.clone(),
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
