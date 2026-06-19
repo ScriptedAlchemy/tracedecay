@@ -4712,7 +4712,7 @@ assert argv[idx + 1] == "/explicit/root", argv
 tools.call_tracedecay_tool("tracedecay_fact_store", {})
 argv = captured[-1]
 idx = argv.index("--project")
-assert argv[idx + 1] == os.path.expanduser("~/.hermes"), argv
+assert os.path.samefile(argv[idx + 1], plugin._resolve_hermes_home()), argv
 assert argv[idx + 1] != "/pinned/project", argv
 
 # Native LCM calls carry hermes_profile storage args and do not need a code --project.

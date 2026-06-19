@@ -53,6 +53,14 @@ fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T 
     }
 }
 
+fn inventory_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    inventory_path(left) == inventory_path(right)
+}
+
 fn block_on_inventory(
     options: MigrationInventoryOptions,
 ) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
@@ -333,7 +341,14 @@ async fn inventory_reports_global_db_metadata() {
         .expect("global DB metadata should be present");
     assert_eq!(global.path, db_path);
     assert_eq!(global.project_count, 1);
-    assert_eq!(global.registered_project_paths, vec![project]);
+    assert_eq!(
+        global
+            .registered_project_paths
+            .iter()
+            .map(|path| inventory_path(path))
+            .collect::<Vec<_>>(),
+        vec![inventory_path(&project)]
+    );
     assert!(global.token_cache_present);
     assert!(global.path_overridden);
     assert!(global.warnings.is_empty());
@@ -362,7 +377,7 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
     let store = report
         .stores
         .iter()
-        .find(|store| store.project_root == registered)
+        .find(|store| same_path(&store.project_root, &registered))
         .expect("registered project store should be inventoried");
     assert_eq!(store.registry_status, RegistryStatus::Registered);
 }
@@ -406,13 +421,13 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
     let store = report
         .stores
         .iter()
-        .find(|store| store.project_root == discovered)
+        .find(|store| same_path(&store.project_root, &discovered))
         .expect("discovered store should be inventoried");
     assert_eq!(store.registry_status, RegistryStatus::Registered);
     assert!(!report
         .stores
         .iter()
-        .any(|store| store.project_root == unrelated));
+        .any(|store| same_path(&store.project_root, &unrelated)));
 }
 
 #[test]
@@ -449,12 +464,12 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
     assert!(report
         .stores
         .iter()
-        .any(|store| store.project_root == discovered
+        .any(|store| same_path(&store.project_root, &discovered)
             && store.registry_status == RegistryStatus::Registered));
     assert!(report
         .stores
         .iter()
-        .any(|store| store.project_root == unrelated
+        .any(|store| same_path(&store.project_root, &unrelated)
             && store.registry_status == RegistryStatus::Registered));
 }
 
@@ -480,7 +495,7 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
     let store = report
         .stores
         .iter()
-        .find(|store| store.project_root == registered)
+        .find(|store| same_path(&store.project_root, &registered))
         .expect("registered missing project should still be inventoried");
     assert_eq!(store.registry_status, RegistryStatus::Registered);
     assert!(store.statuses.contains(&StoreStatus::MissingDb));
