@@ -41,6 +41,7 @@ fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Comm
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
         .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -13,6 +13,9 @@ pub const CONFIG_FILENAME: &str = "config.json";
 /// Name of the hidden directory used to store `TraceDecay` metadata.
 pub const TRACEDECAY_DIR: &str = ".tracedecay";
 
+/// Environment variable that pins the user-level `TraceDecay` data directory.
+pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
+
 /// Legacy (pre-rebrand) data directory name. Projects that already have a
 /// `.tokensave/` dir keep using it as-is — read and write, no auto-migration.
 pub const LEGACY_TOKENSAVE_DIR: &str = ".tokensave";
@@ -150,6 +153,9 @@ pub fn has_project_database(project_root: &Path) -> bool {
 /// legacy `~/.tokensave` (used as-is), defaulting to `~/.tracedecay` when
 /// neither exists yet.
 pub fn user_data_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
     let home = dirs::home_dir()?;
     let primary = home.join(TRACEDECAY_DIR);
     if primary.is_dir() {
