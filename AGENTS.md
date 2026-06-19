@@ -7,6 +7,7 @@
 - When the user asks to remember preferences or decisions, persist concise durable facts using the project memory system when available.
 - For large efforts, user wants fleets of concurrent multi-model subagents with strict per-agent file ownership so writers never collide; choose subagent models by task complexity.
 - Commit only when explicitly asked, scope commits to the agent's own changes grouped by logical subsystem, and push only when told.
+- Use Conventional Commit messages for all commits (for example `fix:`, `feat:`, `docs:`, `test:`, `ci:`, `chore:`); mark breaking changes with `!` or a `BREAKING CHANGE:` footer so release-plz can infer SemVer correctly.
 - Reported metrics (token savings, costs) must be honest and audited — net rather than gross math, cross-checked against real transcript/usage data.
 - Fix flaky tests instead of skipping them; never skip tests to get CI green.
 - Keep one-off migration scripts untracked and delete them once their results are verified per project.
