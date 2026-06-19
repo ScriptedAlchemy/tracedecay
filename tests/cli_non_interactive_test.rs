@@ -616,6 +616,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
         },
     );
     manifest.source.project_root = Some(project_root.clone());
+    manifest.source.data_dir = Some(shard_root.clone());
     manifest.destination.profile_root = Some(profile_root(home.path()));
     manifest.destination.project_id = Some("proj_cli".to_string());
 
