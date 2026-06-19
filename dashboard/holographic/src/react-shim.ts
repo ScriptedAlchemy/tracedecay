@@ -1,8 +1,8 @@
 /**
  * React shim — maps bare `react` imports onto the host dashboard's React.
  *
- * esbuild aliases `react` to this module so the plugin bundle shares the host
- * dashboard's single React instance (exposed via
+ * The dashboard bundler aliases `react` to this module so the plugin bundle
+ * shares the host dashboard's single React instance (exposed via
  * `window.__HERMES_PLUGIN_SDK__.React`) instead of bundling a second copy.
  * Bundled third-party deps (lucide-react, etc.) that `import { forwardRef,
  * createElement, useState, useEffect } from "react"` resolve through here too,

@@ -30,9 +30,12 @@
  */
 
 import { createRsbuild } from "@rsbuild/core";
-import { pluginReact } from "@rsbuild/plugin-react";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  compileHolographicTailwindCss,
+  createDashboardDevConfig,
+} from "../build.shared.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dashboardRoot = path.resolve(__dirname, "..");
@@ -41,41 +44,9 @@ const apiTarget = process.env.TRACEDECAY_DEV_API || "http://127.0.0.1:7341";
 const port = Number(process.env.TRACEDECAY_DEV_PORT || 7342);
 const host = "127.0.0.1";
 
-const rsbuildConfig = {
-  root: dashboardRoot,
-  source: {
-    entry: { index: "./dev/main.tsx" },
-  },
-  html: {
-    template: "./dev/index.html",
-    title: "tracedecay dashboard (dev)",
-  },
-  // NOTE (dev/prod divergence): holographic's `@import "tailwindcss"` (Tailwind
-  // v4) is NOT compiled in this dev server. In THIS execution environment BOTH
-  // Tailwind-v4 integrations Rsbuild documents make createRsbuild() segfault
-  // (native crash, no stdout/stderr output): `@rsbuild/plugin-tailwindcss` AND
-  // `@tailwindcss/postcss` wired through `tools.postcss`. The earlier
-  // `pluginReact()`-only dev server started fine, and `@rspack/core` works here
-  // (the prod build uses it), so the Tailwind native code path is the trigger.
-  // To keep the dev server usable (HMR + every non-holographic plugin styled),
-  // we ship NO Tailwind pipeline here. The holographic plugin will render
-  // unstyled in dev. The prod build (`npm run build`) is the source of truth
-  // for holographic's Tailwind styles — verify holographic styling there.
-  server: {
-    host,
-    port,
-    proxy: {
-      // All dashboard data calls go to /api/* on a running `tracedecay
-      // dashboard` (default 127.0.0.1:7341). Plugins are imported by the dev
-      // bundle, so /dashboard-plugins is NOT proxied.
-      "/api": {
-        target: apiTarget,
-        changeOrigin: true,
-      },
-    },
-  },
-  plugins: [pluginReact()],
-};
+await compileHolographicTailwindCss();
+
+const rsbuildConfig = createDashboardDevConfig({ apiTarget, host, port });
 
 const rsbuild = await createRsbuild({ cwd: dashboardRoot, rsbuildConfig });
 
