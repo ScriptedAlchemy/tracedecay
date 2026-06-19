@@ -78,6 +78,7 @@ fn assert_plugin_skill_frontmatter_is_yaml_safe(plugin_dir: &Path) {
         }
         let skill_path = plugin_dir.join(&relative);
         let skill = text(&skill_path);
+        let skill = skill.replace("\r\n", "\n");
         let Some(rest) = skill.strip_prefix("---\n") else {
             failures.push(format!("{}: missing frontmatter", relative.display()));
             continue;
