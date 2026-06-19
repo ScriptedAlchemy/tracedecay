@@ -41,6 +41,7 @@ import {
   TimeText,
   toolBadge,
 } from "./components";
+import { EmptyState, ErrorPanel } from "../../lib/primitives";
 
 function App(): React.ReactElement {
   const [q, setQ] = useState("");
@@ -497,7 +498,7 @@ function App(): React.ReactElement {
       drawerTitle = top.kind === "node"
         ? `Node #${top.id}`
         : (top.kind === "message" ? `Message #${top.id}` : `Session ${short(top.id, 40)}`);
-      drawerBody = <div className="hermes-lcm-empty">Loading…</div>;
+      drawerBody = <EmptyState className="hermes-lcm-empty">Loading…</EmptyState>;
     } else if (top.error) {
       drawerTitle = top.kind === "node"
         ? `Node #${top.id}`
@@ -598,10 +599,10 @@ function App(): React.ReactElement {
         </div>
       ) : null}
       {(!searchPending && !searching && debouncedQ && !searchError && totalSearchMatches === 0) ? (
-        <div className="hermes-lcm-empty">
+        <EmptyState className="hermes-lcm-empty">
           <strong>No matches found.</strong>
           {" Try removing a facet or a punctuation-heavy query so the backend can stay on the ranked FTS path."}
-        </div>
+        </EmptyState>
       ) : null}
       {totalSearchMatches > 0 ? (
         <div className="hermes-lcm-grid">
@@ -633,7 +634,7 @@ function App(): React.ReactElement {
                       />
                     );
                   })
-                : <div className="hermes-lcm-empty">No matching messages on this page.</div>}
+                : <EmptyState className="hermes-lcm-empty">No matching messages on this page.</EmptyState>}
             </div>
             <Pager
               page={searchMessagePage}
@@ -670,7 +671,7 @@ function App(): React.ReactElement {
                       />
                     );
                   })
-                : <div className="hermes-lcm-empty">No matching summaries on this page.</div>}
+                : <EmptyState className="hermes-lcm-empty">No matching summaries on this page.</EmptyState>}
             </div>
             <Pager
               page={searchNodePage}
@@ -801,16 +802,13 @@ function App(): React.ReactElement {
       ) : null}
 
       {staleData ? (
-        <div className="hermes-lcm-error" role="alert">
-          <div>{`Refresh failed (${overviewError}) — showing previously loaded data.`}</div>
-          <button
-            type="button"
-            className="hermes-lcm-btn"
-            onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-          >Retry</button>
-        </div>
+        <ErrorPanel
+          error={`Refresh failed (${overviewError}) — showing previously loaded data.`}
+          onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+          className="hermes-lcm-error"
+        />
       ) : null}
-      {data && data.error ? <div className="hermes-lcm-error" role="alert">{data.error}</div> : null}
+      {data && data.error ? <ErrorPanel error={data.error} className="hermes-lcm-error" /> : null}
 
       {data && !data.exists ? (
         <div className="hermes-lcm-empty-panel">
@@ -862,14 +860,11 @@ function App(): React.ReactElement {
             <h3>Message Timeline (per day · dots = summaries)</h3>
             {chartsError && !timeline
               ? (
-                <div className="hermes-lcm-error" role="alert">
-                  <div>{chartsError}</div>
-                  <button
-                    type="button"
-                    className="hermes-lcm-btn"
-                    onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-                  >Retry</button>
-                </div>
+                <ErrorPanel
+                  error={chartsError}
+                  onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+                  className="hermes-lcm-error"
+                />
               )
               : (chartsLoading && !timeline)
                 ? <SkeletonLines count={5} widths={["100%", "95%", "90%", "92%", "88%"]} />
@@ -885,14 +880,11 @@ function App(): React.ReactElement {
             <h3>Compression by Session (kept vs saved)</h3>
             {chartsError && !compression
               ? (
-                <div className="hermes-lcm-error" role="alert">
-                  <div>{chartsError}</div>
-                  <button
-                    type="button"
-                    className="hermes-lcm-btn"
-                    onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-                  >Retry</button>
-                </div>
+                <ErrorPanel
+                  error={chartsError}
+                  onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+                  className="hermes-lcm-error"
+                />
               )
               : (chartsLoading && !compression)
                 ? <SkeletonLines count={4} widths={["98%", "90%", "84%", "88%"]} />
@@ -954,7 +946,7 @@ function App(): React.ReactElement {
                     );
                   })
                 : (data
-                    ? <div className="hermes-lcm-empty">No sessions</div>
+                    ? <EmptyState className="hermes-lcm-empty">No sessions</EmptyState>
                     : <SkeletonLines count={3} widths={["92%", "84%", "76%"]} />)}
             </div>
           </div>
@@ -984,7 +976,7 @@ function App(): React.ReactElement {
                     );
                   })
                 : (data
-                    ? <div className="hermes-lcm-empty">No summaries</div>
+                    ? <EmptyState className="hermes-lcm-empty">No summaries</EmptyState>
                     : <SkeletonLines count={3} widths={["90%", "82%", "74%"]} />)}
             </div>
           </div>

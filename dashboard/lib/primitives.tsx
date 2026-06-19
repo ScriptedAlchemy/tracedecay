@@ -106,24 +106,30 @@ export function Stat({
  * Label/value bar list of optionally-pickable rows (ports graph's
  * `.tsg-hub-list` / `.tsg-hub` shape).
  *
- * `keyName` selects the row field used as the visible label and React key.
+ * `keyName` selects the row field used as the visible label and default key.
  * Each row may also carry optional `value`, `meta`, and `color` fields.
  */
-export function BarList({
+export function BarList<Row extends Record<string, unknown>>({
   rows,
   keyName,
   onPick,
+  rowKey,
+  titleFor,
   className,
 }: {
-  rows: Array<Record<string, unknown>>;
+  rows: Array<Row>;
   keyName: string;
-  onPick?: (row: Record<string, unknown>) => void;
+  onPick?: (row: Row) => void;
+  rowKey?: (row: Row) => string;
+  titleFor?: (row: Row) => string;
   className?: string;
 }) {
   return (
     <div className={cn("tdp-bar-list", className)}>
       {rows.map((row) => {
         const label = String(row[keyName] ?? "");
+        const key = rowKey?.(row) ?? String(row[keyName]);
+        const title = titleFor?.(row);
         const value = "value" in row ? row.value : undefined;
         const meta = "meta" in row ? row.meta : undefined;
         const color = "color" in row ? row.color : undefined;
@@ -139,15 +145,16 @@ export function BarList({
         );
         return onPick ? (
           <button
-            key={label}
+            key={key}
             type="button"
             className="tdp-bar-row"
+            title={title}
             onClick={() => onPick(row)}
           >
             {inner}
           </button>
         ) : (
-          <div key={label} className="tdp-bar-row">
+          <div key={key} className="tdp-bar-row" title={title}>
             {inner}
           </div>
         );

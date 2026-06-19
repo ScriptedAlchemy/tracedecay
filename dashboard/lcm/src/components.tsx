@@ -29,6 +29,7 @@ import {
   stripMd,
   summaryTitle,
 } from "./helpers";
+import { EmptyState } from "../../lib/primitives";
 
 // --- search-highlight rendering -------------------------------------------
 
@@ -173,7 +174,7 @@ export function BarList(props: { rows?: any[]; keyName: string; onPick?: (label:
   const keyName = props.keyName;
   const onPick = props.onPick;
   const total = rows.reduce((acc, row) => acc + (Number(row.count) || 0), 0) || 1;
-  if (!rows.length) return <div className="hermes-lcm-empty">No data</div>;
+  if (!rows.length) return <EmptyState className="hermes-lcm-empty">No data</EmptyState>;
   return (
     <div className="hermes-lcm-bars">
       {rows.map(function (row, idx) {
@@ -212,11 +213,11 @@ export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; und
   const undatedCount = Number(props.undatedCount) || 0;
   if (!buckets.length) {
     return (
-      <div className="hermes-lcm-empty">
+      <EmptyState className="hermes-lcm-empty">
         {undatedCount > 0
           ? `No dated messages yet — ${fmtInt(undatedCount)} stored messages have no timestamp`
           : "No timeline data"}
-      </div>
+      </EmptyState>
     );
   }
   const maxCount = buckets.reduce((acc, b) => Math.max(acc, Number(b.count) || 0), 0) || 1;
@@ -257,7 +258,7 @@ export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; und
 export function CompressionBars(props: { groups?: any[]; onPick?: (g: any) => void }): React.ReactElement {
   const groups = props.groups || [];
   const onPick = props.onPick;
-  if (!groups.length) return <div className="hermes-lcm-empty">No compression data</div>;
+  if (!groups.length) return <EmptyState className="hermes-lcm-empty">No compression data</EmptyState>;
   const maxSrc = groups.reduce((acc, g) => Math.max(acc, Number(g.source_token_count) || 0), 0) || 1;
   return (
     <div className="hermes-lcm-comp">
@@ -643,7 +644,7 @@ export function MessageDetail(props: {
   const d = props.data || {};
   const message = d.message;
   const session = d.session;
-  if (!message) return <div className="hermes-lcm-empty">Message not found</div>;
+  if (!message) return <EmptyState className="hermes-lcm-empty">Message not found</EmptyState>;
   const sessionNodes = (session && session.summary_nodes) || [];
   // Prefer the backend's exact message→summary linkage (summary_node_ids,
   // additive field) and fall back to same-session summaries when absent.
@@ -730,7 +731,7 @@ export function MessageDetail(props: {
         </div>
       ) : null}
       {(!relatedNodes.length && !unresolvedLinkIds.length)
-        ? <div className="hermes-lcm-empty">No summary nodes reference this message yet.</div>
+        ? <EmptyState className="hermes-lcm-empty">No summary nodes reference this message yet.</EmptyState>
         : null}
     </div>
   );
@@ -747,7 +748,7 @@ export function NodeDetail(props: {
   const onOpenNode = props.onOpenNode;
   const onOpenSession = props.onOpenSession;
   const onOpenMessage = props.onOpenMessage;
-  if (!node) return <div className="hermes-lcm-empty">Node not found</div>;
+  if (!node) return <EmptyState className="hermes-lcm-empty">Node not found</EmptyState>;
   const sources = d.sources || {};
   const tags = parseJsonArray(node.tags);
   const entities = parseJsonArray(node.entities);
@@ -795,11 +796,11 @@ export function NodeDetail(props: {
         const items = isNodes ? (sources.nodes || []) : (sources.messages || []);
         if (!items.length) {
           return (
-            <div className="hermes-lcm-empty">
+            <EmptyState className="hermes-lcm-empty">
               {(sources.ids || []).length
                 ? "Source items are no longer in the database."
                 : "This summary records no source items."}
-            </div>
+            </EmptyState>
           );
         }
         return (
