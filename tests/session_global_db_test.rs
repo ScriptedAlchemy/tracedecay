@@ -28,7 +28,11 @@ async fn raw_message_count(db_path: &std::path::Path, provider: &str, message_id
         )
         .await
         .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+    drop(conn);
+    drop(db);
+    count
 }
 
 async fn raw_snippet_and_index(
@@ -48,7 +52,11 @@ async fn raw_snippet_and_index(
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
-    (row.get(0).unwrap(), row.get(1).unwrap())
+    let snippet_and_index = (row.get(0).unwrap(), row.get(1).unwrap());
+    drop(rows);
+    drop(conn);
+    drop(db);
+    snippet_and_index
 }
 
 async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
@@ -63,7 +71,11 @@ async fn lcm_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
         )
         .await
         .unwrap();
-    rows.next().await.unwrap().unwrap().get(0).unwrap()
+    let count = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+    drop(conn);
+    drop(db);
+    count
 }
 
 #[tokio::test]
@@ -199,6 +211,8 @@ async fn upsert_session_message_rolls_back_raw_when_projection_fails() {
         )
         .await
         .unwrap();
+    drop(trigger_conn);
+    drop(trigger_db);
 
     let message = sample_message(
         "cursor",
