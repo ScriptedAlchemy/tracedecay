@@ -427,6 +427,7 @@ mod tests {
         std::fs::create_dir_all(&shard_root)?;
         let profile_root = profile_root.canonicalize()?;
         let project_root = project_root.canonicalize()?;
+        let shard_root = profile_root.join("projects/proj_doctor");
         std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
         let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
             .await
