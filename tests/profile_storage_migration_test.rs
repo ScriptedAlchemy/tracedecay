@@ -165,16 +165,16 @@ fn reconstructs_registry_records_from_profile_store_manifest() {
         .artifacts
         .iter()
         .any(|artifact| artifact.artifact_kind == "graph_db"
-            && artifact.relpath == "projects/proj_123/tracedecay.db"));
+            && portable_relpath(&artifact.relpath) == "projects/proj_123/tracedecay.db"));
     assert!(plan
         .artifacts
         .iter()
         .any(|artifact| artifact.artifact_kind == "store_manifest"
-            && artifact.relpath == "projects/proj_123/store_manifest.json"));
+            && portable_relpath(&artifact.relpath) == "projects/proj_123/store_manifest.json"));
     assert_eq!(plan.graph_scopes.len(), 1);
     assert_eq!(plan.graph_scopes[0].branch_name, "main");
     assert_eq!(
-        plan.graph_scopes[0].db_relpath,
+        portable_relpath(&plan.graph_scopes[0].db_relpath),
         "projects/proj_123/tracedecay.db"
     );
 }
