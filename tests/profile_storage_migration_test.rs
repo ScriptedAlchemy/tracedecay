@@ -1,10 +1,10 @@
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
-use tracedecay::config::TraceDecayConfig;
+use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::{
@@ -31,17 +31,21 @@ static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
 }
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
         Self {
             previous_home,
             previous_userprofile,
+            previous_data_dir,
         }
     }
 }
@@ -56,7 +60,15 @@ impl Drop for HomeEnvGuard {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
         }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        }
     }
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
@@ -287,11 +299,12 @@ async fn delete_project_uses_same_canonical_key_as_upsert() {
 #[tokio::test]
 async fn staged_migration_resumes_cutover_after_registry_and_marker() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
-    let project = dir.path().join("repo");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let project = root.join("repo");
     let data_dir = project.join(".tracedecay");
     let graph_db = data_dir.join("tracedecay.db");
-    let profile_root = dir.path().join("profile");
+    let profile_root = root.join("profile");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(
@@ -338,9 +351,7 @@ async fn staged_migration_resumes_cutover_after_registry_and_marker() {
     assert!(!staged.apply_supported);
     assert!(read_enrollment_marker(&project).unwrap().is_none());
 
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
+    let db = GlobalDb::open_at(&root.join("global.db")).await.unwrap();
     apply_registry_reconstruction_report(&db, &staged.registry_reconstruction)
         .await
         .unwrap();
@@ -428,9 +439,10 @@ async fn cursor_session_db_uses_registry_profile_shard_without_marker() {
 async fn trace_decay_init_uses_profile_shard_when_enrolled() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home");
+    let root = canonical_temp_path(dir.path());
+    let home = root.join("home");
     let profile_root = home.join(".tracedecay");
-    let project = dir.path().join("repo");
+    let project = root.join("repo");
     let shard_root = profile_root.join("projects/proj_init");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeEnvGuard::set(&home);
@@ -459,9 +471,10 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
 async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home");
+    let root = canonical_temp_path(dir.path());
+    let home = root.join("home");
     let profile_root = home.join(".tracedecay");
-    let project = dir.path().join("repo");
+    let project = root.join("repo");
     let shard_root = profile_root.join("projects/proj_branch");
     let branch_db = shard_root.join("branches/feature_profile.db");
     fs::create_dir_all(branch_db.parent().unwrap()).unwrap();
