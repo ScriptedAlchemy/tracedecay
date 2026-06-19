@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -53,6 +53,10 @@ fn write_enrollment(root: &Path) {
         r#"{"project_id":"proj_123","storage_mode":"profile_sharded"}"#,
     )
     .unwrap();
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[test]
@@ -217,8 +221,9 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
 #[test]
 fn store_manifest_roundtrips_from_profile_sharded_layout() {
     let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let profile = dir.path().join("profile");
+    let temp_root = canonical_temp_path(dir.path());
+    let project = temp_root.join("repo");
+    let profile = temp_root.join("profile");
     fs::create_dir_all(&project).unwrap();
     write_enrollment(&project);
     let marker = read_enrollment_marker(&project).unwrap().unwrap();
@@ -351,7 +356,7 @@ fn active_project_context_keeps_layout_and_scope_identity() {
 #[test]
 fn project_path_accepts_contained_relative_and_absolute_paths() {
     let dir = TempDir::new().unwrap();
-    let root = dir.path().join("repo");
+    let root = canonical_temp_path(dir.path()).join("repo");
     let file = root.join("src/lib.rs");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, "pub fn lib() {}").unwrap();
@@ -390,7 +395,7 @@ fn project_path_rejects_parent_absolute_nul_non_normal_and_symlink_escapes() {
 #[test]
 fn store_artifact_path_accepts_only_normalized_relative_paths() {
     let dir = TempDir::new().unwrap();
-    let store_root = dir.path().join("store");
+    let store_root = canonical_temp_path(dir.path()).join("store");
     fs::create_dir_all(&store_root).unwrap();
 
     let artifact =
@@ -433,7 +438,7 @@ fn store_artifact_path_rejects_symlinked_relative_components() {
 #[test]
 fn private_store_io_creates_private_dirs_and_files() {
     let dir = TempDir::new().unwrap();
-    let private_dir = dir.path().join("private");
+    let private_dir = canonical_temp_path(dir.path()).join("private");
     let private_file = private_dir.join("config.json");
 
     PrivateStoreIo::create_dir_all(&private_dir).unwrap();
