@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
@@ -39,6 +39,10 @@ fn manifest_for(protocol: MigrationProtocol, migration_id: &str) -> MigrationMan
         protocol,
         empty_inventory(),
     )
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(unix)]
@@ -81,7 +85,8 @@ fn save_manifest_rejects_unsafe_migration_ids_before_deriving_temp_paths() {
 #[test]
 fn save_manifest_keeps_existing_manifest_and_removes_lock_when_tmp_write_fails() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("migration-manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let old = manifest_for(protocol.clone(), "mig_123");
     save_manifest(&old).unwrap();
@@ -99,7 +104,8 @@ fn save_manifest_keeps_existing_manifest_and_removes_lock_when_tmp_write_fails()
 #[test]
 fn save_manifest_replaces_existing_manifest_via_tmp_rename() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("migration-manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let old = manifest_for(protocol.clone(), "mig_123");
     save_manifest(&old).unwrap();
@@ -181,7 +187,8 @@ fn migration_artifacts_follow_apply_state_order() {
 #[test]
 fn manifest_persistence_roundtrips_through_atomic_paths() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
     let inventory = MigrationInventory {
         stores: Vec::new(),
         skipped: Vec::new(),
@@ -437,13 +444,14 @@ fn verify_manifest_validates_profile_store_manifest_registry_records() {
 #[test]
 fn apply_migration_manifest_stops_at_verified_before_cutover() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
-    let project = dir.path().join("repo");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let project = root.join("repo");
     let data_dir = project.join(".tracedecay");
     let graph_db = data_dir.join("tracedecay.db");
     let sessions_db = data_dir.join("sessions.db");
     let branch_meta = data_dir.join("branch-meta.json");
-    let profile_root = dir.path().join("profile");
+    let profile_root = root.join("profile");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(&sessions_db, b"sessions").unwrap();
@@ -508,11 +516,12 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
 #[test]
 fn finalize_migration_apply_marks_cutover_complete() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
-    let project = dir.path().join("repo");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let project = root.join("repo");
     let data_dir = project.join(".tracedecay");
     let graph_db = data_dir.join("tracedecay.db");
-    let profile_root = dir.path().join("profile");
+    let profile_root = root.join("profile");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(
@@ -647,14 +656,15 @@ fn rollback_rejects_cutover_incomplete_state() {
 #[test]
 fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
-    let project = dir.path().join("repo");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let project = root.join("repo");
     let data_dir = project.join(".tracedecay");
     let graph_db = data_dir.join("tracedecay.db");
     let sessions_db = data_dir.join("sessions.db");
     let branch_meta = data_dir.join("branch-meta.json");
-    let profile_root = dir.path().join("profile");
-    let global_db_path = dir.path().join("global/global.db");
+    let profile_root = root.join("profile");
+    let global_db_path = root.join("global/global.db");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(&sessions_db, b"sessions").unwrap();
@@ -781,7 +791,8 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
 #[test]
 fn migrate_rollback_fails_closed_when_targets_diverged_after_apply() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let mut manifest = MigrationManifest::new(
         "mig_123",
@@ -795,12 +806,12 @@ fn migrate_rollback_fails_closed_when_targets_diverged_after_apply() {
             global_db: None,
         },
     );
-    let target = dir.path().join("profile/projects/proj_123/tracedecay.db");
+    let target = root.join("profile/projects/proj_123/tracedecay.db");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"changed").unwrap();
     manifest.artifacts.push(MigrationArtifact {
         kind: "graph_db".to_string(),
-        source_path: dir.path().join("repo/.tracedecay/tracedecay.db"),
+        source_path: root.join("repo/.tracedecay/tracedecay.db"),
         target_path: Some(target),
         state: ArtifactState::Applied,
     });
@@ -877,7 +888,8 @@ fn migrate_reconstruct_reports_registry_plans_without_applying_them() {
 #[test]
 fn migrate_rollback_remains_fail_closed_for_valid_manifest() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let manifest = MigrationManifest::new(
         "mig_123",
