@@ -739,6 +739,8 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
         }
     }
 
+    drop(gdb);
+
     if all {
         if let Some(global_dir) = home_tracedecay.as_ref() {
             for ext in ["db", "db-wal", "db-shm"] {
