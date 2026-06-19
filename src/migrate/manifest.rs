@@ -374,6 +374,13 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
             ArtifactState::Verified | ArtifactState::Applied
         )
     }) {
+        if let Err(err) = validate_manifest_artifact_paths(manifest, artifact, false) {
+            issues.push(format!(
+                "artifact '{}' path validation failed: {err}",
+                artifact.kind
+            ));
+            continue;
+        }
         if let Some(target) = artifact.target_path.as_ref() {
             if let Err(err) = verify_artifact_contents(&artifact.source_path, target) {
                 issues.push(format!(
@@ -390,6 +397,13 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
         .iter()
         .filter(|artifact| artifact.state == ArtifactState::Verified)
     {
+        if let Err(err) = validate_manifest_artifact_paths(manifest, artifact, true) {
+            issues.push(format!(
+                "backup artifact '{}' path validation failed: {err}",
+                artifact.kind
+            ));
+            continue;
+        }
         if let Some(target) = artifact.target_path.as_ref() {
             if let Err(err) = verify_artifact_contents(&artifact.source_path, target) {
                 issues.push(format!(
@@ -643,12 +657,6 @@ pub fn export_profile_store(
 pub fn cleanup_migration_sources(
     manifest: &MigrationManifest,
 ) -> io::Result<MigrationCleanupSourcesReport> {
-    let report = verify_migration_manifest(manifest);
-    if !report.apply_supported {
-        return Err(invalid_manifest(
-            "cleanup-sources requires a verified applied manifest with profile-sharded cutover complete",
-        ));
-    }
     if manifest.inventory.stores.len() > 1 {
         return Err(invalid_manifest(
             "cleanup-sources currently supports at most one manifest inventory store",
@@ -659,18 +667,34 @@ pub fn cleanup_migration_sources(
         .data_dir
         .clone()
         .ok_or_else(|| invalid_manifest("migration manifest has no source data_dir"))?;
+    for artifact in &manifest.artifacts {
+        if artifact.kind == "store_manifest" || artifact.state != ArtifactState::Applied {
+            continue;
+        }
+        validate_manifest_path_under(
+            &artifact.source_path,
+            &source_data_dir,
+            "cleanup source",
+            "source store",
+        )?;
+    }
+    let report = verify_migration_manifest(manifest);
+    if !report.apply_supported {
+        return Err(invalid_manifest(
+            "cleanup-sources requires a verified applied manifest with profile-sharded cutover complete",
+        ));
+    }
     let mut removed_artifacts = 0;
     for artifact in &manifest.artifacts {
         if artifact.kind == "store_manifest" || artifact.state != ArtifactState::Applied {
             continue;
         }
-        if !artifact.source_path.starts_with(&source_data_dir) {
-            return Err(invalid_manifest(&format!(
-                "cleanup source '{}' is outside source store '{}'",
-                artifact.source_path.display(),
-                source_data_dir.display()
-            )));
-        }
+        validate_manifest_path_under(
+            &artifact.source_path,
+            &source_data_dir,
+            "cleanup source",
+            "source store",
+        )?;
         if !artifact.source_path.exists() {
             continue;
         }
@@ -740,20 +764,13 @@ fn apply_copy_artifact(
         .target_path
         .clone()
         .ok_or_else(|| invalid_manifest("migration artifact has no target_path"))?;
-    if !source_path.starts_with(source_data_dir) {
-        return Err(invalid_manifest(&format!(
-            "migration source '{}' is outside source store '{}'",
-            source_path.display(),
-            source_data_dir.display()
-        )));
-    }
-    if !target_path.starts_with(data_root) {
-        return Err(invalid_manifest(&format!(
-            "migration target '{}' is outside profile shard '{}'",
-            target_path.display(),
-            data_root.display()
-        )));
-    }
+    validate_manifest_path_under(
+        &source_path,
+        source_data_dir,
+        "migration source",
+        "source store",
+    )?;
+    validate_manifest_path_under(&target_path, data_root, "migration target", "profile shard")?;
     if manifest.artifacts[index].state == ArtifactState::Applied
         || manifest.artifacts[index].state == ArtifactState::Verified
     {
@@ -838,20 +855,18 @@ fn apply_backup_artifact(
         .target_path
         .clone()
         .ok_or_else(|| invalid_manifest("migration backup artifact has no target_path"))?;
-    if !source_path.starts_with(source_data_dir) {
-        return Err(invalid_manifest(&format!(
-            "migration backup source '{}' is outside source store '{}'",
-            source_path.display(),
-            source_data_dir.display()
-        )));
-    }
-    if !target_path.starts_with(backup_root) {
-        return Err(invalid_manifest(&format!(
-            "migration backup target '{}' is outside backup root '{}'",
-            target_path.display(),
-            backup_root.display()
-        )));
-    }
+    validate_manifest_path_under(
+        &source_path,
+        source_data_dir,
+        "migration backup source",
+        "source store",
+    )?;
+    validate_manifest_path_under(
+        &target_path,
+        backup_root,
+        "migration backup target",
+        "backup root",
+    )?;
     if manifest.backup_artifacts[index].state == ArtifactState::Verified {
         verify_artifact_contents(&source_path, &target_path)?;
         return Ok(());
@@ -887,6 +902,13 @@ fn detect_divergent_applied_targets(manifest: &MigrationManifest) -> Option<Stri
         let Some(target_path) = artifact.target_path.as_ref() else {
             continue;
         };
+        if validate_manifest_artifact_paths(manifest, artifact, false).is_err() {
+            return Some(format!(
+                "migration target '{}' diverged from source '{}'",
+                target_path.display(),
+                artifact.source_path.display()
+            ));
+        }
         if verify_artifact_contents(&artifact.source_path, target_path).is_err() {
             return Some(format!(
                 "migration target '{}' diverged from source '{}'",
@@ -981,6 +1003,104 @@ fn verify_directory_contents(source: &Path, target: &Path) -> io::Result<()> {
         verify_artifact_contents(&entry.path(), &target.join(entry.file_name()))?;
     }
     Ok(())
+}
+
+fn validate_manifest_artifact_paths(
+    manifest: &MigrationManifest,
+    artifact: &MigrationArtifact,
+    backup: bool,
+) -> io::Result<()> {
+    let source_data_dir = manifest
+        .source
+        .data_dir
+        .as_deref()
+        .ok_or_else(|| invalid_manifest("migration manifest has no source data_dir"))?;
+    if artifact.kind != "store_manifest" {
+        let source_label = if backup {
+            "migration backup source"
+        } else {
+            "migration source"
+        };
+        validate_manifest_path_under(
+            &artifact.source_path,
+            source_data_dir,
+            source_label,
+            "source store",
+        )?;
+    }
+    let Some(target_path) = artifact.target_path.as_deref() else {
+        return Ok(());
+    };
+    let profile_root = manifest
+        .destination
+        .profile_root
+        .as_deref()
+        .ok_or_else(|| invalid_manifest("migration manifest has no destination profile_root"))?;
+    let target_root = if backup {
+        profile_root
+            .join("migration-backups")
+            .join(&manifest.migration_id)
+    } else {
+        let project_id =
+            manifest.destination.project_id.as_deref().ok_or_else(|| {
+                invalid_manifest("migration manifest has no destination project_id")
+            })?;
+        profile_sharded_data_root(profile_root, project_id)
+    };
+    let target_label = if backup {
+        "migration backup target"
+    } else {
+        "migration target"
+    };
+    let root_label = if backup {
+        "backup root"
+    } else {
+        "profile shard"
+    };
+    validate_manifest_path_under(target_path, &target_root, target_label, root_label)
+}
+
+fn validate_manifest_path_under(
+    path: &Path,
+    root: &Path,
+    path_label: &str,
+    root_label: &str,
+) -> io::Result<()> {
+    let normalized_path = normalize_manifest_path(path, path_label)?;
+    let normalized_root = normalize_manifest_path(root, root_label)?;
+    if !normalized_path.starts_with(&normalized_root) {
+        return Err(invalid_manifest(&format!(
+            "{path_label} '{}' is outside {root_label} '{}'",
+            path.display(),
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_manifest_path(path: &Path, label: &str) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(invalid_manifest(&format!(
+            "{label} '{}' must be absolute",
+            path.display()
+        )));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(invalid_manifest(&format!(
+                    "{label} '{}' contains path traversal",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn invalid_manifest(message: &str) -> io::Error {

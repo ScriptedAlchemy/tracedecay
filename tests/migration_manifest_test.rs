@@ -12,10 +12,10 @@ use tracedecay::migrate::inventory::{
 };
 use tracedecay::migrate::manifest::{
     apply_migration_manifest, assess_migration_rollback_state, build_plan_manifest,
-    finalize_migration_apply, load_manifest, rollback_migration_manifest, save_manifest,
-    verify_migration_manifest, ArtifactState, MigrationArtifact, MigrationManifest,
-    MigrationPlanOptions, MigrationProtocol, MigrationRollbackState,
-    MIGRATION_MANIFEST_SCHEMA_VERSION,
+    cleanup_migration_sources, finalize_migration_apply, load_manifest,
+    rollback_migration_manifest, save_manifest, verify_migration_manifest, ArtifactState,
+    MigrationArtifact, MigrationManifest, MigrationPlanOptions, MigrationProtocol,
+    MigrationRollbackState, MIGRATION_MANIFEST_SCHEMA_VERSION,
 };
 use tracedecay::storage::{
     read_enrollment_marker, read_store_manifest, StorageMode, StoreKind, StoreManifest,
@@ -584,6 +584,154 @@ fn finalize_migration_apply_marks_cutover_complete() {
         .iter()
         .all(|artifact| artifact.state == ArtifactState::Applied));
     assert!(verify_migration_manifest(&manifest).apply_supported);
+}
+
+#[test]
+fn apply_migration_manifest_rejects_target_parent_escape() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let project = root.join("repo");
+    let data_dir = project.join(".tracedecay");
+    let graph_db = data_dir.join("tracedecay.db");
+    let profile_root = root.join("profile");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(&graph_db, b"graph").unwrap();
+    let mut manifest = build_plan_manifest(
+        MigrationInventory {
+            stores: vec![StoreInventory {
+                project_root: project,
+                data_dir: data_dir.clone(),
+                db_path: graph_db.clone(),
+                brand: StoreBrand::TraceDecay,
+                role: StoreRole::CodeProjectStore,
+                registry_status: RegistryStatus::Unregistered,
+                size_bytes: 5,
+                statuses: vec![StoreStatus::Ok],
+                artifacts: vec![StoreArtifact {
+                    kind: "graph_db".to_string(),
+                    path: graph_db,
+                    size_bytes: 5,
+                }],
+            }],
+            skipped: Vec::new(),
+            global_db: None,
+        },
+        MigrationPlanOptions {
+            manifest_path,
+            migration_id: "mig_123".to_string(),
+            tracedecay_version: "0.0.2".to_string(),
+            created_at_unix: 1_800_000_000,
+            confirmation_token: "confirm-mig_123".to_string(),
+            target_profile_root: profile_root.clone(),
+            project_id: "proj_123".to_string(),
+        },
+    )
+    .unwrap();
+    let escaped_target = profile_root.join("projects/proj_123/../../escaped.db");
+    manifest.artifacts[0].target_path = Some(escaped_target.clone());
+    save_manifest(&manifest).unwrap();
+
+    let err = apply_migration_manifest(&mut manifest).unwrap_err();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("outside profile shard") || err.to_string().contains("traversal"),
+        "unexpected error: {err}"
+    );
+    assert!(!root.join("profile/escaped.db").exists());
+    assert!(!escaped_target.exists());
+}
+
+#[test]
+fn cleanup_migration_sources_rejects_source_parent_escape_without_deleting_outside_file() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
+    let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
+    let project = root.join("repo");
+    let data_dir = project.join(".tracedecay");
+    let profile_root = root.join("profile");
+    let data_root = profile_root.join("projects/proj_123");
+    let escaped_source = data_dir.join("../outside.db");
+    let outside_file = project.join("outside.db");
+    let target = data_root.join("tracedecay.db");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(&outside_file, b"outside").unwrap();
+    fs::write(&target, b"outside").unwrap();
+    tracedecay::storage::write_enrollment_marker(
+        &project,
+        &tracedecay::storage::EnrollmentMarker {
+            project_id: "proj_123".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    fs::write(
+        data_root.join(STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some("proj_123".to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: project.clone(),
+            data_root: data_root.clone(),
+            graph_db_relpath: "tracedecay.db".into(),
+            sessions_db_relpath: "sessions.db".into(),
+            branch_meta_relpath: "branch-meta.json".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let mut manifest = MigrationManifest::new(
+        "mig_123",
+        "0.0.2",
+        1_800_000_000,
+        "confirm-mig_123",
+        protocol,
+        MigrationInventory {
+            stores: vec![StoreInventory {
+                project_root: project.clone(),
+                data_dir: data_dir.clone(),
+                db_path: outside_file.clone(),
+                brand: StoreBrand::TraceDecay,
+                role: StoreRole::CodeProjectStore,
+                registry_status: RegistryStatus::Unregistered,
+                size_bytes: 7,
+                statuses: vec![StoreStatus::Ok],
+                artifacts: Vec::new(),
+            }],
+            skipped: Vec::new(),
+            global_db: None,
+        },
+    );
+    manifest.source.project_root = Some(project);
+    manifest.source.data_dir = Some(data_dir);
+    manifest.destination.profile_root = Some(profile_root);
+    manifest.destination.project_id = Some("proj_123".to_string());
+    manifest.artifacts.push(MigrationArtifact {
+        kind: "graph_db".to_string(),
+        source_path: escaped_source,
+        target_path: Some(target),
+        state: ArtifactState::Applied,
+    });
+    manifest.artifacts.push(MigrationArtifact {
+        kind: "store_manifest".to_string(),
+        source_path: data_root.join(STORE_MANIFEST_FILENAME),
+        target_path: Some(data_root.join(STORE_MANIFEST_FILENAME)),
+        state: ArtifactState::Applied,
+    });
+    save_manifest(&manifest).unwrap();
+
+    let err = cleanup_migration_sources(&manifest).unwrap_err();
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string().contains("outside source store") || err.to_string().contains("traversal"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(fs::read(&outside_file).unwrap(), b"outside");
 }
 
 #[test]
