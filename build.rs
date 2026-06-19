@@ -120,16 +120,15 @@ fn auto_build_dashboard_assets(reason: &str, affected: &[&str]) {
         );
     };
 
-    if !dashboard_dir.join("node_modules").exists() {
-        // `npm ci` needs the lockfile to match package.json; fall back to
-        // `npm install` so a stale lockfile doesn't hard-fail the Rust build.
-        if let Err(ci_err) = run_npm(npm, &["ci"], dashboard_dir) {
-            println!("cargo::warning=dashboard assets: npm ci failed, retrying with npm install");
-            if let Err(install_err) = run_npm(npm, &["install"], dashboard_dir) {
-                fail_fast(&format!(
-                    "automatic dependency install failed.\n\nnpm ci:\n{ci_err}\n\nnpm install:\n{install_err}"
-                ));
-            }
+    // Automatic rebuilds must refresh dependencies even when `node_modules`
+    // already exists: a pulled package-lock change can add build-time imports
+    // that the stale install does not contain yet.
+    if let Err(ci_err) = run_npm(npm, &["ci"], dashboard_dir) {
+        println!("cargo::warning=dashboard assets: npm ci failed, retrying with npm install");
+        if let Err(install_err) = run_npm(npm, &["install"], dashboard_dir) {
+            fail_fast(&format!(
+                "automatic dependency install failed.\n\nnpm ci:\n{ci_err}\n\nnpm install:\n{install_err}"
+            ));
         }
     }
     if let Err(build_err) = run_npm(npm, &["run", "build"], dashboard_dir) {
