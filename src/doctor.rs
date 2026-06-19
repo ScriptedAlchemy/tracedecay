@@ -275,8 +275,11 @@ fn classify_registry_storage(
     if store.storage_mode != "profile_sharded" {
         return None;
     }
+    let profile_root = profile_root
+        .canonicalize()
+        .unwrap_or_else(|_| profile_root.to_path_buf());
     let data_root =
-        crate::storage::StoreArtifactPath::resolve(profile_root, Path::new(&store.store_relpath))
+        crate::storage::StoreArtifactPath::resolve(&profile_root, Path::new(&store.store_relpath))
             .ok()?
             .absolute_path();
     let graph_exists = data_root
@@ -394,6 +397,8 @@ fn print_summary(dc: &DoctorCounters) {
 mod tests {
     use super::*;
     use crate::global_db::StoreInstanceUpsert;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn format_bytes_boundaries() {
@@ -454,6 +459,20 @@ mod tests {
             classify_project_storage_with_registry(&project_root, &db, Some(&profile_root)).await,
             DoctorStorageStatus::ProfileSharded
         );
+        #[cfg(unix)]
+        {
+            let symlinked_profile_root = dir.path().join("profile-link");
+            symlink(&profile_root, &symlinked_profile_root)?;
+            assert_eq!(
+                classify_project_storage_with_registry(
+                    &project_root,
+                    &db,
+                    Some(&symlinked_profile_root)
+                )
+                .await,
+                DoctorStorageStatus::ProfileSharded
+            );
+        }
         Ok(())
     }
 
