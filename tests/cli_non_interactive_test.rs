@@ -574,9 +574,11 @@ fn branch_gc_deletes_stale_profile_shard_branch_dbs() {
 fn migrate_verify_text_reports_actual_apply_supported_state() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
-    let manifest_path = home.path().join("migration-manifest.json");
+    let home_path = home.path().canonicalize().unwrap();
+    let project_path = project.path().canonicalize().unwrap();
+    write_profile_sharded_fixture(&home_path, &project_path);
+    let shard_root = home_path.join(".tracedecay/projects/proj_cli");
+    let manifest_path = home_path.join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_cli_verify");
     let mut manifest = MigrationManifest::new(
         "mig_cli_verify",
@@ -590,8 +592,8 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
             global_db: None,
         },
     );
-    manifest.source.project_root = Some(project.path().to_path_buf());
-    manifest.destination.profile_root = Some(home.path().join(".tracedecay"));
+    manifest.source.project_root = Some(project_path.clone());
+    manifest.destination.profile_root = Some(home_path.join(".tracedecay"));
     manifest.destination.project_id = Some("proj_cli".to_string());
 
     let mut graph_artifact = MigrationArtifact::new(
@@ -618,7 +620,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
         verify_report
     );
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command(&home_path, &project_path);
     command.args(["migrate", "verify", "--manifest"]);
     command.arg(manifest_path);
     let output = run_with_timeout(command, Duration::from_secs(30));
@@ -640,16 +642,18 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
 fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let profile_root = home.path().join(".tracedecay");
-    let graph_db = project.path().join(".tracedecay/tracedecay.db");
+    let home_path = home.path().canonicalize().unwrap();
+    let project_path = project.path().canonicalize().unwrap();
+    let profile_root = home_path.join(".tracedecay");
+    let graph_db = project_path.join(".tracedecay/tracedecay.db");
     write_sqlite_placeholder(&graph_db);
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command(&home_path, &project_path);
     command.args([
         "migrate",
         "plan",
         "--root",
-        project.path().to_str().unwrap(),
+        project_path.to_str().unwrap(),
         "--save",
         "--profile-root",
         profile_root.to_str().unwrap(),
@@ -685,16 +689,18 @@ fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractiv
 fn migrate_export_from_profile_copies_profile_store_to_target() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    write_profile_sharded_fixture(home.path(), project.path());
-    let export_dir = home.path().join("exported-store");
+    let home_path = home.path().canonicalize().unwrap();
+    let project_path = project.path().canonicalize().unwrap();
+    write_profile_sharded_fixture(&home_path, &project_path);
+    let export_dir = home_path.join("exported-store");
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command(&home_path, &project_path);
     command.args([
         "migrate",
         "export",
         "--from-profile",
         "--project",
-        project.path().to_str().unwrap(),
+        project_path.to_str().unwrap(),
         "--to",
         export_dir.to_str().unwrap(),
     ]);
@@ -721,9 +727,11 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
 fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_marker() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let data_dir = project.path().join(".tracedecay");
+    let home_path = home.path().canonicalize().unwrap();
+    let project_path = project.path().canonicalize().unwrap();
+    let data_dir = project_path.join(".tracedecay");
     let source_graph = data_dir.join("tracedecay.db");
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = home_path.join(".tracedecay");
     let target_root = profile_root.join("projects/proj_cli");
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&target_root).unwrap();
@@ -739,7 +747,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         project_id: Some("proj_cli".to_string()),
         store_kind: StoreKind::CodeProject,
         storage_mode: StorageMode::ProfileSharded,
-        project_root: project.path().to_path_buf(),
+        project_root: project_path.clone(),
         data_root: target_root.clone(),
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
@@ -751,7 +759,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     )
     .unwrap();
     write_enrollment_marker(
-        project.path(),
+        &project_path,
         &EnrollmentMarker {
             project_id: "proj_cli".to_string(),
             storage_mode: StorageMode::ProfileSharded,
@@ -759,7 +767,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     )
     .unwrap();
 
-    let manifest_path = home.path().join("migration-manifest.json");
+    let manifest_path = home_path.join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_cli_cleanup");
     let mut manifest = MigrationManifest::new(
         "mig_cli_cleanup",
@@ -773,7 +781,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
             global_db: None,
         },
     );
-    manifest.source.project_root = Some(project.path().to_path_buf());
+    manifest.source.project_root = Some(project_path.clone());
     manifest.source.data_dir = Some(data_dir.clone());
     manifest.destination.profile_root = Some(profile_root);
     manifest.destination.project_id = Some("proj_cli".to_string());
@@ -793,7 +801,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     manifest.artifacts.push(store_manifest_artifact);
     save_manifest(&manifest).unwrap();
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command(&home_path, &project_path);
     command.args([
         "migrate",
         "cleanup-sources",
@@ -815,7 +823,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         "source graph artifact should be removed"
     );
     assert!(
-        read_enrollment_marker(project.path()).unwrap().is_some(),
+        read_enrollment_marker(&project_path).unwrap().is_some(),
         "cleanup must preserve profile-sharded enrollment marker"
     );
 }
