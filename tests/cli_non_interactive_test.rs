@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,15 +15,29 @@ use tracedecay::storage::{
     StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
 
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn profile_root(home: &Path) -> PathBuf {
+    canonical_temp_path(home).join(".tracedecay")
+}
+
+fn profile_shard_root(home: &Path) -> PathBuf {
+    profile_root(home).join("projects/proj_cli")
+}
+
 fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Command {
+    let home = canonical_temp_path(home);
+    let profile_root = profile_root(&home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     command
         .current_dir(project)
-        .env("HOME", home)
-        .env("USERPROFILE", home)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
-        .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"))
+        .env("TRACEDECAY_DATA_DIR", &profile_root)
+        .env("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -38,7 +52,7 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
     let marker_dir = project.join(".tracedecay");
-    let shard_root = home.join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home);
     std::fs::create_dir_all(&marker_dir).unwrap();
     std::fs::create_dir_all(&shard_root).unwrap();
     std::fs::write(
@@ -270,7 +284,7 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let db = GlobalDb::open_at(&home.path().join(".tracedecay/global.db"))
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
         .await
         .unwrap();
     db.upsert(project.path(), 42).await;
@@ -301,8 +315,8 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
-    let db_path = home.path().join(".tracedecay/global.db");
+    let shard_root = profile_shard_root(home.path());
+    let db_path = profile_root(home.path()).join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     db.upsert(project.path(), 42).await;
     drop(db);
@@ -339,7 +353,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    std::fs::create_dir_all(home.path().join(".tracedecay")).unwrap();
+    std::fs::create_dir_all(profile_root(home.path())).unwrap();
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
@@ -364,7 +378,7 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
     std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
-    let db = GlobalDb::open_at(&home.path().join(".tracedecay/global.db"))
+    let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
         .await
         .unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
@@ -396,8 +410,8 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
     std::fs::remove_dir_all(project.path().join(".tracedecay")).unwrap();
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
-    let db_path = home.path().join(".tracedecay/global.db");
+    let shard_root = profile_shard_root(home.path());
+    let db_path = profile_root(home.path()).join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
     drop(db);
@@ -429,7 +443,7 @@ fn branch_list_reads_profile_sharded_branch_meta() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home.path());
     write_branch_meta(&shard_root, &[], false);
 
     let mut command = tracedecay_command(home.path(), project.path());
@@ -458,7 +472,7 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home.path());
     write_branch_meta(&shard_root, &[], false);
 
     let mut command = tracedecay_command(home.path(), project.path());
@@ -488,7 +502,7 @@ fn branch_remove_deletes_branch_db_from_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
         &[("feature/ui", "branches/feature_ui.db")],
@@ -516,7 +530,7 @@ fn branch_removeall_deletes_profile_shard_branch_dbs() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
         &[
@@ -548,7 +562,7 @@ fn branch_gc_deletes_stale_profile_shard_branch_dbs() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
+    let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
         &[("feature/stale", "branches/feature_stale.db")],
@@ -576,8 +590,8 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = home.path().join(".tracedecay/projects/proj_cli");
-    let manifest_path = home.path().join("migration-manifest.json");
+    let shard_root = profile_shard_root(home.path());
+    let manifest_path = canonical_temp_path(home.path()).join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_cli_verify");
     let mut manifest = MigrationManifest::new(
         "mig_cli_verify",
@@ -592,7 +606,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
         },
     );
     manifest.source.project_root = Some(project.path().to_path_buf());
-    manifest.destination.profile_root = Some(home.path().join(".tracedecay"));
+    manifest.destination.profile_root = Some(profile_root(home.path()));
     manifest.destination.project_id = Some("proj_cli".to_string());
 
     let mut graph_artifact = MigrationArtifact::new(
@@ -641,7 +655,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
 fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = profile_root(home.path());
     let graph_db = project.path().join(".tracedecay/tracedecay.db");
     write_sqlite_placeholder(&graph_db);
 
@@ -687,7 +701,7 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
-    let export_dir = home.path().join("exported-store");
+    let export_dir = canonical_temp_path(home.path()).join("exported-store");
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args([
@@ -724,7 +738,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     let project = TempDir::new().unwrap();
     let data_dir = project.path().join(".tracedecay");
     let source_graph = data_dir.join("tracedecay.db");
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = profile_root(home.path());
     let target_root = profile_root.join("projects/proj_cli");
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::create_dir_all(&target_root).unwrap();
@@ -760,7 +774,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     )
     .unwrap();
 
-    let manifest_path = home.path().join("migration-manifest.json");
+    let manifest_path = canonical_temp_path(home.path()).join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_cli_cleanup");
     let mut manifest = MigrationManifest::new(
         "mig_cli_cleanup",
