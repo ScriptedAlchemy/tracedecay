@@ -1,10 +1,10 @@
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
-use tracedecay::config::TraceDecayConfig;
+use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
 use tracedecay::hooks::{
     cursor_branch_switch_target, cursor_shell_command_targets_project, cursor_shell_sync_plan,
@@ -17,17 +17,21 @@ static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
 }
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
         Self {
             previous_home,
             previous_userprofile,
+            previous_data_dir,
         }
     }
 }
@@ -42,6 +46,21 @@ impl Drop for HomeEnvGuard {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
         }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        }
+    }
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
@@ -146,13 +165,10 @@ fn ambiguous_state_changes_fall_back_to_current_branch_when_available() {
 async fn hook_branch_tracking_writes_profile_sharded_branch_db() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let root = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
-    let home = root.join("home");
+    let temp_root = canonical_temp_path(dir.path());
+    let home = temp_root.join("home");
     let profile_root = home.join(".tracedecay");
-    let project = root.join("project");
+    let project = temp_root.join("project");
     let shard_root = profile_root.join("projects/proj_hook");
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn hook_marker() {}\n").unwrap();

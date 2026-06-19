@@ -148,7 +148,8 @@ fn manifest_save_generates_token_and_records_protocol_context() {
 #[test]
 fn manifest_atomic_save_roundtrips_and_cleans_protocol_files() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = canonical_temp_path(dir.path()).join("migration-manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("migration-manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let manifest = MigrationManifest::new(
         "mig_123",
@@ -176,7 +177,8 @@ fn manifest_atomic_save_roundtrips_and_cleans_protocol_files() {
 #[test]
 fn manifest_save_requires_confirmation_token() {
     let dir = TempDir::new().unwrap();
-    let manifest_path = dir.path().join("manifest.json");
+    let root = canonical_temp_path(dir.path());
+    let manifest_path = root.join("manifest.json");
     let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_123");
     let manifest = MigrationManifest::new(
         "mig_123",
@@ -385,10 +387,11 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
 #[test]
 fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
-    let scan_root = dir.path().join("scan-root");
+    let root = canonical_temp_path(dir.path());
+    let db_path = root.join("global.db");
+    let scan_root = root.join("scan-root");
     let discovered = scan_root.join("discovered");
-    let unrelated = dir.path().join("unrelated-registered");
+    let unrelated = root.join("unrelated-registered");
     fs::create_dir_all(&discovered).unwrap();
     fs::create_dir_all(&unrelated).unwrap();
     make_project_store(&discovered);
@@ -399,7 +402,7 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
         db.upsert(&unrelated, 99).await;
     });
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
+    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(&root))], || {
         block_on_inventory(MigrationInventoryOptions {
             roots: vec![scan_root],
             global_db_path: Some(db_path),
@@ -448,18 +451,15 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
         db.upsert(&unrelated, 99).await;
     });
 
-    let report = with_env_vars(
-        &[("HERMES_HOME", None), ("HOME", Some(root.as_path()))],
-        || {
-            block_on_inventory(MigrationInventoryOptions {
-                roots: vec![scan_root],
-                global_db_path: Some(db_path),
-                include_all_registered: true,
-                ..MigrationInventoryOptions::default()
-            })
-            .unwrap()
-        },
-    );
+    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(&root))], || {
+        block_on_inventory(MigrationInventoryOptions {
+            roots: vec![scan_root],
+            global_db_path: Some(db_path),
+            include_all_registered: true,
+            ..MigrationInventoryOptions::default()
+        })
+        .unwrap()
+    });
 
     assert!(report
         .stores

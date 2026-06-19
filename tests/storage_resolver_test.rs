@@ -487,6 +487,20 @@ fn private_store_io_creates_private_dirs_and_files() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn private_store_io_allows_verbatim_absolute_paths() {
+    let dir = TempDir::new().unwrap();
+    let private_file = fs::canonicalize(dir.path())
+        .unwrap()
+        .join("private")
+        .join("enrollment.json");
+
+    PrivateStoreIo::write_file(&private_file, b"{}").unwrap();
+
+    assert_eq!(fs::read_to_string(&private_file).unwrap(), "{}");
+}
+
 #[cfg(unix)]
 #[test]
 fn private_store_io_rejects_symlinked_parent_components() {

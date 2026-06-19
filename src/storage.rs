@@ -505,14 +505,22 @@ impl PrivateStoreIo {
 
 fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
     let mut current = PathBuf::new();
+    let mut has_normal_component = false;
     for component in path.components() {
         match component {
-            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+            Component::Normal(_) => {
+                current.push(component.as_os_str());
+                has_normal_component = true;
+            }
+            Component::RootDir | Component::Prefix(_) => {
                 current.push(component.as_os_str());
             }
             Component::CurDir | Component::ParentDir => {
                 return Err(invalid_input(format!("{subject} path must be normalized")));
             }
+        }
+        if !has_normal_component {
+            continue;
         }
         match fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {
