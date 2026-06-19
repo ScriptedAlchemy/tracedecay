@@ -400,6 +400,17 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    fn canonical_temp_path(path: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            path.to_path_buf()
+        }
+        #[cfg(not(windows))]
+        {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        }
+    }
+
     #[test]
     fn format_bytes_boundaries() {
         assert_eq!(format_bytes(0), "0 B");
@@ -429,6 +440,10 @@ mod tests {
         let project_root = dir.path().join("repo");
         let shard_root = profile_root.join("projects/proj_doctor");
         std::fs::create_dir_all(&project_root)?;
+        std::fs::create_dir_all(&shard_root)?;
+        let profile_root = canonical_temp_path(&profile_root);
+        let project_root = canonical_temp_path(&project_root);
+        let shard_root = crate::storage::profile_sharded_data_root(&profile_root, "proj_doctor");
         std::fs::create_dir_all(&shard_root)?;
         std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
         let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
@@ -485,6 +500,7 @@ mod tests {
         let outside_root = dir.path().join("outside");
         std::fs::create_dir_all(&project_root)?;
         std::fs::create_dir_all(&outside_root)?;
+        let project_root = canonical_temp_path(&project_root);
         std::fs::write(outside_root.join("tracedecay.db"), b"graph")?;
         let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
             .await

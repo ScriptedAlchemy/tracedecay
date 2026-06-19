@@ -42,7 +42,14 @@ fn manifest_for(protocol: MigrationProtocol, migration_id: &str) -> MigrationMan
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 #[cfg(unix)]

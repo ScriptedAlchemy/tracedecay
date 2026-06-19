@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,25 @@ use tracedecay::storage::{
     read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
     StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn profile_root(home: &Path) -> PathBuf {
+    canonical_temp_path(home).join(".tracedecay")
+}
+
+fn profile_shard_root(home: &Path) -> PathBuf {
+    profile_root(home).join("projects/proj_cli")
+}
 
 fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
