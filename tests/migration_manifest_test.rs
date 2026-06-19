@@ -18,9 +18,10 @@ use tracedecay::migrate::manifest::{
     MigrationRollbackState, MIGRATION_MANIFEST_SCHEMA_VERSION,
 };
 use tracedecay::storage::{
-    read_enrollment_marker, read_store_manifest, StorageMode, StoreKind, StoreManifest,
-    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    read_enrollment_marker, read_store_manifest, write_enrollment_marker, EnrollmentMarker,
+    StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
+use tracedecay::types::{Node, NodeKind, Visibility};
 
 fn empty_inventory() -> MigrationInventory {
     MigrationInventory {
@@ -49,6 +50,34 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(not(windows))]
     {
         path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn sample_node(id: &str, name: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        kind: NodeKind::Function,
+        name: name.to_string(),
+        qualified_name: format!("crate::{name}"),
+        file_path: "src/lib.rs".to_string(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 3,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: None,
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1_800_000_000,
+        parent_id: None,
     }
 }
 
@@ -445,6 +474,124 @@ fn verify_manifest_validates_profile_store_manifest_registry_records() {
     assert_eq!(report.store_manifest_count, 1);
     assert_eq!(report.registry_plan_count, 1);
     assert!(!report.apply_supported);
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+}
+
+#[tokio::test]
+async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different_bytes() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let project = root.join("repo");
+    let data_dir = project.join(".tracedecay");
+    let source_db = data_dir.join("tracedecay.db");
+    let profile_root = root.join("profile");
+    let data_root = profile_root.join("projects/proj_123");
+    let target_db = data_root.join("tracedecay.db");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(&data_root).unwrap();
+
+    let (source, _) = tracedecay::db::Database::initialize(&source_db)
+        .await
+        .unwrap();
+    source
+        .insert_node(&sample_node("node-1", "process_data"))
+        .await
+        .unwrap();
+    source.checkpoint().await.unwrap();
+    source.close();
+
+    let (target, _) = tracedecay::db::Database::initialize(&target_db)
+        .await
+        .unwrap();
+    target
+        .insert_node(&sample_node("node-extra", "deleted_later"))
+        .await
+        .unwrap();
+    target
+        .conn()
+        .execute(
+            "DELETE FROM nodes WHERE id = ?1",
+            libsql::params!["node-extra"],
+        )
+        .await
+        .unwrap();
+    target
+        .insert_node(&sample_node("node-1", "process_data"))
+        .await
+        .unwrap();
+    target.checkpoint().await.unwrap();
+    target.close();
+    assert_ne!(fs::read(&source_db).unwrap(), fs::read(&target_db).unwrap());
+
+    fs::write(
+        data_root.join("branch-meta.json"),
+        r#"{"default_branch":"main","branches":{}}"#,
+    )
+    .unwrap();
+    fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
+    let store_manifest = StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some("proj_123".to_string()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: project.clone(),
+        data_root: data_root.clone(),
+        graph_db_relpath: "tracedecay.db".into(),
+        sessions_db_relpath: "sessions.db".into(),
+        branch_meta_relpath: "branch-meta.json".into(),
+    };
+    let store_manifest_path = data_root.join(STORE_MANIFEST_FILENAME);
+    fs::write(
+        &store_manifest_path,
+        serde_json::to_string_pretty(&store_manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        data_dir.join(STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&store_manifest).unwrap(),
+    )
+    .unwrap();
+    write_enrollment_marker(
+        &project,
+        &EnrollmentMarker {
+            project_id: "proj_123".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let protocol = MigrationProtocol::for_manifest(root.join("manifest.json"), "mig_123");
+    let mut manifest = MigrationManifest::new(
+        "mig_123",
+        "0.0.2",
+        1_800_000_000,
+        "confirm-mig_123",
+        protocol,
+        MigrationInventory {
+            stores: Vec::new(),
+            skipped: Vec::new(),
+            global_db: None,
+        },
+    );
+    manifest.source.project_root = Some(project);
+    manifest.source.data_dir = Some(data_dir.clone());
+    manifest.destination.profile_root = Some(profile_root);
+    manifest.destination.project_id = Some("proj_123".to_string());
+    manifest.artifacts.push(MigrationArtifact {
+        kind: "graph_db".to_string(),
+        source_path: source_db,
+        target_path: Some(target_db),
+        state: ArtifactState::Applied,
+    });
+    manifest.artifacts.push(MigrationArtifact {
+        kind: "store_manifest".to_string(),
+        source_path: data_dir.join("store_manifest.json"),
+        target_path: Some(store_manifest_path),
+        state: ArtifactState::Applied,
+    });
+
+    let report = verify_migration_manifest(&manifest);
+
+    assert!(report.apply_supported, "{:?}", report.issues);
     assert!(report.issues.is_empty(), "{:?}", report.issues);
 }
 

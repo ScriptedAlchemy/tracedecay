@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tracedecay::db::Database;
 use tracedecay::types::*;
@@ -53,6 +55,39 @@ async fn test_initialize_creates_database() {
         db_path.exists(),
         "database file should exist after initialize"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_open_read_only_reads_existing_database_without_write_pragmas() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let db_path = dir.path().join("code_graph.db");
+    let (db, _) = Database::initialize(&db_path)
+        .await
+        .expect("failed to initialize database");
+    db.insert_node(&sample_node("node-1", "process_data", "src/main.rs"))
+        .await
+        .expect("failed to insert node");
+    db.checkpoint()
+        .await
+        .expect("failed to checkpoint database");
+    db.close();
+    let mut permissions = std::fs::metadata(&db_path)
+        .expect("failed to stat database")
+        .permissions();
+    permissions.set_mode(0o444);
+    std::fs::set_permissions(&db_path, permissions).expect("failed to mark database readonly");
+
+    let (db, migrated) = Database::open_read_only(&db_path)
+        .await
+        .expect("readonly database should open");
+    let stats = db
+        .get_stats()
+        .await
+        .expect("readonly stats should be available");
+
+    assert!(!migrated);
+    assert_eq!(stats.node_count, 1);
 }
 
 #[tokio::test]

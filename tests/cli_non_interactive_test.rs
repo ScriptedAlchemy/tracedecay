@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tracedecay::branch_meta::BranchMeta;
+use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::MigrationInventory;
 use tracedecay::migrate::manifest::{
@@ -14,6 +17,7 @@ use tracedecay::storage::{
     read_enrollment_marker, write_enrollment_marker, EnrollmentMarker, StorageMode, StoreKind,
     StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
+use tracedecay::types::{Node, NodeKind, Visibility};
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -105,6 +109,34 @@ fn write_sqlite_placeholder(path: &Path) {
             .await
             .unwrap();
     });
+}
+
+fn sample_node(id: &str, name: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        kind: NodeKind::Function,
+        name: name.to_string(),
+        qualified_name: format!("crate::{name}"),
+        file_path: "src/lib.rs".to_string(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 3,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: None,
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1_800_000_000,
+        parent_id: None,
+    }
 }
 
 async fn register_profile_sharded_store(
@@ -286,6 +318,36 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
         stderr.contains("Non-interactive: skipping index creation"),
         "stderr should explain the non-interactive default\nstderr:\n{stderr}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn status_json_reads_readonly_project_database() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let db_path = project.path().join(".tracedecay/tracedecay.db");
+    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    db.insert_node(&sample_node("node-1", "process_data"))
+        .await
+        .unwrap();
+    db.checkpoint().await.unwrap();
+    db.close();
+    let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
+    permissions.set_mode(0o444);
+    std::fs::set_permissions(&db_path, permissions).unwrap();
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["status", "--json"]);
+    let output = run_with_timeout(command, Duration::from_secs(30));
+
+    assert!(
+        output.status.success(),
+        "status --json should read readonly DB\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["node_count"], 1);
 }
 
 #[tokio::test]
