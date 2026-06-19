@@ -70,6 +70,46 @@ fn file_listing(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn assert_plugin_skill_frontmatter_is_yaml_safe(plugin_dir: &Path) {
+    let mut failures = Vec::new();
+    for relative in file_listing(plugin_dir) {
+        if relative.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            continue;
+        }
+        let skill_path = plugin_dir.join(&relative);
+        let skill = text(&skill_path);
+        let Some(rest) = skill.strip_prefix("---\n") else {
+            failures.push(format!("{}: missing frontmatter", relative.display()));
+            continue;
+        };
+        let Some((frontmatter, _body)) = rest.split_once("\n---") else {
+            failures.push(format!("{}: unterminated frontmatter", relative.display()));
+            continue;
+        };
+        for (line_index, line) in frontmatter.lines().enumerate() {
+            let Some((_key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim_start();
+            if value.starts_with('"') || value.starts_with('\'') {
+                continue;
+            }
+            if value.contains(": ") {
+                failures.push(format!(
+                    "{}:{}: quote frontmatter value containing ': '",
+                    relative.display(),
+                    line_index + 2
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "plugin skill frontmatter must be safe for strict YAML parsers:\n{}",
+        failures.join("\n")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Hermes
 // ---------------------------------------------------------------------------
@@ -221,6 +261,7 @@ fn cursor_update_plugin_refreshes_bundle_and_preserves_user_config() {
     assert!(
         text(&plugin_dir.join(".cursor-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION"))
     );
+    assert_plugin_skill_frontmatter_is_yaml_safe(&plugin_dir);
 }
 
 #[test]
@@ -261,6 +302,7 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
     assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
     assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
+    assert_plugin_skill_frontmatter_is_yaml_safe(&plugin_dir);
 }
 
 #[test]

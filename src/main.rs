@@ -458,7 +458,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         } => {
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
             let cg = if TraceDecay::is_initialized(&project_path) {
-                TraceDecay::open(&project_path).await?
+                TraceDecay::open_read_only(&project_path).await?
             } else if !io::stdin().is_terminal() {
                 eprintln!(
                     "No TraceDecay index found at '{}'. Non-interactive: skipping index creation (run `tracedecay init`).",

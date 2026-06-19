@@ -112,33 +112,6 @@
   gap: 0.85rem;
 }
 
-.tss-stat {
-  border: 1px solid var(--ts-line);
-  border-radius: var(--ts-radius);
-  background: color-mix(in srgb, var(--ts-panel) 70%, transparent);
-  padding: 0.85rem 1rem;
-  display: grid;
-  gap: 0.25rem;
-}
-
-.tss-stat-value {
-  color: var(--ts-text);
-  font-family: var(--theme-font-mono);
-  font-size: 1.45rem;
-  font-weight: 800;
-}
-
-.tss-stat-label {
-  color: var(--ts-text-2);
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
-.tss-stat-hint {
-  color: var(--ts-text-3);
-  font-size: 0.72rem;
-}
-
 /* ------------------------------------------------------------- charts */
 
 .tss-chart {
@@ -379,27 +352,6 @@
   color: var(--ts-text-3);
   font-size: 0.78rem;
   padding: 0.6rem 0;
-}
-
-.tss-error {
-  border: 1px solid color-mix(in srgb, var(--ts-red) 50%, transparent);
-  border-radius: var(--ts-radius);
-  background: color-mix(in srgb, var(--ts-red) 8%, transparent);
-  color: var(--ts-text);
-  font-size: 0.82rem;
-  padding: 0.7rem 0.95rem;
-}
-
-.tss-retry {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--ts-line-strong);
-  border-radius: 8px;
-  color: var(--ts-text);
-  cursor: pointer;
-  font-size: 0.74rem;
-  margin-left: 0.5rem;
-  padding: 0.2rem 0.6rem;
 }
 
 .tss-pager {

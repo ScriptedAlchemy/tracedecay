@@ -512,84 +512,10 @@
   width: 100%;
 }
 
-.tsg-chart-label {
-  fill: var(--ts-text-2);
-  font-family: var(--theme-font-mono);
-  font-size: 11px;
-}
-
-.tsg-chart-value {
-  fill: var(--ts-text-3);
-  font-family: var(--theme-font-mono);
-  font-size: 10px;
-}
-
-.tsg-chart-row-clickable {
-  cursor: pointer;
-}
-
-.tsg-chart-row-clickable:hover .tsg-chart-label {
-  fill: var(--ts-text);
-}
-
 .tsg-chart-hint {
   margin: 0.5rem 0 0;
   color: var(--ts-text-3);
   font-size: 0.72rem;
-}
-
-.tsg-hub-list {
-  display: grid;
-  gap: 0.4rem;
-  max-height: 21rem;
-  overflow: auto;
-}
-
-.tsg-hub {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 0.55rem;
-  appearance: none;
-  text-align: left;
-  border: 1px solid var(--ts-line);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--ts-void) 26%, transparent);
-  color: var(--ts-text-2);
-  cursor: pointer;
-  padding: 0.42rem 0.6rem;
-}
-
-.tsg-hub:hover {
-  border-color: color-mix(in srgb, var(--ts-cyan) 42%, transparent);
-  background: color-mix(in srgb, var(--ts-cyan) 8%, transparent);
-}
-
-.tsg-hub-dot {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
-}
-
-.tsg-hub-name {
-  color: var(--ts-text);
-  font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tsg-hub-meta {
-  color: var(--ts-text-3);
-  font-family: var(--theme-font-mono);
-  font-size: 0.66rem;
-}
-
-.tsg-hub-degree {
-  color: var(--ts-cyan);
-  font-family: var(--theme-font-mono);
-  font-size: 0.68rem;
-  white-space: nowrap;
 }
 
 .tsg-edge-kind-strip {

@@ -481,6 +481,45 @@ impl TraceDecay {
         Ok(ts)
     }
 
+    /// Opens an existing project for read-only inspection.
+    ///
+    /// Unlike [`Self::open`], this does not run migrations, repair dirty
+    /// sentinels, clear markers, or rewrite corrupted DBs. It is intended for
+    /// status/verification commands that must be able to inspect read-only
+    /// stores without mutating them.
+    pub async fn open_read_only(project_root: &Path) -> Result<Self> {
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let config = load_config_from_path(project_root, &store_layout.config_path)?;
+        let active_branch = branch::current_branch(project_root);
+
+        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+            project_root,
+            &store_layout.data_root,
+            active_branch.as_deref(),
+        );
+
+        if !db_path.exists() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "no TraceDecay database found at '{}'; run 'tracedecay init' first",
+                    db_path.display()
+                ),
+            });
+        }
+
+        let (db, _) = Database::open_read_only(&db_path).await?;
+        Ok(Self {
+            db,
+            config,
+            project_root: project_root.to_path_buf(),
+            store_layout,
+            registry: LanguageRegistry::new(),
+            active_branch,
+            serving_branch,
+            fallback_warning,
+        })
+    }
+
     /// Resolves which DB file to open for a given branch.
     ///
     /// Returns `(db_path, serving_branch, fallback_warning)`.

@@ -99,14 +99,13 @@ export default function OverviewPanel({
               keyName="label"
               rows={overview.top_connected.map((row) => ({
                 label: row.name,
-                name: row.name,
                 color: colorForKind(row.kind),
                 meta: row.kind,
                 value: `${fmt(row.degree)} edges`,
                 node: row,
               }))}
               rowKey={(row) => String(row.node.id)}
-              titleFor={(row) => `Open ${String(row.name)} in the canvas`}
+              titleFor={(row) => `Open ${String(row.label)} in the canvas`}
               onPick={(row) => onFocusSymbol(row.node)}
             />
           </CardContent>
@@ -121,10 +120,12 @@ export default function OverviewPanel({
                 const short = row.path.split("/").slice(-2).join("/");
                 return {
                   label: short,
+                  path: row.path,
                   color: "color-mix(in srgb, var(--ts-cyan, #75f4d2) 60%, transparent)",
                   value: `${fmt(row.node_count)} symbols`,
                 };
               })}
+              rowKey={(row) => String(row.path)}
             />
           </CardContent>
         </Card>
