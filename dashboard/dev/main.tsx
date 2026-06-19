@@ -113,21 +113,21 @@ try {
 // ---------------------------------------------------------------------------
 
 const PLUGIN_ENTRIES = [
-  { name: "holographic", spec: "../holographic/src/entry.tsx" },
-  { name: "graph", spec: "../graph/src/entry.tsx" },
-  { name: "savings", spec: "../savings/src/entry.tsx" },
-  { name: "hermes-lcm", spec: "../lcm/src/entry.tsx" },
+  { name: "holographic", load: () => import("../holographic/src/entry") },
+  { name: "graph", load: () => import("../graph/src/entry") },
+  { name: "savings", load: () => import("../savings/src/entry") },
+  { name: "hermes-lcm", load: () => import("../lcm/src/entry") },
 ];
 
 async function loadPlugins() {
   await Promise.all(
     PLUGIN_ENTRIES.map(async (p) => {
       try {
-        await import(/* @vite-ignore */ p.spec);
+        await p.load();
         return;
       } catch (err) {
         // Rsbuild leaves a stack in `err`; keep the console line scannable.
-        console.warn(`[tracedecay dev] failed to load "${p.spec}":`, err);
+        console.warn(`[tracedecay dev] failed to load "${p.name}":`, err);
       }
       console.warn(`[tracedecay dev] plugin "${p.name}" has no loadable entry — skipping.`);
     }),
