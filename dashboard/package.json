@@ -11,8 +11,7 @@
     "test:node": "node run-unit-tests.mjs",
     "test:dom": "vitest run",
     "smoke": "node smoke.mjs",
-    "smoke:mobile": "node smoke.mjs --profiles=iphone12,pixel5",
-    "typecheck": "tsc --noEmit"
+    "smoke:mobile": "node smoke.mjs --profiles=iphone12,pixel5"
   },
   "dependencies": {
     "@observablehq/plot": "^0.6.17",
