@@ -23,8 +23,14 @@ export function useGraphSearch({
 
   const onQueryChange = useCallback((value: string) => {
     setQuery(value);
-    setSearchOpen(true);
     if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!value.trim()) {
+      searchSeq.next();
+      setResults([]);
+      setSearchOpen(false);
+      return;
+    }
+    setSearchOpen(true);
     searchTimer.current = setTimeout(() => {
       const ticket = searchSeq.next();
       search({ q: value, limit: 20 })

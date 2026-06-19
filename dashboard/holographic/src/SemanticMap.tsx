@@ -305,6 +305,10 @@ export default function SemanticMap({
   useEffect(() => {
     if (!focus || loading) return;
     if (appliedFocusTokenRef.current === focus.token) return;
+    if (hiddenCats.size > 0) {
+      setHiddenCats(new Set());
+      return;
+    }
     const targets = focus.ids
       .map((id) => layout.byId.get(id))
       .filter((p): p is PlacedPoint => !!p);
@@ -316,7 +320,7 @@ export default function SemanticMap({
       targets[0];
     setSelected(pin.point);
     fitToPlaced(targets);
-  }, [focus, loading, layout, fitToPlaced]);
+  }, [focus, loading, hiddenCats, layout, fitToPlaced]);
 
   // True when at least one plotted fact is inside the viewport for the
   // committed transform; drives the empty-view recovery overlay.
