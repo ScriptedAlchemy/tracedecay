@@ -48,6 +48,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
 ```json
 {
   "mcpAllowlist": [
+    "tracedecay:tracedecay_active_project",
     "tracedecay:tracedecay_affected",
     "tracedecay:tracedecay_body",
     "tracedecay:tracedecay_branch_diff",
@@ -102,6 +103,9 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_port_order",
     "tracedecay:tracedecay_port_status",
     "tracedecay:tracedecay_pr_context",
+    "tracedecay:tracedecay_project_context",
+    "tracedecay:tracedecay_project_list",
+    "tracedecay:tracedecay_project_search",
     "tracedecay:tracedecay_rank",
     "tracedecay:tracedecay_read",
     "tracedecay:tracedecay_recursion",
@@ -115,6 +119,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_similar",
     "tracedecay:tracedecay_simplify_scan",
     "tracedecay:tracedecay_status",
+    "tracedecay:tracedecay_storage_status",
     "tracedecay:tracedecay_test_map",
     "tracedecay:tracedecay_test_risk",
     "tracedecay:tracedecay_todos",
