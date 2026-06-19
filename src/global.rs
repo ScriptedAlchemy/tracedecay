@@ -106,8 +106,11 @@ fn classify_registry_storage(
     if store.storage_mode != "profile_sharded" {
         return None;
     }
+    let profile_root = profile_root
+        .canonicalize()
+        .unwrap_or_else(|_| profile_root.to_path_buf());
     let data_root = tracedecay::storage::StoreArtifactPath::resolve(
-        profile_root,
+        &profile_root,
         std::path::Path::new(&store.store_relpath),
     )
     .ok()?
@@ -120,7 +123,7 @@ fn classify_registry_storage(
         .as_ref()
         .and_then(|relpath| {
             tracedecay::storage::StoreArtifactPath::resolve(
-                profile_root,
+                &profile_root,
                 std::path::Path::new(relpath),
             )
             .ok()
@@ -544,6 +547,8 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
 mod gather_tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     /// Plant a `.tracedecay/tracedecay.db` marker so `is_project_dir` returns true.
@@ -704,7 +709,21 @@ mod gather_tests {
             location.status,
             ProjectStorageStatus::ManifestReconstructable
         );
-        assert_eq!(location.data_root, data_root);
+        assert_eq!(
+            location.data_root,
+            data_root.canonicalize().unwrap_or(data_root)
+        );
+        #[cfg(unix)]
+        {
+            let symlinked_profile_root = dir.path().join("profile-link");
+            symlink(&profile_root, &symlinked_profile_root).unwrap();
+            let location =
+                classify_registry_storage(&project_root, &symlinked_profile_root, &store).unwrap();
+            assert_eq!(
+                location.status,
+                ProjectStorageStatus::ManifestReconstructable
+            );
+        }
     }
 
     #[test]
