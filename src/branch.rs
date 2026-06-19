@@ -297,6 +297,9 @@ pub enum BranchAddOutcome {
     AlreadyTracked,
     /// A new branch DB was created from the nearest ancestor and synced.
     Added,
+    /// Another process was adding or syncing; metadata/DB may be created, but
+    /// catch-up sync was deferred.
+    Deferred,
 }
 
 /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
@@ -326,12 +329,21 @@ pub async fn add_branch_tracking(
             |layout| layout.data_root,
         );
 
-    let _branch_lock = match try_acquire_branch_add_lock(&tracedecay_dir) {
-        Ok(lock) => lock,
-        Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
-            return Ok(BranchAddOutcome::AlreadyTracked);
+    let _branch_lock = {
+        let mut attempts = 0;
+        loop {
+            match try_acquire_branch_add_lock(&tracedecay_dir) {
+                Ok(lock) => break lock,
+                Err(crate::errors::TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
+                    return Ok(BranchAddOutcome::Deferred);
+                }
+                Err(e) => return Err(e),
+            }
         }
-        Err(e) => return Err(e),
     };
 
     let mut meta = branch_meta::load_branch_meta(&tracedecay_dir).unwrap_or_else(|| {
@@ -383,7 +395,7 @@ pub async fn add_branch_tracking(
         return Err(e.into());
     }
 
-    // Save metadata BEFORE open() so it resolves the new branch to its DB.
+    // Save metadata BEFORE open_branch() so it resolves the new branch DB.
     let db_file = format!("branches/{stem}.db");
     meta.add_branch(branch_name, &db_file, &parent);
     if let Err(e) = branch_meta::save_branch_meta(&tracedecay_dir, &meta) {
@@ -391,13 +403,10 @@ pub async fn add_branch_tracking(
         return Err(e.into());
     }
 
-    let sync_result = async {
-        let cg = crate::tracedecay::TraceDecay::open_branch(project_root, branch_name).await?;
-        let _ = cg.sync().await?;
-        Ok::<(), crate::errors::TraceDecayError>(())
-    }
-    .await;
-    if let Err(e) = sync_result {
+    let sync_result = sync_new_branch_with_retries(project_root, branch_name).await;
+    if let Err(crate::errors::TraceDecayError::SyncLock { .. }) = sync_result {
+        return Ok(BranchAddOutcome::Deferred);
+    } else if let Err(e) = sync_result {
         rollback_branch_tracking(&tracedecay_dir, branch_name, &db_file, &new_db_path);
         return Err(e);
     }
@@ -408,6 +417,24 @@ pub async fn add_branch_tracking(
     }
 
     Ok(BranchAddOutcome::Added)
+}
+
+async fn sync_new_branch_with_retries(
+    project_root: &Path,
+    branch_name: &str,
+) -> crate::errors::Result<()> {
+    let mut attempts = 0;
+    loop {
+        let cg = crate::tracedecay::TraceDecay::open_branch(project_root, branch_name).await?;
+        match cg.sync().await {
+            Ok(_) => return Ok(()),
+            Err(crate::errors::TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn rollback_branch_tracking(

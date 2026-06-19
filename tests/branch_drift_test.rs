@@ -211,6 +211,11 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
 
     git(project, &["checkout", "-b", "feature/tracked"]);
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    fs::write(
+        project.join("src/tracked_only.rs"),
+        "pub fn tracked_only() {}\n",
+    )
+    .unwrap();
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "feature"]);
 
@@ -239,6 +244,10 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
         diagnostics.warnings.is_empty(),
         "expected auto-repaired branch DB without warnings, got: {:?}",
         diagnostics.warnings
+    );
+    assert!(
+        !cg.search("tracked_only", 10).await.unwrap().is_empty(),
+        "repaired branch DB should be synced with branch-only symbols"
     );
     drop(cg);
 }

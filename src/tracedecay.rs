@@ -595,7 +595,7 @@ impl TraceDecay {
         )
     }
 
-    /// Opens a specific branch's DB for read-only queries.
+    /// Opens a specific branch's DB.
     ///
     /// Returns an error if the branch is not tracked or the DB doesn't exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {

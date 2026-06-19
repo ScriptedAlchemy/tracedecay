@@ -59,12 +59,12 @@ async fn open_untracked_project() -> (TempDir, PathBuf, TraceDecay) {
     )
     .unwrap();
 
-    let fallback = TraceDecay::open(&project).await.unwrap();
-    assert_eq!(fallback.active_branch(), Some("feature/untracked"));
-    assert_eq!(fallback.serving_branch(), Some("feature/untracked"));
-    assert!(!fallback.is_fallback());
+    let feature = TraceDecay::open(&project).await.unwrap();
+    assert_eq!(feature.active_branch(), Some("feature/untracked"));
+    assert_eq!(feature.serving_branch(), Some("feature/untracked"));
+    assert!(!feature.is_fallback());
 
-    (dir, project, fallback)
+    (dir, project, feature)
 }
 
 async fn open_detached_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
