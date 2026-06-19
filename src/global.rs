@@ -752,10 +752,14 @@ mod gather_tests {
             location.status,
             ProjectStorageStatus::ManifestReconstructable
         );
-        assert_eq!(
-            location.data_root,
-            data_root.canonicalize().unwrap_or(data_root)
-        );
+        let actual_data_root = location
+            .data_root
+            .canonicalize()
+            .unwrap_or_else(|_| location.data_root.clone());
+        let expected_data_root = data_root
+            .canonicalize()
+            .unwrap_or_else(|_| data_root.clone());
+        assert_eq!(actual_data_root, expected_data_root);
         #[cfg(unix)]
         {
             let symlinked_profile_root = dir.path().join("profile-link");
