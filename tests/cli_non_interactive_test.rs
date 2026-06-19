@@ -736,7 +736,8 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
 fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_marker() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let data_dir = project.path().join(".tracedecay");
+    let project_root = canonical_temp_path(project.path());
+    let data_dir = project_root.join(".tracedecay");
     let source_graph = data_dir.join("tracedecay.db");
     let profile_root = profile_root(home.path());
     let target_root = profile_root.join("projects/proj_cli");
@@ -754,7 +755,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         project_id: Some("proj_cli".to_string()),
         store_kind: StoreKind::CodeProject,
         storage_mode: StorageMode::ProfileSharded,
-        project_root: project.path().to_path_buf(),
+        project_root: project_root.clone(),
         data_root: target_root.clone(),
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
@@ -766,7 +767,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     )
     .unwrap();
     write_enrollment_marker(
-        project.path(),
+        &project_root,
         &EnrollmentMarker {
             project_id: "proj_cli".to_string(),
             storage_mode: StorageMode::ProfileSharded,
@@ -788,7 +789,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
             global_db: None,
         },
     );
-    manifest.source.project_root = Some(project.path().to_path_buf());
+    manifest.source.project_root = Some(project_root.clone());
     manifest.source.data_dir = Some(data_dir.clone());
     manifest.destination.profile_root = Some(profile_root);
     manifest.destination.project_id = Some("proj_cli".to_string());
@@ -808,7 +809,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     manifest.artifacts.push(store_manifest_artifact);
     save_manifest(&manifest).unwrap();
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command(home.path(), &project_root);
     command.args([
         "migrate",
         "cleanup-sources",
@@ -830,7 +831,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
         "source graph artifact should be removed"
     );
     assert!(
-        read_enrollment_marker(project.path()).unwrap().is_some(),
+        read_enrollment_marker(&project_root).unwrap().is_some(),
         "cleanup must preserve profile-sharded enrollment marker"
     );
 }
