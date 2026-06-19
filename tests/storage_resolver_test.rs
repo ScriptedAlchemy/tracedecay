@@ -7,8 +7,8 @@ use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracedecay::branch_meta::{self, BranchMeta};
-use tracedecay::config::TraceDecayConfig;
 use tracedecay::config::{discover_project_root, get_config_path, load_config};
+use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
 use tracedecay::mcp::response_handles::{
     retrieve_response_handle, store_response_handle, ResponseHandleLookup,
@@ -26,22 +26,40 @@ use tracedecay::tracedecay::TraceDecay;
 static HOME_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct HomeGuard {
-    previous: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
 }
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
-        let previous = std::env::var_os("HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
         std::env::set_var("HOME", home);
-        Self { previous }
+        std::env::set_var("USERPROFILE", home);
+        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        Self {
+            previous_home,
+            previous_userprofile,
+            previous_data_dir,
+        }
     }
 }
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
-        match self.previous.take() {
+        match self.previous_home.take() {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(USER_DATA_DIR_ENV),
         }
     }
 }
@@ -367,14 +385,15 @@ fn project_path_accepts_contained_relative_and_absolute_paths() {
     let file = root.join("src/lib.rs");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, "pub fn lib() {}").unwrap();
+    let expected_file = file.canonicalize().unwrap_or_else(|_| file.clone());
 
     let relative = ProjectPath::resolve(&root, Path::new("src/lib.rs")).unwrap();
     assert_eq!(relative.relative_path(), Path::new("src/lib.rs"));
-    assert_eq!(relative.absolute_path(), file);
+    assert_eq!(relative.absolute_path(), expected_file);
 
     let absolute = ProjectPath::resolve(&root, &file).unwrap();
     assert_eq!(absolute.relative_path(), Path::new("src/lib.rs"));
-    assert_eq!(absolute.absolute_path(), file);
+    assert_eq!(absolute.absolute_path(), expected_file);
 }
 
 #[test]
