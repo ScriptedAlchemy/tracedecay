@@ -1,8 +1,11 @@
 use tracedecay::context::*;
 use tracedecay::types::*;
 
+static CONTEXT_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn test_reranking_demotes_fixture_nodes() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
     use tracedecay::db::Database;
@@ -147,6 +150,7 @@ fn test_format_context_json() {
 
 #[tokio::test]
 async fn test_build_context_with_db() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
@@ -201,6 +205,7 @@ async fn test_build_context_with_db() {
 
 #[tokio::test]
 async fn test_get_code_reads_source_file() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
@@ -256,6 +261,7 @@ async fn test_get_code_reads_source_file() {
 
 #[tokio::test]
 async fn test_get_code_returns_none_for_missing_file() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
     use tracedecay::db::Database;
@@ -300,6 +306,7 @@ async fn test_get_code_returns_none_for_missing_file() {
 
 #[tokio::test]
 async fn test_find_relevant_context() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
     use tracedecay::db::Database;
@@ -347,6 +354,7 @@ async fn test_find_relevant_context() {
 
 #[tokio::test]
 async fn test_exclude_node_ids_deduplication() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
     use tracedecay::db::Database;
@@ -409,6 +417,7 @@ async fn test_exclude_node_ids_deduplication() {
 
 #[tokio::test]
 async fn test_merge_adjacent_code_blocks() {
+    let _guard = CONTEXT_DB_LOCK.lock().await;
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
