@@ -700,7 +700,10 @@ mod gather_tests {
 
         let location = classify_registry_storage(&project_root, &profile_root, &store).unwrap();
 
-        assert_eq!(location.status, ProjectStorageStatus::ManifestReconstructable);
+        assert_eq!(
+            location.status,
+            ProjectStorageStatus::ManifestReconstructable
+        );
         assert_eq!(location.data_root, data_root);
     }
 
