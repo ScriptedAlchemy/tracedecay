@@ -275,37 +275,48 @@ fn classify_registry_storage(
     if store.storage_mode != "profile_sharded" {
         return None;
     }
-    let profile_root = profile_root
-        .canonicalize()
-        .unwrap_or_else(|_| profile_root.to_path_buf());
     let store_relpath = registry_relpath(&store.store_relpath);
-    let data_root = crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
-        .ok()?
-        .absolute_path();
-    let graph_exists = data_root
-        .join(crate::config::db_filename(&data_root))
-        .exists();
-    let manifest_exists = store.manifest_relpath.as_ref().map_or_else(
-        || {
-            data_root
-                .join(crate::storage::STORE_MANIFEST_FILENAME)
-                .is_file()
-        },
-        |relpath| {
-            let relpath = registry_relpath(relpath);
-            [&profile_root, &data_root].iter().any(|root| {
-                crate::storage::StoreArtifactPath::resolve(root, &relpath)
-                    .ok()
-                    .is_some_and(|path| path.absolute_path().is_file())
-            })
-        },
-    );
-    if graph_exists {
-        Some(DoctorStorageStatus::ProfileSharded)
-    } else if manifest_exists {
+    let manifest_relpath = store
+        .manifest_relpath
+        .as_ref()
+        .map(|relpath| registry_relpath(relpath));
+    let mut resolved_any_root = false;
+    let mut manifest_exists = false;
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) =
+            crate::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        else {
+            continue;
+        };
+        resolved_any_root = true;
+        let data_root = data_root.absolute_path();
+        if data_root
+            .join(crate::config::db_filename(&data_root))
+            .exists()
+        {
+            return Some(DoctorStorageStatus::ProfileSharded);
+        }
+        manifest_exists |= manifest_relpath.as_ref().map_or_else(
+            || {
+                data_root
+                    .join(crate::storage::STORE_MANIFEST_FILENAME)
+                    .is_file()
+            },
+            |relpath| {
+                [&profile_root, &data_root].iter().any(|root| {
+                    crate::storage::StoreArtifactPath::resolve(root, relpath)
+                        .ok()
+                        .is_some_and(|path| path.absolute_path().is_file())
+                })
+            },
+        );
+    }
+    if manifest_exists {
         Some(DoctorStorageStatus::ManifestReconstructable)
-    } else {
+    } else if resolved_any_root {
         Some(DoctorStorageStatus::Stale)
+    } else {
+        None
     }
 }
 
@@ -322,6 +333,16 @@ fn registry_relpath(value: &str) -> PathBuf {
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![profile_root.to_path_buf()];
+    if let Ok(canonical) = profile_root.canonicalize() {
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
 }
 
 fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String]) {

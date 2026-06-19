@@ -22,6 +22,8 @@ jobs:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
+    env:
+      CARGO_BUILD_JOBS: "2"
     strategy:
       fail-fast: false
       matrix:

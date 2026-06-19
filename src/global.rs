@@ -106,44 +106,87 @@ fn classify_registry_storage(
     if store.storage_mode != "profile_sharded" {
         return None;
     }
-    let profile_root = profile_root
-        .canonicalize()
-        .unwrap_or_else(|_| profile_root.to_path_buf());
-    let data_root = tracedecay::storage::StoreArtifactPath::resolve(
-        &profile_root,
-        std::path::Path::new(&store.store_relpath),
-    )
-    .ok()?
-    .absolute_path();
-    let graph_exists = data_root
-        .join(tracedecay::config::db_filename(&data_root))
-        .exists();
-    let manifest_path = store
+    let store_relpath = registry_relpath(&store.store_relpath);
+    let manifest_relpath = store
         .manifest_relpath
         .as_ref()
-        .and_then(|relpath| {
-            tracedecay::storage::StoreArtifactPath::resolve(
-                &profile_root,
-                std::path::Path::new(relpath),
-            )
-            .ok()
-            .map(|path| path.absolute_path())
-        })
-        .unwrap_or_else(|| data_root.join(tracedecay::storage::STORE_MANIFEST_FILENAME));
-    let manifest_exists = manifest_path.is_file();
-    let status = if graph_exists {
-        ProjectStorageStatus::ProfileSharded
-    } else if manifest_exists {
-        ProjectStorageStatus::ManifestReconstructable
-    } else {
-        ProjectStorageStatus::Stale
-    };
-    Some(ProjectStorageLocation {
-        project_root: project_root.to_path_buf(),
-        data_root,
-        marker_root: Some(project_root.join(tracedecay::config::TRACEDECAY_DIR)),
-        status,
-    })
+        .map(|relpath| registry_relpath(relpath));
+    let mut stale_location = None;
+    let mut manifest_location = None;
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) =
+            tracedecay::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        else {
+            continue;
+        };
+        let data_root = data_root.absolute_path();
+        let manifest_exists = manifest_relpath.as_ref().map_or_else(
+            || {
+                data_root
+                    .join(tracedecay::storage::STORE_MANIFEST_FILENAME)
+                    .is_file()
+            },
+            |relpath| {
+                [&profile_root, &data_root].iter().any(|root| {
+                    tracedecay::storage::StoreArtifactPath::resolve(root, relpath)
+                        .ok()
+                        .is_some_and(|path| path.absolute_path().is_file())
+                })
+            },
+        );
+        let status = if data_root
+            .join(tracedecay::config::db_filename(&data_root))
+            .exists()
+        {
+            ProjectStorageStatus::ProfileSharded
+        } else if manifest_exists {
+            ProjectStorageStatus::ManifestReconstructable
+        } else {
+            ProjectStorageStatus::Stale
+        };
+        let location = ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root,
+            marker_root: Some(project_root.join(tracedecay::config::TRACEDECAY_DIR)),
+            status,
+        };
+        match location.status {
+            ProjectStorageStatus::ProfileSharded => return Some(location),
+            ProjectStorageStatus::ManifestReconstructable if manifest_location.is_none() => {
+                manifest_location = Some(location);
+            }
+            ProjectStorageStatus::Stale if stale_location.is_none() => {
+                stale_location = Some(location);
+            }
+            _ => {}
+        }
+    }
+    manifest_location.or(stale_location)
+}
+
+fn registry_relpath(value: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return path.to_path_buf();
+    }
+    value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn registry_profile_roots(profile_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![profile_root.to_path_buf()];
+    if let Ok(canonical) = profile_root.canonicalize() {
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
 }
 
 /// Returns how many seconds have elapsed since a persisted timestamp.
