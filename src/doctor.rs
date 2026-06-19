@@ -285,22 +285,21 @@ fn classify_registry_storage(
     let graph_exists = data_root
         .join(crate::config::db_filename(&data_root))
         .exists();
-    let manifest_exists = store
-        .manifest_relpath
-        .as_ref()
-        .map(|relpath| {
+    let manifest_exists = store.manifest_relpath.as_ref().map_or_else(
+        || {
+            data_root
+                .join(crate::storage::STORE_MANIFEST_FILENAME)
+                .is_file()
+        },
+        |relpath| {
             let relpath = registry_relpath(relpath);
             [&profile_root, &data_root].iter().any(|root| {
                 crate::storage::StoreArtifactPath::resolve(root, &relpath)
                     .ok()
                     .is_some_and(|path| path.absolute_path().is_file())
             })
-        })
-        .unwrap_or_else(|| {
-            data_root
-                .join(crate::storage::STORE_MANIFEST_FILENAME)
-                .is_file()
-        });
+        },
+    );
     if graph_exists {
         Some(DoctorStorageStatus::ProfileSharded)
     } else if manifest_exists {

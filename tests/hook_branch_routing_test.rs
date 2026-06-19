@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -42,17 +42,6 @@ impl Drop for HomeEnvGuard {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
         }
-    }
-}
-
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
