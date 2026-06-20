@@ -16,6 +16,10 @@
 //! * `event_msg` with `payload.type == "token_count"` — per-API-call usage; a
 //!   turn's tool loop emits one per call, so a turn's true cost is the *sum*
 //!   (see [`CodexTurnUsage`]).
+//! * `compacted` — Codex context-compression boundary. The rollout stores the
+//!   replacement history and an encrypted compaction body, so TraceDecay records
+//!   the boundary/provenance as a summary record without claiming plaintext
+//!   access to Codex's private summary.
 //! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
@@ -118,12 +122,26 @@ impl TranscriptSource for CodexSource {
         // Real session_meta lines carry no model; track the active model from
         // `turn_context` lines instead (it can change mid-session).
         let mut current_model = meta.model.clone();
+        let mut compaction_depth = 0_i64;
         for line in &new.lines {
             if turn_usage.observe(&line.value) {
                 continue;
             }
             if let Some(model) = turn_context_model(&line.value) {
                 current_model = Some(model);
+                continue;
+            }
+            if let Some(message) = compacted_summary_from_line(
+                &line.value,
+                &meta,
+                current_model.as_deref(),
+                path,
+                line.offset,
+                compaction_depth + 1,
+            ) {
+                flush_turn_usage(&mut messages, &mut turn_usage);
+                compaction_depth += 1;
+                messages.push(message);
                 continue;
             }
             if let Some(message) = message_from_line(
@@ -334,6 +352,107 @@ fn message_from_line(
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
         metadata_json: serde_json::to_string(&message_metadata(payload)).ok(),
+    })
+}
+
+fn compacted_summary_from_line(
+    record: &Value,
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+    depth: i64,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("compacted") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    let replacement_history_count = payload
+        .get("replacement_history")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let compaction = payload
+        .get("replacement_history")
+        .and_then(Value::as_array)
+        .and_then(|history| {
+            history
+                .iter()
+                .rev()
+                .find(|entry| entry.get("type").and_then(Value::as_str) == Some("compaction"))
+        });
+    let plaintext = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    let encrypted = compaction
+        .and_then(|entry| entry.get("encrypted_content"))
+        .and_then(Value::as_str)
+        .is_some_and(|content| !content.is_empty());
+    let summary_body = if plaintext.is_some() {
+        "plaintext"
+    } else if encrypted {
+        "encrypted"
+    } else {
+        "unavailable"
+    };
+    let timestamp_text = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown time");
+    let text = plaintext.map_or_else(
+        || {
+            format!(
+                "Codex context compaction at {timestamp_text}. Summary body is {summary_body} in the rollout; replacement history entries: {replacement_history_count}."
+            )
+        },
+        str::to_string,
+    );
+
+    let timestamp = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .map(|secs| secs as i64);
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("codex_context_compacted".to_string()),
+    );
+    metadata.insert(
+        "source_event".to_string(),
+        Value::String("compacted".to_string()),
+    );
+    metadata.insert(
+        "summary_body".to_string(),
+        Value::String(summary_body.to_string()),
+    );
+    metadata.insert(
+        "replacement_history_count".to_string(),
+        Value::from(replacement_history_count as i64),
+    );
+    metadata.insert(
+        "codex_compaction_depth".to_string(),
+        Value::from(depth.max(1)),
+    );
+    metadata.insert("source_offset".to_string(), Value::from(offset));
+    metadata.insert("encrypted".to_string(), Value::from(encrypted));
+
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: "assistant".to_string(),
+        timestamp,
+        ordinal: offset,
+        text,
+        kind: Some("summary".to_string()),
+        model: model.map(str::to_string),
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
 }
 

@@ -3,6 +3,9 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::lcm::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
+};
 use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -121,6 +124,58 @@ fn write_codex_subagent_rollout(
     path
 }
 
+fn write_codex_rollout_with_compaction(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-20-{session}.jsonl"));
+    let contents = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:20.000Z",
+            "type": "session_meta",
+            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:21.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Map the release automation state"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:22.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Release automation is mapped."}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:23.000Z",
+            "type": "compacted",
+            "payload": {
+                "message": "",
+                "replacement_history": [
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Map the release automation state"}]},
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Release automation is mapped."}]},
+                    {"type": "compaction", "encrypted_content": "encrypted-codex-summary"}
+                ]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:23.010Z",
+            "type": "event_msg",
+            "payload": {"type": "context_compacted"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:24.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Continue after compaction"}
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
 #[tokio::test]
 async fn codex_rollout_populates_user_and_agent_messages_only() {
     let tmp = TempDir::new().unwrap();
@@ -184,6 +239,151 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
     assert!(user_metadata.get("usage").is_none());
+}
+
+#[tokio::test]
+async fn codex_context_compaction_creates_lcm_summary_node() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 4);
+
+    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    assert_eq!(status.raw_message_count, 4);
+    assert_eq!(status.summary_node_count, 1);
+    assert!(status.dag.depths.values().any(|depth| depth.count == 1));
+
+    let description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .unwrap();
+    assert_eq!(description.summary_nodes.len(), 1);
+    assert_eq!(description.summary_nodes[0].depth, 1);
+    assert_eq!(description.summary_nodes[0].source_count, 2);
+
+    let node_id = description.summary_nodes[0].node_id.clone();
+    let expanded = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmDescribeTarget::SummaryNode { node_id },
+        })
+        .await
+        .unwrap();
+    let summary = expanded.summary_node.expect("summary node should expand");
+    assert_eq!(summary.source_count, 2);
+
+    let expansion = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: summary.node_id.clone(),
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 0,
+                limit: 1024,
+            }),
+            source_offset: 0,
+            source_limit: Some(10),
+        })
+        .await
+        .unwrap();
+    assert!(expansion
+        .content
+        .contains("Map the release automation state"));
+    assert!(expansion.content.contains("Release automation is mapped"));
+    assert!(!expansion.content.contains("Summary body is encrypted"));
+    assert_eq!(expansion.summary_sources.len(), 2);
+    let metadata: serde_json::Value = serde_json::from_str(
+        expansion
+            .summary_node
+            .as_ref()
+            .unwrap()
+            .metadata_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metadata["source"], "codex_context_compacted");
+    assert_eq!(metadata["summary_body"], "encrypted");
+    assert_eq!(metadata["codex_summary_body"], "encrypted");
+    assert_eq!(
+        metadata["tracedecay_summary_source"],
+        "visible_transcript_source_messages"
+    );
+    assert_eq!(metadata["replacement_history_count"], 3);
+}
+
+#[tokio::test]
+async fn codex_compaction_summary_can_be_replaced_with_auxiliary_summary() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+
+    let pending = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].request.provider, "codex");
+    assert_eq!(pending[0].request.session_id, "codex-compact");
+    assert_eq!(
+        pending[0]
+            .request
+            .source_messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Map the release automation state",
+            "Release automation is mapped."
+        ]
+    );
+
+    let replacement = db
+        .replace_codex_compaction_summary(
+            &pending[0].node_id,
+            "Auxiliary Codex app-server summary",
+            "codex_app_server",
+            Some("gpt-5.4"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement.summary_text,
+        "Auxiliary Codex app-server summary"
+    );
+    assert_ne!(replacement.node_id, pending[0].node_id);
+    assert_eq!(replacement.source_refs.len(), 2);
+
+    let pending_after = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+        .await
+        .unwrap();
+    assert!(pending_after.is_empty());
+
+    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    assert_eq!(status.summary_node_count, 1);
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(replacement.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["codex_summary_body"], "encrypted");
+    assert_eq!(metadata["tracedecay_summary_source"], "codex_app_server");
+    assert_eq!(metadata["codex_auxiliary_model"], "gpt-5.4");
 }
 
 #[tokio::test]

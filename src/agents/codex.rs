@@ -466,6 +466,14 @@ fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
         60,
         Some("Bash|apply_patch"),
     );
+    install_codex_hook_event(
+        &mut hooks,
+        "PostCompact",
+        tracedecay_bin,
+        "hook-codex-post-compact",
+        120,
+        Some("auto|manual"),
+    );
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
@@ -719,11 +727,12 @@ fn print_hook_trust_guidance() {
 
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 5] = [
+    const SUBCOMMANDS: [&str; 6] = [
         "hook-codex-session-start",
         "hook-codex-user-prompt-submit",
         "hook-codex-subagent-start",
         "hook-codex-post-tool-use",
+        "hook-codex-post-compact",
         "hook-codex-pre-tool-use",
     ];
 
@@ -1077,6 +1086,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("UserPromptSubmit", "hook-codex-user-prompt-submit"),
         ("SubagentStart", "hook-codex-subagent-start"),
         ("PostToolUse", "hook-codex-post-tool-use"),
+        ("PostCompact", "hook-codex-post-compact"),
     ];
     let missing: Vec<&str> = expected
         .iter()

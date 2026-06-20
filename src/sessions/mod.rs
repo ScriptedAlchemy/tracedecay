@@ -9,6 +9,7 @@ use crate::sessions::source::{ingest_source, TranscriptSource};
 pub mod claude;
 pub mod cline_like;
 pub mod codex;
+pub mod codex_app_server;
 pub mod cursor;
 pub mod hermes;
 pub mod kiro;

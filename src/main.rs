@@ -1072,6 +1072,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCodexPostCompact => {
+            let code = tracedecay::hooks::hook_codex_post_compact().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::Dashboard {
             path,
             host,
@@ -1544,6 +1550,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookCodexUserPromptSubmit
             | Commands::HookCodexSubagentStart
             | Commands::HookCodexPostToolUse
+            | Commands::HookCodexPostCompact
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
             // every pre-serve startup task — `try_flush` network round-trip,

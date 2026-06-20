@@ -2952,11 +2952,22 @@ fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
         codex_event_has_handler(hooks, "PostToolUse", "hook-codex-post-tool-use"),
         "Codex PostToolUse hook should keep the index fresh: {hooks}"
     );
+    assert!(
+        codex_event_has_handler(hooks, "PostCompact", "hook-codex-post-compact"),
+        "Codex PostCompact hook should generate app-server LCM summaries: {hooks}"
+    );
     let matcher = codex_matcher_for_handler(hooks, "PostToolUse", "hook-codex-post-tool-use")
         .expect("PostToolUse handler should exist");
     assert!(
         matcher.contains("Bash") && matcher.contains("apply_patch"),
         "PostToolUse matcher should target Bash and apply_patch, got {matcher:?}"
+    );
+    let compact_matcher =
+        codex_matcher_for_handler(hooks, "PostCompact", "hook-codex-post-compact")
+            .expect("PostCompact handler should exist");
+    assert!(
+        compact_matcher.contains("auto") && compact_matcher.contains("manual"),
+        "PostCompact matcher should target auto and manual compactions, got {compact_matcher:?}"
     );
 }
 

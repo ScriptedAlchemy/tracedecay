@@ -195,6 +195,9 @@ pub enum Commands {
     /// Codex PostToolUse hook handler for incremental sync (called by Codex)
     #[command(name = "hook-codex-post-tool-use", hide = true)]
     HookCodexPostToolUse,
+    /// Codex PostCompact hook handler for app-server LCM summaries (called by Codex)
+    #[command(name = "hook-codex-post-compact", hide = true)]
+    HookCodexPostCompact,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     Dashboard {
         /// Project path (default: current directory, with discovery)

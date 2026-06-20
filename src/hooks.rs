@@ -1280,6 +1280,21 @@ pub async fn hook_codex_post_tool_use() -> i32 {
     0
 }
 
+/// Codex `PostCompact` hook handler.
+///
+/// Codex stores compacted context bodies encrypted in the transcript. This hook
+/// uses the visible source messages already ingested into the LCM store, asks a
+/// child Codex app-server turn to summarize them, and replaces the temporary
+/// deterministic summary node. Fail-open: compaction must never block Codex.
+pub async fn hook_codex_post_compact() -> i32 {
+    let event = read_hook_event!();
+    if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
+        codex_post_compact(&event).await;
+    }
+    println!("{}", serde_json::json!({}));
+    0
+}
+
 /// Builds a Codex hook stdout payload that injects model-visible context via
 /// `hookSpecificOutput.additionalContext`. Used by `SessionStart`,
 /// `UserPromptSubmit`, and `SubagentStart`.
@@ -1443,6 +1458,81 @@ async fn codex_post_tool_use(event_json: &str) {
             CursorShellSyncPlan::Noop => {}
         }
     }
+}
+
+const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+
+async fn codex_post_compact(event_json: &str) {
+    let work = async {
+        let Some(project_root) = codex_project_root_from_event(event_json) else {
+            return;
+        };
+        if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+            return;
+        }
+        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+            return;
+        };
+        if let Some(source) = crate::sessions::codex::CodexSource::new() {
+            let _ = crate::sessions::source::ingest_source(&db, &source, &project_root, None).await;
+        }
+        let session_id = serde_json::from_str::<Value>(event_json)
+            .ok()
+            .and_then(|parsed| event_session_id(&parsed));
+        let Ok(mut pending) = db
+            .pending_codex_compaction_summary_requests(session_id.as_deref(), 1)
+            .await
+        else {
+            return;
+        };
+        let Some(pending) = pending.pop() else {
+            return;
+        };
+        let config = codex_app_server_summary_config();
+        let summary = match crate::sessions::codex_app_server::summarize_with_codex_app_server(
+            &pending.request,
+            &config,
+        ) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("tracedecay Codex PostCompact summary failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = db
+            .replace_codex_compaction_summary(
+                &pending.node_id,
+                &summary.text,
+                &summary.route,
+                summary.model.as_deref(),
+            )
+            .await
+        {
+            eprintln!("tracedecay Codex PostCompact summary replacement failed: {err}");
+        }
+    };
+    let _ = tokio::time::timeout(CODEX_POST_COMPACT_BUDGET, work).await;
+}
+
+fn codex_app_server_summary_config(
+) -> crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+    let mut config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::default();
+    if let Ok(bin) = std::env::var("TRACEDECAY_CODEX_BIN") {
+        if !bin.trim().is_empty() {
+            config.codex_bin = bin;
+        }
+    }
+    if let Ok(model) = std::env::var("TRACEDECAY_CODEX_SUMMARY_MODEL") {
+        if !model.trim().is_empty() {
+            config.model = Some(model);
+        }
+    }
+    if let Ok(secs) = std::env::var("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS") {
+        if let Ok(secs) = secs.parse::<u64>() {
+            config.timeout = Duration::from_secs(secs.clamp(5, 300));
+        }
+    }
+    config
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {
