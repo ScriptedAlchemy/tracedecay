@@ -49,6 +49,7 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     // Track `main` so the project is in branch-aware mode (serving_branch=Some).
     let meta = BranchMeta::new("main");
     save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    drop(cg);
 
     // Reopen so the instance resolves and pins `main`.
     let cg = TraceDecay::open(project).await.unwrap();
@@ -79,6 +80,8 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     // Reopening rebinds to the live branch and clears the drift.
     let reopened = cg.reopen_for_current_branch().await.unwrap();
     assert!(!reopened.branch_drifted());
+    drop(reopened);
+    drop(cg);
 }
 
 #[tokio::test]
@@ -89,6 +92,8 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
+    drop(cg);
+
     let cg = TraceDecay::open(project).await.unwrap();
 
     // Still on the branch we opened: no drift, writes proceed normally.
@@ -97,6 +102,7 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
     cg.sync()
         .await
         .expect("sync on the opened branch must not be blocked");
+    drop(cg);
 }
 
 #[tokio::test]
@@ -110,6 +116,8 @@ async fn sync_allowed_in_single_db_mode_without_git() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
+    drop(cg);
+
     let cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(cg.serving_branch(), None);
     assert!(!cg.branch_drifted());
@@ -118,6 +126,7 @@ async fn sync_allowed_in_single_db_mode_without_git() {
     cg.sync()
         .await
         .expect("single-DB mode sync must never be blocked by the drift guard");
+    drop(cg);
 }
 
 #[tokio::test]
@@ -131,6 +140,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    drop(cg);
 
     let cg = TraceDecay::open(project).await.unwrap();
     git(project, &["checkout", "-b", "feature"]);
@@ -149,6 +159,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
         "expected branch-drift warning naming both branches, got: {:?}",
         diagnostics.warnings
     );
+    drop(cg);
 }
 
 #[tokio::test]
@@ -162,6 +173,7 @@ async fn branch_diagnostics_reports_fallback_target_and_nearest_ancestor() {
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    drop(cg);
 
     git(project, &["checkout", "-b", "feature/untracked"]);
 
@@ -180,6 +192,7 @@ async fn branch_diagnostics_reports_fallback_target_and_nearest_ancestor() {
     );
     assert_eq!(diagnostics.serving_branch.as_deref(), Some("main"));
     assert!(!diagnostics.live_branch_tracked);
+    drop(cg);
 }
 
 #[tokio::test]
@@ -193,6 +206,7 @@ async fn branch_diagnostics_flags_missing_tracked_branch_db() {
 
     let meta = BranchMeta::new("main");
     save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    drop(cg);
 
     git(project, &["checkout", "-b", "feature/tracked"]);
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
@@ -224,4 +238,5 @@ async fn branch_diagnostics_flags_missing_tracked_branch_db() {
         "expected missing-db warning for tracked branch, got: {:?}",
         diagnostics.warnings
     );
+    drop(cg);
 }

@@ -43,6 +43,7 @@ pub fn helper() { foo(); }
 
 fn run_git(project: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "core.hooksPath=.git/no-hooks"])
         .args(args)
         .current_dir(project)
         .output()
