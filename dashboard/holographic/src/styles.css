@@ -308,6 +308,12 @@ input[type="range"] {
   flex-wrap: wrap;
 }
 
+@media (max-width: 720px) {
+  .hv-viewswitch {
+    flex-wrap: nowrap;
+  }
+}
+
 .hm-searchbox {
   position: relative;
 }

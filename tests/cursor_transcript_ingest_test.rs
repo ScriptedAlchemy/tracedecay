@@ -465,6 +465,48 @@ async fn cursor_subagent_transcript_ingests_as_child_session() {
 }
 
 #[tokio::test]
+async fn cursor_subagent_child_messages_inherit_parent_dispatch_model() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcripts_dir = tmp.path().join("agent-transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    let parent = transcripts_dir.join("parent-session.jsonl");
+    std::fs::write(
+        &parent,
+        r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-worker-1","name":"Subagent","input":{"agent_id":"worker-1","model":"claude-opus-4-8-thinking-max","prompt":"Review child pricing."}}]}}
+"#,
+    )
+    .unwrap();
+    let subagent_dir = transcripts_dir.join("parent-session").join("subagents");
+    std::fs::create_dir_all(&subagent_dir).unwrap();
+    std::fs::write(
+        subagent_dir.join("worker-1.jsonl"),
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"priced child transcript model evidence"}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let results = db
+        .search_session_messages("cursor", None, "priced child transcript", 10)
+        .await;
+    let child_hit = results
+        .iter()
+        .find(|hit| hit.session.session_id == "worker-1")
+        .expect("expected child transcript hit");
+    assert_eq!(
+        child_hit.message.model.as_deref(),
+        Some("claude-opus-4-8-thinking-max")
+    );
+}
+
+#[tokio::test]
 async fn cursor_capped_ingest_discovers_subagents() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);

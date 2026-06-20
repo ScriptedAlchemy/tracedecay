@@ -158,6 +158,10 @@ jobs:
         holographic/dist/style.css
         lcm/dist/index.js
         lcm/dist/style.css
+        graph/dist/index.js
+        graph/dist/style.css
+        savings/dist/index.js
+        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 

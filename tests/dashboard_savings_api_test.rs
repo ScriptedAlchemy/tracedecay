@@ -299,6 +299,24 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
         ))
         .await
     );
+    assert!(
+        gdb.upsert_session_message(&message_record_at(
+            "cursor",
+            "m-codex-summary",
+            "sess-codex",
+            "assistant",
+            2,
+            Some(day_start + 520),
+            "Synthetic Codex compaction placeholder that is not real model output.",
+            "summary",
+            Some("gpt-5.3-codex-high"),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+    );
 }
 
 async fn start_fixture() -> Fixture {
@@ -618,8 +636,23 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         assert!((turns_by_model[0]["cost_usd"].as_f64().expect("cost") - 1.25).abs() < 1e-9);
 
         let daily = models["daily"].as_array().expect("daily");
-        assert_eq!(daily.len(), 1, "all seeded messages share one UTC day");
-        assert_eq!(daily[0]["day"], fixture.day_start);
+        assert_eq!(
+            daily.len(),
+            5,
+            "daily session costs should keep one row per day/model price bucket"
+        );
+        assert!(
+            daily.iter().all(|row| row["day"] == fixture.day_start),
+            "all seeded daily rows should stay in the same UTC day"
+        );
+        assert!(
+            daily.iter().any(|row| row["model"] == "gpt-5.5-high"),
+            "daily rows must carry model ids so frontend price lookup works"
+        );
+        assert!(
+            daily.iter().any(|row| row["model"].is_null()),
+            "unknown-model daily rows should remain explicit"
+        );
         let turns_by_day = models["turns"]["by_day"].as_array().expect("turns by day");
         assert_eq!(turns_by_day.len(), 1);
 

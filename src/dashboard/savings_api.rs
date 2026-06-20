@@ -615,7 +615,8 @@ pub(crate) async fn models(
         let day_tiers = overlay.as_deref().map(|messages| {
             fold_overlay(messages, |msg| {
                 let ts = msg.timestamp.unwrap_or(0);
-                (ts > 0 && (since == 0 || ts >= since)).then(|| (ts / 86_400) * 86_400)
+                (ts > 0 && (since == 0 || ts >= since))
+                    .then(|| ((ts / 86_400) * 86_400, msg.model.clone()))
             })
         });
 
@@ -649,10 +650,10 @@ pub(crate) async fn models(
         );
 
         let daily_sql = format!(
-            "SELECT (timestamp / 86400) * 86400 AS day, {TOKEN_AGG_COLUMNS}
+            "SELECT (timestamp / 86400) * 86400 AS day, model, {TOKEN_AGG_COLUMNS}
              FROM ({MESSAGE_TOKENS_CTE})
              WHERE timestamp IS NOT NULL AND timestamp > 0 AND (?1 = 0 OR timestamp >= ?1)
-             GROUP BY day ORDER BY day ASC LIMIT 366"
+             GROUP BY day, model ORDER BY day ASC, messages DESC LIMIT 366"
         );
         let daily_rows = query_rows(conn, &daily_sql, libsql::params![since])
             .await
@@ -662,8 +663,14 @@ pub(crate) async fn models(
                 .iter()
                 .map(|row| {
                     let day = i64_field(row, "day");
-                    let tiers = day_tiers.as_ref().and_then(|map| map.get(&day));
-                    merge(token_block(row, tiers), json!({ "day": day }))
+                    let model = str_field(row, "model");
+                    let tiers = day_tiers
+                        .as_ref()
+                        .and_then(|map| map.get(&(day, model.to_string())));
+                    merge(
+                        token_block(row, tiers),
+                        json!({ "day": day, "model": model_value(model) }),
+                    )
                 })
                 .collect(),
         );

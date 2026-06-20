@@ -84,8 +84,36 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
     Ok(row.get::<i64>(0).unwrap_or(0).max(0))
 }
 
+pub(crate) async fn repair_derived_memory(
+    state: &DashboardState,
+) -> Result<MemoryRepairStats, String> {
+    let store = MemoryStore::new(&state.mem_conn);
+    let mut missing_vectors_repaired = 0;
+    loop {
+        let repaired = store
+            .compute_missing_vectors(500)
+            .await
+            .map_err(|e| e.to_string())?;
+        if repaired == 0 {
+            break;
+        }
+        missing_vectors_repaired += repaired;
+    }
+
+    let banks_rebuilt = store
+        .rebuild_dirty_banks()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(MemoryRepairStats {
+        missing_vectors_repaired,
+        banks_rebuilt,
+    })
+}
+
 async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
     let hrr_dim = HolographicEncoder::DIMENSIONS;
+    let repair = repair_derived_memory(state).await?;
     let status = MemoryStatus {
         fact_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await
             as usize,
@@ -153,10 +181,7 @@ async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> 
         )
         .await
             > 0,
-        repair: MemoryRepairStats {
-            missing_vectors_repaired: 0,
-            banks_rebuilt: 0,
-        },
+        repair,
     };
     let largest_bank_fact_count = largest_bank_fact_count(state).await?;
     let largest_bank_utilization_pct = if status.estimated_capacity > 0 {

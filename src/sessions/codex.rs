@@ -17,7 +17,7 @@
 //!   turn's tool loop emits one per call, so a turn's true cost is the *sum*
 //!   (see [`CodexTurnUsage`]).
 //! * `compacted` — Codex context-compression boundary. The rollout stores the
-//!   replacement history and an encrypted compaction body, so TraceDecay records
+//!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
 //! * subagent rollouts — separate `rollout-*.jsonl` files whose leading

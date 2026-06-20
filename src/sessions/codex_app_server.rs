@@ -1,6 +1,7 @@
 //! Codex app-server adapter used to generate auxiliary compaction summaries.
 
-use std::io::{BufRead, BufReader, Write};
+use std::fmt::Write as _;
+use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -101,7 +102,7 @@ pub fn summarize_with_codex_app_server(
     let deadline = Instant::now() + config.timeout;
     send_json(
         &mut stdin,
-        json!({
+        &json!({
             "method": "initialize",
             "id": 0,
             "params": {
@@ -114,7 +115,7 @@ pub fn summarize_with_codex_app_server(
         }),
     )?;
     wait_for_response(&line_rx, deadline, 0)?;
-    send_json(&mut stdin, json!({"method": "initialized", "params": {}}))?;
+    send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
     let mut thread_params = json!({});
     if let Some(model) = model {
@@ -122,7 +123,7 @@ pub fn summarize_with_codex_app_server(
     }
     send_json(
         &mut stdin,
-        json!({"method": "thread/start", "id": 1, "params": thread_params}),
+        &json!({"method": "thread/start", "id": 1, "params": thread_params}),
     )?;
     let thread_response = wait_for_response(&line_rx, deadline, 1)?;
     let thread_id = thread_response
@@ -148,7 +149,7 @@ pub fn summarize_with_codex_app_server(
     }
     send_json(
         &mut stdin,
-        json!({"method": "turn/start", "id": 2, "params": turn_params}),
+        &json!({"method": "turn/start", "id": 2, "params": turn_params}),
     )?;
 
     let text = wait_for_turn_summary(&line_rx, deadline)?;
@@ -173,7 +174,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn send_json(stdin: &mut impl Write, value: Value) -> Result<()> {
+fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
     writeln!(stdin, "{value}")?;
     stdin.flush()?;
     Ok(())
@@ -262,8 +263,7 @@ fn collect_item_text(value: Option<&Value>) -> Option<String> {
             let text = items
                 .iter()
                 .filter_map(|item| collect_item_text(Some(item)))
-                .collect::<Vec<_>>()
-                .join("");
+                .collect::<String>();
             (!text.is_empty()).then_some(text)
         }
         Value::Object(map) => {
@@ -288,10 +288,11 @@ pub fn build_codex_summary_prompt(request: &LcmSummaryRequest) -> String {
     prompt.push_str(&request.prompt);
     prompt.push_str("\n\nSource messages:\n");
     for message in &request.source_messages {
-        prompt.push_str(&format!(
+        let _ = write!(
+            prompt,
             "\n[{} store_id={}]\n{}\n",
             message.role, message.store_id, message.content
-        ));
+        );
     }
     prompt
 }

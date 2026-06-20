@@ -234,6 +234,9 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     };
+    if let Err(err) = memory_api::repair_derived_memory(&state).await {
+        eprintln!("Dashboard memory repair skipped: {err}");
+    }
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     token_count::spawn_warm(state.clone());
@@ -407,6 +410,7 @@ pub(crate) fn router(state: DashboardState) -> Router {
 /// Capability discovery for hosts and future Hermes-side extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
+    let has_lcm = state.lcm_conn.is_some();
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
@@ -421,9 +425,9 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "lcm_scope": state.lcm_scope,
         "features": {
             "memory": true,
-            "lcm": true,
-            "lcm_gc": true,
-            "lcm_payload_health": true,
+            "lcm": has_lcm,
+            "lcm_gc": has_lcm,
+            "lcm_payload_health": has_lcm,
             "graph": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side

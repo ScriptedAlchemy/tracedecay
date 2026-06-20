@@ -251,30 +251,30 @@ fn parse_cursor_jsonl(
         || parent_session_id.to_string(),
         |(session_id, _agent_id)| session_id.clone(),
     );
+    let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
+        parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
+    });
     let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
     let mut messages = Vec::new();
     for line in &new.lines {
         let derived_timestamp = carry.observe(&line.value);
+        let context = CursorMessageContext {
+            transcript_path: path,
+            source_offset: line.offset,
+            derived_timestamp,
+            model_fallback: subagent_model.as_deref(),
+        };
         // The byte offset doubles as the message ordinal and source_offset,
         // matching the original Cursor ingestion.
-        if let Some(message) = event_message(
-            &line.value,
-            event,
-            &session_id,
-            path,
-            line.offset,
-            line.offset,
-            derived_timestamp,
-        ) {
+        if let Some(message) = event_message(&line.value, event, &session_id, line.offset, context)
+        {
             messages.push(message);
         }
         messages.extend(event_dispatch_messages(
             &line.value,
             event,
             &session_id,
-            path,
-            line.offset,
-            derived_timestamp,
+            context,
         ));
     }
 
@@ -631,6 +631,70 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
+fn parent_dispatch_model_for_subagent(
+    path: &Path,
+    parent_session_id: &str,
+    agent_id: &str,
+) -> Option<String> {
+    let parent_dir = path.parent()?.parent()?;
+    let candidates = [
+        parent_dir.join(format!("{parent_session_id}.jsonl")),
+        parent_dir.with_extension("jsonl"),
+    ];
+    for candidate in candidates {
+        if let Some(model) = dispatch_model_for_agent(&candidate, agent_id) {
+            return Some(model);
+        }
+    }
+    None
+}
+
+fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let message = record.get("message").unwrap_or(&record);
+        let content = message.get("content").unwrap_or(message);
+        let Some(items) = content.as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if is_subagent_dispatch_tool(name) && dispatch_targets_agent(item, agent_id) {
+                if let Some(model) = cursor_dispatch_model(item) {
+                    return Some(model);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
+    let input = item.get("input").unwrap_or(item);
+    [
+        "agent_id",
+        "agentId",
+        "subagent_id",
+        "subagentId",
+        "session_id",
+        "sessionId",
+        "id",
+    ]
+    .into_iter()
+    .any(|key| {
+        input
+            .get(key)
+            .or_else(|| item.get(key))
+            .and_then(Value::as_str)
+            == Some(agent_id)
+    })
+}
+
 /// Per-line timestamp derivation for Cursor transcripts, which carry no
 /// structured per-message timestamps. The injected `<timestamp>…</timestamp>`
 /// tag in user prompts is parsed and carried forward across subsequent lines
@@ -681,14 +745,20 @@ fn timestamp_tag_from_text(text: &str) -> Option<i64> {
     crate::timeutil::parse_cursor_human_timestamp(text[start..end].trim())
 }
 
+#[derive(Clone, Copy)]
+struct CursorMessageContext<'a> {
+    transcript_path: &'a Path,
+    source_offset: i64,
+    derived_timestamp: Option<i64>,
+    model_fallback: Option<&'a str>,
+}
+
 fn event_message(
     record: &Value,
     event: &Value,
     session_id: &str,
-    transcript_path: &Path,
     ordinal: i64,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
+    context: CursorMessageContext<'_>,
 ) -> Option<SessionMessageRecord> {
     let role = record
         .get("role")
@@ -718,7 +788,9 @@ fn event_message(
             || format!("{session_id}:{ordinal}"),
             std::string::ToString::to_string,
         );
-    let model = cursor_record_model(record, message, event);
+    let model = cursor_record_message_model(record, message)
+        .or_else(|| context.model_fallback.map(str::to_string))
+        .or_else(|| cursor_model_string(event));
 
     Some(SessionMessageRecord {
         provider: "cursor".to_string(),
@@ -727,14 +799,14 @@ fn event_message(
         role: role.to_string(),
         timestamp: record_timestamp(record)
             .or_else(|| record_timestamp(event))
-            .or(derived_timestamp),
+            .or(context.derived_timestamp),
         ordinal,
         text,
         kind: content_kind(content).map(str::to_string),
         model,
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(transcript_path.to_string_lossy().to_string()),
-        source_offset: Some(source_offset),
+        source_path: Some(context.transcript_path.to_string_lossy().to_string()),
+        source_offset: Some(context.source_offset),
         metadata_json: serde_json::to_string(&message_metadata(record, message)).ok(),
     })
 }
@@ -743,9 +815,7 @@ fn event_dispatch_messages(
     record: &Value,
     event: &Value,
     session_id: &str,
-    transcript_path: &Path,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
+    context: CursorMessageContext<'_>,
 ) -> Vec<SessionMessageRecord> {
     let Some(role) = record
         .get("role")
@@ -776,7 +846,12 @@ fn event_dispatch_messages(
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty());
         let message_id = tool_use_id.map_or_else(
-            || format!("{session_id}:tool_dispatch:{source_offset}:{index}"),
+            || {
+                format!(
+                    "{}:tool_dispatch:{}:{index}",
+                    session_id, context.source_offset
+                )
+            },
             |id| format!("{session_id}:tool_dispatch:{id}"),
         );
         out.push(SessionMessageRecord {
@@ -786,15 +861,17 @@ fn event_dispatch_messages(
             role: role.to_string(),
             timestamp: record_timestamp(record)
                 .or_else(|| record_timestamp(event))
-                .or(derived_timestamp),
-            ordinal: source_offset.saturating_add(index as i64),
+                .or(context.derived_timestamp),
+            ordinal: context.source_offset.saturating_add(index as i64),
             text,
             kind: Some("tool_dispatch".to_string()),
             model: cursor_dispatch_model(item)
-                .or_else(|| cursor_record_model(record, message, event)),
+                .or_else(|| cursor_record_message_model(record, message))
+                .or_else(|| context.model_fallback.map(str::to_string))
+                .or_else(|| cursor_model_string(event)),
             tool_names: Some(name.to_string()),
-            source_path: Some(transcript_path.to_string_lossy().to_string()),
-            source_offset: Some(source_offset),
+            source_path: Some(context.transcript_path.to_string_lossy().to_string()),
+            source_offset: Some(context.source_offset),
             metadata_json: serde_json::to_string(&serde_json::json!({
                 "source": "cursor_transcript",
                 "raw_type": record.get("type").cloned(),
@@ -818,10 +895,8 @@ fn cursor_model_string(value: &Value) -> Option<String> {
         })
 }
 
-fn cursor_record_model(record: &Value, message: &Value, event: &Value) -> Option<String> {
-    cursor_model_string(record)
-        .or_else(|| cursor_model_string(message))
-        .or_else(|| cursor_model_string(event))
+fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
+    cursor_model_string(record).or_else(|| cursor_model_string(message))
 }
 
 fn cursor_dispatch_model(item: &Value) -> Option<String> {

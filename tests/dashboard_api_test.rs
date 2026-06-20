@@ -363,9 +363,13 @@ fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) 
 
 async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
-    let project_root = tmp.path().join("project");
-    let global_db_path = tmp.path().join("global").join("global.db");
-    let profile_root = tmp.path().join("profile").join(".tracedecay");
+    let tmp_root = tmp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+    let project_root = tmp_root.join("project");
+    let global_db_path = tmp_root.join("global").join("global.db");
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     if let Err(err) = write_enrollment_marker(
@@ -607,7 +611,7 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
         assert_eq!(
             initial["pairs"].as_array().map(Vec::len),
             Some(3),
-            "dashboard startup backfills legacy fixture vectors, so all three seeded facts participate in the >=0.99 similarity set"
+            "dashboard startup should repair stale seeded vectors before similarity reads"
         );
 
         set_fact_access_without_touching_updated_at(&fixture, 102, 7, 1_700_000_500).await;

@@ -60,7 +60,8 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
            CASE WHEN json_valid(metadata_json) THEN
                CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
            END AS usage_cache_write
-    FROM session_messages";
+    FROM session_messages
+    WHERE kind IS NULL OR kind <> 'summary'";
 
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
 /// is exact (the model's real tokenizer) or a labeled approximation.
