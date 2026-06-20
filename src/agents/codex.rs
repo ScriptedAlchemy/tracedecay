@@ -107,8 +107,7 @@ impl AgentIntegration for CodexIntegration {
         };
         write_codex_plugin_files(&target, &ctx.tracedecay_bin, InstallScope::Global)?;
         if target_is_cached {
-            remove_codex_plugin_install(&plugin_dir)?;
-            remove_codex_marketplace_entry(&ctx.home)?;
+            cleanup_codex_plugin_bootstrap(&ctx.home)?;
         }
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
@@ -341,8 +340,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         InstallScope::Global,
     )?;
     if install_dir == codex_plugin_cached_install_dir(home) {
-        remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
-        remove_codex_marketplace_entry(home)?;
+        cleanup_codex_plugin_bootstrap(home)?;
     } else {
         install_codex_marketplace_entry(
             &codex_personal_marketplace_path(home),
@@ -579,10 +577,41 @@ fn install_codex_marketplace_entry(
 }
 
 fn uninstall_codex_plugin(home: &Path) -> Result<()> {
-    remove_codex_plugin_install(&codex_plugin_cached_install_dir(home))?;
-    remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
-    remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
+    remove_codex_plugin_bootstrap_source(&codex_plugin_cached_install_dir(home))?;
+    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
+    remove_codex_plugin_bootstrap_source(&codex_plugin_legacy_install_dir(home))?;
     remove_codex_marketplace_entry(home)?;
+    Ok(())
+}
+
+fn cleanup_codex_plugin_bootstrap(home: &Path) -> Result<()> {
+    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
+    remove_codex_plugin_bootstrap_source(&codex_plugin_legacy_install_dir(home))?;
+    remove_codex_marketplace_entry(home)?;
+    Ok(())
+}
+
+fn remove_codex_plugin_bootstrap_source(install_dir: &Path) -> Result<()> {
+    if install_dir.exists() && codex_plugin_dir_is_tracedecay(install_dir) {
+        remove_codex_plugin_skills_dir(install_dir)?;
+    }
+    remove_codex_plugin_install(install_dir)
+}
+
+fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
+    let skills_dir = install_dir.join("skills");
+    let Ok(metadata) = std::fs::symlink_metadata(&skills_dir) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(&skills_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", skills_dir.display()),
+        })?;
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(&skills_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", skills_dir.display()),
+        })?;
+    }
     Ok(())
 }
 
