@@ -41,6 +41,7 @@ fn init_project_with_cli(home: &Path, project: &Path) {
 }
 
 async fn register_global_project(home: &Path, project: &Path) {
+    let home = canonical_existing_path(home);
     let db_path = home.join(".tracedecay/global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     db.upsert(project, 0).await;
@@ -48,13 +49,18 @@ async fn register_global_project(home: &Path, project: &Path) {
 }
 
 fn tracedecay_command_with_home(home: &Path) -> Command {
+    let home = canonical_existing_path(home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"));
     command
+}
+
+fn canonical_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn runtime_project_root(stdout: &[u8], id: i64) -> String {
