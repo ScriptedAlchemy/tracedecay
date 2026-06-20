@@ -6,6 +6,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { cn } from "../../lib/sdk";
+import { ErrorPanel } from "../../lib/primitives";
 import { api } from "./api";
 import { fmtTokens } from "./logic";
 import type { PriceTable } from "./pricing";
@@ -115,10 +116,12 @@ export default function SavingsExplorer() {
       <div className="tss-toolbar">
         <div className="tss-toolbar-left">
           <span className="tss-kicker">Savings &amp; Cost</span>
-          <div className="tss-views" role="group" aria-label="Savings views">
+          <div className="tss-views" role="tablist" aria-label="Savings views">
             {VIEWS.map((entry) => (
               <button
                 key={entry.id}
+                role="tab"
+                aria-selected={view === entry.id}
                 className={cn("tss-view-tab", view === entry.id && "tss-view-tab-active")}
                 onClick={() => setView(entry.id)}
               >
@@ -169,12 +172,7 @@ export default function SavingsExplorer() {
       )}
 
       {error && (
-        <div className="tss-error" role="alert">
-          Failed to load savings data: {error}{" "}
-          <button className="tss-retry" onClick={retry}>
-            Retry
-          </button>
-        </div>
+        <ErrorPanel error={`Failed to load savings data: ${error}`} onRetry={retry} />
       )}
 
       {view === "savings" && (

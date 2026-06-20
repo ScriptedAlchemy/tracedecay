@@ -1093,7 +1093,7 @@ The dashboard frontend source lives in `dashboard/`:
 | `dashboard/graph/` | Code Graph explorer plugin bundle |
 | `dashboard/savings/` | Savings & Cost plugin bundle |
 | `dashboard/hermes-wrapper/` | Hermes-side thin wrapper (concatenated child bundles) |
-| `dashboard/lib/` | Shared plugin shims (React/JSX-runtime shims; canonical `cn.ts`) |
+| `dashboard/lib/` | Shared plugin shims (React/JSX-runtime shims), shared UI primitives (`primitives.tsx` / `primitives.css`), and the canonical `cn.ts` classname helper |
 | `dashboard/dev/` | Rsbuild HMR dev server entry |
 
 ### Building
@@ -1120,7 +1120,10 @@ npm run build
    `@layer theme` and `@layer base` so the plugin never clobbers the host's
    `:root` theme vars or preflight, wraps the output in
    `@layer hermes-plugin`, and minifies it to `holographic/dist/style.css`.
-   (graph/savings/lcm ship hand-rolled CSS, copied as-is to `dist/style.css`.)
+   (graph/savings/lcm ship hand-rolled CSS in `src/styles.css`, copied to
+   `dist/style.css`; each primitives-consuming plugin additionally gets
+   `lib/primitives.css` prepended — see
+   [Shared UI primitives](#shared-ui-primitives).)
 4. **LCM** is a regular TSX plugin bundle (built like the others), replacing
    the old hand-written vanilla-JS IIFE.
 5. **Hermes wrapper** — `build.mjs` assembles `hermes-wrapper/dist/` by
@@ -1128,8 +1131,38 @@ npm run build
    `graph.js`, `savings.js`) and merging all plugin stylesheets into a single
    `style.css`.
 
-esbuild is no longer part of the build pipeline — it remains only as a
-unit-test bundler helper.
+The production dashboard build now flows through `dashboard/build.mjs`: Rspack
+bundles the shell/plugins, holographic styles compile with Tailwind v4, and the
+resulting `dist/` assets are what the Rust binary embeds.
+
+### Shared UI primitives
+
+`dashboard/lib/primitives.tsx` exports a small set of theme-aware UI building
+blocks in the `tdp-*` class namespace — `EmptyState`, `ErrorPanel`,
+`SkeletonLines`, `Stat`, and `BarList`. They are built on the host-SDK
+design-system components (Button, etc.) and resolve every color through the
+host `--color-*` CSS variables, so they theme correctly in both the standalone
+tracedecay shell (which aliases `--color-*` to its `--ts-*` tokens) and the
+Hermes dashboard (whose shadcn palette defines the same `--color-*` names).
+The matching stylesheet is `dashboard/lib/primitives.css`. The canonical
+classname-join helper used throughout is `dashboard/lib/cn.ts`
+(`cn(...args)` — flattens arrays/strings, drops falsy).
+
+A plugin opts into the primitives CSS via the `buildPlugin` `primitives: true`
+option in `build.mjs`, which prepends `lib/primitives.css` to that plugin's
+`dist/style.css`. The prepend (rather than a separate file) is deliberate:
+both hosts load a single per-plugin stylesheet — the standalone shell serves
+`<plugin>/dist/style.css`, and the Hermes wrapper concatenates the same files
+into one `style.css` — so prepending is the only way the `tdp-*` classes reach
+both hosts without a second `<link>`.
+
+Current adoption:
+
+- **graph**, **savings**, and **lcm** consume the shared `tdp-*` primitives and
+  build with `primitives: true`, so each plugin's `dist/style.css` includes
+  `lib/primitives.css`.
+- **holographic** stays self-contained (its own `holographic/src/ui.ts`
+  primitives layered over Tailwind utilities).
 
 ### Smoke Testing
 
@@ -1204,11 +1237,26 @@ cd dashboard && npm run dev          # listens on http://127.0.0.1:7342/
 - Imports the plugin entries directly (no `/api/dashboard/plugins` fetch in
   dev), and builds the SDK on `window.__HERMES_PLUGIN_SDK__` before any plugin
   entry runs, mirroring the prod shell.
+- Compiles the holographic plugin's Tailwind v4 stylesheet once with the same
+  programmatic compiler used by production, writes
+  `dashboard/holographic/dist/style.css`, and imports that generated CSS into
+  the dev entry before Rsbuild starts.
 
 Note that in **dev** React is *not* aliased onto the window-SDK shim — a single
 Rsbuild bundle already shares one real React instance, and `react-dom/client`
 needs the real `react` module — so the per-plugin React externalization is a
 **prod** concern only.
+
+The dev server intentionally does **not** install Tailwind as an Rsbuild
+plugin. In some sandboxes both Tailwind-v4 integrations Rsbuild documents —
+`@rsbuild/plugin-tailwindcss` and `@tailwindcss/postcss` wired through
+`tools.postcss` — segfault natively inside `createRsbuild()` (hard native
+crash, no stdout/stderr), while `pluginReact()` alone and the
+`@rspack/core`-based prod build run fine. To keep HMR usable without native
+crashes, `dashboard/dev/run.mjs` performs the Tailwind compile as a preflight
+step and the dev entry imports the generated `holographic/dist/style.css`.
+That keeps holographic styled in dev while preserving production as the source
+of truth for the embedded dashboard assets.
 
 To validate the production build (the shipped UI is always embedded bytes):
 

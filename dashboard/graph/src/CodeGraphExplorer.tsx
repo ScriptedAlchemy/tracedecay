@@ -5,6 +5,7 @@ import GraphCanvas from "./GraphCanvas";
 import OverviewPanel from "./OverviewPanel";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, cn } from "../../lib/sdk";
 import { fmt, short } from "../../lib/format";
+import { EmptyState, ErrorPanel } from "../../lib/primitives";
 import { makeSequence } from "../../lib/sequence";
 import { useGraphInspection } from "./useGraphInspection";
 import { useGraphSearch } from "./useGraphSearch";
@@ -77,10 +78,10 @@ function DetailPanel({
       <Card className="tsg-panel">
         <CardHeader><CardTitle>Inspector</CardTitle></CardHeader>
         <CardContent>
-          <div className="tsg-empty">
+          <EmptyState>
             Click a node to inspect it. Double-click (or use the +N badge counts as a guide) to
             expand its neighbors into the canvas.
-          </div>
+          </EmptyState>
         </CardContent>
       </Card>
     );
@@ -405,6 +406,10 @@ export default function CodeGraphExplorer() {
           )}
         </div>
         {overview && (
+          /* Compact inline mono stat strip (nodes/edges/files). Left as a
+           * hand-rolled `.tsg-totals` span row on purpose: the shared `Stat`
+           * tiles are large bordered cards meant for dashboards, far too heavy
+           * for this one-line toolbar. This is not a Stat duplicate. */
           <div className="tsg-totals">
             <span>{fmt(overview.totals.nodes)} nodes</span>
             <span>{fmt(overview.totals.edges)} edges</span>
@@ -414,7 +419,9 @@ export default function CodeGraphExplorer() {
       </div>
 
       {error && (
-        <div className="tsg-error" onClick={() => setError("")} role="alert">{error}</div>
+        <div onClick={() => setError("")} style={{ cursor: "pointer" }}>
+          <ErrorPanel error={error} />
+        </div>
       )}
 
       {view === "overview" ? (

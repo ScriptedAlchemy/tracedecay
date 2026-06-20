@@ -47,8 +47,9 @@ The contract's §2 claims were re-checked against the current tree; all hold:
 - `LcmError` (`types.rs:726`) has `InvalidPayloadRef`/`PayloadNotFound`/`PayloadMissing`/
   `PayloadIntegrityMismatch`; **`PayloadGc'd` and `StillReferenced` are absent** → both are
   new work (confirms MF-1 and the test-plan §8 open item). ✓
-- Frontend source is real: `dashboard/lcm/src/{index.js,style.css}` → built to `dist/` by
-  `dashboard/build.mjs`. The visibility UI card lands there. ✓
+- Frontend source is real: `dashboard/lcm/src/{entry.tsx,styles.css}` → built to
+  `dashboard/lcm/dist/{index.js,style.css}` by `dashboard/build.mjs`. The visibility UI card
+  lands there. ✓
 
 ## 3. Open items reconciled (decisions for the implementation)
 
@@ -117,7 +118,7 @@ A1 (foundation)  ──►  A2 (reaper engine)  ──►  B (visibility + invoc
 | **A1 — foundation** | `schema.rs` (v5: `lcm_gc_marks`+`lcm_gc_meta`+get/set), `types.rs` (`PayloadGc'd`+`StillReferenced`+`LcmGcConfig`), `gc.rs` NEW (extracted `referenced_payload_refs` + `tombstone_placeholder_in_text`), `doctor.rs` (call shared fn) | `TS-001..003`, `CFG-001..005`, `FS-001..008` | bounded; clear spec |
 | **A2 — reaper engine** | `payload.rs` (`delete_external_payload`+`DeleteOpts/Outcome`, `safe_remove_payload_file`, wire `expand`→`PayloadGc'd`), `gc.rs` (`LcmGcReport`, phases A–D, `run_payload_gc` w/ injected clock, reap-time ref re-check) | `DEL-001..007`, `PHA/PHB/PHC/PHD-*`, `GC-001..012`, `DRY-001..003` | hardest; safety-critical (path/symlink/crash/txn) |
 | **B — visibility + invocation** | `query.rs` (`status()` byte/orphan/tombstoned additions), `doctor.rs` (`payload_diagnostics` bytes + `mode=gc`), `types.rs` (`LcmPayloadGcStatus` + status fields + `LcmGcReport` surfacing), `mcp/tools/definitions.rs` + `handlers/session.rs` (`lcm_status deep`, `lcm_doctor gc` mode), `dashboard/lcm_api.rs` + `mod.rs` (`payload_health` block, `/payloads/health`, `/payloads/gc`, capabilities), `agents/hermes/templates.rs` (gc mode desc + env wiring) | `VIS-001..012` | multi-file integration; cross-surface agreement |
-| **C — frontend** *(deferred, spawned after B)* | `dashboard/lcm/src/{index.js,style.css}` (Payload Health card + dry-run→apply modal) → rebuild `dist/` via `build.mjs` | visual QA of green/amber/red pill + modal | UI; operator review of design |
+| **C — frontend** *(deferred, spawned after B)* | `dashboard/lcm/src/{entry.tsx,styles.css}` (Payload Health card + dry-run→apply modal) → rebuild `dashboard/lcm/dist/{index.js,style.css}` via `build.mjs` | visual QA of green/amber/red pill + modal | UI; operator review of design |
 
 **Why A1/A2/B are serial, not parallel:** A2 needs A1's schema + extracted helper + error
 variants; B needs A2's `LcmGcReport`/status fields; all three write `types.rs` and `gc.rs`/

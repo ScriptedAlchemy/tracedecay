@@ -29,6 +29,7 @@ import {
   stripMd,
   summaryTitle,
 } from "./helpers";
+import { EmptyState, Stat } from "../../lib/primitives";
 
 // --- search-highlight rendering -------------------------------------------
 
@@ -76,30 +77,6 @@ function codeBlock(text: any): React.ReactElement {
 
 export function toolBadge(label: any, kind?: string): React.ReactElement {
   return <span className={"hermes-lcm-tag" + (kind ? " hermes-lcm-tag-" + kind : "")}>{label}</span>;
-}
-
-export function Stat(props: { value: any; label: any }): React.ReactElement {
-  return (
-    <div className="hermes-lcm-stat">
-      <div className="hermes-lcm-stat-v">{props.value}</div>
-      <div className="hermes-lcm-stat-k">{props.label}</div>
-    </div>
-  );
-}
-
-export function SkeletonLines(props: { count?: number; widths?: any }): React.ReactElement {
-  const count = props.count || 3;
-  const lines: React.ReactElement[] = [];
-  for (let i = 0; i < count; i++) {
-    lines.push(
-      <div
-        key={"sk" + i}
-        className="hermes-lcm-skel-line"
-        style={props.widths && props.widths[i] ? { width: props.widths[i] } : undefined}
-      />,
-    );
-  }
-  return <div className="hermes-lcm-skeleton-block">{lines}</div>;
 }
 
 export function Pager(props: { totalPages?: number; page: number; onChange: (n: number) => void }): React.ReactElement | null {
@@ -167,40 +144,6 @@ export function CopyButton(props: { text: any; label?: string; title?: string })
 }
 
 // --- chart-ish presentational components -----------------------------------
-
-export function BarList(props: { rows?: any[]; keyName: string; onPick?: (label: string) => void }): React.ReactElement {
-  const rows = props.rows || [];
-  const keyName = props.keyName;
-  const onPick = props.onPick;
-  const total = rows.reduce((acc, row) => acc + (Number(row.count) || 0), 0) || 1;
-  if (!rows.length) return <div className="hermes-lcm-empty">No data</div>;
-  return (
-    <div className="hermes-lcm-bars">
-      {rows.map(function (row, idx) {
-        const label = String(row[keyName] == null ? "(none)" : row[keyName]);
-        const count = Number(row.count) || 0;
-        const pct = Math.max(2, Math.round((count / total) * 100));
-        const clickable = typeof onPick === "function";
-        return (
-          <div
-            key={label + ":" + idx}
-            className={"hermes-lcm-bar-row" + (clickable ? " hermes-lcm-clk" : "")}
-            onClick={clickable ? function () { onPick!(label); } : undefined}
-          >
-            <div className="hermes-lcm-bar-head">
-              <span className="hermes-lcm-k">{label}</span>
-              <span className="hermes-lcm-v">{fmtInt(count)}</span>
-            </div>
-            <div className="hermes-lcm-bar-track">
-              <div className="hermes-lcm-bar-fill" style={{ width: pct + "%" }} />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /** Responsive CSS bar chart (no SVG stretching, so bars stay crisp and the
  *  summary markers render as true round dots regardless of bucket count). */
 export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; undatedCount?: any }): React.ReactElement {
@@ -212,11 +155,11 @@ export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; und
   const undatedCount = Number(props.undatedCount) || 0;
   if (!buckets.length) {
     return (
-      <div className="hermes-lcm-empty">
+      <EmptyState className="hermes-lcm-empty">
         {undatedCount > 0
           ? `No dated messages yet — ${fmtInt(undatedCount)} stored messages have no timestamp`
           : "No timeline data"}
-      </div>
+      </EmptyState>
     );
   }
   const maxCount = buckets.reduce((acc, b) => Math.max(acc, Number(b.count) || 0), 0) || 1;
@@ -257,7 +200,7 @@ export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; und
 export function CompressionBars(props: { groups?: any[]; onPick?: (g: any) => void }): React.ReactElement {
   const groups = props.groups || [];
   const onPick = props.onPick;
-  if (!groups.length) return <div className="hermes-lcm-empty">No compression data</div>;
+  if (!groups.length) return <EmptyState className="hermes-lcm-empty">No compression data</EmptyState>;
   const maxSrc = groups.reduce((acc, g) => Math.max(acc, Number(g.source_token_count) || 0), 0) || 1;
   return (
     <div className="hermes-lcm-comp">
@@ -504,6 +447,7 @@ export function ToolResult(props: { name: any; content: any }): React.ReactEleme
 // --- list rows -------------------------------------------------------------
 
 export function SearchResultCard(props: {
+  key?: React.Key;
   item: any;
   kind: string;
   query: any;
@@ -557,6 +501,7 @@ export function SearchResultCard(props: {
 }
 
 export function MessageItem(props: {
+  key?: React.Key;
   m: any;
   onOpenMessage?: (m: any) => void;
   active?: boolean;
@@ -611,7 +556,7 @@ export function MessageItem(props: {
   );
 }
 
-export function NodeRef(props: { n: any; onOpen: (id: any) => void; active?: boolean }): React.ReactElement {
+export function NodeRef(props: { key?: React.Key; n: any; onOpen: (id: any) => void; active?: boolean }): React.ReactElement {
   const n = props.n;
   const onOpen = props.onOpen;
   return (
@@ -643,7 +588,7 @@ export function MessageDetail(props: {
   const d = props.data || {};
   const message = d.message;
   const session = d.session;
-  if (!message) return <div className="hermes-lcm-empty">Message not found</div>;
+  if (!message) return <EmptyState className="hermes-lcm-empty">Message not found</EmptyState>;
   const sessionNodes = (session && session.summary_nodes) || [];
   // Prefer the backend's exact message→summary linkage (summary_node_ids,
   // additive field) and fall back to same-session summaries when absent.
@@ -730,7 +675,7 @@ export function MessageDetail(props: {
         </div>
       ) : null}
       {(!relatedNodes.length && !unresolvedLinkIds.length)
-        ? <div className="hermes-lcm-empty">No summary nodes reference this message yet.</div>
+        ? <EmptyState className="hermes-lcm-empty">No summary nodes reference this message yet.</EmptyState>
         : null}
     </div>
   );
@@ -747,7 +692,7 @@ export function NodeDetail(props: {
   const onOpenNode = props.onOpenNode;
   const onOpenSession = props.onOpenSession;
   const onOpenMessage = props.onOpenMessage;
-  if (!node) return <div className="hermes-lcm-empty">Node not found</div>;
+  if (!node) return <EmptyState className="hermes-lcm-empty">Node not found</EmptyState>;
   const sources = d.sources || {};
   const tags = parseJsonArray(node.tags);
   const entities = parseJsonArray(node.entities);
@@ -795,11 +740,11 @@ export function NodeDetail(props: {
         const items = isNodes ? (sources.nodes || []) : (sources.messages || []);
         if (!items.length) {
           return (
-            <div className="hermes-lcm-empty">
+            <EmptyState className="hermes-lcm-empty">
               {(sources.ids || []).length
                 ? "Source items are no longer in the database."
                 : "This summary records no source items."}
-            </div>
+            </EmptyState>
           );
         }
         return (
@@ -839,10 +784,11 @@ export function SessionDetail(props: {
   return (
     <div className="hermes-lcm-detail">
       <div className="hermes-lcm-statrow">
-        <Stat value={fmtInt(c.message_count)} label="messages" />
-        <Stat value={fmtInt(c.summary_node_count)} label="summaries" />
-        <Stat value={fmtInt(c.token_estimate_total)} label="msg tokens" />
+        <Stat variant="compact" value={fmtInt(c.message_count)} label="messages" />
+        <Stat variant="compact" value={fmtInt(c.summary_node_count)} label="summaries" />
+        <Stat variant="compact" value={fmtInt(c.token_estimate_total)} label="msg tokens" />
         <Stat
+          variant="compact"
           value={ratioStr(c.source_token_count, c.summary_token_count)}
           label="compression"
         />

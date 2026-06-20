@@ -5,29 +5,12 @@
 
 import React from "react";
 import { Badge, Card, CardContent, CardHeader, CardTitle } from "../../lib/sdk";
+import { EmptyState, Stat } from "../../lib/primitives";
 import { fillDailySeries, fmtTokens, fmtUsd, projectLabel } from "./logic";
 import { savedTokensUsd } from "./pricing";
 import type { PriceTable } from "./pricing";
 import { DailyBars, HBarChart } from "./charts";
 import type { LedgerResponse, SavingsOverview } from "./types";
-
-function StatCard({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  return (
-    <div className="tss-stat">
-      <div className="tss-stat-value">{value}</div>
-      <div className="tss-stat-label">{label}</div>
-      {hint && <div className="tss-stat-hint">{hint}</div>}
-    </div>
-  );
-}
 
 export default function SavingsOverviewPanel({
   overview,
@@ -39,19 +22,19 @@ export default function SavingsOverviewPanel({
   prices: PriceTable;
 }) {
   if (!overview) {
-    return <div className="tss-empty">Loading savings analytics…</div>;
+    return <EmptyState variant="dashed">Loading savings analytics…</EmptyState>;
   }
   const savings = overview.savings;
   if (!savings.available) {
     return (
-      <div className="tss-empty">
+      <EmptyState variant="dashed">
         <h3>Global accounting database unavailable</h3>
         <p>
           The savings ledger lives in <code>~/.tracedecay/global.db</code>{" "}
           (override: <code>TRACEDECAY_GLOBAL_DB</code>), which could not be
           opened.
         </p>
-      </div>
+      </EmptyState>
     );
   }
 
@@ -68,22 +51,22 @@ export default function SavingsOverviewPanel({
   return (
     <div className="tss-grid">
       <div className="tss-stat-row">
-        <StatCard
+        <Stat
           label={`Tokens saved (${ledger?.range || "all"})`}
           value={fmtTokens(total.saved_tokens)}
           hint={`${fmtTokens(total.calls)} tool calls in the ledger`}
         />
-        <StatCard
+        <Stat
           label="Estimated value saved"
           value={usd === null ? "no price data" : fmtUsd(usd)}
           hint="estimated (computed) at the Claude Sonnet input rate"
         />
-        <StatCard
+        <Stat
           label="Saved last 7 days"
           value={fmtTokens(savings.ledger?.last_7d.saved_tokens)}
           hint={`today: ${fmtTokens(savings.ledger?.today.saved_tokens)}`}
         />
-        <StatCard
+        <Stat
           label="Lifetime counter (all projects)"
           value={fmtTokens(lifetime?.total_tokens_saved)}
           hint="legacy gross counters, predates the ledger — see note below"

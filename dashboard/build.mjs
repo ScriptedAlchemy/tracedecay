@@ -24,6 +24,7 @@ import {
   EMBEDDED_DIST_FILES,
   HERMES_WRAPPER_DIST_FILES,
   logBuiltFiles,
+  writeDashboardSourceStamp,
 } from "./build.shared.mjs";
 
 async function main() {
@@ -35,6 +36,7 @@ async function main() {
     buildPlugin("lcm", "LCM", { primitives: true }),
   ]);
   await buildHermesWrapper();
+  await writeDashboardSourceStamp();
   await logBuiltFiles([...EMBEDDED_DIST_FILES, ...HERMES_WRAPPER_DIST_FILES]);
 }
 

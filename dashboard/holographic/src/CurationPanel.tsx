@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useState } from "react";
+import { type Key, type ReactNode, type RefObject, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -17,11 +17,18 @@ import {
   isBookkeepingTag,
   splitTags,
 } from "./curation/format";
-import { actionRisk, groupActions, riskClass, type ActionRisk } from "./curation/risk";
-import { useCurationData } from "./curation/useCurationData";
+import {
+  actionRisk,
+  groupActions,
+  riskClass,
+  type ActionGroupDef,
+  type ActionRisk,
+} from "./curation/risk";
+import { useCurationData, type CurationTab } from "./curation/useCurationData";
 import type {
   MemoryCurateAction,
   MemoryCuratorActivityEvent,
+  MemoryOplogEvent,
 } from "./types";
 
 const DIAGNOSTIC_COUNT_KEYS = new Set([
@@ -251,7 +258,7 @@ function TagBucket({
   );
 }
 
-function ActionRow({ action }: { action: MemoryCurateAction }) {
+function ActionRow({ action }: { action: MemoryCurateAction; key?: Key }) {
   const content = action.content ?? "";
   const [expanded, setExpanded] = useState(false);
   const risk = actionRisk(action.op);
@@ -418,6 +425,7 @@ function ActionGroup({
 }: {
   group: ActionGroupDef & { actions: MemoryCurateAction[] };
   defaultOpen: boolean;
+  key?: Key;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   if (group.actions.length === 0) return null;
@@ -564,12 +572,13 @@ export default function CurationPanel({
     preview,
     apply,
     loadActivity,
+    loadStatus,
   } = useCurationData({ onApplied });
 
   const actions = report?.actions ?? [];
-  const counts = report?.counts ?? {};
+  const counts: Record<string, number> = report?.counts ?? {};
   const isPlan = report?.dry_run ?? true;
-  const shownCounts = isPlan ? counts : (report?.applied_counts ?? counts);
+  const shownCounts: Record<string, number> = isPlan ? counts : (report?.applied_counts ?? counts);
   const actionCounts = Object.entries(shownCounts).filter(
     ([key]) => !DIAGNOSTIC_COUNT_KEYS.has(key),
   );

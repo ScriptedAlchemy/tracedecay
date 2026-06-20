@@ -26,7 +26,6 @@ import {
   summaryTitle,
 } from "./helpers";
 import {
-  BarList,
   CompressionBars,
   Drawer,
   DrawerError,
@@ -35,12 +34,11 @@ import {
   Pager,
   SearchResultCard,
   SessionDetail,
-  SkeletonLines,
-  Stat,
   TimelineChart,
   TimeText,
   toolBadge,
 } from "./components";
+import { BarList, EmptyState, ErrorPanel, SkeletonLines, Stat } from "../../lib/primitives";
 
 function App(): React.ReactElement {
   const [q, setQ] = useState("");
@@ -230,7 +228,7 @@ function App(): React.ReactElement {
     const params = new URLSearchParams();
     params.set("limit", String(SESSION_FETCH_BATCH));
     params.set("offset", String(offset || 0));
-    fetchJSON(`${API}/session/${encodeURIComponent(id)}?${params.toString()}`).then(function (json) {
+    fetchJSON<any>(`${API}/session/${encodeURIComponent(id)}?${params.toString()}`).then(function (json) {
       updateStackEntry(function (entry) {
         return entry.kind === "session" && String(entry.id) === String(id);
       }, function (entry) {
@@ -497,7 +495,7 @@ function App(): React.ReactElement {
       drawerTitle = top.kind === "node"
         ? `Node #${top.id}`
         : (top.kind === "message" ? `Message #${top.id}` : `Session ${short(top.id, 40)}`);
-      drawerBody = <div className="hermes-lcm-empty">Loading…</div>;
+      drawerBody = <EmptyState className="hermes-lcm-empty">Loading…</EmptyState>;
     } else if (top.error) {
       drawerTitle = top.kind === "node"
         ? `Node #${top.id}`
@@ -598,10 +596,10 @@ function App(): React.ReactElement {
         </div>
       ) : null}
       {(!searchPending && !searching && debouncedQ && !searchError && totalSearchMatches === 0) ? (
-        <div className="hermes-lcm-empty">
+        <EmptyState className="hermes-lcm-empty">
           <strong>No matches found.</strong>
           {" Try removing a facet or a punctuation-heavy query so the backend can stay on the ranked FTS path."}
-        </div>
+        </EmptyState>
       ) : null}
       {totalSearchMatches > 0 ? (
         <div className="hermes-lcm-grid">
@@ -633,7 +631,7 @@ function App(): React.ReactElement {
                       />
                     );
                   })
-                : <div className="hermes-lcm-empty">No matching messages on this page.</div>}
+                : <EmptyState className="hermes-lcm-empty">No matching messages on this page.</EmptyState>}
             </div>
             <Pager
               page={searchMessagePage}
@@ -670,7 +668,7 @@ function App(): React.ReactElement {
                       />
                     );
                   })
-                : <div className="hermes-lcm-empty">No matching summaries on this page.</div>}
+                : <EmptyState className="hermes-lcm-empty">No matching summaries on this page.</EmptyState>}
             </div>
             <Pager
               page={searchNodePage}
@@ -801,16 +799,13 @@ function App(): React.ReactElement {
       ) : null}
 
       {staleData ? (
-        <div className="hermes-lcm-error" role="alert">
-          <div>{`Refresh failed (${overviewError}) — showing previously loaded data.`}</div>
-          <button
-            type="button"
-            className="hermes-lcm-btn"
-            onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-          >Retry</button>
-        </div>
+        <ErrorPanel
+          error={`Refresh failed (${overviewError}) — showing previously loaded data.`}
+          onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+          className="hermes-lcm-error"
+        />
       ) : null}
-      {data && data.error ? <div className="hermes-lcm-error" role="alert">{data.error}</div> : null}
+      {data && data.error ? <ErrorPanel error={data.error} className="hermes-lcm-error" /> : null}
 
       {data && !data.exists ? (
         <div className="hermes-lcm-empty-panel">
@@ -842,11 +837,11 @@ function App(): React.ReactElement {
           genuinely "empty database", never a masked fetch failure. */}
       {data ? (
         <div className="hermes-lcm-statrow">
-          <Stat value={fmtInt(overview.messages_total)} label="messages" />
-          <Stat value={fmtInt(overview.sessions_total)} label="sessions" />
-          <Stat value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
-          <Stat value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
-          <Stat value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
+          <Stat variant="compact" value={fmtInt(overview.messages_total)} label="messages" />
+          <Stat variant="compact" value={fmtInt(overview.sessions_total)} label="sessions" />
+          <Stat variant="compact" value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
+          <Stat variant="compact" value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
+          <Stat variant="compact" value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
         </div>
       ) : (overviewLoading ? (
         <div className="hermes-lcm-statrow">
@@ -862,14 +857,11 @@ function App(): React.ReactElement {
             <h3>Message Timeline (per day · dots = summaries)</h3>
             {chartsError && !timeline
               ? (
-                <div className="hermes-lcm-error" role="alert">
-                  <div>{chartsError}</div>
-                  <button
-                    type="button"
-                    className="hermes-lcm-btn"
-                    onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-                  >Retry</button>
-                </div>
+                <ErrorPanel
+                  error={chartsError}
+                  onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+                  className="hermes-lcm-error"
+                />
               )
               : (chartsLoading && !timeline)
                 ? <SkeletonLines count={5} widths={["100%", "95%", "90%", "92%", "88%"]} />
@@ -885,14 +877,11 @@ function App(): React.ReactElement {
             <h3>Compression by Session (kept vs saved)</h3>
             {chartsError && !compression
               ? (
-                <div className="hermes-lcm-error" role="alert">
-                  <div>{chartsError}</div>
-                  <button
-                    type="button"
-                    className="hermes-lcm-btn"
-                    onClick={function () { setReloadToken(function (n) { return n + 1; }); }}
-                  >Retry</button>
-                </div>
+                <ErrorPanel
+                  error={chartsError}
+                  onRetry={function () { setReloadToken(function (n) { return n + 1; }); }}
+                  className="hermes-lcm-error"
+                />
               )
               : (chartsLoading && !compression)
                 ? <SkeletonLines count={4} widths={["98%", "90%", "84%", "88%"]} />
@@ -911,18 +900,47 @@ function App(): React.ReactElement {
           <div className="hermes-lcm-card">
             <h3>By Source</h3>
             <BarList
-              rows={sources}
+              rows={(sources || []).map(function (s) {
+                return {
+                  source: s.source == null ? "(none)" : s.source,
+                  count: s.count,
+                  value: fmtInt(s.count),
+                };
+              })}
               keyName="source"
-              onPick={function (v) { setSource(v === "(none)" ? "unknown" : v); }}
+              proportional
+              valueName="count"
+              emptyText="No data"
+              onPick={function (row) {
+                const v = String(row.source);
+                setSource(v === "(none)" ? "unknown" : v);
+              }}
             />
           </div>
           <div className="hermes-lcm-card">
             <h3>By Role</h3>
-            <BarList rows={overview.role_counts || []} keyName="role" onPick={function (v) { setRole(v); }} />
+            <BarList
+              rows={(overview.role_counts || []).map(function (r) {
+                return { role: r.role == null ? "(none)" : r.role, count: r.count, value: fmtInt(r.count) };
+              })}
+              keyName="role"
+              proportional
+              valueName="count"
+              emptyText="No data"
+              onPick={function (row) { setRole(String(row.role)); }}
+            />
           </div>
           <div className="hermes-lcm-card">
             <h3>Summary Depth</h3>
-            <BarList rows={overview.depth_counts || []} keyName="depth" />
+            <BarList
+              rows={(overview.depth_counts || []).map(function (r) {
+                return { depth: r.depth == null ? "(none)" : r.depth, count: r.count, value: fmtInt(r.count) };
+              })}
+              keyName="depth"
+              proportional
+              valueName="count"
+              emptyText="No data"
+            />
           </div>
         </div>
       )}
@@ -954,7 +972,7 @@ function App(): React.ReactElement {
                     );
                   })
                 : (data
-                    ? <div className="hermes-lcm-empty">No sessions</div>
+                    ? <EmptyState className="hermes-lcm-empty">No sessions</EmptyState>
                     : <SkeletonLines count={3} widths={["92%", "84%", "76%"]} />)}
             </div>
           </div>
@@ -984,7 +1002,7 @@ function App(): React.ReactElement {
                     );
                   })
                 : (data
-                    ? <div className="hermes-lcm-empty">No summaries</div>
+                    ? <EmptyState className="hermes-lcm-empty">No summaries</EmptyState>
                     : <SkeletonLines count={3} widths={["90%", "82%", "74%"]} />)}
             </div>
           </div>

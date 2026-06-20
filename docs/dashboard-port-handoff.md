@@ -22,7 +22,7 @@ Phase 3 TODOs.
 | `dashboard/holographic/dist/style.css` | generated from `dashboard/holographic/src/styles.css` | Phase 2 replaced the frozen Tailwind artifact with a hand-rolled token stylesheet rebuilt by `dashboard/build.mjs` |
 | `dashboard/holographic/build.from-hermes.mjs` | same plugin's `build.mjs` | Reference only; depends on `hermes-agent/web/node_modules` + host theme |
 | `dashboard/holographic/manifest.json` | same plugin | Reference copy of the Hermes manifest |
-| `dashboard/lcm/src/{index.js,style.css}` | `/home/zack/projects/lcm/dashboard/dist/` | The LCM repo ships no separate frontend source; its `dist/` is hand-written, unbundled, readable JS (React via SDK, no JSX) — treated as source |
+| `dashboard/lcm/src/{entry.tsx,styles.css}` | `/home/zack/projects/lcm/dashboard/dist/` | The LCM port now lives as repo-native TSX + CSS source and builds to `dashboard/lcm/dist/{index.js,style.css}` via `dashboard/build.mjs` |
 | `dashboard/lcm/manifest.json` | `/home/zack/projects/lcm/dashboard/manifest.json` | Reference copy |
 | `dashboard/shell/` | new | Standalone host shell (see architecture) |
 | `dashboard/hermes-wrapper/` | new | Canonical source of the Hermes-side wrapper |
@@ -49,8 +49,8 @@ that reuses it, never a fork.
 ```
                 ┌────────────────────────────────────────────┐
                 │ UI bundles (byte-identical in both hosts)  │
-                │  holographic/dist/index.js  (esbuild IIFE) │
-                │  lcm/dist/index.js          (plain IIFE)   │
+                │  holographic/dist/index.js  (Rspack IIFE)  │
+                │  lcm/dist/index.js          (Rspack IIFE)  │
                 └──────────────┬─────────────────────────────┘
             register via window.__HERMES_PLUGINS__ / SDK
            ┌───────────────────┴────────────────────────┐
@@ -170,9 +170,10 @@ as fallbacks). Old backend was `$HERMES_HOME/lcm.db`
 
 ## What works (verified)
 
-- `cd dashboard && npm install && npm run build` — builds shell (React 19 +
-  esbuild), **rebuilds the holographic bundle from src** (proves the source
-  port is buildable), copies LCM, assembles the hermes-wrapper dist.
+- `cd dashboard && npm install && npm run build` — runs `dashboard/build.mjs`,
+  building the shell and plugin bundles with Rspack, compiling holographic's
+  Tailwind v4 stylesheet, writing `dashboard/lcm/dist/{index.js,style.css}`,
+  and assembling the hermes-wrapper dist.
 - `cargo check`, `cargo clippy --bin tracedecay` (repo denies
   `unwrap`/`expect`), `cargo test --lib dashboard` — clean.
 - `tracedecay dashboard --port 7341` against this repo's own index: verified
