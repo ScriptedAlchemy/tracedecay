@@ -3,12 +3,15 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::pyyaml_shim_pythonpath;
+use common::{pyyaml_shim_pythonpath, EnvVarGuard};
 use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::branch_meta;
-use tracedecay::config::get_tracedecay_dir;
+use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+
+static AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -142,6 +145,7 @@ fn tracedecay_command(project: &Path, home: &Path) -> Command {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env("KIRO_HOME", home.join(".kiro"))
         .env("VIBE_HOME", home.join(".vibe"));
     command
@@ -579,7 +583,9 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
 
 #[tokio::test]
 async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, home.path().join(".tracedecay"));
     let project = TempDir::new().unwrap();
     let git_init = Command::new("git")
         .arg("init")
@@ -596,6 +602,35 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
     );
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    let git_add = Command::new("git")
+        .arg("add")
+        .arg("src/lib.rs")
+        .current_dir(project.path())
+        .output()
+        .expect("git add should run");
+    assert!(
+        git_add.status.success(),
+        "git add should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_add.stdout),
+        String::from_utf8_lossy(&git_add.stderr)
+    );
+    let git_commit = Command::new("git")
+        .arg("-c")
+        .arg("user.name=TraceDecay Test")
+        .arg("-c")
+        .arg("user.email=tracedecay@example.invalid")
+        .arg("commit")
+        .arg("-m")
+        .arg("initial")
+        .current_dir(project.path())
+        .output()
+        .expect("git commit should run");
+    assert!(
+        git_commit.status.success(),
+        "git commit should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_commit.stdout),
+        String::from_utf8_lossy(&git_commit.stderr)
+    );
     TraceDecay::init(project.path()).await.unwrap();
     let checkout = Command::new("git")
         .arg("checkout")
@@ -613,7 +648,10 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
 
     assert_local_install_success("cursor", project.path(), home.path());
 
-    let meta = branch_meta::load_branch_meta(&get_tracedecay_dir(project.path()))
+    let data_dir = resolve_layout_for_current_profile(project.path())
+        .unwrap_or_else(|err| panic!("failed to resolve project store layout: {err}"))
+        .data_root;
+    let meta = branch_meta::load_branch_meta(&data_dir)
         .expect("Cursor install should bootstrap branch tracking metadata");
     assert!(meta.is_tracked("main"));
     assert!(meta.is_tracked("feature/install"));
