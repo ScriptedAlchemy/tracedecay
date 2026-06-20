@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.3...v0.0.4) - 2026-06-20
+
+### Fixed
+
+- *(migrate)* verify sqlite artifacts logically
+- *(storage)* stabilize profile storage workflows
+- *(storage)* add profile storage foundations
+
 ## [0.0.3](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.2...v0.0.3) - 2026-06-19
 
 ### Fixed
