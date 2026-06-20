@@ -24,8 +24,10 @@ import React, {
   createContext,
 } from "react";
 import { makeSequence } from "../../lib/sequence";
+import { cn as cnImpl } from "../../lib/cn";
 
 export { makeSequence };
+export const cn = cnImpl;
 
 export async function fetchJSON(url, init) {
   const res = await fetch(url, init);
@@ -40,13 +42,6 @@ export async function fetchJSON(url, init) {
     throw new Error(detail);
   }
   return res.json();
-}
-
-export function cn(...args) {
-  return args
-    .flat(Infinity)
-    .filter((a) => typeof a === "string" && a.length > 0)
-    .join(" ");
 }
 
 function relativeTime(deltaSeconds) {

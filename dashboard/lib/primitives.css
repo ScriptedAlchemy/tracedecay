@@ -1,0 +1,266 @@
+/*
+ * Shared dashboard primitives stylesheet (`tdp-*`).
+ *
+ * Colors resolve exclusively through the host `--color-*` semantic variables
+ * (defined by the standalone shell as aliases of its `--ts-*` tokens, and by
+ * Hermes' shadcn palette). No color is hardcoded. Layout values (radii,
+ * spacing, font sizes) are ported verbatim from graph/src/styles.css so the
+ * primitives are visually identical to the original `tsg-*` markup.
+ *
+ * Delivery: build.mjs prepends this file to a plugin's dist/style.css when
+ * that plugin opts in via `buildPlugin(..., { primitives: true })`.
+ */
+
+/* ----------------------------------------------------------- EmptyState */
+/* Ports `.tsg-empty` verbatim (--ts-text-3 -> --color-muted-foreground). */
+.tdp-empty {
+  display: grid;
+  place-items: center;
+  min-height: 8rem;
+  color: var(--color-muted-foreground);
+  text-align: center;
+  padding: 0.75rem;
+}
+
+/* `variant="dashed"`: ports savings `.tss-empty` — a left-aligned dashed-border
+ * box for no-data panels that carry an <h3>/<p> explanation. Overrides the
+ * centered base (equal specificity, declared later). */
+.tdp-empty-dashed {
+  place-items: start;
+  min-height: 0;
+  padding: 1.4rem 1.2rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--ts-radius, 12px);
+  color: var(--color-muted-foreground);
+  text-align: start;
+  gap: 0.4rem;
+}
+
+.tdp-empty-dashed h3 {
+  color: var(--color-foreground);
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.tdp-empty-dashed p {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ----------------------------------------------------------- ErrorPanel */
+/* Ports `.tsg-error` verbatim (--ts-red -> --color-destructive,
+ * --ts-radius -> var(--ts-radius, 18px) so it resolves to graph's 18px in the
+ * shell and falls back to the same 18px in hosts without --ts-radius). */
+.tdp-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-destructive) 42%, transparent);
+  border-radius: var(--ts-radius, 18px);
+  background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+  color: var(--color-destructive);
+  padding: 0.7rem 1rem;
+  font-size: 0.84rem;
+}
+
+.tdp-error-text {
+  min-width: 0;
+}
+
+.tdp-error-retry {
+  flex-shrink: 0;
+}
+
+/* -------------------------------------------------------- SkeletonLines */
+/* New loading affordance; themed via host muted/border tokens. */
+.tdp-skeleton {
+  display: grid;
+  gap: 0.6rem;
+  width: 100%;
+}
+
+.tdp-skeleton-line {
+  width: 100%;
+  height: 0.85rem;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
+  animation: tdp-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.tdp-skeleton-line:last-child {
+  width: 60%;
+}
+
+@keyframes tdp-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ----------------------------------------------------------------- Stat */
+/* Ports the `.tss-stat` shape; themed via host tokens. */
+.tdp-stat {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--ts-radius, 18px);
+  background: color-mix(in srgb, var(--color-background) 26%, transparent);
+}
+
+.tdp-stat-value {
+  color: var(--color-foreground);
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.tdp-stat-label {
+  color: var(--color-muted-foreground);
+  font-size: 0.78rem;
+}
+
+.tdp-stat-hint {
+  color: var(--color-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+/* `variant="compact"`: ports LCM's headline `.hermes-lcm-stat` tile — smaller,
+ * tighter, with an uppercase label and a tabular (non-mono) value, sized to
+ * sit several abreast in a flex strip. */
+.tdp-stat-compact {
+  flex: 1 1 120px;
+  border-radius: 8px;
+  background: var(--color-card);
+  padding: 0.55rem 0.7rem;
+}
+
+.tdp-stat-compact .tdp-stat-value {
+  font-family: inherit;
+  font-size: 1.2rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tdp-stat-compact .tdp-stat-label {
+  font-size: 0.72rem;
+  color: var(--color-muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* -------------------------------------------------------------- BarList */
+/* Ports `.tsg-hub-list`. */
+.tdp-bar-list {
+  display: grid;
+  gap: 0.4rem;
+  max-height: 21rem;
+  overflow: auto;
+}
+
+/* Ports `.tsg-hub`. */
+.tdp-bar-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.55rem;
+  appearance: none;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-background) 26%, transparent);
+  color: var(--color-foreground);
+  cursor: pointer;
+  padding: 0.42rem 0.6rem;
+  font: inherit;
+}
+
+/* Ports `.tsg-hub:hover`. */
+.tdp-bar-row:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 42%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+/* Ports `.tsg-hub-dot`. */
+.tdp-bar-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+}
+
+/* Ports `.tsg-hub-name`. */
+.tdp-bar-label {
+  color: var(--color-foreground);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ports `.tsg-hub-meta`. */
+.tdp-bar-meta {
+  color: var(--color-muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+}
+
+/* Ports `.tsg-hub-degree`. */
+.tdp-bar-value {
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+/* `proportional` mode: ports LCM's `.hermes-lcm-bar-*` — a head row (muted
+ * label + tabular value) over a fill track whose width is ∝ the row's value.
+ * The modifier collapses the 4-column row grid into a single stacked column. */
+.tdp-bar-row-prop {
+  grid-template-columns: 1fr;
+  gap: 0.3rem;
+}
+
+.tdp-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* In the proportional head the label is muted (not bold foreground) and the
+ * value inherits the foreground color with tabular figures — matching the LCM
+ * source/role/depth bars. */
+.tdp-bar-head .tdp-bar-label {
+  color: var(--color-muted-foreground);
+  font-weight: inherit;
+}
+
+.tdp-bar-head .tdp-bar-value {
+  color: var(--color-foreground);
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.tdp-bar-track {
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
+  overflow: hidden;
+}
+
+.tdp-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--color-primary, #5a7fff) 65%, white 10%);
+}

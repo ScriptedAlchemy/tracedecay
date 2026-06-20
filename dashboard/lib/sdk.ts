@@ -5,8 +5,8 @@
  *
  * Each plugin bundle externalizes React and the design-system components onto
  * `window.__HERMES_PLUGIN_SDK__` (provided by the Hermes dashboard or the
- * standalone shell — see shell/src/sdk.jsx). esbuild inlines this module into
- * every bundle, so the bundles stay independent at runtime.
+ * standalone shell — see shell/src/sdk.jsx). The dashboard build inlines this
+ * module into every bundle, so the bundles stay independent at runtime.
  */
 
 const SDK: any =
@@ -26,8 +26,7 @@ export const Badge: any = components.Badge;
 export const Button: any = components.Button;
 export const Input: any = components.Input;
 
-export const cn: (...args: any[]) => string =
-  utils.cn || ((...a: any[]) => a.filter(Boolean).join(" "));
+export { cn } from "./cn";
 
 export const timeAgo: (ts: number) => string =
   utils.timeAgo || ((ts: number) => new Date(ts * 1000).toLocaleString());

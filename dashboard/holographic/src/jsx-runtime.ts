@@ -1,7 +1,7 @@
 /**
  * Automatic-JSX runtime shim.
  *
- * esbuild is built with `jsx: "automatic"`, so it emits imports of
+ * The dashboard bundler uses the automatic JSX runtime, so it emits imports of
  * `jsx`/`jsxs`/`Fragment` from `react/jsx-runtime`. We alias that specifier to
  * this module, which implements the runtime on top of the host's
  * `React.createElement` (pulled from `./react-shim`). This keeps the plugin off

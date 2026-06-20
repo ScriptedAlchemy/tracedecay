@@ -6,11 +6,13 @@
   "description": "TraceDecay dashboard UI: standalone shell + ported Hermes plugin dashboards (holographic memory, LCM).",
   "scripts": {
     "build": "node build.mjs",
+    "dev": "node dev/run.mjs",
     "test": "npm run test:node && npm run test:dom",
     "test:node": "node run-unit-tests.mjs",
     "test:dom": "vitest run",
     "smoke": "node smoke.mjs",
-    "smoke:mobile": "node smoke.mjs --profiles=iphone12,pixel5"
+    "smoke:mobile": "node smoke.mjs --profiles=iphone12,pixel5",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@observablehq/plot": "^0.6.17",
@@ -20,10 +22,16 @@
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
+    "@rsbuild/core": "^2.0.15",
+    "@rsbuild/plugin-react": "^2.1.0",
+    "@rspack/core": "^2.0.8",
+    "@tailwindcss/node": "^4.3.1",
+    "@tailwindcss/oxide": "^4.3.1",
     "@testing-library/react": "^16.3.2",
-    "esbuild": "^0.25.0",
     "jsdom": "^29.1.1",
     "playwright": "^1.60.0",
-    "vitest": "^4.1.8"
+    "tailwindcss": "^4.3.1",
+    "vitest": "^4.1.8",
+    "typescript": "^5.9.0"
   }
 }
