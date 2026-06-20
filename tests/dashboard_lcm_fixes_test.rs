@@ -15,6 +15,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
@@ -307,24 +308,27 @@ async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
 
     let cg = setup_project(&project_root).await;
+    let session_db_path = project_session_db_path(&project_root);
 
-    let global_db = match GlobalDb::open_at(&global_db_path).await {
+    let global_db = match GlobalDb::open_at(&session_db_path).await {
         Some(db) => db,
         None => panic!(
-            "failed to open temporary global DB at {}",
-            global_db_path.display()
+            "failed to open temporary session DB at {}",
+            session_db_path.display()
         ),
     };
-    let storage_root = tmp.path().join("lcm-storage");
-    if let Err(err) = std::fs::create_dir_all(&storage_root) {
+    let storage_root = session_db_path
+        .parent()
+        .unwrap_or_else(|| panic!("session DB has no parent: {}", session_db_path.display()));
+    if let Err(err) = std::fs::create_dir_all(storage_root) {
         panic!("failed to create LCM storage root: {err}");
     }
-    let linked_node_id = seed_lcm_fixture(&global_db, &storage_root, &project_root).await;
+    let linked_node_id = seed_lcm_fixture(&global_db, storage_root, &project_root).await;
     drop(global_db);
 
-    plant_external_needle(&global_db_path).await;
+    plant_external_needle(&session_db_path).await;
     if break_message_fts {
-        drop_raw_message_fts(&global_db_path).await;
+        drop_raw_message_fts(&session_db_path).await;
     }
 
     let port = pick_free_port();
@@ -341,7 +345,7 @@ async fn start_fixture(break_message_fts: bool) -> DashboardFixture {
         _env_guard: env_guard,
         base_url,
         server,
-        global_db_path,
+        global_db_path: session_db_path,
         linked_node_id,
     }
 }
