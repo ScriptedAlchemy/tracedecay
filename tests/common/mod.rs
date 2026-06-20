@@ -8,6 +8,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::types::{Node, NodeKind, Visibility};
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -53,6 +54,34 @@ pub fn tempdir_or_panic() -> TempDir {
     match TempDir::new() {
         Ok(dir) => dir,
         Err(err) => panic!("failed to create temp dir: {err}"),
+    }
+}
+
+pub fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        kind: NodeKind::Function,
+        name: name.to_string(),
+        qualified_name: format!("crate::{name}"),
+        file_path: file_path.to_string(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 3,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: None,
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1_800_000_000,
+        parent_id: None,
     }
 }
 

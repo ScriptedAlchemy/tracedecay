@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
+use common::sample_node;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
@@ -21,7 +24,6 @@ use tracedecay::storage::{
     read_enrollment_marker, read_store_manifest, write_enrollment_marker, EnrollmentMarker,
     StorageMode, StoreKind, StoreManifest, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
 };
-use tracedecay::types::{Node, NodeKind, Visibility};
 
 fn empty_inventory() -> MigrationInventory {
     MigrationInventory {
@@ -50,34 +52,6 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(not(windows))]
     {
         path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
-}
-
-fn sample_node(id: &str, name: &str) -> Node {
-    Node {
-        id: id.to_string(),
-        kind: NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("crate::{name}"),
-        file_path: "src/lib.rs".to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 3,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: None,
-        visibility: Visibility::Pub,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1_800_000_000,
-        parent_id: None,
     }
 }
 
@@ -494,7 +468,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
         .await
         .unwrap();
     source
-        .insert_node(&sample_node("node-1", "process_data"))
+        .insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
     source.checkpoint().await.unwrap();
@@ -504,7 +478,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
         .await
         .unwrap();
     target
-        .insert_node(&sample_node("node-extra", "deleted_later"))
+        .insert_node(&sample_node("node-extra", "deleted_later", "src/lib.rs"))
         .await
         .unwrap();
     target
@@ -516,7 +490,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
         .await
         .unwrap();
     target
-        .insert_node(&sample_node("node-1", "process_data"))
+        .insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
     target.checkpoint().await.unwrap();
