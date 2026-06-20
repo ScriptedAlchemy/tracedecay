@@ -586,13 +586,21 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
 async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
     let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, home.path().join(".tracedecay"));
+    let home_root = home
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| home.path().to_path_buf());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, home_root.join(".tracedecay"));
     let project = TempDir::new().unwrap();
+    let project_root = project
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| project.path().to_path_buf());
     let git_init = Command::new("git")
         .arg("init")
         .arg("-b")
         .arg("main")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git init should run");
     assert!(
@@ -601,12 +609,12 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&git_init.stdout),
         String::from_utf8_lossy(&git_init.stderr)
     );
-    std::fs::create_dir_all(project.path().join("src")).unwrap();
-    std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
     let git_add = Command::new("git")
         .arg("add")
         .arg("src/lib.rs")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git add should run");
     assert!(
@@ -623,7 +631,7 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         .arg("commit")
         .arg("-m")
         .arg("initial")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git commit should run");
     assert!(
@@ -632,12 +640,12 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&git_commit.stdout),
         String::from_utf8_lossy(&git_commit.stderr)
     );
-    TraceDecay::init(project.path()).await.unwrap();
+    TraceDecay::init(&project_root).await.unwrap();
     let checkout = Command::new("git")
         .arg("checkout")
         .arg("-b")
         .arg("feature/install")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git checkout should run");
     assert!(
@@ -647,9 +655,9 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&checkout.stderr)
     );
 
-    assert_local_install_success("cursor", project.path(), home.path());
+    assert_local_install_success("cursor", &project_root, &home_root);
 
-    let data_dir = resolve_layout_for_current_profile(project.path())
+    let data_dir = resolve_layout_for_current_profile(&project_root)
         .unwrap_or_else(|err| panic!("failed to resolve project store layout: {err}"))
         .data_root;
     let meta = branch_meta::load_branch_meta(&data_dir)
