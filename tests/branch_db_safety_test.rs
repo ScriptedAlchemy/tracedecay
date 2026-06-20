@@ -6,6 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::branch::{self, BranchAddOutcome};
 use tracedecay::branch_meta::load_branch_meta;
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &Path, args: &[&str]) {
@@ -37,6 +38,12 @@ fn commit_all(project: &Path, message: &str) {
             message,
         ],
     );
+}
+
+fn project_data_dir(project: &Path) -> PathBuf {
+    resolve_layout_for_current_profile(project)
+        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
+        .data_root
 }
 
 async fn open_untracked_project() -> (TempDir, PathBuf, TraceDecay) {
@@ -133,7 +140,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
         "auto-tracked branch should contain the branch-only symbol"
     );
 
-    let meta = load_branch_meta(&project.join(".tracedecay")).unwrap();
+    let meta = load_branch_meta(&project_data_dir(&project)).unwrap();
     let feature_entry = meta
         .branches
         .get("feature/untracked")
@@ -271,7 +278,7 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
         .unwrap();
     assert_eq!(topic_outcome, BranchAddOutcome::Added);
 
-    let meta = load_branch_meta(&project.join(".tracedecay")).unwrap();
+    let meta = load_branch_meta(&project_data_dir(project)).unwrap();
     let topic_entry = meta
         .branches
         .get("topic/child")

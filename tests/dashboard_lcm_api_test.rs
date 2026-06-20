@@ -1,6 +1,6 @@
 //! Integration tests for the LCM dashboard API
 //! (`/api/plugins/hermes-lcm/*`) against a seeded temp session store served
-//! from the project-local session DB.
+//! from the profile-sharded project session DB.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -257,7 +257,7 @@ fn lcm_overview_and_search_preserve_shapes() {
         let (status, caps) = get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(caps["features"]["lcm"], true);
-        assert_eq!(caps["lcm_scope"], "project_local");
+        assert_eq!(caps["lcm_scope"], "profile_sharded");
 
         let (status, overview) = get_json(
             &agent,
@@ -268,7 +268,7 @@ fn lcm_overview_and_search_preserve_shapes() {
         );
         assert_eq!(status, 200);
         assert_eq!(overview["exists"], true);
-        assert_eq!(overview["storage_scope"], "project_local");
+        assert_eq!(overview["storage_scope"], "profile_sharded");
         assert_eq!(overview["overview"]["messages_total"], 2);
         assert_eq!(overview["overview"]["summary_nodes_total"], 2);
         assert_eq!(overview["latest_sessions"][0]["session_id"], fixture.session_id);

@@ -1440,10 +1440,10 @@ impl McpServer {
 
     async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
-        let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
+        let tracedecay_dir = &cg.store_layout().data_root;
         let current = cg.active_branch();
 
-        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tracedecay_dir) {
+        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(tracedecay_dir) {
             Some(meta) => meta
                 .branches
                 .iter()

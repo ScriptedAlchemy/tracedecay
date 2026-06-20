@@ -222,8 +222,10 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        project.path().join(".tracedecay").is_dir(),
-        "init should still create the index"
+        std::fs::read_dir(profile_root(home.path()).join("projects"))
+            .unwrap()
+            .any(|entry| entry.unwrap().path().join("tracedecay.db").is_file()),
+        "init should still create the project index in the profile store"
     );
     let gitignore = project.path().join(".gitignore");
     assert!(

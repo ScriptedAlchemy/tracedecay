@@ -916,10 +916,10 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
 /// (signature differs).
 pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let project_root = cg.project_root();
-    let tracedecay_dir = crate::config::get_tracedecay_dir(project_root);
+    let tracedecay_dir = &cg.store_layout().data_root;
 
     // Resolve base and head branches
-    let meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).ok_or_else(|| {
+    let meta = crate::branch_meta::load_branch_meta(tracedecay_dir).ok_or_else(|| {
         TraceDecayError::Config {
             message: "no branch tracking configured — run `tracedecay branch add` first"
                 .to_string(),

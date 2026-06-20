@@ -35,9 +35,6 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 }
 
 pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
-    if is_hermes_profile_home(project_root) {
-        return Some(hermes_profile_session_db_path(project_root));
-    }
     let layout = resolve_layout_for_current_profile(project_root).ok()?;
     if layout.storage_mode == StorageMode::ProfileSharded {
         return Some(layout.sessions_db_path);
@@ -46,10 +43,6 @@ pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<Pat
         return Some(db_path);
     }
     layout.data_root.is_dir().then_some(layout.sessions_db_path)
-}
-
-fn is_hermes_profile_home(project_root: &Path) -> bool {
-    project_root.join("state.db").is_file()
 }
 
 async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
@@ -321,7 +314,7 @@ fn parse_cursor_jsonl(
 
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
-/// hooks should pass the project-local DB from [`open_project_session_db`].
+/// hooks should pass the resolved project DB from [`open_project_session_db`].
 ///
 /// Ingestion is **incremental**: it resumes from the byte offset recorded in the
 /// DB's `parse_offsets` table (via the shared [`crate::sessions::source`]

@@ -6,8 +6,8 @@
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
 //! one ingest target: the `plugins.tracedecay.project_root` pin in its
 //! `config.yaml` when set (the same pin the generated Hermes plugin resolves
-//! at runtime), or — for unpinned profiles — the profile home itself, whose
-//! `.tracedecay/sessions.db` is the profile-scoped store the plugin serves.
+//! at runtime), or — for unpinned profiles — the profile home itself as a
+//! project identity in the unified user-level `TraceDecay` store.
 //!
 //! Unlike the file-based adapters this source holds *many* sessions in one
 //! store, so it does not implement [`TranscriptSource`]; it drives the shared
@@ -82,12 +82,9 @@ pub async fn ingest_homes(
 /// Locates the `state.db` of every profile that maps to `project_root`.
 ///
 /// A profile maps to a project either through its `plugins.tracedecay`
-/// `project_root` pin, or — for unpinned profiles (the default since the
-/// installer stopped writing storage-home pins) — through its own profile
-/// home: sweeping with `project_root == <profile dir>` ingests that
-/// profile's history into the profile-scoped store at
-/// `<profile dir>/.tracedecay/sessions.db`, which is exactly the store the
-/// generated plugin's `hermes_profile` storage scope serves.
+/// `project_root` pin, or — for unpinned profiles — through its own profile
+/// home as a project identity. In both cases the active `GlobalDb` is the
+/// unified user-level `TraceDecay` store resolved for that project root.
 ///
 /// Returns `(state_db_path, profile_name)`; the default profile (the home
 /// directory itself) has no profile name.
@@ -120,10 +117,8 @@ fn pinned_state_dbs(
                 // An explicit pin (including the legacy home-equal pin)
                 // maps the profile to that project.
                 Some(pin) => paths_equal(Path::new(&pin), project_root),
-                // Unpinned profiles map to their own home, so sweeping
-                // `<profile dir>` as the project ingests their history
-                // into the profile-scoped store the generated plugin's
-                // `hermes_profile` storage serves.
+                // Unpinned profiles map to their own home as the project
+                // identity in the unified user-level store.
                 None => paths_equal(&profile_dir, project_root),
             };
             if !matches {

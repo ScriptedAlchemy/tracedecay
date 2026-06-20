@@ -375,6 +375,7 @@ async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     let lock_path = project.join(".tracedecay/sync.lock");
     // A PID well out of range can never be alive -> the lock is stale.
     fs::write(&lock_path, "4294967294").unwrap();
@@ -398,6 +399,7 @@ async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     let lock_path = project.join(".tracedecay/sync.lock");
     // Our own PID is alive -> the lock must be treated as in-progress.
     fs::write(&lock_path, format!("{}", std::process::id())).unwrap();

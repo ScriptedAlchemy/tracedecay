@@ -65,8 +65,7 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
 /// `plugins.tracedecay.project_root` key of the profile config.yaml.
 ///
 /// A pin pointing at the profile home itself is the legacy storage-home
-/// conflation (storage is profile-scoped now and code tools resolve per
-/// cwd), so it is treated — and re-propagated on reinstall — as no pin.
+/// conflation, so it is treated — and re-propagated on reinstall — as no pin.
 pub(super) fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
     let profile_dir = plugin_dir.parent()?.parent()?;
     let pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))?;

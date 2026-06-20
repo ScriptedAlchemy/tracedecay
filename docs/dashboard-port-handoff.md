@@ -533,9 +533,9 @@ conservatism backstop, and callers can pass a higher `threshold` /
 ## Remaining stubbed / known gaps (post Phase 3)
 
 1. LCM data scope: MOSTLY RESOLVED — the standalone dashboard now serves the
-   project-local `.tracedecay/sessions.db` (where transcript ingest writes),
-   with `TRACEDECAY_GLOBAL_DB` pinning an explicit store (also the path for
-   hermes-profile stores: point it at `<hermes_home>/.tracedecay/sessions.db`).
+   resolved project session store (user-level profile shard by default, local
+   only for explicit/legacy stores), with `TRACEDECAY_GLOBAL_DB` pinning an
+   explicit test/smoke store.
    Remaining: an in-UI store *switcher* for browsing multiple stores.
 2. The wrapper picks the project root from `TRACEDECAY_DASHBOARD_PROJECT` or
    Hermes' cwd — no per-request/workspace project selection.
@@ -569,17 +569,15 @@ conservatism backstop, and callers can pass a higher `threshold` /
         the holographic_plus **memory provider** (tools, curator, retrieval,
         `on_session_end`) is fully intact. See the Hermes live-render section
         below.
-- [ ] LCM: surface provider/profile selection (project-local vs global vs
-      hermes-profile stores); consider storing real `token_estimate`,
+- [ ] LCM: surface provider/profile selection (resolved project stores vs
+      global override stores); consider storing real `token_estimate`,
       `tool_name`, `pinned` in `lcm_raw_messages` so the session drawer
       stops approximating.
       - 2026-06-10 PARTIAL — project-local vs global selection shipped. The
-        dashboard now serves the project's `.tracedecay/sessions.db` (where
-        Cursor hooks + the hookless-agent catch-up sweep actually ingest)
-        instead of the always-empty `~/.tracedecay/global.db`; a
-        `TRACEDECAY_GLOBAL_DB` override still pins the store (smoke harness /
-        Hermes wrapper contract, which is also the path for hermes-profile
-        stores: point the override at `<hermes_home>/.tracedecay/sessions.db`).
+        dashboard now serves the resolved project session store (where Cursor
+        hooks + the hookless-agent catch-up sweep actually ingest) instead of
+        the always-empty `~/.tracedecay/global.db`; a `TRACEDECAY_GLOBAL_DB`
+        override still pins the store for smoke harnesses.
         Additive `storage_scope` field on every LCM payload + `lcm_scope` in
         capabilities; LCM header shows "Project store"/"Global store".
         `tracedecay dashboard` startup now spawns the same detached catch-up

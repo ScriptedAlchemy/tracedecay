@@ -11,6 +11,7 @@ pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;
 pub mod cursor;
+pub mod cursor_agent;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;

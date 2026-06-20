@@ -11,9 +11,12 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-fn run_tool(cwd: &Path, args: &[&str]) -> std::process::Output {
+fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(cwd)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"))
         .arg("tool")
         .args(args)
         .output()
@@ -30,6 +33,7 @@ fn fact_store_creates_profile_store_on_first_touch() {
     let profile_arg = profile.to_string_lossy().to_string();
     let output = run_tool(
         cwd.path(),
+        home.path(),
         &[
             "--project",
             &profile_arg,
@@ -45,14 +49,20 @@ fn fact_store_creates_profile_store_on_first_touch() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let graph_db_path =
+        tracedecay::storage::resolve_layout(&profile, &home.path().join(".tracedecay"))
+            .unwrap()
+            .graph_db_path;
     assert!(
-        profile.join(".tracedecay").join("tracedecay.db").is_file(),
-        "first touch should have created .tracedecay/tracedecay.db under the profile home"
+        graph_db_path.is_file(),
+        "first touch should have created the resolved profile graph DB at {}",
+        graph_db_path.display()
     );
 
     // The store persists: a follow-up search finds the fact.
     let output = run_tool(
         cwd.path(),
+        home.path(),
         &[
             "--project",
             &profile_arg,
@@ -73,8 +83,10 @@ fn fact_store_creates_profile_store_on_first_touch() {
 #[test]
 fn store_tools_without_explicit_project_still_require_init() {
     let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
     let output = run_tool(
         cwd.path(),
+        home.path(),
         &["fact_store", "--args", r#"{"action":"list"}"#],
     );
     assert!(
@@ -91,8 +103,13 @@ fn store_tools_without_explicit_project_still_require_init() {
 fn code_graph_tools_keep_strict_init_requirement() {
     let target = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
     let target_arg = target.path().to_string_lossy().to_string();
-    let output = run_tool(cwd.path(), &["--project", &target_arg, "status", "--json"]);
+    let output = run_tool(
+        cwd.path(),
+        home.path(),
+        &["--project", &target_arg, "status", "--json"],
+    );
     assert!(
         !output.status.success(),
         "code-graph tools must not bootstrap stores on first touch"

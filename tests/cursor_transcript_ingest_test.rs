@@ -1,11 +1,17 @@
 use std::io::Write;
 
+mod common;
+
+use common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
 use tracedecay::sessions::cursor::{
     cursor_project_slug, ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped,
     open_project_session_db, project_session_db_path, CursorSweepSource,
 };
+use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
+use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::SessionSearchScope;
 
@@ -48,6 +54,101 @@ fn write_cursor_parent_with_subagent(tmp: &TempDir) -> (std::path::PathBuf, std:
     )
     .unwrap();
     (parent, subagent)
+}
+
+#[tokio::test]
+// Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
+// hook resolves its storage paths.
+#[allow(clippy::await_holding_lock)]
+async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
+    let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let _env_guards = [
+        EnvVarGuard::set(GLOBAL_DB_ENV, tmp.path().join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: keep Cursor compaction summaries in LCM."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Implementation plan: use cursor-agent as an auxiliary summarizer when Cursor exposes no summary."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Fresh tail should remain replayable."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Acknowledged fresh tail."}]}}
+"#,
+    )
+    .unwrap();
+
+    let fake_bin = tmp.path().join("cursor-agent-fake");
+    std::fs::write(
+        &fake_bin,
+        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let event = serde_json::json!({
+        "hook_event_name": "preCompact",
+        "session_id": "cursor-session",
+        "conversation_id": "conversation-1",
+        "transcript_path": transcript,
+        "workspace_roots": [project],
+        "message_count": 4,
+        "messages_to_compact": 2,
+        "context_tokens": 124000,
+        "context_window_size": 128000
+    });
+    let config = CursorAgentSummaryConfig {
+        cursor_agent_bin: fake_bin.to_string_lossy().to_string(),
+        model: Some("fake-cursor-model".to_string()),
+        timeout: std::time::Duration::from_secs(5),
+        workspace: Some(tmp.path().join("summary-workspace")),
+    };
+
+    let outcome = cursor_pre_compact_for_event_with_config(&event.to_string(), &config).await;
+    assert_eq!(outcome.status, "ok");
+    assert_eq!(outcome.summary_nodes_created, 1);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let node_id = outcome
+        .summary_node_ids
+        .first()
+        .expect("summary node id should be returned");
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "cursor-session", node_id)
+        .await
+        .expect("summary node should expand");
+    assert!(expanded
+        .summary
+        .summary_text
+        .contains("Cursor auxiliary summary: keep compaction summaries in LCM."));
+    let described = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".to_string(),
+            session_id: "cursor-session".to_string(),
+            target: LcmDescribeTarget::SummaryNode {
+                node_id: node_id.clone(),
+            },
+        })
+        .await
+        .expect("summary node should describe");
+    let summary = described
+        .summary_node
+        .expect("summary node details should exist");
+    assert_eq!(summary.source_count, 2);
+    assert!(summary
+        .metadata_json
+        .as_deref()
+        .unwrap_or_default()
+        .contains("cursor_agent"));
 }
 
 #[tokio::test]

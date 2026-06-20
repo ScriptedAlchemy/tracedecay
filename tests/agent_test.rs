@@ -342,6 +342,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
         ("sessionEnd", "hook-cursor-session-end"),
         ("subagentStart", "hook-cursor-subagent-start"),
         ("postToolUse", "hook-cursor-post-tool-use"),
+        ("preCompact", "hook-cursor-pre-compact"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
@@ -1144,11 +1145,13 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
+assert provider.project_root == "/tmp/hermes-profile"
 assert provider.session_id == "session-123"
 # Without an explicit hermes_home the provider resolves the active profile
 # home itself (sync_turn/prefetch need a storage anchor).
 provider.initialize("session-only")
 assert provider.hermes_home == os.environ["HERMES_HOME"]
+assert provider.project_root == os.environ["HERMES_HOME"]
 assert provider.session_id == "session-only"
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy

@@ -912,6 +912,7 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("sessionEnd", "hook-cursor-session-end"),
         ("subagentStart", "hook-cursor-subagent-start"),
         ("postToolUse", "hook-cursor-post-tool-use"),
+        ("preCompact", "hook-cursor-pre-compact"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),

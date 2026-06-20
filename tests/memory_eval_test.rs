@@ -3,7 +3,7 @@
 //! Each scenario in `eval/scenarios/*.json` seeds a throwaway fixture project,
 //! replays a scripted tool-call sequence through the real `tracedecay` binary
 //! (the same write/curation paths an agent hits over MCP), then asserts on
-//! end-state with plain SQL against the fixture's `.tracedecay/tracedecay.db`.
+//! end-state with plain SQL against the fixture's resolved project graph DB.
 //! No LLM is involved; the cost-gated real-model layer lives in
 //! `eval/run_real_model.py`.
 //!
@@ -214,7 +214,12 @@ struct Fixture {
 
 impl Fixture {
     fn db_path(&self) -> PathBuf {
-        self.project.path().join(".tracedecay/tracedecay.db")
+        tracedecay::storage::resolve_layout(
+            self.project.path(),
+            &self.home.path().join(".tracedecay"),
+        )
+        .expect("resolve fixture storage layout")
+        .graph_db_path
     }
 
     fn command(&self) -> Command {

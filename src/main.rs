@@ -1012,6 +1012,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 process::exit(code);
             }
         }
+        Commands::HookCursorPreCompact => {
+            let code = tracedecay::hooks::hook_cursor_pre_compact().await;
+            if code != 0 {
+                process::exit(code);
+            }
+        }
         Commands::HookCursorAfterFileEdit => {
             let code = tracedecay::hooks::hook_cursor_after_file_edit().await;
             if code != 0 {
@@ -1540,6 +1546,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookCursorSubagentStart
             | Commands::HookCursorPostToolUse
             | Commands::HookCursorBeforeSubmitPrompt
+            | Commands::HookCursorPreCompact
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart
             | Commands::HookCursorSessionEnd
