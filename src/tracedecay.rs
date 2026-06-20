@@ -2092,8 +2092,10 @@ impl TraceDecay {
     /// the wrong site.
     pub async fn replace_symbol(&self, symbol: &str, new_source: &str) -> Result<EditResult> {
         let target = resolve_symbol_for_edit(self, symbol).await?;
+        let project_path =
+            crate::storage::ProjectPath::resolve(&self.project_root, Path::new(&target.file_path))?;
         let rel_path = target.file_path.clone();
-        let abs_path = self.absolute_path(&rel_path);
+        let abs_path = project_path.absolute_path();
         let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {rel_path}: {e}"),
         })?;
@@ -2162,8 +2164,10 @@ impl TraceDecay {
             }
         };
         let target = resolve_symbol_for_edit(self, symbol).await?;
+        let project_path =
+            crate::storage::ProjectPath::resolve(&self.project_root, Path::new(&target.file_path))?;
         let rel_path = target.file_path.clone();
-        let abs_path = self.absolute_path(&rel_path);
+        let abs_path = project_path.absolute_path();
         let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {rel_path}: {e}"),
         })?;

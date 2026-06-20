@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+
+static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn table_exists(db_path: &Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
@@ -31,6 +34,7 @@ async fn project_column_exists(db_path: &Path, column: &str) -> bool {
 
 #[tokio::test]
 async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
@@ -69,6 +73,7 @@ async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
 
 #[tokio::test]
 async fn delete_project_paths_use_same_canonical_key_as_upsert() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let project_one = dir.path().join("repo-one");
@@ -92,6 +97,7 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
 
 #[tokio::test]
 async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let project_root = dir.path().join("repo");
@@ -185,6 +191,7 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
 
 #[tokio::test]
 async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let project_one = dir.path().join("repo-one");

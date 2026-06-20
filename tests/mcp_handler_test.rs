@@ -2947,6 +2947,62 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn read_and_outline_preserve_symlink_indexed_file_key() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let external = dir.path().join("external-src");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
+    unix_fs::symlink(&external, project.join("src")).unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let read = handle_tool_call(
+        &cg,
+        "tracedecay_read",
+        json!({"file": "src/lib.rs", "mode": "full"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let read_text = extract_text(&read.value);
+    let read_payload: serde_json::Value = serde_json::from_str(read_text).unwrap();
+    assert_eq!(read_payload["file"], "src/lib.rs");
+    assert!(
+        read_payload["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("through_symlink"),
+        "read should serve indexed source behind symlink: {read_payload:?}"
+    );
+
+    let outline = handle_tool_call(
+        &cg,
+        "tracedecay_outline",
+        json!({"file": "src/lib.rs"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let outline_text = extract_text(&outline.value);
+    let outline_payload: serde_json::Value = serde_json::from_str(outline_text).unwrap();
+    assert_eq!(outline_payload["file"], "src/lib.rs");
+    assert!(
+        outline_payload["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "through_symlink"),
+        "outline should query graph by indexed symlink path: {outline_payload:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn path_containment_config_rejects_symlink_escape_before_serving_config() {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1379,14 +1379,19 @@ pub(super) async fn handle_body(
 
     for result in &chosen {
         let n = &result.node;
-        let abs_path = project_root.join(&n.file_path);
-        let body = match crate::sync::read_source_file(&abs_path) {
-            Ok(source) => extract_lines(&source, n.start_line, n.end_line),
-            Err(_) => String::from("<file unreadable>"),
+        let project_path = ProjectPath::resolve(project_root, Path::new(&n.file_path));
+        let body = match project_path {
+            Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
+                Ok(source) => {
+                    if !touched.contains(&n.file_path) {
+                        touched.push(n.file_path.clone());
+                    }
+                    extract_lines(&source, n.start_line, n.end_line)
+                }
+                Err(_) => String::from("<file unreadable>"),
+            },
+            Err(_) => String::from("<file path outside project>"),
         };
-        if !touched.contains(&n.file_path) {
-            touched.push(n.file_path.clone());
-        }
         matches.push(json!({
             "id": n.id,
             "name": n.name,
@@ -1533,8 +1538,10 @@ pub(super) async fn handle_todos(
                 continue;
             }
         }
-        let abs_path = project_root.join(&file.path);
-        let Ok(source) = crate::sync::read_source_file(&abs_path) else {
+        let Ok(project_path) = ProjectPath::resolve(project_root, Path::new(&file.path)) else {
+            continue;
+        };
+        let Ok(source) = crate::sync::read_source_file(&project_path.absolute_path()) else {
             continue;
         };
         // Cache nodes per file so enclosing-symbol lookup is one DB call per
@@ -1587,6 +1594,93 @@ pub(super) async fn handle_todos(
     })
 }
 
+fn relative_source_key(path: &Path) -> Result<Option<String>> {
+    if path.is_absolute() {
+        return Ok(None);
+    }
+
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: format!("path '{}' contains unsafe components", path.display()),
+                });
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "path must name a project file".to_string(),
+        });
+    }
+
+    Ok(Some(parts.join("/")))
+}
+
+fn absolute_source_key(project_root: &Path, path: &Path) -> Result<Option<String>> {
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return Ok(None);
+    };
+    relative_source_key(relative)
+}
+
+async fn resolve_indexed_source_file(cg: &TraceDecay, file: &str) -> Result<(PathBuf, String)> {
+    if file.contains('\0') {
+        return Err(TraceDecayError::Config {
+            message: "path contains NUL byte".to_string(),
+        });
+    }
+
+    let project_root = cg.project_root().to_path_buf();
+    let input = Path::new(file);
+
+    if let Ok(project_path) = ProjectPath::resolve(&project_root, input) {
+        let display_file = match relative_source_key(input)? {
+            Some(relative) => relative,
+            None => project_path.relative_path_string(),
+        };
+        return Ok((project_path.absolute_path(), display_file));
+    }
+
+    let display_file = if let Some(relative) = relative_source_key(input)? {
+        relative
+    } else if let Some(relative) = absolute_source_key(&project_root, input)? {
+        relative
+    } else {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "path '{}' escapes project root '{}'",
+                input.display(),
+                project_root.display()
+            ),
+        });
+    };
+
+    let nodes = cg.get_nodes_by_file(&display_file).await?;
+    if nodes.is_empty() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "path '{}' escapes project root '{}' and is not indexed",
+                input.display(),
+                project_root.display()
+            ),
+        });
+    }
+
+    let abs_path = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        project_root.join(input)
+    };
+    Ok((abs_path, display_file))
+}
+
 /// Handles `tracedecay_read` — mode-aware file read with cross-session cache.
 pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     use crate::context::read_cache::{self, GLOBAL_SESSION};
@@ -1623,11 +1717,9 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
         None
     };
 
+    let (abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
     let project_root = cg.project_root().to_path_buf();
     let project_id = project_root.to_string_lossy().to_string();
-    let project_path = ProjectPath::resolve(&project_root, std::path::Path::new(file))?;
-    let abs_path = project_path.absolute_path();
-    let display_file = project_path.relative_path_string();
 
     let mtime_ns = read_cache::file_mtime_ns(&abs_path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read file metadata for '{file}': {e}"),
@@ -1755,9 +1847,7 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
             .collect()
     });
 
-    let project_root = cg.project_root();
-    let project_path = ProjectPath::resolve(project_root, Path::new(file))?;
-    let display_file = project_path.relative_path_string();
+    let (_abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
     let value = render_map(cg.db(), &display_file, kinds_slice).await?;

@@ -202,7 +202,8 @@ fn deployed_bundles_match_embedded_standalone_assets() {
     let entry = read(&dist.join("index.js"));
     let css = read(&dist.join("style.css"));
 
-    assert!(holographic.contains("tracedecay holographic-memory dashboard plugin"));
+    assert!(holographic.contains(r#"register("holographic""#));
+    assert!(holographic.contains("/api/plugins/holographic"));
     assert!(entry.contains("\"tracedecay\""));
     // Wrapper chrome first, then the child stylesheets concatenated.
     assert!(css.starts_with("/* Wrapper chrome"));
