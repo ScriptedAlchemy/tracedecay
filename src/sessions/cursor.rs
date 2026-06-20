@@ -12,6 +12,7 @@ use crate::sessions::source::{
     TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
+use crate::storage::{project_local_layout, resolve_layout_for_current_profile, StorageMode};
 
 const PROJECT_SESSION_DB_FILENAME: &str = "sessions.db";
 
@@ -22,11 +23,40 @@ pub struct CursorTranscriptIngestStats {
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
-    crate::config::get_tracedecay_dir(project_root).join(PROJECT_SESSION_DB_FILENAME)
+    resolve_layout_for_current_profile(project_root).map_or_else(
+        |_| project_local_layout(project_root).sessions_db_path,
+        |layout| layout.sessions_db_path,
+    )
 }
 
 pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
-    GlobalDb::open_at(&project_session_db_path(project_root)).await
+    if is_hermes_profile_home(project_root) {
+        return GlobalDb::open_at(&hermes_profile_session_db_path(project_root)).await;
+    }
+    let layout = resolve_layout_for_current_profile(project_root).ok()?;
+    if layout.storage_mode == StorageMode::ProfileSharded || layout.data_root.is_dir() {
+        return GlobalDb::open_at(&layout.sessions_db_path).await;
+    }
+    let db_path = registry_profile_session_db_path(project_root).await?;
+    GlobalDb::open_at(&db_path).await
+}
+
+fn is_hermes_profile_home(project_root: &Path) -> bool {
+    project_root.join("state.db").is_file()
+}
+
+async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
+    let profile_root = crate::storage::default_profile_root().ok()?;
+    let global = GlobalDb::open().await?;
+    let resolution = global.resolve_project_store_by_alias(project_root).await?;
+    if resolution.store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    Some(
+        profile_root
+            .join(resolution.store.store_relpath)
+            .join(PROJECT_SESSION_DB_FILENAME),
+    )
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {

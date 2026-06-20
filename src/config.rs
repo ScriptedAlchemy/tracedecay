@@ -13,6 +13,9 @@ pub const CONFIG_FILENAME: &str = "config.json";
 /// Name of the hidden directory used to store `TraceDecay` metadata.
 pub const TRACEDECAY_DIR: &str = ".tracedecay";
 
+/// Environment variable that pins the user-level `TraceDecay` data directory.
+pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
+
 /// Legacy (pre-rebrand) data directory name. Projects that already have a
 /// `.tokensave/` dir keep using it as-is — read and write, no auto-migration.
 pub const LEGACY_TOKENSAVE_DIR: &str = ".tokensave";
@@ -132,10 +135,27 @@ pub fn get_project_db_path(project_root: &Path) -> PathBuf {
     dir.join(file)
 }
 
+/// Returns true when either supported project DB filename exists at this root.
+///
+/// This intentionally checks the legacy path independently of
+/// [`get_tracedecay_dir`], because a profile-storage enrollment marker creates
+/// `.tracedecay/` even when the graph DB still lives in a legacy `.tokensave/`
+/// directory.
+pub fn has_project_database(project_root: &Path) -> bool {
+    project_root.join(TRACEDECAY_DIR).join(DB_FILENAME).exists()
+        || project_root
+            .join(LEGACY_TOKENSAVE_DIR)
+            .join(LEGACY_DB_FILENAME)
+            .exists()
+}
+
 /// User-level data directory: `~/.tracedecay`, falling back to an existing
 /// legacy `~/.tokensave` (used as-is), defaulting to `~/.tracedecay` when
 /// neither exists yet.
 pub fn user_data_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
     let home = dirs::home_dir()?;
     let primary = home.join(TRACEDECAY_DIR);
     if primary.is_dir() {
@@ -159,6 +179,9 @@ pub fn brand_env(suffix: &str) -> Option<String> {
 /// Returns the path to the configuration file (`config.json`) within the
 /// resolved data directory.
 pub fn get_config_path(project_root: &Path) -> PathBuf {
+    if let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) {
+        return layout.config_path;
+    }
     get_tracedecay_dir(project_root).join(CONFIG_FILENAME)
 }
 
@@ -168,7 +191,12 @@ pub fn get_config_path(project_root: &Path) -> PathBuf {
 /// with `root_dir` set to the given project root.
 pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
     let config_path = get_config_path(project_root);
+    load_config_from_path(project_root, &config_path)
+}
 
+/// Loads configuration from an explicit config path while preserving the
+/// project root used for default config values.
+pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<TraceDecayConfig> {
     if !config_path.exists() {
         return Ok(TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
@@ -176,7 +204,7 @@ pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
         });
     }
 
-    let contents = fs::read_to_string(&config_path).map_err(|e| TraceDecayError::Config {
+    let contents = fs::read_to_string(config_path).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to read config file '{}': {}",
             config_path.display(),
@@ -201,8 +229,16 @@ pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
 /// Writes to a temporary file first and then renames it to the final location,
 /// ensuring that a partial write never corrupts the configuration.
 pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
-    let data_dir = get_tracedecay_dir(project_root);
-    fs::create_dir_all(&data_dir).map_err(|e| TraceDecayError::Config {
+    let config_path = get_config_path(project_root);
+    let data_dir = config_path
+        .parent()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "configuration path '{}' has no parent directory",
+                config_path.display()
+            ),
+        })?;
+    fs::create_dir_all(data_dir).map_err(|e| TraceDecayError::Config {
         message: format!(
             "failed to create tracedecay directory '{}': {}",
             data_dir.display(),
@@ -210,7 +246,6 @@ pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()>
         ),
     })?;
 
-    let config_path = get_config_path(project_root);
     let tmp_path = config_path.with_extension("tmp");
 
     let json = serde_json::to_string_pretty(config).map_err(|e| TraceDecayError::Config {
@@ -321,7 +356,8 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
 }
 
 /// Walks from `start` upward looking for an initialised project database
-/// (`.tracedecay/tracedecay.db`, or legacy `.tokensave/tokensave.db`).
+/// (`.tracedecay/tracedecay.db`, or legacy `.tokensave/tokensave.db`) or a
+/// profile-storage enrollment marker (`.tracedecay/enrollment.json`).
 ///
 /// Returns the first ancestor directory (inclusive) that contains an
 /// initialised `TraceDecay` project, or `None` if the filesystem root is
@@ -350,7 +386,7 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
-        if get_project_db_path(&dir).exists() {
+        if has_project_database(&dir) || crate::storage::has_enrollment_marker(&dir) {
             return Some(dir);
         }
         if !dir.pop() {

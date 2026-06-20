@@ -12,6 +12,7 @@ use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .current_dir(project)
         .output()

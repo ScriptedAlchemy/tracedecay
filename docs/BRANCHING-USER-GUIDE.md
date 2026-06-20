@@ -2,7 +2,7 @@
 
 ## The problem
 
-TraceDecay maintains a code graph in a single SQLite database per project. When you switch
+TraceDecay maintains a code graph in the active project store. Without multi-branch indexing, that store has one SQLite database for the project. When you switch
 git branches, the files on disk change but the graph still reflects the old branch. The
 embedded MCP watcher eventually catches up by re-indexing changed files, but there are two costs:
 
@@ -23,8 +23,8 @@ you're actually working on.
 Multi-branch is fully opt-in. Without it, tracedecay behaves exactly as before: one database,
 one graph, the watcher re-indexes whatever is on disk.
 
-When you opt in, tracedecay creates a `branch-meta.json` file inside `.tracedecay/` that tracks
-which branches have their own database. The storage layout looks like this:
+When you opt in, tracedecay creates a `branch-meta.json` file inside the active project store that tracks
+which branches have their own database. In repo-local mode, the storage layout looks like this:
 
 ```
 .tracedecay/
@@ -37,6 +37,8 @@ which branches have their own database. The storage layout looks like this:
 
 Projects indexed before the rebrand may still use a legacy `.tokensave/` directory
 with the same layout; it is honored as a fallback.
+
+Profile-backed projects keep the same logical layout in their profile shard. The repository may contain only an enrollment marker, while `branch-meta.json`, `tracedecay.db`, and `branches/*.db` live under the resolved store root.
 
 Creating a new branch database is cheap. TraceDecay copies the nearest ancestor's database
 (usually `main`) and then runs an incremental sync that only re-parses files whose content

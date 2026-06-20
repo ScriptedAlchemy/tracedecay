@@ -391,6 +391,93 @@ fn test_cursor_plugin_bundle_files_are_valid() {
     );
 }
 
+#[test]
+fn generated_guidance_prefers_resolved_active_project_store() {
+    let cursor_status = include_str!("../cursor-plugin/skills/project-status/SKILL.md");
+    let codex_status = include_str!("../codex-plugin/skills/project-status/SKILL.md");
+    let cursor_rule = include_str!("../cursor-plugin/rules/tracedecay.mdc");
+
+    for (name, guidance) in [
+        ("cursor project-status", cursor_status),
+        ("codex project-status", codex_status),
+    ] {
+        assert!(
+            guidance.contains("tracedecay_active_project"),
+            "{name} should steer project identity checks through the active-project tool"
+        );
+        assert!(
+            guidance.contains("tracedecay_storage_status"),
+            "{name} should steer store checks through the storage-status tool"
+        );
+        assert!(
+            guidance.contains("resolved active project store"),
+            "{name} should describe resolved storage instead of repo-local DB probing"
+        );
+        assert!(
+            !guidance.contains(".tracedecay/tracedecay.db"),
+            "{name} must not tell agents to inspect the repo-local graph DB directly"
+        );
+    }
+
+    assert!(
+        cursor_rule.contains("resolved active project"),
+        "the always-on Cursor rule should describe resolved active-project routing"
+    );
+    assert!(
+        !cursor_rule.contains("when `.tracedecay/` exists"),
+        "the always-on Cursor rule must not gate MCP usage on a repo-local marker"
+    );
+}
+
+#[test]
+fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
+    for (name, source) in [
+        ("claude", include_str!("../src/agents/claude.rs")),
+        ("copilot", include_str!("../src/agents/copilot.rs")),
+        ("gemini", include_str!("../src/agents/gemini.rs")),
+        ("kiro", include_str!("../src/agents/kiro.rs")),
+        ("kimi", include_str!("../src/agents/kimi.rs")),
+        ("opencode", include_str!("../src/agents/opencode.rs")),
+        ("vibe", include_str!("../src/agents/vibe.rs")),
+    ] {
+        assert!(
+            !source.contains(".tracedecay/tracedecay.db"),
+            "{name} generated guidance must not hardcode the repo-local graph DB path"
+        );
+        assert!(
+            source.contains("tracedecay_active_project")
+                && source.contains("tracedecay_storage_status"),
+            "{name} generated guidance should point store questions to active-project/storage-status tools"
+        );
+    }
+}
+
+#[test]
+fn profile_storage_docs_do_not_overclaim_unimplemented_bundle_or_quota_support() {
+    let docs = include_str!("../docs/PROFILE-STORAGE-SUPPORT.md");
+    assert!(
+        !docs.contains("tracedecay support bundle --redact"),
+        "profile-storage docs must not present support-bundle behavior as implemented"
+    );
+    assert!(
+        !docs.contains("quota status"),
+        "profile-storage docs must not claim quota status is emitted before quota support exists"
+    );
+}
+
+#[test]
+fn hermes_dashboard_wrapper_docs_describe_deployed_profile_default() {
+    let wrapper = include_str!("../dashboard/hermes-wrapper/plugin_api.py");
+    assert!(
+        wrapper.contains("deploy-time default"),
+        "Hermes dashboard wrapper docs should describe the deployed project default"
+    );
+    assert!(
+        !wrapper.contains("defaults to the Hermes process cwd"),
+        "Hermes dashboard wrapper docs must not hide the deployed profile/pin default"
+    );
+}
+
 fn assert_hermes_config_enables_tracedecay_memory(config_path: &Path) -> String {
     let config = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
         panic!(
@@ -3248,7 +3335,8 @@ fn test_copilot_install_creates_config() {
     let cli_prompt = home.join(".copilot/copilot-instructions.md");
     let prompt = std::fs::read_to_string(&cli_prompt).unwrap();
     assert!(prompt.contains("tracedecay_fact_store"));
-    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("tracedecay_active_project"));
+    assert!(prompt.contains("tracedecay_storage_status"));
     assert!(prompt.contains("sensitive or proprietary code"));
 }
 
@@ -3287,7 +3375,8 @@ fn test_vibe_install_creates_config() {
     let prompt = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(prompt.contains("tracedecay"));
     assert!(prompt.contains("tracedecay_fact_store"));
-    assert!(prompt.contains("memory_facts"));
+    assert!(prompt.contains("tracedecay_active_project"));
+    assert!(prompt.contains("tracedecay_storage_status"));
     assert!(prompt.contains("sensitive or proprietary code"));
 }
 

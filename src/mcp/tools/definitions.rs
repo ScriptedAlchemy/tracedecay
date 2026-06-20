@@ -113,6 +113,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_impact(),
         def_node(),
         def_status(),
+        def_active_project(),
+        def_storage_status(),
+        def_project_list(),
+        def_project_search(),
+        def_project_context(),
         def_files(),
         def_affected(),
         def_dead_code(),
@@ -328,6 +333,90 @@ fn def_status() -> ToolDefinition {
         json!({
             "type": "object",
             "properties": {}
+        }),
+    )
+}
+
+fn def_active_project() -> ToolDefinition {
+    def_always_load(
+        "tracedecay_active_project",
+        "Active Project",
+        "Return the resolved active project context for this MCP session, including project root, scope prefix, branch identity, and the active project store paths. Use this instead of guessing from repo-local marker files or hardcoded DB paths.",
+        json!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
+fn def_storage_status() -> ToolDefinition {
+    def_always_load(
+        "tracedecay_storage_status",
+        "Storage Status",
+        "Return read-only health and path metadata for the resolved active project store backing this MCP session. Use this to answer which store is active and whether it is writable, stale, missing, or branch-fallback backed.",
+        json!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
+fn def_project_list() -> ToolDefinition {
+    def(
+        "tracedecay_project_list",
+        "Project List",
+        "List projects from the profile/global registry without opening or mutating their stores. Results are bounded and include only registry metadata.",
+        json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum projects to return (default: 25, max: 100)"
+                }
+            }
+        }),
+    )
+}
+
+fn def_project_search() -> ToolDefinition {
+    def(
+        "tracedecay_project_search",
+        "Project Search",
+        "Search registered projects by project id, root path, aliases, remote URL, or default branch. This is read-only and bounded.",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Case-insensitive substring query over registry project metadata"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum projects to return (default: 10, max: 50)"
+                }
+            },
+            "required": ["query"]
+        }),
+    )
+}
+
+fn def_project_context() -> ToolDefinition {
+    def(
+        "tracedecay_project_context",
+        "Project Context",
+        "Return registry context for one project: project metadata, aliases, store instances, graph scopes, and artifacts. Defaults to the active project alias when neither project_id nor path is provided.",
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "Registered project id to inspect"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Project path or registered alias to resolve"
+                }
+            }
         }),
     )
 }

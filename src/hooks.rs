@@ -455,10 +455,35 @@ fn deduped_cursor_hint(event_json: &str, hint: ToolHint) -> Option<ToolHint> {
         return None;
     }
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let Some(session_id) = event_session_id(&parsed) else {
+    deduped_project_hint(Some(root), event_session_id(&parsed), hint)
+}
+
+fn deduped_codex_hint(event_json: &str, parsed: &Value, hint: ToolHint) -> Option<ToolHint> {
+    deduped_project_hint(
+        codex_project_root_from_event(event_json),
+        event_session_id(parsed),
+        hint,
+    )
+}
+
+fn deduped_project_hint(
+    root: Option<PathBuf>,
+    session_id: Option<String>,
+    hint: ToolHint,
+) -> Option<ToolHint> {
+    let Some(root) = root else {
         return Some(hint);
     };
-    let path = crate::config::get_tracedecay_dir(&root).join("tool_hints_seen.json");
+    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
+        return Some(hint);
+    };
+    if !layout.data_root.is_dir() {
+        return Some(hint);
+    }
+    let Some(session_id) = session_id else {
+        return Some(hint);
+    };
+    let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     if !dedupe.should_emit(session_id, hint.category) {
         return None;
@@ -1715,7 +1740,7 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
 
 fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    decide_hint(&ToolHintInput {
+    let hint = decide_hint(&ToolHintInput {
         agent: HintAgent::Codex,
         session_id: event_session_id(&parsed),
         tool_name: None,
@@ -1724,7 +1749,8 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         subagent_type: None,
         file_path: None,
         hints_enabled: true,
-    })
+    })?;
+    deduped_codex_hint(event_json, &parsed, hint)
 }
 
 fn text_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -1830,6 +1856,34 @@ pub async fn hook_stop() {
         eprintln!(
             "\x1b[36mSession: ${:.2} spent | {saved_str} saved | {efficiency:.0}% efficiency\x1b[0m",
             stats.cost_usd
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_prompt_hints_dedupe_by_session_and_category() {
+        let project = tempfile::tempdir().unwrap();
+        let data_dir = project.path().join(".tracedecay");
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::write(data_dir.join("tracedecay.db"), "").unwrap();
+        let event = serde_json::json!({
+            "session_id": "codex-session-1",
+            "cwd": project.path(),
+            "prompt": "Please explain the impact of changing parse_user"
+        })
+        .to_string();
+
+        let first = codex_prompt_hint(&event).unwrap();
+        assert_eq!(first.category, tool_hints::HintCategory::Impact);
+
+        assert!(
+            codex_prompt_hint(&event).is_none(),
+            "Codex should use shared per-session hint dedupe for prompt hints"
         );
     }
 }

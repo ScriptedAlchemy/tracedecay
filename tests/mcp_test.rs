@@ -29,6 +29,9 @@ fn test_tool_definitions() {
     assert!(tool_names.contains(&"tracedecay_impact"));
     assert!(tool_names.contains(&"tracedecay_node"));
     assert!(tool_names.contains(&"tracedecay_status"));
+    assert!(tool_names.contains(&"tracedecay_project_list"));
+    assert!(tool_names.contains(&"tracedecay_project_search"));
+    assert!(tool_names.contains(&"tracedecay_project_context"));
 }
 
 #[test]
@@ -96,11 +99,11 @@ fn test_tool_definitions_count() {
     // `tracedecay_ast_grep_rewrite` is registered conditionally on whether
     // the external `ast-grep` binary is on PATH — hide-when-missing so
     // agents never receive a tool that will instantly fail.
-    // LCM comparison support registers ten additional MCP tools.
+    // LCM comparison and profile-storage registry support add extra tools.
     let expected = if tracedecay::mcp::tools::ast_grep_available() {
-        89
+        94
     } else {
-        88
+        93
     };
     assert_eq!(tools.len(), expected);
 }

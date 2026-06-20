@@ -3,6 +3,192 @@ use std::path::Path;
 use crate::current_unix_timestamp;
 use tracedecay::tracedecay::TraceDecay;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectStorageStatus {
+    RepoLocal,
+    ProfileSharded,
+    ManifestReconstructable,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectStorageLocation {
+    pub project_root: std::path::PathBuf,
+    pub data_root: std::path::PathBuf,
+    pub marker_root: Option<std::path::PathBuf>,
+    pub status: ProjectStorageStatus,
+}
+
+impl ProjectStorageStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::RepoLocal => "repo-local",
+            Self::ProfileSharded => "profile-sharded",
+            Self::ManifestReconstructable => "manifest-reconstructable",
+            Self::Stale => "stale",
+        }
+    }
+
+    pub(crate) fn is_live(self) -> bool {
+        matches!(self, Self::RepoLocal | Self::ProfileSharded)
+    }
+}
+
+pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
+    match tracedecay::storage::resolve_layout_for_current_profile(project_root) {
+        Ok(layout) => classify_layout_storage(project_root, layout),
+        Err(_) => ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root: tracedecay::config::get_tracedecay_dir(project_root),
+            marker_root: None,
+            status: ProjectStorageStatus::Stale,
+        },
+    }
+}
+
+pub(crate) async fn classify_project_storage_with_registry(
+    project_root: &Path,
+    global_db: Option<&tracedecay::global_db::GlobalDb>,
+    profile_root: Option<&Path>,
+) -> ProjectStorageLocation {
+    let location = classify_project_storage(project_root);
+    if location.status != ProjectStorageStatus::Stale {
+        return location;
+    }
+    let Some(db) = global_db else {
+        return location;
+    };
+    let Some(profile_root) = profile_root else {
+        return location;
+    };
+    let Some(resolution) = db.resolve_project_store_by_alias(project_root).await else {
+        return location;
+    };
+    classify_registry_storage(project_root, profile_root, &resolution.store).unwrap_or(location)
+}
+
+fn classify_layout_storage(
+    project_root: &Path,
+    layout: tracedecay::storage::StoreLayout,
+) -> ProjectStorageLocation {
+    let graph_exists = layout.graph_db_path.exists();
+    let manifest_exists = layout
+        .manifest_path
+        .as_ref()
+        .is_some_and(|path| path.is_file());
+    let status = match layout.storage_mode {
+        tracedecay::storage::StorageMode::ProjectLocal if graph_exists => {
+            ProjectStorageStatus::RepoLocal
+        }
+        tracedecay::storage::StorageMode::ProfileSharded if graph_exists => {
+            ProjectStorageStatus::ProfileSharded
+        }
+        tracedecay::storage::StorageMode::ProfileSharded if manifest_exists => {
+            ProjectStorageStatus::ManifestReconstructable
+        }
+        _ => ProjectStorageStatus::Stale,
+    };
+    let marker_root = (layout.storage_mode == tracedecay::storage::StorageMode::ProfileSharded)
+        .then(|| project_root.join(tracedecay::config::TRACEDECAY_DIR));
+    ProjectStorageLocation {
+        project_root: project_root.to_path_buf(),
+        data_root: layout.data_root,
+        marker_root,
+        status,
+    }
+}
+
+fn classify_registry_storage(
+    project_root: &Path,
+    profile_root: &Path,
+    store: &tracedecay::global_db::StoreInstanceRecord,
+) -> Option<ProjectStorageLocation> {
+    if store.storage_mode != "profile_sharded" {
+        return None;
+    }
+    let store_relpath = registry_relpath(&store.store_relpath);
+    let manifest_relpath = store
+        .manifest_relpath
+        .as_ref()
+        .map(|relpath| registry_relpath(relpath));
+    let mut stale_location = None;
+    let mut manifest_location = None;
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) =
+            tracedecay::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
+        else {
+            continue;
+        };
+        let data_root = data_root.absolute_path();
+        let manifest_exists = manifest_relpath.as_ref().map_or_else(
+            || {
+                data_root
+                    .join(tracedecay::storage::STORE_MANIFEST_FILENAME)
+                    .is_file()
+            },
+            |relpath| {
+                [&profile_root, &data_root].iter().any(|root| {
+                    tracedecay::storage::StoreArtifactPath::resolve(root, relpath)
+                        .ok()
+                        .is_some_and(|path| path.absolute_path().is_file())
+                })
+            },
+        );
+        let status = if data_root
+            .join(tracedecay::config::db_filename(&data_root))
+            .exists()
+        {
+            ProjectStorageStatus::ProfileSharded
+        } else if manifest_exists {
+            ProjectStorageStatus::ManifestReconstructable
+        } else {
+            ProjectStorageStatus::Stale
+        };
+        let location = ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root,
+            marker_root: Some(project_root.join(tracedecay::config::TRACEDECAY_DIR)),
+            status,
+        };
+        match location.status {
+            ProjectStorageStatus::ProfileSharded => return Some(location),
+            ProjectStorageStatus::ManifestReconstructable if manifest_location.is_none() => {
+                manifest_location = Some(location);
+            }
+            ProjectStorageStatus::Stale if stale_location.is_none() => {
+                stale_location = Some(location);
+            }
+            _ => {}
+        }
+    }
+    manifest_location.or(stale_location)
+}
+
+fn registry_relpath(value: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return path.to_path_buf();
+    }
+    value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn registry_profile_roots(profile_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![profile_root.to_path_buf()];
+    if let Ok(canonical) = profile_root.canonicalize() {
+        if !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
 /// Returns how many seconds have elapsed since a persisted timestamp.
 ///
 /// User config timestamps can land in the future because of clock skew,
@@ -212,10 +398,8 @@ pub(crate) fn gather_local_projects_from(
         false
     };
 
-    let is_project_dir = |ts: &Path| -> bool {
-        !is_home_tracedecay(ts)
-            && ts.is_dir()
-            && ts.join(tracedecay::config::db_filename(ts)).exists()
+    let is_project_dir = |project_root: &Path, ts: &Path| -> bool {
+        !is_home_tracedecay(ts) && local_project_marker_exists(project_root, ts)
     };
 
     let mut cursor: Option<&Path> = Some(cwd);
@@ -227,7 +411,7 @@ pub(crate) fn gather_local_projects_from(
             tracedecay::config::LEGACY_TOKENSAVE_DIR,
         ] {
             let ts = dir.join(dir_name);
-            if is_project_dir(&ts) && seen.insert(dir.to_path_buf()) {
+            if is_project_dir(dir, &ts) && seen.insert(dir.to_path_buf()) {
                 out.push(dir.to_path_buf());
             }
         }
@@ -292,8 +476,8 @@ pub(crate) fn find_descendant_tracedecay(
                         continue;
                     }
                 }
-                if path.join(tracedecay::config::db_filename(&path)).exists() {
-                    if let Some(parent) = path.parent() {
+                if let Some(parent) = path.parent() {
+                    if local_project_marker_exists(parent, &path) {
                         let pb = parent.to_path_buf();
                         if seen.insert(pb.clone()) {
                             out.push(pb);
@@ -321,8 +505,24 @@ pub(crate) fn find_descendant_tracedecay(
     }
 }
 
+fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
+    if !data_dir.is_dir() {
+        return false;
+    }
+    if data_dir
+        .join(tracedecay::config::db_filename(data_dir))
+        .exists()
+    {
+        return true;
+    }
+    data_dir.file_name().is_some_and(|name| {
+        name == tracedecay::config::TRACEDECAY_DIR
+            && tracedecay::storage::has_enrollment_marker(project_root)
+    })
+}
+
 /// Prints the big flashing warning shown before a wipe.
-pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
+pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation]) {
     // Banner is `INNER_WIDTH` display columns wide. The colored title row is
     // padded with red-background spaces so the highlight reaches the same
     // width as the `═` rules above and below — a fixed-width visual block
@@ -364,9 +564,13 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
         eprintln!("Targets:");
         for t in targets {
             eprintln!(
-                "  \x1b[31m✗\x1b[0m {}",
-                tracedecay::config::get_tracedecay_dir(t).display()
+                "  \x1b[31m✗\x1b[0m {} [{}]",
+                t.data_root.display(),
+                t.status.label()
             );
+            if let Some(marker_root) = &t.marker_root {
+                eprintln!("    marker: {}", marker_root.display());
+            }
         }
     }
     if all {
@@ -386,6 +590,8 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[std::path::PathBuf]) {
 mod gather_tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     /// Plant a `.tracedecay/tracedecay.db` marker so `is_project_dir` returns true.
@@ -393,6 +599,21 @@ mod gather_tests {
         let ts = root.join(".tracedecay");
         fs::create_dir_all(&ts).unwrap();
         fs::write(ts.join("tracedecay.db"), b"").unwrap();
+    }
+
+    fn make_enrolled_project(root: &Path, project_id: &str) {
+        let ts = root.join(".tracedecay");
+        fs::create_dir_all(&ts).unwrap();
+        fs::write(
+            ts.join(tracedecay::storage::ENROLLMENT_FILENAME),
+            format!(
+                r#"{{
+  "project_id": "{project_id}",
+  "storage_mode": "profile_sharded"
+}}"#
+            ),
+        )
+        .unwrap();
     }
 
     /// Plant a legacy `.tokensave/tokensave.db` marker — pre-rebrand projects
@@ -476,6 +697,80 @@ mod gather_tests {
         assert!(out.contains(&child));
         let unique: std::collections::HashSet<_> = out.iter().collect();
         assert_eq!(unique.len(), out.len(), "duplicates: {out:?}");
+    }
+
+    #[test]
+    fn finds_profile_enrolled_projects_without_graph_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let cwd = root.join("mid");
+        let child = cwd.join("child");
+        fs::create_dir_all(&child).unwrap();
+        make_enrolled_project(&root, "proj_root");
+        make_enrolled_project(&child, "proj_child");
+
+        let out = gather_local_projects_from(&cwd, &None);
+
+        assert!(
+            out.contains(&root),
+            "ancestor enrollment marker must be detected, got {out:?}"
+        );
+        assert!(
+            out.contains(&child),
+            "descendant enrollment marker must be detected, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn registry_manifest_relpath_resolves_from_profile_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        let profile_root = dir.path().join("profile");
+        let data_root = profile_root.join("projects").join("proj_123");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(
+            data_root.join(tracedecay::storage::STORE_MANIFEST_FILENAME),
+            b"{}",
+        )
+        .unwrap();
+        let store = tracedecay::global_db::StoreInstanceRecord {
+            store_id: "store_123".to_string(),
+            project_id: "proj_123".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_123".to_string(),
+            manifest_relpath: Some("projects/proj_123/store_manifest.json".to_string()),
+            created_at: 1_800_000_000,
+            last_verified_at: None,
+            last_write_at: None,
+        };
+
+        let location = classify_registry_storage(&project_root, &profile_root, &store).unwrap();
+
+        assert_eq!(
+            location.status,
+            ProjectStorageStatus::ManifestReconstructable
+        );
+        let actual_data_root = location
+            .data_root
+            .canonicalize()
+            .unwrap_or_else(|_| location.data_root.clone());
+        let expected_data_root = data_root
+            .canonicalize()
+            .unwrap_or_else(|_| data_root.clone());
+        assert_eq!(actual_data_root, expected_data_root);
+        #[cfg(unix)]
+        {
+            let symlinked_profile_root = dir.path().join("profile-link");
+            symlink(&profile_root, &symlinked_profile_root).unwrap();
+            let location =
+                classify_registry_storage(&project_root, &symlinked_profile_root, &store).unwrap();
+            assert_eq!(
+                location.status,
+                ProjectStorageStatus::ManifestReconstructable
+            );
+        }
     }
 
     #[test]

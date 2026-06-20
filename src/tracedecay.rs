@@ -10,8 +10,8 @@ use walkdir::WalkDir;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    brand_env, db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-    is_included, load_config, save_config, TraceDecayConfig,
+    brand_env, db_filename, is_excluded, is_excluded_dir, is_included, load_config_from_path,
+    save_config, TraceDecayConfig,
 };
 use crate::context::ContextBuilder;
 use crate::db::Database;
@@ -28,6 +28,7 @@ use crate::memory::types::{
     SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
 use crate::resolution::ReferenceResolver;
+use crate::storage::{self, StoreLayout};
 use crate::sync;
 use crate::types::*;
 
@@ -217,6 +218,7 @@ pub struct TraceDecay {
     db: Database,
     config: TraceDecayConfig,
     project_root: PathBuf,
+    store_layout: StoreLayout,
     registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
     active_branch: Option<String>,
@@ -321,29 +323,32 @@ impl TraceDecay {
     /// Creates the `.tracedecay` directory, writes a default configuration,
     /// and initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
         };
         save_config(project_root, &config)?;
 
-        let db_path = get_project_db_path(project_root);
-        let (db, _migrated) = Database::initialize(&db_path).await?;
+        let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
+        if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
+            storage::write_store_manifest(&store_layout)?;
+        }
 
         // Bootstrap branch metadata if we can detect a default branch
         let active_branch = branch::current_branch(project_root);
         let default_branch =
             branch::detect_default_branch(project_root).or_else(|| active_branch.clone());
         if let Some(ref default) = default_branch {
-            let data_dir = get_tracedecay_dir(project_root);
-            let meta = BranchMeta::new_for_dir(&data_dir, default);
-            let _ = branch_meta::save_branch_meta(&data_dir, &meta);
+            let meta = BranchMeta::new_for_dir(&store_layout.data_root, default);
+            let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
         Ok(Self {
             db,
             config,
             project_root: project_root.to_path_buf(),
+            store_layout,
             registry: LanguageRegistry::new(),
             active_branch,
             serving_branch: None,
@@ -364,12 +369,15 @@ impl TraceDecay {
     /// If the previous operation was interrupted (dirty sentinel exists),
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
-        let config = load_config(project_root)?;
-        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
 
-        let (db_path, serving_branch, fallback_warning) =
-            Self::resolve_db_for_branch(project_root, &tracedecay_dir, active_branch.as_deref());
+        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+            project_root,
+            &store_layout.data_root,
+            active_branch.as_deref(),
+        );
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -382,7 +390,7 @@ impl TraceDecay {
 
         // If the dirty sentinel exists, a previous sync/index was interrupted.
         // Check integrity and rebuild if necessary.
-        let crashed = has_dirty_sentinel(project_root);
+        let crashed = has_dirty_sentinel_at(&store_layout.dirty_path);
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -397,12 +405,13 @@ impl TraceDecay {
             Err(ref e) if Database::is_corruption_error(e) || crashed => {
                 print_corruption_warning();
                 delete_db_files(&db_path);
-                clear_dirty_sentinel(project_root);
+                clear_dirty_sentinel_at(&store_layout.dirty_path);
                 let (db, _) = Database::initialize(&db_path).await?;
                 let ts = Self {
                     db,
                     config,
                     project_root: project_root.to_path_buf(),
+                    store_layout: store_layout.clone(),
                     registry: LanguageRegistry::new(),
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
@@ -426,12 +435,13 @@ impl TraceDecay {
                 print_corruption_warning();
                 drop(db);
                 delete_db_files(&db_path);
-                clear_dirty_sentinel(project_root);
+                clear_dirty_sentinel_at(&store_layout.dirty_path);
                 let (new_db, _) = Database::initialize(&db_path).await?;
                 let ts = Self {
                     db: new_db,
                     config,
                     project_root: project_root.to_path_buf(),
+                    store_layout: store_layout.clone(),
                     registry: LanguageRegistry::new(),
                     active_branch: active_branch.clone(),
                     serving_branch: serving_branch.clone(),
@@ -445,13 +455,14 @@ impl TraceDecay {
                 return Ok(ts);
             }
             // DB is fine — clean up the stale sentinel.
-            clear_dirty_sentinel(project_root);
+            clear_dirty_sentinel_at(&store_layout.dirty_path);
         }
 
         let ts = Self {
             db,
             config,
             project_root: project_root.to_path_buf(),
+            store_layout,
             registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
@@ -536,20 +547,20 @@ impl TraceDecay {
     ///
     /// Returns an error if the branch is not tracked or the DB doesn't exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
-        let config = load_config(project_root)?;
-        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let config = load_config_from_path(project_root, &store_layout.config_path)?;
 
-        let meta = branch_meta::load_branch_meta(&tracedecay_dir).ok_or_else(|| {
+        let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
                 message: "no branch tracking configured — run `tracedecay branch add` first"
                     .to_string(),
             }
         })?;
 
-        let db_path = branch::resolve_branch_db_path(&tracedecay_dir, branch_name, &meta)
+        let db_path = branch::resolve_branch_db_path(&store_layout.data_root, branch_name, &meta)
             .ok_or_else(|| TraceDecayError::Config {
-                message: format!("branch '{branch_name}' is not tracked"),
-            })?;
+            message: format!("branch '{branch_name}' is not tracked"),
+        })?;
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -565,6 +576,7 @@ impl TraceDecay {
             db,
             config,
             project_root: project_root.to_path_buf(),
+            store_layout,
             registry: LanguageRegistry::new(),
             active_branch: Some(branch_name.to_string()),
             serving_branch: Some(branch_name.to_string()),
@@ -574,14 +586,15 @@ impl TraceDecay {
 
     /// Lists tracked branches from metadata. Returns `None` if no branch tracking.
     pub fn list_tracked_branches(project_root: &Path) -> Option<Vec<String>> {
-        let tracedecay_dir = get_tracedecay_dir(project_root);
-        let meta = branch_meta::load_branch_meta(&tracedecay_dir)?;
+        let store_layout = storage::resolve_layout_for_current_profile(project_root).ok()?;
+        let meta = branch_meta::load_branch_meta(&store_layout.data_root)?;
         Some(meta.branches.keys().cloned().collect())
     }
 
     /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
     pub fn is_initialized(project_root: &Path) -> bool {
-        get_project_db_path(project_root).exists()
+        crate::config::has_project_database(project_root)
+            || crate::storage::has_enrollment_marker(project_root)
     }
 }
 
@@ -589,16 +602,15 @@ impl TraceDecay {
 // Dirty sentinel — detects interrupted sync/index operations
 // ---------------------------------------------------------------------------
 
-/// Creates a `.tracedecay/dirty` sentinel file before a sync or index begins.
+/// Creates the active store's dirty sentinel before a sync or index begins.
 ///
 /// This file is intentionally NOT cleaned up by a Drop guard — it must be
 /// removed explicitly by `clear_dirty_sentinel` after the operation succeeds.
 /// If the process is killed (SIGKILL, OOM), the sentinel survives and signals
 /// a potential crash on the next open.
-fn write_dirty_sentinel(project_root: &Path) {
-    let path = get_tracedecay_dir(project_root).join("dirty");
+fn write_dirty_sentinel_at(path: &Path) {
     let _ = std::fs::write(
-        &path,
+        path,
         format!(
             "pid={}\ntime={}\nversion={}",
             std::process::id(),
@@ -609,15 +621,14 @@ fn write_dirty_sentinel(project_root: &Path) {
 }
 
 /// Removes the dirty sentinel after a successful sync/index.
-fn clear_dirty_sentinel(project_root: &Path) {
-    let path = get_tracedecay_dir(project_root).join("dirty");
+fn clear_dirty_sentinel_at(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
 /// Returns `true` if the dirty sentinel exists (previous operation was
 /// interrupted).
-fn has_dirty_sentinel(project_root: &Path) -> bool {
-    get_tracedecay_dir(project_root).join("dirty").exists()
+fn has_dirty_sentinel_at(path: &Path) -> bool {
+    path.exists()
 }
 
 /// Deletes the database and its WAL/SHM sidecars.
@@ -666,9 +677,9 @@ impl Drop for SyncLockGuard {
     }
 }
 
-/// Try to acquire the sync lock for `project_root`.
+/// Try to acquire the sync lock for `project_root`'s resolved store.
 ///
-/// Creates `.tracedecay/sync.lock` containing the current PID. If the file
+/// Creates the store's `sync.lock` containing the current PID. If the file
 /// already exists and the PID inside is still alive, returns a `SyncLock`
 /// error. Stale lockfiles (dead PID or unreadable content) are reclaimed
 /// automatically.
@@ -676,19 +687,25 @@ impl Drop for SyncLockGuard {
 /// Internal: exposed for integration tests; not part of the stable public API.
 #[doc(hidden)]
 pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
+    let layout = storage::resolve_layout_for_current_profile(project_root)?;
+    try_acquire_sync_lock_at(&layout.sync_lock_path)
+}
+
+fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     use std::io::Write;
-    let lock_path = get_tracedecay_dir(project_root).join("sync.lock");
     let pid = std::process::id();
 
     // Fast path: try atomic create.
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&lock_path)
+        .open(lock_path)
     {
         Ok(mut f) => {
             let _ = write!(f, "{pid}");
-            return Ok(SyncLockGuard { path: lock_path });
+            return Ok(SyncLockGuard {
+                path: lock_path.to_path_buf(),
+            });
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Fall through to stale-check below.
@@ -701,7 +718,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     }
 
     // Lockfile exists — check if the owning process is still alive.
-    let contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
+    let contents = std::fs::read_to_string(lock_path).unwrap_or_default();
     if let Ok(existing_pid) = contents.trim().parse::<u32>() {
         if is_pid_alive(existing_pid) {
             return Err(TraceDecayError::SyncLock {
@@ -723,7 +740,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     // still the O_EXCL create below — the single source of truth for ownership.
     let nonce = RECLAIM_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let reclaim_path = lock_path.with_file_name(format!("sync.lock.reclaim.{pid}.{nonce}"));
-    if std::fs::rename(&lock_path, &reclaim_path).is_ok() {
+    if std::fs::rename(lock_path, &reclaim_path).is_ok() {
         // We won the move. Guard against the race where another process
         // replaced the stale lock with a *live* one between our staleness check
         // and the rename: if what we moved is a live PID, put it back and
@@ -731,7 +748,7 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
         let moved = std::fs::read_to_string(&reclaim_path).unwrap_or_default();
         let moved_is_live = moved.trim().parse::<u32>().is_ok_and(is_pid_alive);
         if moved_is_live {
-            let _ = std::fs::rename(&reclaim_path, &lock_path);
+            let _ = std::fs::rename(&reclaim_path, lock_path);
             return Err(TraceDecayError::SyncLock {
                 message: "another sync is already in progress".to_string(),
             });
@@ -745,11 +762,13 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&lock_path)
+        .open(lock_path)
     {
         Ok(mut f) => {
             let _ = write!(f, "{pid}");
-            Ok(SyncLockGuard { path: lock_path })
+            Ok(SyncLockGuard {
+                path: lock_path.to_path_buf(),
+            })
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(TraceDecayError::SyncLock {
             message: "another sync is already in progress".to_string(),
@@ -841,8 +860,8 @@ impl TraceDecay {
             "project root is not a directory"
         );
         self.ensure_branch_writable("full index")?;
-        let _lock = try_acquire_sync_lock(&self.project_root)?;
-        write_dirty_sentinel(&self.project_root);
+        let _lock = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?;
+        write_dirty_sentinel_at(&self.store_layout.dirty_path);
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode
@@ -978,7 +997,7 @@ impl TraceDecay {
             result.duration_ms > 0 || result.file_count == 0,
             "non-empty index completed in zero milliseconds"
         );
-        clear_dirty_sentinel(&self.project_root);
+        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(result)
     }
 
@@ -1019,7 +1038,7 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let Ok(lock) = try_acquire_sync_lock(&self.project_root) else {
+        let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) else {
             return Ok(true);
         };
 
@@ -1056,7 +1075,7 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let lock = if let Ok(lock) = try_acquire_sync_lock(&self.project_root) {
+        let lock = if let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) {
             lock
         } else {
             // Peer is syncing. Wait for them to release the lock so the
@@ -1071,7 +1090,7 @@ impl TraceDecay {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if let Ok(lock) = try_acquire_sync_lock(&self.project_root) {
+                if let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) {
                     // Peer released. If they covered our files, the DB is
                     // fresh and we're done; otherwise sync ourselves.
                     let still_stale = self.check_file_staleness(&stale_files).await;
@@ -1189,7 +1208,7 @@ impl TraceDecay {
             )
             .await?;
 
-        clear_dirty_sentinel(&self.project_root);
+        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(())
     }
 
@@ -1336,8 +1355,8 @@ impl TraceDecay {
             "sync: project root is not a directory"
         );
         self.ensure_branch_writable("sync")?;
-        let _lock = try_acquire_sync_lock(&self.project_root)?;
-        write_dirty_sentinel(&self.project_root);
+        let _lock = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?;
+        write_dirty_sentinel_at(&self.store_layout.dirty_path);
         let start = Instant::now();
 
         on_progress(0, 0, "scanning files");
@@ -1598,7 +1617,7 @@ impl TraceDecay {
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
 
-        clear_dirty_sentinel(&self.project_root);
+        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(SyncResult {
             files_added: new_files.len(),
             files_modified: stale.len(),
@@ -1787,16 +1806,12 @@ impl TraceDecay {
     }
 
     /// Resolves a path to a relative path string.
-    /// If the path is already relative, returns it as-is.
+    /// If the path is already relative, validates that it stays in the project.
     /// If absolute, strips the `project_root` prefix.
     fn resolve_path(&self, path: &str) -> Option<String> {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            let relative = path.strip_prefix(&self.project_root).ok()?;
-            Some(relative.to_string_lossy().replace('\\', "/"))
-        } else {
-            Some(path.to_string_lossy().replace('\\', "/"))
-        }
+        crate::storage::ProjectPath::resolve(&self.project_root, Path::new(path))
+            .ok()
+            .map(|path| path.relative_path_string())
     }
 
     /// Gets the absolute path for a relative path.
@@ -3007,24 +3022,27 @@ impl TraceDecay {
     /// serving. Useful for diagnostics (e.g. WAL/SHM size sampling) —
     /// returns the same path that `Database::open` was called with.
     pub fn db_path(&self) -> PathBuf {
-        let tracedecay_dir = get_tracedecay_dir(&self.project_root);
         let (path, _, _) = Self::resolve_db_for_branch(
             &self.project_root,
-            &tracedecay_dir,
+            &self.store_layout.data_root,
             self.serving_branch.as_deref(),
         );
         path
     }
 
+    pub fn store_layout(&self) -> &StoreLayout {
+        &self.store_layout
+    }
+
     fn build_branch_diagnostics(
         project_root: &Path,
+        data_root: &Path,
         open_active_branch: Option<String>,
         serving_branch: Option<String>,
         fallback_warning: Option<String>,
         serving_db_path: PathBuf,
     ) -> BranchDiagnostics {
-        let tracedecay_dir = get_tracedecay_dir(project_root);
-        let meta = branch_meta::load_branch_meta(&tracedecay_dir);
+        let meta = branch_meta::load_branch_meta(data_root);
         let current_branch = branch::current_branch(project_root);
         let tracking_enabled = meta.as_ref().is_some_and(|m| !m.branches.is_empty());
         let branch_drifted =
@@ -3047,7 +3065,7 @@ impl TraceDecay {
         ) = if let (Some(meta), Some(current)) = (meta.as_ref(), current_branch.as_deref()) {
             let live_branch_tracked = meta.is_tracked(current);
             let live_branch_db_path = if live_branch_tracked {
-                branch::resolve_branch_db_path(&tracedecay_dir, current, meta)
+                branch::resolve_branch_db_path(data_root, current, meta)
             } else {
                 None
             };
@@ -3057,10 +3075,9 @@ impl TraceDecay {
             } else {
                 branch::find_nearest_tracked_ancestor(project_root, current, meta)
             };
-            let nearest_tracked_ancestor_db_path =
-                nearest_tracked_ancestor.as_deref().and_then(|ancestor| {
-                    branch::resolve_branch_db_path(&tracedecay_dir, ancestor, meta)
-                });
+            let nearest_tracked_ancestor_db_path = nearest_tracked_ancestor
+                .as_deref()
+                .and_then(|ancestor| branch::resolve_branch_db_path(data_root, ancestor, meta));
             let nearest_tracked_ancestor_db_exists = nearest_tracked_ancestor_db_path
                 .as_ref()
                 .map(|path| path.exists());
@@ -3145,12 +3162,13 @@ impl TraceDecay {
             names.sort();
             for name in names {
                 let entry = &meta.branches[&name];
-                let db_path = tracedecay_dir.join(&entry.db_file);
+                let db_path = data_root.join(&entry.db_file);
                 let db_exists = db_path.exists();
                 let size_bytes = db_path.metadata().map_or(0, |metadata| metadata.len());
-                let parent_db_path = entry.parent.as_deref().and_then(|parent| {
-                    branch::resolve_branch_db_path(&tracedecay_dir, parent, meta)
-                });
+                let parent_db_path = entry
+                    .parent
+                    .as_deref()
+                    .and_then(|parent| branch::resolve_branch_db_path(data_root, parent, meta));
                 let parent_db_exists = parent_db_path.as_ref().map(|path| path.exists());
                 let mut branch_warnings = Vec::new();
                 if !db_exists {
@@ -3205,12 +3223,17 @@ impl TraceDecay {
     }
 
     pub fn project_branch_diagnostics(project_root: &Path) -> BranchDiagnostics {
-        let tracedecay_dir = get_tracedecay_dir(project_root);
+        let store_layout = storage::resolve_layout_for_current_profile(project_root)
+            .unwrap_or_else(|_| storage::project_local_layout(project_root));
         let current_branch = branch::current_branch(project_root);
-        let (serving_db_path, serving_branch, fallback_warning) =
-            Self::resolve_db_for_branch(project_root, &tracedecay_dir, current_branch.as_deref());
+        let (serving_db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+            project_root,
+            &store_layout.data_root,
+            current_branch.as_deref(),
+        );
         Self::build_branch_diagnostics(
             project_root,
+            &store_layout.data_root,
             current_branch,
             serving_branch,
             fallback_warning,
@@ -3221,6 +3244,7 @@ impl TraceDecay {
     pub fn branch_diagnostics(&self) -> BranchDiagnostics {
         Self::build_branch_diagnostics(
             &self.project_root,
+            &self.store_layout.data_root,
             self.active_branch.clone(),
             self.serving_branch.clone(),
             self.fallback_warning.clone(),

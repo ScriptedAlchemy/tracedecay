@@ -23,8 +23,11 @@ Configuration (environment always wins, then deploy-time defaults below):
 
 - ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
 - ``TRACEDECAY_BIN``                path to the tracedecay binary
-- ``TRACEDECAY_DASHBOARD_PROJECT``  project root to serve (must be
-  ``tracedecay init``-ed); defaults to the Hermes process cwd
+- ``TRACEDECAY_DASHBOARD_PROJECT``  project root/store to serve. When unset,
+  the installed wrapper uses its deploy-time default: the configured
+  ``plugins.tracedecay.project_root`` pin, or the Hermes profile home for
+  unpinned profile-scoped installs. Source-tree development falls back to the
+  Hermes process cwd when no deploy-time default has been baked in.
 
 Legacy ``TOKENSAVE_*`` aliases remain accepted as fallbacks during the
 TraceDecay rebrand; ``TRACEDECAY_*`` wins when both are present.

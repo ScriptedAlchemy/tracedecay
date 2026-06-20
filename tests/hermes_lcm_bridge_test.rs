@@ -4655,6 +4655,7 @@ fn generated_plugin_honors_install_time_project_root_pin() {
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import types
@@ -4706,6 +4707,21 @@ tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root
 argv = captured[-1]
 idx = argv.index("--project")
 assert argv[idx + 1] == "/explicit/root", argv
+
+# Profile-store tools stay anchored at the Hermes profile home, not the code pin.
+tools.call_tracedecay_tool("tracedecay_fact_store", {})
+argv = captured[-1]
+idx = argv.index("--project")
+assert os.path.samefile(argv[idx + 1], plugin._resolve_hermes_home()), argv
+assert argv[idx + 1] != "/pinned/project", argv
+
+# Native LCM calls carry hermes_profile storage args and do not need a code --project.
+tools.call_tracedecay_tool(
+    "tracedecay_lcm_status",
+    {"storage_scope": "hermes_profile", "hermes_home": "/tmp/hermes-profile"},
+)
+argv = captured[-1]
+assert "--project" not in argv, argv
 
 # Engine resolution: pin applies by default, config beats pin, kwargs beat
 # config, and cwd no longer overrides any pin.

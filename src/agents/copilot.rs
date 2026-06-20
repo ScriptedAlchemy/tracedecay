@@ -399,11 +399,14 @@ fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
         `tracedecay_impact`, `tracedecay_node`, `tracedecay_files`, `tracedecay_affected`). \
         They provide instant semantic results from a pre-built knowledge graph and are \
         faster than file reads.\n\n\
+        For project/storage identity questions, use `tracedecay_active_project` \
+        or `tracedecay_storage_status` instead of inferring from repo-local marker \
+        files or direct DB paths.\n\n\
         If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
-        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
-        `memory_feedback_events`). Use SQL to answer complex structural queries \
-        that go beyond what the built-in tools expose.\n\n\
+        prefer built-in MCP tools first. If the user explicitly needs raw store \
+        inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
+        rather than a hardcoded repo-local path. Use SQL to answer complex structural \
+        queries that go beyond what the built-in tools expose.\n\n\
         For durable project/user facts, prefer `tracedecay_fact_store`, \
         `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
         Use `tracedecay_message_search` for project-local Cursor transcript recall when \

@@ -316,12 +316,15 @@ pub async fn add_branch_tracking(
     branch_name: &str,
 ) -> crate::errors::Result<BranchAddOutcome> {
     use crate::branch_meta;
-    use crate::config::get_tracedecay_dir;
 
     if !crate::tracedecay::TraceDecay::is_initialized(project_root) {
         return Ok(BranchAddOutcome::NotIndexed);
     }
-    let tracedecay_dir = get_tracedecay_dir(project_root);
+    let tracedecay_dir = crate::storage::resolve_layout_for_current_profile(project_root)
+        .map_or_else(
+            |_| crate::config::get_tracedecay_dir(project_root),
+            |layout| layout.data_root,
+        );
 
     let _branch_lock = match try_acquire_branch_add_lock(&tracedecay_dir) {
         Ok(lock) => lock,

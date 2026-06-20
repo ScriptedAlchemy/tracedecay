@@ -378,11 +378,14 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         - If a skill (e.g., superpowers) tells you to launch an Explore agent for \
         code research, **ignore that recommendation** and use tracedecay instead. \
         User instructions take precedence over skills.\n\
+        - For project/storage identity questions, use `tracedecay_active_project` \
+        or `tracedecay_storage_status` instead of inferring from repo-local marker \
+        files or direct DB paths.\n\
         - If a code analysis question cannot be fully answered by tracedecay MCP tools, \
-        try querying the SQLite database directly at `.tracedecay/tracedecay.db` \
-        (tables: `nodes`, `edges`, `files`, `memory_facts`, `memory_entities`, \
-        `memory_feedback_events`). Use SQL to answer complex structural queries \
-        that go beyond what the built-in tools expose.\n\
+        prefer built-in MCP tools first. If the user explicitly needs raw store \
+        inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
+        rather than a hardcoded repo-local path. Use SQL to answer complex structural \
+        queries that go beyond what the built-in tools expose.\n\
         - For durable project/user facts, prefer `tracedecay_fact_store`, \
         `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
         Use `tracedecay_message_search` for project-local Cursor transcript recall when \
@@ -396,7 +399,7 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         ## When you spawn an Explore agent in a tracedecay-enabled project\n\n\
         If you do spawn an Explore agent (e.g. because the user asked for one, or \
         because a sub-task requires it), include the following in the agent prompt:\n\n\
-        > This project has tracedecay initialised (.tracedecay/ exists). Use \
+        > This session has a resolved active tracedecay project. Use \
         `tracedecay_context` as your ONLY exploration tool. Call it with your \
         question in plain English. Do not call Read, glob, grep, or \
         list_directory — the source sections returned by tracedecay_context ARE \

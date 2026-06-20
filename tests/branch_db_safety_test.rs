@@ -10,6 +10,7 @@ use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .current_dir(project)
         .output()

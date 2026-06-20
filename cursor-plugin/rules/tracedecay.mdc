@@ -5,7 +5,8 @@ alwaysApply: true
 
 # Prefer tracedecay MCP tools
 
-- **Explore:** for codebase exploration, symbol lookup, call graphs, impact analysis, and affected files, use the tracedecay MCP tools first — `tracedecay_context` is the default starting point before Grep/Glob/semantic search when `.tracedecay/` exists.
+- **Explore:** for codebase exploration, symbol lookup, call graphs, impact analysis, and affected files, use the tracedecay MCP tools first — `tracedecay_context` is the default starting point before Grep/Glob/semantic search when the session has a resolved active project.
+- **Storage:** for "which project/store is active?" questions, use `tracedecay_active_project` or `tracedecay_storage_status` instead of inferring from repo-local marker files or direct DB paths.
 - **Read:** before reading a whole file, follow `tracedecay:reading-code-cheaply` — `tracedecay_outline` (table of contents), `tracedecay_body` (one symbol's source), or `tracedecay_read` (`mode: "lines"` slices). Full-file Read is the fallback, not the default.
 - **Write:** before adding a new helper/util, run the `tracedecay:finding-duplicate-logic` pre-write probe — it may already exist.
 - **Edit:** for anchored or structural source edits, follow the `tracedecay:atomic-code-edits` skill (`tracedecay_str_replace`, `tracedecay_replace_symbol`, `tracedecay_ast_grep_rewrite`, …) — the graph re-indexes itself after each write.

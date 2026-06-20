@@ -325,6 +325,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Inspect stores before profile-storage migration
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
     /// Wipe local tracedecay DBs (current folder, parents, and children)
     Wipe {
         /// Wipe ALL tracked projects so the global DB ends empty
@@ -402,6 +407,100 @@ pub enum MemoryAction {
 }
 
 #[derive(Subcommand)]
+pub enum MigrateAction {
+    /// Build a readonly migration inventory or manifest plan
+    Plan {
+        /// Root directory to scan (repeatable). Defaults to the current directory.
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Include all registered projects even when explicit roots are supplied.
+        #[arg(long = "include-all-registered")]
+        include_all_registered: bool,
+        /// Follow symlinked directories while scanning.
+        #[arg(long)]
+        follow_symlinks: bool,
+        /// Write a manifest plan to this path instead of only printing inventory.
+        #[arg(long)]
+        manifest: Option<String>,
+        /// Save a manifest under the target profile's migration-inventory directory.
+        #[arg(long)]
+        save: bool,
+        /// Target profile root for manifest-backed profile-shard planning.
+        #[arg(long)]
+        profile_root: Option<String>,
+        /// Project id to use for manifest-backed profile-shard planning.
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a profile-sharded project store to a standalone directory.
+    Export {
+        /// Export from the current profile-sharded store layout.
+        #[arg(long = "from-profile")]
+        from_profile: bool,
+        /// Project path whose enrollment marker identifies the profile shard.
+        #[arg(long, conflicts_with = "project_id")]
+        project: Option<String>,
+        /// Project id to export from the current profile root.
+        #[arg(long = "project-id", conflicts_with = "project")]
+        project_id: Option<String>,
+        /// Destination directory for the exported store.
+        #[arg(long)]
+        to: String,
+    },
+    /// Apply a single-store manifest plan with staged profile-shard copy and cutover.
+    Apply {
+        /// Manifest path to apply.
+        #[arg(long)]
+        manifest: String,
+        /// Confirmation token from `migrate plan`.
+        #[arg(long = "confirm-token")]
+        confirm_token: String,
+    },
+    /// Verify a manifest plan without mutating source stores.
+    Verify {
+        /// Manifest path to verify.
+        #[arg(long)]
+        manifest: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reconstruct registry plans from profile-sharded store manifests without applying them.
+    Reconstruct {
+        /// Profile root containing projects/<project_id>/store_manifest.json files.
+        #[arg(long = "profile-root")]
+        profile_root: String,
+        /// Apply registry reconstruction plans after scanning manifests.
+        #[arg(long)]
+        apply: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Roll back a manifest plan when the rollback preconditions are supported.
+    Rollback {
+        /// Manifest path to roll back.
+        #[arg(long)]
+        manifest: String,
+        /// Confirmation token from `migrate plan`.
+        #[arg(long = "confirm-token")]
+        confirm_token: String,
+    },
+    /// Remove old source artifacts after a verified manifest-backed migration.
+    CleanupSources {
+        /// Manifest path to clean up.
+        #[arg(long)]
+        manifest: String,
+        /// Confirmation token from `migrate plan`.
+        #[arg(long = "confirm-token")]
+        confirm_token: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum BranchAction {
     /// List tracked branches and their DB sizes
     List {
@@ -441,7 +540,7 @@ pub enum BranchAction {
 
 #[cfg(test)]
 mod cli_parse_tests {
-    use super::{BranchAction, Cli, Commands, MemoryAction, SessionsAction};
+    use super::{BranchAction, Cli, Commands, MemoryAction, MigrateAction, SessionsAction};
     use clap::{error::ErrorKind, Parser};
 
     #[test]
@@ -583,6 +682,80 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn migrate_commands_parse_manifest_scaffolding_flags() {
+        let plan = Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "plan",
+            "--root",
+            "/tmp/project",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--profile-root",
+            "/tmp/profile",
+            "--project-id",
+            "proj_123",
+            "--json",
+        ])
+        .expect("migrate plan should parse");
+        assert!(matches!(
+            plan.command,
+            Some(Commands::Migrate {
+                action:
+                    MigrateAction::Plan {
+                        roots,
+                        manifest,
+                        profile_root,
+                        project_id,
+                        json,
+                        ..
+                    }
+            }) if roots == vec!["/tmp/project".to_string()]
+                && manifest.as_deref() == Some("/tmp/manifest.json")
+                && profile_root.as_deref() == Some("/tmp/profile")
+                && project_id.as_deref() == Some("proj_123")
+                && json
+        ));
+
+        let apply = Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "apply",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--confirm-token",
+            "confirm-mig_123",
+        ])
+        .expect("migrate apply should parse");
+        assert!(matches!(
+            apply.command,
+            Some(Commands::Migrate {
+                action:
+                    MigrateAction::Apply {
+                        manifest,
+                        confirm_token,
+                    }
+            }) if manifest == "/tmp/manifest.json" && confirm_token == "confirm-mig_123"
+        ));
+
+        let verify = Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "verify",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--json",
+        ])
+        .expect("migrate verify should parse");
+        assert!(matches!(
+            verify.command,
+            Some(Commands::Migrate {
+                action: MigrateAction::Verify { manifest, json }
+            }) if manifest == "/tmp/manifest.json" && json
+        ));
+    }
+
+    #[test]
     fn install_conflicting_profile_flags_fail_during_parse() {
         let err = match Cli::try_parse_from([
             "tracedecay",
@@ -598,6 +771,32 @@ mod cli_parse_tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn migrate_reconstruct_apply_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "migrate",
+            "reconstruct",
+            "--profile-root",
+            "/tmp/profile",
+            "--apply",
+            "--json",
+        ])
+        .expect("migrate reconstruct should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Migrate {
+                action:
+                    MigrateAction::Reconstruct {
+                        profile_root,
+                        apply,
+                        json,
+                    }
+            }) if profile_root == "/tmp/profile" && apply && json
+        ));
     }
 
     #[test]

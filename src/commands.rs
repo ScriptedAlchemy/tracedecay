@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::cli::{BranchAction, MemoryAction};
+use crate::cli::{BranchAction, MemoryAction, MigrateAction};
 use crate::global;
 use crate::Spinner;
 use tracedecay::tracedecay::TraceDecay;
@@ -64,15 +64,343 @@ fn read_llm_ops_payload(source: &str) -> tracedecay::errors::Result<serde_json::
     })
 }
 
+pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
+    match action {
+        MigrateAction::Plan {
+            roots,
+            include_all_registered,
+            follow_symlinks,
+            manifest,
+            save,
+            profile_root,
+            project_id,
+            json,
+        } => {
+            let scan_roots = if roots.is_empty() {
+                vec![std::env::current_dir().map_err(|e| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: format!("could not determine current directory: {e}"),
+                    }
+                })?]
+            } else {
+                roots.into_iter().map(PathBuf::from).collect()
+            };
+            let report = tracedecay::migrate::inventory::build_inventory(
+                tracedecay::migrate::inventory::MigrationInventoryOptions {
+                    roots: scan_roots,
+                    follow_symlinks,
+                    include_all_registered,
+                    ..tracedecay::migrate::inventory::MigrationInventoryOptions::default()
+                },
+            )
+            .await?;
+            if manifest.is_some() || save {
+                let migration_id = format!("mig_{}", tracedecay::tracedecay::current_timestamp());
+                let profile_root =
+                    profile_root.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "--profile-root is required when saving a manifest".to_string(),
+                    })?;
+                let project_id =
+                    project_id.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "--project-id is required when saving a manifest".to_string(),
+                    })?;
+                let manifest_path = manifest.map(PathBuf::from).unwrap_or_else(|| {
+                    PathBuf::from(&profile_root)
+                        .join("migration-inventory")
+                        .join(format!("{migration_id}.json"))
+                });
+                let confirmation_token = format!("confirm-{migration_id}");
+                let manifest = tracedecay::migrate::manifest::build_plan_manifest(
+                    report,
+                    tracedecay::migrate::manifest::MigrationPlanOptions {
+                        manifest_path,
+                        migration_id,
+                        tracedecay_version: env!("CARGO_PKG_VERSION").to_string(),
+                        created_at_unix: tracedecay::tracedecay::current_timestamp(),
+                        confirmation_token,
+                        target_profile_root: PathBuf::from(profile_root),
+                        project_id,
+                    },
+                )
+                .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+                tracedecay::migrate::manifest::save_manifest(&manifest)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                } else {
+                    println!(
+                        "migration manifest: {} ({} artifact(s))",
+                        manifest.protocol.manifest_path.display(),
+                        manifest.artifacts.len()
+                    );
+                    println!("confirmation token: {}", manifest.confirmation_token);
+                }
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "migration inventory: {} store(s), {} skipped path(s)",
+                    report.stores.len(),
+                    report.skipped.len()
+                );
+                if let Some(global) = report.global_db {
+                    println!(
+                        "global db: {} (projects: {}, sessions: {})",
+                        global.path.display(),
+                        global.project_count,
+                        global.session_count
+                    );
+                }
+            }
+        }
+        MigrateAction::Export {
+            from_profile,
+            project,
+            project_id,
+            to,
+        } => {
+            if !from_profile {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "migrate export currently supports only --from-profile".to_string(),
+                });
+            }
+            let project_id = match project_id {
+                Some(project_id) => project_id,
+                None => {
+                    let project_root =
+                        project
+                            .map(PathBuf::from)
+                            .unwrap_or(std::env::current_dir().map_err(|e| {
+                                tracedecay::errors::TraceDecayError::Config {
+                                    message: format!("could not determine current directory: {e}"),
+                                }
+                            })?);
+                    let marker = tracedecay::storage::read_enrollment_marker(&project_root)?
+                        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                            message: format!(
+                                "project '{}' is not enrolled in profile-sharded storage",
+                                project_root.display()
+                            ),
+                        })?;
+                    marker.project_id
+                }
+            };
+            let profile_root = tracedecay::storage::default_profile_root()?;
+            let report = tracedecay::migrate::manifest::export_profile_store(
+                &profile_root,
+                &project_id,
+                &PathBuf::from(to),
+            )
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: err.to_string(),
+            })?;
+            println!(
+                "migration export: {} artifact(s) from {} to {}",
+                report.artifact_count,
+                report.source_data_root.display(),
+                report.target_dir.display()
+            );
+        }
+        MigrateAction::Apply {
+            manifest,
+            confirm_token,
+        } => {
+            let mut manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            if manifest.confirmation_token != confirm_token {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "confirmation token does not match migration manifest".to_string(),
+                });
+            }
+            let apply_report = tracedecay::migrate::manifest::apply_migration_manifest(
+                &mut manifest,
+            )
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: err.to_string(),
+            })?;
+            let verify_report = tracedecay::migrate::manifest::verify_migration_manifest(&manifest);
+            if !verify_report.cutover_ready {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "migration staging did not reach cutover-ready state: {} missing target(s), {} issue(s)",
+                        verify_report.missing_targets,
+                        verify_report.issues.len()
+                    ),
+                });
+            }
+            let global_db = tracedecay::global_db::GlobalDb::open()
+                .await
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "could not open global DB for migrate apply".to_string(),
+                })?;
+            let registry_report =
+                tracedecay::migrate::registry::apply_registry_reconstruction_report(
+                    &global_db,
+                    &verify_report.registry_reconstruction,
+                )
+                .await
+                .map_err(|issues| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "failed to apply registry reconstruction: {}",
+                        issues.join("; ")
+                    ),
+                })?;
+            tracedecay::storage::write_enrollment_marker(
+                &apply_report.project_root,
+                &tracedecay::storage::EnrollmentMarker {
+                    project_id: apply_report.project_id.clone(),
+                    storage_mode: tracedecay::storage::StorageMode::ProfileSharded,
+                },
+            )?;
+            if let Err(err) = tracedecay::migrate::manifest::finalize_migration_apply(&mut manifest)
+            {
+                let _ = tracedecay::storage::remove_enrollment_marker(
+                    &apply_report.project_root,
+                    &apply_report.project_id,
+                );
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: err.to_string(),
+                });
+            }
+            tracedecay::migrate::manifest::save_manifest(&manifest)?;
+            println!(
+                "migration apply: {} artifact(s), {} registry project(s), {} alias(es)",
+                apply_report.artifact_count, registry_report.projects, registry_report.aliases
+            );
+        }
+        MigrateAction::Verify { manifest, json } => {
+            let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            let report = tracedecay::migrate::manifest::verify_migration_manifest(&manifest);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "migration verify: {} artifact(s), {} planned target(s), {} missing target(s)",
+                    report.artifact_count, report.planned_targets, report.missing_targets
+                );
+                println!(
+                    "registry reconstruction: {} plan(s), {} store manifest(s), {} issue(s)",
+                    report.registry_plan_count,
+                    report.store_manifest_count,
+                    report.issues.len()
+                );
+                println!(
+                    "cutover ready: {}",
+                    if report.cutover_ready { "yes" } else { "no" }
+                );
+                println!(
+                    "apply supported: {}",
+                    if report.apply_supported { "yes" } else { "no" }
+                );
+            }
+        }
+        MigrateAction::Reconstruct {
+            profile_root,
+            apply,
+            json,
+        } => {
+            let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+                &PathBuf::from(profile_root),
+                tracedecay::tracedecay::current_timestamp(),
+            );
+            if apply {
+                let global_db = tracedecay::global_db::GlobalDb::open()
+                    .await
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "could not open global DB for registry reconstruction".to_string(),
+                    })?;
+                let applied = tracedecay::migrate::registry::apply_registry_reconstruction_report(
+                    &global_db, &report,
+                )
+                .await
+                .map_err(|issues| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "failed to apply registry reconstruction: {}",
+                        issues.join("; ")
+                    ),
+                })?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "dry_run": report,
+                            "applied": applied,
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "registry reconstruction applied: {} project(s), {} alias(es), {} store(s), {} graph scope(s), {} artifact(s)",
+                        applied.projects,
+                        applied.aliases,
+                        applied.stores,
+                        applied.graph_scopes,
+                        applied.artifacts
+                    );
+                }
+            } else if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "registry reconstruction: {} plan(s), {} issue(s)",
+                    report.plans.len(),
+                    report.issues.len()
+                );
+                println!("apply supported: yes (re-run with --apply after review)");
+            }
+        }
+        MigrateAction::Rollback {
+            manifest,
+            confirm_token,
+        } => {
+            let mut manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            if manifest.confirmation_token != confirm_token {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "confirmation token does not match migration manifest".to_string(),
+                });
+            }
+            let rollback_report = tracedecay::migrate::manifest::rollback_migration_manifest(
+                &mut manifest,
+            )
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: err.to_string(),
+            })?;
+            tracedecay::migrate::manifest::save_manifest(&manifest)?;
+            println!(
+                "migration rollback: {} artifact(s)",
+                rollback_report.artifact_count
+            );
+        }
+        MigrateAction::CleanupSources {
+            manifest,
+            confirm_token,
+        } => {
+            let manifest = tracedecay::migrate::manifest::load_manifest(manifest)?;
+            if manifest.confirmation_token != confirm_token {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "confirmation token does not match migration manifest".to_string(),
+                });
+            }
+            let cleanup_report = tracedecay::migrate::manifest::cleanup_migration_sources(
+                &manifest,
+            )
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: err.to_string(),
+            })?;
+            println!(
+                "migration cleanup-sources: {} source artifact(s) removed",
+                cleanup_report.removed_artifacts
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
     use tracedecay::branch;
     use tracedecay::branch_meta;
-    use tracedecay::config::get_tracedecay_dir;
 
     match action {
         BranchAction::List { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path);
             let Some(_meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
                 return Ok(());
@@ -151,7 +479,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Add { name, path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path);
 
             let branch_name = match name {
                 Some(n) => n,
@@ -235,7 +563,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Remove { name, path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path);
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -261,7 +589,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Removeall { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path);
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -289,7 +617,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
         }
         BranchAction::Gc { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let tracedecay_dir = get_tracedecay_dir(&project_path);
+            let tracedecay_dir = resolve_branch_data_root(&project_path);
             let Some(mut meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
                 eprintln!("No branch tracking configured.");
                 return Ok(());
@@ -338,16 +666,30 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
     Ok(())
 }
 
+fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
+    tracedecay::storage::resolve_layout_for_current_profile(project_path)
+        .map(|layout| layout.data_root)
+        .unwrap_or_else(|_| tracedecay::config::get_tracedecay_dir(project_path))
+}
+
 /// Handles the `wipe` and `wipe --all` commands.
 pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     use std::fs;
     let home_tracedecay = tracedecay::config::user_data_dir();
 
-    let mut targets = global::gather_target_projects(all, &home_tracedecay).await;
-    if all {
-        // wipe acts on the resolved live data directory; drop rows whose
-        // directory is already gone (they're handled by `tracedecay doctor`).
-        targets.retain(|p| tracedecay::config::get_project_db_path(p).exists());
+    let project_paths = global::gather_target_projects(all, &home_tracedecay).await;
+    let gdb = tracedecay::global_db::GlobalDb::open().await;
+    let mut targets = Vec::new();
+    for path in &project_paths {
+        let location = global::classify_project_storage_with_registry(
+            path,
+            gdb.as_ref(),
+            home_tracedecay.as_deref(),
+        )
+        .await;
+        if location.status.is_live() {
+            targets.push(location);
+        }
     }
 
     if !all && targets.is_empty() {
@@ -374,26 +716,30 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     let mut errors = 0usize;
     let mut wiped_paths: Vec<PathBuf> = Vec::new();
 
-    // `targets` is already unique: `gather_local_projects` dedupes via its
-    // own `seen`, and the `--all` branch reads from `projects.path` which is
-    // a primary key. No need for a second per-loop dedupe.
-    for project_root in &targets {
-        let tracedecay_dir = tracedecay::config::get_tracedecay_dir(project_root);
-        if !tracedecay_dir.exists() {
+    for location in &targets {
+        if !location.data_root.exists() {
             continue;
         }
-        match fs::remove_dir_all(&tracedecay_dir) {
+        match fs::remove_dir_all(&location.data_root) {
             Ok(()) => {
                 removed += 1;
-                wiped_paths.push(project_root.clone());
-                eprintln!("  \x1b[32m✔\x1b[0m removed {}", tracedecay_dir.display());
+                wiped_paths.push(location.project_root.clone());
+                eprintln!(
+                    "  \x1b[32m✔\x1b[0m removed {}",
+                    location.data_root.display()
+                );
+                if let Some(marker_root) = &location.marker_root {
+                    let _ = fs::remove_dir_all(marker_root);
+                }
             }
             Err(e) => {
                 errors += 1;
-                eprintln!("  \x1b[31m✗\x1b[0m {} ({e})", tracedecay_dir.display());
+                eprintln!("  \x1b[31m✗\x1b[0m {} ({e})", location.data_root.display());
             }
         }
     }
+
+    drop(gdb);
 
     if all {
         if let Some(global_dir) = home_tracedecay.as_ref() {
@@ -433,12 +779,8 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     let home_tracedecay = tracedecay::config::user_data_dir();
     let project_paths = global::gather_target_projects(all, &home_tracedecay).await;
 
-    if project_paths.is_empty() {
-        if all {
-            println!("No tracedecay projects tracked in the global DB.");
-        } else {
-            println!("No tracedecay projects found in current folder, parents, or children.");
-        }
+    if !all && project_paths.is_empty() {
+        println!("No tracedecay projects found in current folder, parents, or children.");
         return Ok(());
     }
 
@@ -448,10 +790,15 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     let mut total_tokens: u64 = 0;
 
     for path in &project_paths {
-        let tracedecay_dir = tracedecay::config::get_tracedecay_dir(path);
-        let on_disk = tracedecay_dir.exists();
-        let size = if on_disk {
-            global::tracedecay_dir_size(&tracedecay_dir)
+        let location = global::classify_project_storage_with_registry(
+            path,
+            gdb.as_ref(),
+            home_tracedecay.as_deref(),
+        )
+        .await;
+        let has_data = location.data_root.exists();
+        let size = if has_data {
+            global::tracedecay_dir_size(&location.data_root)
         } else {
             0
         };
@@ -463,19 +810,33 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         total_tokens = total_tokens.saturating_add(tokens);
         rows.push(ListRow {
             path: path.clone(),
-            on_disk,
+            status_label: location.status.label(),
+            has_data,
             size,
             tokens,
         });
     }
+
+    if all {
+        append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
+    }
+
+    if rows.is_empty() {
+        println!("No tracedecay projects tracked in the global DB.");
+        return Ok(());
+    }
+
+    total_size = rows.iter().map(|row| row.size).sum();
+    total_tokens = rows.iter().map(|row| row.tokens).sum();
 
     rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
 
     let path_w = rows
         .iter()
         .map(|r| {
-            r.path.display().to_string().chars().count()
-                + if r.on_disk { 0 } else { " (stale)".len() }
+            format!("{} [{}]", r.path.display(), r.status_label)
+                .chars()
+                .count()
         })
         .max()
         .unwrap_or(0);
@@ -483,16 +844,9 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     println!("Found {} tracedecay project(s):", rows.len());
     println!();
     for r in &rows {
-        let path_str = if r.on_disk {
-            r.path.display().to_string()
-        } else {
-            format!("{} \x1b[33m(stale)\x1b[0m", r.path.display())
-        };
-        let pad = path_w.saturating_sub(
-            r.path.display().to_string().chars().count()
-                + if r.on_disk { 0 } else { " (stale)".len() },
-        );
-        let size_str = if r.on_disk {
+        let path_str = format!("{} [{}]", r.path.display(), r.status_label);
+        let pad = path_w.saturating_sub(path_str.chars().count());
+        let size_str = if r.has_data {
             tracedecay::display::format_bytes(r.size)
         } else {
             "—".to_string()
@@ -526,9 +880,49 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
 #[derive(Debug)]
 struct ListRow {
     path: std::path::PathBuf,
-    on_disk: bool,
+    status_label: &'static str,
+    has_data: bool,
     size: u64,
     tokens: u64,
+}
+
+fn append_orphan_manifest_rows(
+    rows: &mut Vec<ListRow>,
+    project_paths: &[std::path::PathBuf],
+    profile_root: Option<&Path>,
+) {
+    let Some(profile_root) = profile_root else {
+        return;
+    };
+    let registered: std::collections::HashSet<String> = project_paths
+        .iter()
+        .map(|path| tracedecay::global_db::GlobalDb::canonical_project_key(path))
+        .collect();
+    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+        profile_root,
+        tracedecay::tracedecay::current_timestamp(),
+    );
+    for plan in report.plans {
+        let key =
+            tracedecay::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
+        if registered.contains(&key) {
+            continue;
+        }
+        let data_root = profile_root.join(&plan.store.store_relpath);
+        let has_data = data_root.exists();
+        let size = if has_data {
+            global::tracedecay_dir_size(&data_root)
+        } else {
+            0
+        };
+        rows.push(ListRow {
+            path: plan.project.project_root,
+            status_label: "orphan manifest-reconstructable",
+            has_data,
+            size,
+            tokens: 0,
+        });
+    }
 }
 
 /// True when the global DB has zero registered projects (or can't be opened

@@ -4,9 +4,9 @@ How tracedecay builds and maintains a semantic code graph from source files, and
 
 ## Overview
 
-tracedecay indexes a codebase into a directed graph stored in a single SQLite database at `.tracedecay/tracedecay.db` (an existing legacy `.tokensave/` directory is still honored as a fallback). Source files are parsed with tree-sitter to extract **nodes** (code entities) and **edges** (relationships between them). Cross-file references that cannot be resolved during single-file extraction are stored as **unresolved refs** and resolved in a second pass once all files have been processed.
+tracedecay indexes a codebase into a directed graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; existing `.tokensave/` directories remain a fallback. Profile-backed projects use the same schema through the storage resolver, with the physical DB in a private profile shard. Source files are parsed with tree-sitter to extract **nodes** (code entities) and **edges** (relationships between them). Cross-file references that cannot be resolved during single-file extraction are stored as **unresolved refs** and resolved in a second pass once all files have been processed.
 
-The graph is kept up-to-date through incremental sync: only files whose content hash has changed are re-extracted. A file-level lock prevents concurrent sync operations from the CLI and the embedded MCP file watcher (and from multiple MCP servers attached to the same project).
+The graph is kept up-to-date through incremental sync: only files whose content hash has changed are re-extracted. A lock in the active store prevents concurrent sync operations from the CLI and the embedded MCP file watcher (and from multiple MCP servers attached to the same project).
 
 ## Database Schema
 
@@ -253,7 +253,7 @@ Successfully resolved refs become edges with the ref's `from_node_id` as source,
 
 Designed for the common case where only a handful of files changed.
 
-1. **Acquire sync lock** — atomically create `.tracedecay/sync.lock` with the current PID. If the lockfile already exists and the owning PID is alive, the sync fails immediately with an error. Stale locks from dead processes are reclaimed automatically.
+1. **Acquire sync lock** — atomically create `sync.lock` in the active project store with the current PID. In repo-local mode this is `.tracedecay/sync.lock`. If the lockfile already exists and the owning PID is alive, the sync fails immediately with an error. Stale locks from dead processes are reclaimed automatically.
 
 2. **Scan and hash** — walk the project directory and compute SHA-256 content hashes for every source file on disk.
 
@@ -338,6 +338,6 @@ This gives the AI assistant a complete picture of the blast radius of a change, 
 
 ## Concurrency Model
 
-- **Single writer.** The sync lock (`.tracedecay/sync.lock`) ensures only one sync or full index runs at a time. The lock is a regular file containing the PID; stale locks from crashed processes are detected by checking if the PID is still alive.
+- **Single writer.** The sync lock in the active project store ensures only one sync or full index runs at a time. The lock is a regular file containing the PID; stale locks from crashed processes are detected by checking if the PID is still alive.
 - **Concurrent readers.** WAL mode allows the MCP server to serve queries while a sync is in progress. Reads see a consistent snapshot of the database at the time they started.
 - **Schema migrations.** Run inside `BEGIN EXCLUSIVE` to prevent multiple processes from migrating simultaneously. After acquiring the lock, the version is re-checked to handle the race where another process migrated between the initial check and the lock acquisition.

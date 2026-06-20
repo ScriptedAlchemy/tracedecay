@@ -3,11 +3,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::TraceDecay;
+use crate::global_db::{global_db_path, GlobalDb};
+use crate::storage::{ProjectPath, StorageMode, StoreKind};
+use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
 
 use super::super::ToolResult;
@@ -136,6 +139,294 @@ pub(super) async fn handle_status(
         }),
         touched_files: vec![],
     })
+}
+
+fn display_path(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+fn active_project_context(
+    cg: &TraceDecay,
+    branch: &BranchDiagnostics,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+) -> Value {
+    let project_root = cg.project_root();
+    let layout = cg.store_layout();
+    let graph_db_path = cg.db_path();
+    let mut output = json!({
+        "project_root": display_path(project_root),
+        "resolution_source": "active_project",
+        "storage": {
+            "class": store_kind_name(&layout.store_kind),
+            "mode": storage_mode_name(&layout.storage_mode),
+            "data_root": display_path(&layout.data_root),
+            "config_path": display_path(&layout.config_path),
+            "graph_db_path": display_path(&graph_db_path),
+            "graph_db_exists": graph_db_path.exists(),
+            "graph_db_size_bytes": graph_db_path.metadata().map_or(0, |metadata| metadata.len()),
+            "sessions_db_path": display_path(&layout.sessions_db_path),
+            "response_handle_root": display_path(&layout.response_handle_root),
+            "lcm_payload_root": display_path(&layout.lcm_payload_root),
+        },
+        "branch": {
+            "current_branch": branch.current_branch.clone(),
+            "open_active_branch": branch.open_active_branch.clone(),
+            "serving_branch": branch.serving_branch.clone(),
+            "serving_db_path": display_path(&branch.serving_db_path),
+            "serving_db_exists": branch.serving_db_exists,
+            "branch_resolution": branch.branch_resolution.clone(),
+            "branch_drifted": branch.branch_drifted,
+            "is_fallback": branch.is_fallback,
+            "fallback_target": branch.fallback_target.clone(),
+            "fallback_warning": branch.fallback_warning.clone(),
+            "tracked_branch_count": branch.tracked_branch_count,
+            "warnings": branch.warnings.clone(),
+        }
+    });
+    if let Some(prefix) = scope_prefix {
+        output["scope_prefix"] = json!(prefix);
+    }
+    if let Some(stats) = server_stats {
+        output["server"] = stats;
+    }
+    output
+}
+
+fn storage_mode_name(mode: &StorageMode) -> &'static str {
+    match mode {
+        StorageMode::ProjectLocal => "project_local",
+        StorageMode::ProfileSharded => "profile_sharded",
+    }
+}
+
+fn store_kind_name(kind: &StoreKind) -> &'static str {
+    match kind {
+        StoreKind::CodeProject => "code_project",
+        StoreKind::HermesProfile => "hermes_profile",
+    }
+}
+
+/// Handles `tracedecay_active_project` tool calls.
+pub(super) fn handle_active_project(
+    cg: &TraceDecay,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+) -> ToolResult {
+    let branch = cg.branch_diagnostics();
+    let output = active_project_context(cg, &branch, server_stats, scope_prefix);
+    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+        }),
+        touched_files: vec![],
+    }
+}
+
+/// Handles `tracedecay_storage_status` tool calls.
+pub(super) async fn handle_storage_status(
+    cg: &TraceDecay,
+    scope_prefix: Option<&str>,
+) -> Result<ToolResult> {
+    let stats = cg.get_stats().await?;
+    let branch = cg.branch_diagnostics();
+    let layout = cg.store_layout();
+    let graph_db_path = cg.db_path();
+    let graph_db_size_bytes = graph_db_path
+        .metadata()
+        .map_or(0, |metadata| metadata.len());
+    let writable = branch.serving_db_exists && !branch.is_fallback;
+    let mut warnings = branch.warnings.clone();
+    if let Some(warning) = branch.fallback_warning.as_ref() {
+        warnings.push(warning.clone());
+    }
+    warnings.sort();
+    warnings.dedup();
+    let status = if branch.serving_db_exists {
+        "ok"
+    } else {
+        "missing_graph_db"
+    };
+    let output = json!({
+        "status": status,
+        "active_project": active_project_context(cg, &branch, None, scope_prefix),
+        "paths": {
+            "data_root": display_path(&layout.data_root),
+            "config_path": display_path(&layout.config_path),
+            "graph_db_path": display_path(&graph_db_path),
+            "sessions_db_path": display_path(&layout.sessions_db_path),
+            "response_handle_root": display_path(&layout.response_handle_root),
+            "lcm_payload_root": display_path(&layout.lcm_payload_root),
+            "manifest_path": layout.manifest_path.as_deref().map(display_path),
+            "dirty_path": display_path(&layout.dirty_path),
+        },
+        "locks": {
+            "sync_lock_path": display_path(&layout.sync_lock_path),
+            "sync_lock_exists": layout.sync_lock_path.exists(),
+            "branch_add_lock_path": display_path(&layout.branch_add_lock_path),
+            "branch_add_lock_exists": layout.branch_add_lock_path.exists(),
+        },
+        "quotas": {
+            "enforced": false,
+            "graph_db_size_bytes": graph_db_size_bytes,
+            "graph_db_size_limit_bytes": Value::Null,
+        },
+        "writable": writable,
+        "warnings": warnings,
+        "stats": stats,
+    });
+    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
+    Ok(ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+        }),
+        touched_files: vec![],
+    })
+}
+
+fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
+    args.get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .map_or(default, |value| value.clamp(1, max))
+}
+
+async fn open_project_registry_read_only() -> Result<Option<(PathBuf, GlobalDb)>> {
+    let Some(path) = global_db_path() else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let db = GlobalDb::open_read_only_at(&path)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "could not open project registry read-only at '{}'",
+                path.display()
+            ),
+        })?;
+    Ok(Some((path, db)))
+}
+
+fn registry_result(payload: &Value) -> ToolResult {
+    let formatted = serde_json::to_string_pretty(&payload).unwrap_or_default();
+    ToolResult {
+        value: json!({
+            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
+        }),
+        touched_files: vec![],
+    }
+}
+
+fn registry_missing_payload() -> Value {
+    json!({
+        "status": "not_found",
+        "message": "project registry is not present for this profile",
+        "projects": [],
+    })
+}
+
+fn registry_project_value(project: &crate::global_db::CodeProjectRecord) -> Value {
+    let mut value = serde_json::to_value(project).unwrap_or_else(|_| json!({}));
+    if let Value::Object(map) = &mut value {
+        map.remove("git_remote_url");
+    }
+    value
+}
+
+/// Handles `tracedecay_project_list` tool calls.
+pub(super) async fn handle_project_list(args: Value) -> Result<ToolResult> {
+    let limit = bounded_limit(&args, 25, 100);
+    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+        let mut payload = registry_missing_payload();
+        payload["limit"] = json!(limit);
+        payload["truncated"] = json!(false);
+        return Ok(registry_result(&payload));
+    };
+    let mut projects = db.list_code_projects(limit + 1).await;
+    let truncated = projects.len() > limit;
+    projects.truncate(limit);
+    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
+    Ok(registry_result(&json!({
+        "status": "ok",
+        "registry_path": display_path(&registry_path),
+        "limit": limit,
+        "truncated": truncated,
+        "projects": projects,
+    })))
+}
+
+/// Handles `tracedecay_project_search` tool calls.
+pub(super) async fn handle_project_search(args: Value) -> Result<ToolResult> {
+    let query =
+        args.get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "missing required parameter: query".to_string(),
+            })?;
+    let limit = bounded_limit(&args, 10, 50);
+    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+        let mut payload = registry_missing_payload();
+        payload["query"] = json!(query);
+        payload["limit"] = json!(limit);
+        payload["truncated"] = json!(false);
+        return Ok(registry_result(&payload));
+    };
+    let mut projects = db.search_code_projects(query, limit + 1).await;
+    let truncated = projects.len() > limit;
+    projects.truncate(limit);
+    let projects: Vec<Value> = projects.iter().map(registry_project_value).collect();
+    Ok(registry_result(&json!({
+        "status": "ok",
+        "registry_path": display_path(&registry_path),
+        "query": query,
+        "limit": limit,
+        "truncated": truncated,
+        "projects": projects,
+    })))
+}
+
+fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> PathBuf {
+    let Some(path) = args.get("path").and_then(Value::as_str) else {
+        return cg.project_root().to_path_buf();
+    };
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cg.project_root().join(path)
+    }
+}
+
+/// Handles `tracedecay_project_context` tool calls.
+pub(super) async fn handle_project_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let Some((registry_path, db)) = open_project_registry_read_only().await? else {
+        return Ok(registry_result(&registry_missing_payload()));
+    };
+    let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
+        db.project_registry_context_by_id(project_id).await
+    } else {
+        let alias_path = project_context_alias_path(cg, &args);
+        db.project_registry_context_by_alias(&alias_path).await
+    };
+    let Some(context) = context else {
+        return Ok(registry_result(&json!({
+            "status": "not_found",
+            "registry_path": display_path(&registry_path),
+            "project": null,
+            "aliases": [],
+            "stores": [],
+        })));
+    };
+    Ok(registry_result(&json!({
+        "status": "ok",
+        "registry_path": display_path(&registry_path),
+        "project": registry_project_value(&context.project),
+        "aliases": context.aliases,
+        "stores": context.stores,
+    })))
 }
 
 /// Handles `tracedecay_files` tool calls.
@@ -1334,20 +1625,9 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
     let project_root = cg.project_root().to_path_buf();
     let project_id = project_root.to_string_lossy().to_string();
-    let rel_path = file.trim_start_matches('/').to_string();
-    let abs_path = if std::path::Path::new(file).is_absolute() {
-        std::path::PathBuf::from(file)
-    } else {
-        project_root.join(&rel_path)
-    };
-    let display_file = if abs_path.starts_with(&project_root) {
-        abs_path
-            .strip_prefix(&project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(rel_path.clone())
-    } else {
-        rel_path.clone()
-    };
+    let project_path = ProjectPath::resolve(&project_root, std::path::Path::new(file))?;
+    let abs_path = project_path.absolute_path();
+    let display_file = project_path.relative_path_string();
 
     let mtime_ns = read_cache::file_mtime_ns(&abs_path).map_err(|e| TraceDecayError::Config {
         message: format!("cannot read file metadata for '{file}': {e}"),
@@ -1476,20 +1756,8 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
     });
 
     let project_root = cg.project_root();
-    let rel_path = file.trim_start_matches('/').to_string();
-    let abs_path = if std::path::Path::new(file).is_absolute() {
-        std::path::PathBuf::from(file)
-    } else {
-        project_root.join(&rel_path)
-    };
-    let display_file = if abs_path.starts_with(project_root) {
-        abs_path
-            .strip_prefix(project_root)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(rel_path.clone())
-    } else {
-        rel_path.clone()
-    };
+    let project_path = ProjectPath::resolve(project_root, Path::new(file))?;
+    let display_file = project_path.relative_path_string();
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
     let value = render_map(cg.db(), &display_file, kinds_slice).await?;
@@ -1529,7 +1797,8 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let project_root = cg.project_root().to_path_buf();
     let mut files: Vec<String> = Vec::new();
     if let Some(p) = path {
-        files.push(p.to_string());
+        let project_path = ProjectPath::resolve(&project_root, Path::new(p))?;
+        files.push(project_path.relative_path_string());
     } else if let Some(pat) = glob_pat {
         let combined = project_root.join(pat);
         let walker =
@@ -1537,8 +1806,8 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
                 message: format!("invalid glob '{pat}': {e}"),
             })?;
         for entry in walker.flatten() {
-            if let Ok(rel) = entry.strip_prefix(&project_root) {
-                files.push(rel.to_string_lossy().to_string());
+            if let Ok(project_path) = ProjectPath::resolve(&project_root, &entry) {
+                files.push(project_path.relative_path_string());
             }
         }
         files.sort();
@@ -1547,11 +1816,13 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
     let mut matches: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for rel in &files {
-        let abs = project_root.join(rel);
+        let project_path = ProjectPath::resolve(&project_root, Path::new(rel))?;
+        let abs = project_path.absolute_path();
+        let rel = project_path.relative_path_string();
         let Ok(contents) = std::fs::read_to_string(&abs) else {
             continue;
         };
-        let parsed = match config_format(rel) {
+        let parsed = match config_format(&rel) {
             Some(ConfigFormat::Toml) => match toml::from_str::<toml::Value>(&contents) {
                 Ok(v) => toml_to_json(&v),
                 Err(e) => {
@@ -1581,7 +1852,7 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
             None => None,
         };
 
-        if !touched.contains(rel) {
+        if !touched.contains(&rel) {
             touched.push(rel.clone());
         }
 
