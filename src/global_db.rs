@@ -226,6 +226,12 @@ struct TranscriptSummaryExcerpt {
     text: String,
 }
 
+const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
+    "Summarize the visible transcript messages that Codex compacted. ",
+    "Preserve durable user intent, implementation decisions, file/module names, ",
+    "unresolved tasks, and verification status. Return only the summary text."
+);
+
 const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 /// Legacy env-var spelling, still honored as a fallback.
 const LEGACY_GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
@@ -345,8 +351,8 @@ fn estimated_tokens_from_chars(char_count: i64) -> i64 {
     ((char_count.max(0) + 3) / 4).max(1)
 }
 
-fn estimated_token_count(text: &str) -> i64 {
-    estimated_tokens_from_chars(text.chars().count() as i64)
+fn estimate_summary_tokens(text: &str) -> i64 {
+    crate::context::read_modes::estimate_tokens(text) as i64
 }
 
 fn transcript_summary_text(
@@ -1864,7 +1870,7 @@ impl GlobalDb {
             depth,
             summary_text: summary_text.clone(),
             source_refs: sources.refs,
-            summary_token_count: estimated_token_count(&summary_text),
+            summary_token_count: estimate_summary_tokens(&summary_text),
             source_token_count: sources.source_token_count,
             source_time_start: sources.source_time_start,
             source_time_end: sources.source_time_end.or(message.timestamp),
@@ -2173,38 +2179,25 @@ impl GlobalDb {
         limit: usize,
     ) -> Result<Vec<PendingCodexCompactionSummary>, crate::sessions::lcm::LcmError> {
         let limit = limit.clamp(1, 100) as i64;
-        let (sql, query_params) = if let Some(session_id) = session_id {
-            (
-                "SELECT node_id, session_id
-                 FROM lcm_summary_nodes
-                 WHERE provider = 'codex'
-                   AND session_id = ?1
-                   AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                   AND COALESCE(
-                         json_extract(metadata_json, '$.tracedecay_summary_source'),
-                         ''
-                       ) <> 'codex_app_server'
-                 ORDER BY depth DESC, created_at DESC
-                 LIMIT ?2",
-                vec![Value::Text(session_id.to_string()), Value::Integer(limit)],
-            )
+        let mut sql = String::from(
+            "SELECT node_id, session_id
+             FROM lcm_summary_nodes
+             WHERE provider = 'codex'
+               AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+               AND COALESCE(
+                     json_extract(metadata_json, '$.tracedecay_summary_source'),
+                     ''
+                   ) <> 'codex_app_server'",
+        );
+        let mut query_params = vec![Value::Integer(limit)];
+        if let Some(session_id) = session_id {
+            sql.push_str(" AND session_id = ?2 ORDER BY depth DESC, created_at DESC LIMIT ?1");
+            query_params.push(Value::Text(session_id.to_string()));
         } else {
-            (
-                "SELECT node_id, session_id
-                 FROM lcm_summary_nodes
-                 WHERE provider = 'codex'
-                   AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                   AND COALESCE(
-                         json_extract(metadata_json, '$.tracedecay_summary_source'),
-                         ''
-                       ) <> 'codex_app_server'
-                 ORDER BY created_at DESC, depth DESC
-                 LIMIT ?1",
-                vec![Value::Integer(limit)],
-            )
-        };
+            sql.push_str(" ORDER BY created_at DESC, depth DESC LIMIT ?1");
+        }
 
-        let mut rows = self.conn.query(sql, query_params).await?;
+        let mut rows = self.conn.query(&sql, query_params).await?;
         let mut pending = Vec::new();
         while let Some(row) = rows.next().await? {
             let node_id: String = row.get(0)?;
@@ -2257,7 +2250,7 @@ impl GlobalDb {
             provider: "codex".to_string(),
             session_id: session_id.to_string(),
             focus_topic: Some("Codex context compaction".to_string()),
-            prompt: "Summarize the visible transcript messages that Codex compacted. Preserve durable user intent, implementation decisions, file/module names, unresolved tasks, and verification status. Return only the summary text.".to_string(),
+            prompt: CODEX_COMPACTION_SUMMARY_PROMPT.to_string(),
             source_range: LcmSummarySourceRange {
                 from_store_id: first.store_id,
                 to_store_id: last.store_id,
@@ -2290,8 +2283,7 @@ impl GlobalDb {
             return Err(crate::sessions::lcm::LcmError::SummaryNodeNotFound);
         }
         draft.summary_text = summary_text.trim().to_string();
-        draft.summary_token_count =
-            crate::context::read_modes::estimate_tokens(&draft.summary_text) as i64;
+        draft.summary_token_count = estimate_summary_tokens(&draft.summary_text);
         metadata.insert(
             "tracedecay_summary_source".to_string(),
             JsonValue::String(route.to_string()),

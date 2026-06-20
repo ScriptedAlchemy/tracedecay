@@ -32,23 +32,29 @@ impl Default for CodexAppServerSummaryConfig {
 impl CodexAppServerSummaryConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(bin) = std::env::var("TRACEDECAY_CODEX_BIN") {
-            if !bin.trim().is_empty() {
-                config.codex_bin = bin;
-            }
+        if let Some(bin) = non_empty_env("TRACEDECAY_CODEX_BIN") {
+            config.codex_bin = bin;
         }
-        if let Ok(model) = std::env::var("TRACEDECAY_CODEX_SUMMARY_MODEL") {
-            if !model.trim().is_empty() {
-                config.model = Some(model);
-            }
+        if let Some(model) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_MODEL") {
+            config.model = Some(model);
         }
-        if let Ok(secs) = std::env::var("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS") {
-            if let Ok(secs) = secs.parse::<u64>() {
-                config.timeout = Duration::from_secs(secs.clamp(5, 300));
-            }
+        if let Some(secs) = non_empty_env("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS")
+            .and_then(|secs| secs.parse::<u64>().ok())
+        {
+            config.timeout = Duration::from_secs(secs.clamp(5, 300));
         }
         config
     }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn configured_model(config: &CodexAppServerSummaryConfig) -> Option<&str> {
+    config.model.as_deref().filter(|model| !model.is_empty())
 }
 
 pub fn summarize_with_codex_app_server(
@@ -56,6 +62,7 @@ pub fn summarize_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
 ) -> Result<String> {
     let prompt = build_codex_summary_prompt(request);
+    let model = configured_model(config);
     let child = Command::new(&config.codex_bin)
         .arg("app-server")
         .env(CODEX_SUMMARY_CHILD_ENV, "1")
@@ -110,7 +117,7 @@ pub fn summarize_with_codex_app_server(
     send_json(&mut stdin, json!({"method": "initialized", "params": {}}))?;
 
     let mut thread_params = json!({});
-    if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
+    if let Some(model) = model {
         thread_params["model"] = json!(model);
     }
     send_json(
@@ -136,7 +143,7 @@ pub fn summarize_with_codex_app_server(
         "effort": "low",
         "summary": "concise"
     });
-    if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
+    if let Some(model) = model {
         turn_params["model"] = json!(model);
     }
     send_json(
