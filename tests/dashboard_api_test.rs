@@ -724,9 +724,7 @@ fn dashboard_reports_resolved_branch_db_path() {
         };
         let expected = cg.db_path().display().to_string();
         assert!(
-            expected
-                .replace('\\', "/")
-                .contains(".tracedecay/branches/"),
+            expected.replace('\\', "/").contains("/branches/"),
             "fixture should serve a branch DB path, got {expected}"
         );
 
@@ -785,7 +783,11 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
             panic!("failed to track feature branch: {err}");
         }
 
-        let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
+        let cg = match TraceDecay::open(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to open feature branch fixture: {err}"),
+        };
+        let project_db_path = cg.store_layout().graph_db_path.clone();
         let project_db = libsql::Builder::new_local(&project_db_path)
             .build()
             .await
@@ -813,17 +815,13 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
             .await
             .unwrap_or_else(|err| panic!("failed to seed project memory fact: {err}"));
 
-        let cg = match TraceDecay::open(&project_root).await {
-            Ok(cg) => cg,
-            Err(err) => panic!("failed to open feature branch fixture: {err}"),
-        };
         let branch_db_path = cg.db_path();
         assert!(
             branch_db_path
                 .display()
                 .to_string()
                 .replace('\\', "/")
-                .contains(".tracedecay/branches/"),
+                .contains("/branches/"),
             "fixture should serve a branch graph DB path, got {}",
             branch_db_path.display()
         );
@@ -2128,8 +2126,8 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
     });
 }
 
-/// Opens (creating if needed) the project-local session store at
-/// `<project>/.tracedecay/sessions.db` — the DB transcript ingest writes to.
+/// Opens (creating if needed) the resolved project session store — profile
+/// sharded by default, project-local only for explicit or legacy projects.
 async fn open_project_session_store(project_root: &Path) -> GlobalDb {
     let db_path = tracedecay::sessions::cursor::project_session_db_path(project_root);
     match GlobalDb::open_at(&db_path).await {
@@ -2142,9 +2140,8 @@ async fn open_project_session_store(project_root: &Path) -> GlobalDb {
 }
 
 /// Without a `TRACEDECAY_GLOBAL_DB` override the dashboard must serve the
-/// project-local `.tracedecay/sessions.db` (where Cursor hooks and the
-/// catch-up sweep ingest transcripts), and report it via the additive
-/// `storage_scope` payload field.
+/// resolved project session store, profile-sharded by default, and report it
+/// via the additive `storage_scope` payload field.
 #[test]
 fn lcm_serves_project_session_store_without_global_override() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -2158,6 +2155,8 @@ fn lcm_serves_project_session_store_without_global_override() {
 
         let cg = setup_project(&project_root).await;
         let session_store = open_project_session_store(&project_root).await;
+        let expected_session_path =
+            tracedecay::sessions::cursor::project_session_db_path(&project_root);
         seed_lcm_fixture(&session_store, &project_root).await;
         drop(session_store);
 
@@ -2172,16 +2171,14 @@ fn lcm_serves_project_session_store_without_global_override() {
 
         let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
         assert_eq!(status, 200);
-        assert_eq!(capabilities["lcm_scope"], "project_local");
+        assert_eq!(capabilities["lcm_scope"], "profile_sharded");
         assert_eq!(capabilities["features"]["lcm"], true);
         let lcm_db = capabilities["lcm_db"]
             .as_str()
             .unwrap_or_else(|| panic!("expected capabilities.lcm_db string"));
         assert!(
-            lcm_db
-                .replace('\\', "/")
-                .ends_with(".tracedecay/sessions.db"),
-            "capabilities.lcm_db should be the project session store, got {lcm_db}"
+            Path::new(lcm_db) == expected_session_path,
+            "capabilities.lcm_db should be the resolved project session store, got {lcm_db}"
         );
 
         let (status, overview) = get_json(
@@ -2189,7 +2186,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "project_local");
+        assert_eq!(overview["storage_scope"], "profile_sharded");
         assert_eq!(overview["exists"], true);
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
@@ -2198,8 +2195,8 @@ fn lcm_serves_project_session_store_without_global_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
-            "overview.path should be the project session store, got {path}"
+            Path::new(path) == expected_session_path,
+            "overview.path should be the resolved project session store, got {path}"
         );
 
         let (status, search) = get_json(
@@ -2207,7 +2204,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/search?q=vector&limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["storage_scope"], "project_local");
+        assert_eq!(search["storage_scope"], "profile_sharded");
         let search_messages = search["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
@@ -2221,7 +2218,7 @@ fn lcm_serves_project_session_store_without_global_override() {
 }
 
 /// `TRACEDECAY_GLOBAL_DB` pins savings/accounting, but LCM sessions still
-/// come from the project-local store that transcript ingest writes.
+/// come from the resolved project store that transcript ingest writes.
 #[test]
 fn lcm_project_store_wins_over_global_accounting_override() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -2237,6 +2234,8 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let cg = setup_project(&project_root).await;
         // The project store has rows; the overridden global accounting store has none.
         let session_store = open_project_session_store(&project_root).await;
+        let expected_session_path =
+            tracedecay::sessions::cursor::project_session_db_path(&project_root);
         seed_lcm_fixture(&session_store, &project_root).await;
         drop(session_store);
 
@@ -2251,14 +2250,14 @@ fn lcm_project_store_wins_over_global_accounting_override() {
 
         let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
         assert_eq!(status, 200);
-        assert_eq!(capabilities["lcm_scope"], "project_local");
+        assert_eq!(capabilities["lcm_scope"], "profile_sharded");
 
         let (status, overview) = get_json(
             &agent,
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "project_local");
+        assert_eq!(overview["storage_scope"], "profile_sharded");
         assert_eq!(overview["exists"], true);
         assert_eq!(
             overview["overview"]["messages_total"], 3,
@@ -2268,8 +2267,8 @@ fn lcm_project_store_wins_over_global_accounting_override() {
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
         assert!(
-            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
-            "expected project session DB path, got {path}"
+            Path::new(path) == expected_session_path,
+            "expected resolved project session DB path, got {path}"
         );
 
         server.abort();
