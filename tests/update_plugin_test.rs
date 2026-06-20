@@ -264,6 +264,56 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
 }
 
 #[test]
+fn codex_update_plugin_refreshes_cache_and_removes_bootstrap_source() {
+    let home = TempDir::new().unwrap();
+    let cached_plugin_dir = home
+        .path()
+        .join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"));
+    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+
+    let bootstrap_dir = home.path().join("plugins/tracedecay");
+    std::fs::create_dir_all(bootstrap_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(bootstrap_dir.join("skills/stale-skill")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join("skills/stale-skill/SKILL.md"),
+        "---\nname: tracedecay:stale-skill\n---\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.path().join(".agents/plugins")).unwrap();
+    std::fs::write(
+        home.path().join(".agents/plugins/marketplace.json"),
+        r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
+    )
+    .unwrap();
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+    assert_eq!(paths, vec![cached_plugin_dir.clone()]);
+
+    assert!(text(&cached_plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&cached_plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert!(!bootstrap_dir.exists());
+
+    let marketplace = text(&home.path().join(".agents/plugins/marketplace.json"));
+    assert!(!marketplace.contains(r#""name": "tracedecay""#));
+    assert!(!marketplace.contains(r#""name":"tracedecay""#));
+}
+
+#[test]
 fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
     let home = TempDir::new().unwrap();
     let codex_dir = home.path().join(".codex");

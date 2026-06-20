@@ -86,10 +86,14 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        let cached_dir = codex_plugin_cached_install_dir(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
         let legacy_dir = codex_plugin_legacy_install_dir(&ctx.home);
-        let target = if codex_plugin_manifest_path(&ctx.home).exists() {
-            Some(plugin_dir)
+        let target_is_cached = codex_plugin_cached_manifest_path(&ctx.home).exists();
+        let target = if target_is_cached {
+            Some(cached_dir.clone())
+        } else if codex_plugin_manifest_path(&ctx.home).exists() {
+            Some(plugin_dir.clone())
         } else if codex_plugin_legacy_manifest_path(&ctx.home).exists() {
             Some(legacy_dir)
         } else if Self::has_legacy_config_install(&ctx.home) {
@@ -102,6 +106,10 @@ impl AgentIntegration for CodexIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         };
         write_codex_plugin_files(&target, &ctx.tracedecay_bin, InstallScope::Global)?;
+        if target_is_cached {
+            remove_codex_plugin_install(&plugin_dir)?;
+            remove_codex_marketplace_entry(&ctx.home)?;
+        }
         Ok(UpdatePluginOutcome::Refreshed(vec![target]))
     }
 
@@ -123,15 +131,23 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn is_detected(&self, home: &Path) -> bool {
-        home.join(".codex").is_dir() || codex_plugin_manifest_path(home).exists()
+        home.join(".codex").is_dir()
+            || codex_plugin_cached_manifest_path(home).exists()
+            || codex_plugin_manifest_path(home).exists()
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(codex_plugin_manifest_path(home))
+        if codex_plugin_cached_manifest_path(home).exists() {
+            Some(codex_plugin_cached_manifest_path(home))
+        } else {
+            Some(codex_plugin_manifest_path(home))
+        }
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        if codex_plugin_manifest_path(home).exists() {
+        if codex_plugin_cached_manifest_path(home).exists()
+            || codex_plugin_manifest_path(home).exists()
+        {
             return true;
         }
         Self::has_legacy_config_install(home)
@@ -278,8 +294,17 @@ fn codex_plugin_install_dir(home: &Path) -> PathBuf {
     home.join("plugins/tracedecay")
 }
 
+fn codex_plugin_cached_install_dir(home: &Path) -> PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
 fn codex_plugin_legacy_install_dir(home: &Path) -> PathBuf {
     home.join("plugins/tokensave")
+}
+
+fn codex_plugin_cached_manifest_path(home: &Path) -> PathBuf {
+    codex_plugin_cached_install_dir(home).join(".codex-plugin/plugin.json")
 }
 
 fn codex_plugin_manifest_path(home: &Path) -> PathBuf {
@@ -303,19 +328,29 @@ fn codex_repo_marketplace_path(project_path: &Path) -> PathBuf {
 }
 
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
-    let install_dir = codex_plugin_install_dir(home);
+    let cached_dir = codex_plugin_cached_install_dir(home);
+    let install_dir = if codex_plugin_cached_manifest_path(home).exists() {
+        cached_dir
+    } else {
+        codex_plugin_install_dir(home)
+    };
     install_codex_plugin_bundle(
         &install_dir,
         Some(&codex_plugin_legacy_install_dir(home)),
         tracedecay_bin,
         InstallScope::Global,
     )?;
-    install_codex_marketplace_entry(
-        &codex_personal_marketplace_path(home),
-        "personal",
-        "Personal",
-        "./plugins/tracedecay",
-    )?;
+    if install_dir == codex_plugin_cached_install_dir(home) {
+        remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
+        remove_codex_marketplace_entry(home)?;
+    } else {
+        install_codex_marketplace_entry(
+            &codex_personal_marketplace_path(home),
+            "personal",
+            "Personal",
+            "./plugins/tracedecay",
+        )?;
+    }
     eprintln!(
         "\x1b[32m✔\x1b[0m Installed Codex plugin source at {}",
         install_dir.display()
@@ -544,6 +579,7 @@ fn install_codex_marketplace_entry(
 }
 
 fn uninstall_codex_plugin(home: &Path) -> Result<()> {
+    remove_codex_plugin_install(&codex_plugin_cached_install_dir(home))?;
     remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
     remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
     remove_codex_marketplace_entry(home)?;
