@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.4...v0.0.5) - 2026-06-20
+
+### Fixed
+
+- *(dashboard)* refresh shell source stamp
+- *(branch)* harden auto tracking under contention
+- *(branch)* auto-track active tracedecay branches
+- *(dashboard)* tighten dist freshness checks
+- *(build)* refresh dashboard deps during auto rebuilds
+
+### Other
+
+- *(dashboard)* trim primitive comments
+- *(dashboard)* real React imports, stale-dist build guard
+
 ## [0.0.4](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.3...v0.0.4) - 2026-06-20
 
 ### Fixed
