@@ -31,7 +31,9 @@ const LABEL_PAD = 3;
  * desktop canvas allows a few dozen and a narrow panel only a handful.
  */
 export function labelCapForArea(width: number, height: number): number {
-  return Math.max(6, Math.floor((width * height) / 30_000));
+  const density = width < 520 ? 58_000 : 30_000;
+  const floor = width < 520 ? 4 : 6;
+  return Math.max(floor, Math.floor((width * height) / density));
 }
 
 function overlaps(a: LabelBox, b: LabelBox): boolean {

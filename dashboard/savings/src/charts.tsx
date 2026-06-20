@@ -86,9 +86,11 @@ export function DailyBars({
   }
   const width = 420;
   const height = 120;
+  const chartPadX = 18;
   const max = Math.max(1, ...series.map((point) => point.value));
-  const barW = Math.max(2, Math.min(26, (width - 8) / series.length - 2));
-  const step = (width - 8) / series.length;
+  const usableWidth = width - chartPadX * 2;
+  const barW = Math.max(2, Math.min(26, usableWidth / series.length - 2));
+  const step = usableWidth / series.length;
   const label = valueLabel || fmtTokens;
   return (
     <svg
@@ -99,7 +101,7 @@ export function DailyBars({
     >
       {series.map((point, index) => {
         const h = Math.max(2, (point.value / max) * (height - 28));
-        const x = 4 + index * step;
+        const x = chartPadX + index * step;
         return (
           <g key={point.day}>
             <rect
@@ -118,7 +120,7 @@ export function DailyBars({
                 x={x + barW / 2}
                 y={height - 4}
                 className="tss-chart-label"
-                textAnchor="middle"
+                textAnchor={index === 0 ? "start" : "end"}
               >
                 {fmtDay(point.day)}
               </text>

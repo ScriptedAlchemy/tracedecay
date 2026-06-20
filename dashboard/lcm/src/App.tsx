@@ -837,17 +837,19 @@ function App(): React.ReactElement {
           genuinely "empty database", never a masked fetch failure. */}
       {data ? (
         <div className="hermes-lcm-statrow">
-          <Stat variant="compact" value={fmtInt(overview.messages_total)} label="messages" />
-          <Stat variant="compact" value={fmtInt(overview.sessions_total)} label="sessions" />
-          <Stat variant="compact" value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
-          <Stat variant="compact" value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
-          <Stat variant="compact" value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
+          <Stat className="hermes-lcm-stat" variant="compact" value={fmtInt(overview.messages_total)} label="messages" />
+          <Stat className="hermes-lcm-stat" variant="compact" value={fmtInt(overview.sessions_total)} label="sessions" />
+          <Stat className="hermes-lcm-stat" variant="compact" value={fmtInt(overview.summary_nodes_total)} label="summary nodes" />
+          <Stat className="hermes-lcm-stat" variant="compact" value={(comp.ratio ? comp.ratio + "×" : "—")} label="compression" />
+          <Stat className="hermes-lcm-stat" variant="compact" value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`} label="tokens kept" />
         </div>
       ) : (overviewLoading ? (
         <div className="hermes-lcm-statrow">
           <div className="hermes-lcm-stat hermes-lcm-skeleton"><SkeletonLines count={2} widths={["55%", "35%"]} /></div>
           <div className="hermes-lcm-stat hermes-lcm-skeleton"><SkeletonLines count={2} widths={["45%", "30%"]} /></div>
           <div className="hermes-lcm-stat hermes-lcm-skeleton"><SkeletonLines count={2} widths={["62%", "38%"]} /></div>
+          <div className="hermes-lcm-stat hermes-lcm-skeleton"><SkeletonLines count={2} widths={["50%", "36%"]} /></div>
+          <div className="hermes-lcm-stat hermes-lcm-skeleton"><SkeletonLines count={2} widths={["60%", "42%"]} /></div>
         </div>
       ) : null)}
 

@@ -208,6 +208,17 @@
   max-width: 26rem;
 }
 
+.tss-session-name,
+.tss-model-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tss-session-badge {
+  margin-left: 0.35rem;
+  vertical-align: baseline;
+}
+
 .tss-caret {
   color: var(--ts-text-3);
   margin-right: 0.4rem;
@@ -243,6 +254,12 @@
 }
 
 .tss-slug {
+  display: inline-block;
+  max-width: min(20rem, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
   color: var(--ts-text-3);
   font-family: var(--theme-font-mono);
   font-size: 0.74rem;
@@ -371,15 +388,181 @@
 
 @media (max-width: 560px) {
   .tss-toolbar {
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 1fr;
     align-items: stretch;
   }
 
+  .tss-toolbar-left {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+
+  .tss-views {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .tss-view-tab {
+    min-width: 0;
+    padding-inline: 0.45rem;
+    white-space: normal;
+  }
+
   .tss-toolbar-right {
-    justify-content: flex-end;
+    justify-content: space-between;
+  }
+
+  .tss-meta-strip-top {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+
+  .tss-table-scroll {
+    overflow: visible;
+  }
+
+  .tss-table,
+  .tss-table thead,
+  .tss-table tbody,
+  .tss-table tr,
+  .tss-table th,
+  .tss-table td {
+    display: block;
+  }
+
+  .tss-table thead {
+    display: none;
+  }
+
+  .tss-table tbody {
+    display: grid;
+    gap: 0.65rem;
+  }
+
+  .tss-table tr {
+    border: 1px solid var(--ts-line);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--ts-void) 24%, transparent);
+    overflow: hidden;
+  }
+
+  .tss-table td {
+    display: grid;
+    grid-template-columns: minmax(5.8rem, 34%) minmax(0, 1fr);
+    gap: 0.6rem;
+    align-items: start;
+    min-width: 0;
+    padding: 0.42rem 0.65rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ts-line) 78%, transparent);
+  }
+
+  .tss-table td::before {
+    content: attr(data-label);
+    color: var(--ts-text-3);
+    font-family: var(--theme-font-mono);
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    line-height: 1.35;
+    text-transform: uppercase;
+  }
+
+  .tss-table td:last-child {
+    border-bottom: 0;
   }
 
   .tss-session-title {
-    max-width: 14rem;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.25rem;
+    align-items: start;
+    grid-column: 1 / -1;
+    max-width: none;
+  }
+
+  .tss-session-title::before {
+    content: none;
+  }
+
+  .tss-caret {
+    margin-right: 0.25rem;
+  }
+
+  .tss-session-name {
+    display: -webkit-box;
+    grid-column: 2;
+    max-width: 100%;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .tss-session-badge {
+    grid-column: 2;
+    width: fit-content;
+    margin-left: 0;
+  }
+
+  .tss-session-meta {
+    grid-column: 2;
+  }
+
+  .tss-session-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tss-session-row > td {
+    grid-template-columns: 1fr;
+    gap: 0.18rem;
+  }
+
+  .tss-session-row > td[data-label="Models"] {
+    grid-column: 1 / -1;
+  }
+
+  .tss-model-chips {
+    justify-content: flex-start;
+  }
+
+  .tss-chip,
+  .tss-slug,
+  .tss-model-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tss-session-detail-row {
+    border: 0 !important;
+    background: transparent !important;
+  }
+
+  .tss-session-detail-row > td {
+    display: block;
+    padding: 0.55rem;
+  }
+
+  .tss-session-detail-row > td::before {
+    content: none;
+  }
+
+  .tss-table-inner tr {
+    border-radius: 10px;
+  }
+
+  .tss-pager {
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .tss-pager-label {
+    order: -1;
+    width: 100%;
+    text-align: center;
   }
 }

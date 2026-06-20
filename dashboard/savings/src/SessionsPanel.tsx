@@ -176,19 +176,19 @@ export default function SessionsPanel({
                       className={cn("tss-session-row", isOpen && "tss-session-row-open")}
                       onClick={() => setExpanded(isOpen ? null : key)}
                     >
-                      <td className="tss-session-title">
+                      <td className="tss-session-title" data-label="Session" title={cleanTitle(session.title)}>
                         <span className="tss-caret">{isOpen ? "▾" : "▸"}</span>
-                        {cleanTitle(session.title)}
-                        {session.is_subagent && <Badge>subagent</Badge>}
+                        <span className="tss-session-name">{cleanTitle(session.title)}</span>
+                        {session.is_subagent && <Badge className="tss-session-badge">subagent</Badge>}
                         <span className="tss-session-meta">
                           {session.session_id.slice(0, 8)}
                           {when ? ` · ${timeAgo(when)}` : " · no timestamp"}
                         </span>
                       </td>
-                      <td>
+                      <td data-label="Models">
                         <span className="tss-model-chips">
                           {session.models.slice(0, 3).map((modelRow, index) => (
-                            <span key={index} className="tss-chip">
+                            <span key={index} className="tss-chip" title={modelRow.model || "unknown model"}>
                               {modelRow.model || "unknown model"}
                             </span>
                           ))}
@@ -197,10 +197,10 @@ export default function SessionsPanel({
                           )}
                         </span>
                       </td>
-                      <td>{fmtTokens(session.messages)}</td>
-                      <td>{fmtTokens(inputTokens)}</td>
-                      <td>{fmtTokens(outputTokens)}</td>
-                      <td>
+                      <td data-label="Messages">{fmtTokens(session.messages)}</td>
+                      <td data-label="Tokens in">{fmtTokens(inputTokens)}</td>
+                      <td data-label="Tokens out">{fmtTokens(outputTokens)}</td>
+                      <td data-label="Cost">
                         {cost.priced_rows === 0 ? (
                           <em>no price data</em>
                         ) : (
@@ -215,7 +215,7 @@ export default function SessionsPanel({
                           </>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Basis">
                         <BasisBadge basis={session.cost_basis} />
                       </td>
                     </tr>
