@@ -51,6 +51,7 @@ struct GlobalDbEnvGuard {
 impl GlobalDbEnvGuard {
     fn set(db_path: &Path) -> Self {
         let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
+        let db_path = canonicalize_test_db_path(db_path);
         std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
         Self { previous }
     }
@@ -76,8 +77,9 @@ impl HomeEnvGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
+        let home = canonicalize_test_dir(home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         std::env::set_var(
             tracedecay::config::USER_DATA_DIR_ENV,
             home.join(tracedecay::config::TRACEDECAY_DIR),
@@ -105,6 +107,31 @@ impl Drop for HomeEnvGuard {
             None => std::env::remove_var(tracedecay::config::USER_DATA_DIR_ENV),
         }
     }
+}
+
+fn canonicalize_test_dir(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).unwrap_or_else(|err| {
+        panic!(
+            "failed to create test directory '{}': {err}",
+            path.display()
+        )
+    });
+    path.canonicalize().unwrap_or_else(|err| {
+        panic!(
+            "failed to canonicalize test directory '{}': {err}",
+            path.display()
+        )
+    })
+}
+
+fn canonicalize_test_db_path(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    canonicalize_test_dir(parent).join(
+        path.file_name()
+            .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
+    )
 }
 
 // ---------------------------------------------------------------------------
