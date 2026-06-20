@@ -72,7 +72,31 @@ jobs:
         if: runner.os == 'Windows'
         env:
           RUST_TEST_THREADS: "1"
-        run: cargo test --workspace -- --test-threads=1
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          cargo test --workspace --lib --bins -- --test-threads=1
+
+          $testFiles = @(Get-ChildItem -Path tests -Filter *.rs |
+            ForEach-Object { $_.BaseName } |
+            Sort-Object)
+
+          $integrationArgs = @("test", "--workspace")
+          foreach ($test in ($testFiles | Where-Object { $_ -ne "branch_db_safety_test" })) {
+            $integrationArgs += @("--test", $test)
+          }
+          $integrationArgs += @("--", "--test-threads=1")
+          cargo @integrationArgs
+
+          $cases = cargo test --test branch_db_safety_test -- --list |
+            Where-Object { $_ -match ': test$' } |
+            ForEach-Object { ($_ -split ':')[0] }
+
+          foreach ($case in $cases) {
+            cargo test --test branch_db_safety_test $case -- --exact --test-threads=1
+          }
+
+          cargo test --workspace --doc -- --test-threads=1
 
   clippy:
     name: Clippy
