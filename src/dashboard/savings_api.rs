@@ -650,10 +650,18 @@ pub(crate) async fn models(
         );
 
         let daily_sql = format!(
-            "SELECT (timestamp / 86400) * 86400 AS day, model, {TOKEN_AGG_COLUMNS}
-             FROM ({MESSAGE_TOKENS_CTE})
-             WHERE timestamp IS NOT NULL AND timestamp > 0 AND (?1 = 0 OR timestamp >= ?1)
-             GROUP BY day, model ORDER BY day ASC, messages DESC LIMIT 366"
+            "WITH daily AS (
+                SELECT (timestamp / 86400) * 86400 AS day, model, {TOKEN_AGG_COLUMNS}
+                FROM ({MESSAGE_TOKENS_CTE})
+                WHERE timestamp IS NOT NULL AND timestamp > 0 AND (?1 = 0 OR timestamp >= ?1)
+                GROUP BY day, model
+             ),
+             latest_days AS (
+                SELECT day FROM daily GROUP BY day ORDER BY day DESC LIMIT 366
+             )
+             SELECT daily.*
+             FROM daily JOIN latest_days ON latest_days.day = daily.day
+             ORDER BY daily.day ASC, daily.messages DESC"
         );
         let daily_rows = query_rows(conn, &daily_sql, libsql::params![since])
             .await

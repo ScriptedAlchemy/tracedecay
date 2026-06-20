@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{self, TRACEDECAY_DIR};
 use crate::errors::{Result, TraceDecayError};
@@ -194,6 +195,27 @@ pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathB
     profile_root.join("projects").join(project_id)
 }
 
+pub fn default_profile_project_id(project_root: &Path) -> String {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("proj_{}", &digest[..16])
+}
+
+pub fn default_profile_sharded_layout(
+    project_root: &Path,
+    profile_root: &Path,
+) -> Result<StoreLayout> {
+    let marker = EnrollmentMarker {
+        project_id: default_profile_project_id(project_root),
+        storage_mode: StorageMode::ProfileSharded,
+    };
+    profile_sharded_layout(project_root, profile_root, &marker)
+}
+
 pub fn profile_sharded_layout(
     project_root: &Path,
     profile_root: &Path,
@@ -234,7 +256,11 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
         Some(marker) if marker.storage_mode == StorageMode::ProfileSharded => {
             profile_sharded_layout(project_root, profile_root, &marker)
         }
-        Some(_) | None => Ok(project_local_layout(project_root)),
+        Some(_) => Ok(project_local_layout(project_root)),
+        None if project_local_database_exists(project_root) => {
+            Ok(project_local_layout(project_root))
+        }
+        None => default_profile_sharded_layout(project_root, profile_root),
     }
 }
 
@@ -250,8 +276,26 @@ pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLa
             let profile_root = default_profile_root()?;
             profile_sharded_layout(project_root, &profile_root, &marker)
         }
-        Some(_) | None => Ok(project_local_layout(project_root)),
+        Some(_) => Ok(project_local_layout(project_root)),
+        None if project_local_database_exists(project_root) => {
+            Ok(project_local_layout(project_root))
+        }
+        None => {
+            let profile_root = default_profile_root()?;
+            default_profile_sharded_layout(project_root, &profile_root)
+        }
     }
+}
+
+pub fn project_local_database_exists(project_root: &Path) -> bool {
+    project_root
+        .join(TRACEDECAY_DIR)
+        .join(config::DB_FILENAME)
+        .exists()
+        || project_root
+            .join(config::LEGACY_TOKENSAVE_DIR)
+            .join(config::LEGACY_DB_FILENAME)
+            .exists()
 }
 
 pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {

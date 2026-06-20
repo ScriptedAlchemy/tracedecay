@@ -148,6 +148,39 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
 }
 
 #[tokio::test]
+async fn cursor_transcript_ingest_reads_display_model_fields() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"modelDisplayName":"gpt-5.5-cursor-display","content":[{"type":"text","text":"Display model field should price correctly."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let results = db
+        .search_session_messages("cursor", None, "price correctly", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].message.model.as_deref(),
+        Some("gpt-5.5-cursor-display")
+    );
+}
+
+#[tokio::test]
 async fn cursor_transcript_ingest_preserves_structured_content_in_raw_lcm() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);

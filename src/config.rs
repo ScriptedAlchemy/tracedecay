@@ -386,7 +386,13 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
-        if has_project_database(&dir) || crate::storage::has_enrollment_marker(&dir) {
+        if has_project_database(&dir)
+            || crate::storage::has_enrollment_marker(&dir)
+            || crate::storage::resolve_layout_for_current_profile(&dir).is_ok_and(|layout| {
+                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
+                    && layout.graph_db_path.exists()
+            })
+        {
             return Some(dir);
         }
         if !dir.pop() {

@@ -40,6 +40,28 @@ import {
 } from "./components";
 import { BarList, EmptyState, ErrorPanel, SkeletonLines, Stat } from "../../lib/primitives";
 
+function storageScopeLabel(scope: string | undefined): string | null {
+  if (scope === "project_local") return "Project store";
+  if (scope === "profile_sharded") return "User project store";
+  if (scope === "global") return "Global store";
+  return null;
+}
+
+function missingStoreTitle(scope: string | undefined): string {
+  if (scope === "global") return "Global LCM database not found";
+  return "Project session store not found";
+}
+
+function emptyStoreCopy(scope: string | undefined): string {
+  if (scope === "project_local") {
+    return "This project's session store (.tracedecay/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
+  }
+  if (scope === "profile_sharded") {
+    return "This project's user-level session store exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
+  }
+  return "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns.";
+}
+
 function App(): React.ReactElement {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -695,6 +717,7 @@ function App(): React.ReactElement {
       ) : null}
     </div>
   ) : null;
+  const lcmScopeLabel = data ? storageScopeLabel(data.storage_scope) : null;
 
   return (
     <div className="hermes-lcm" ref={rootRef}>
@@ -761,15 +784,16 @@ function App(): React.ReactElement {
         <span>Arrow keys browse results</span>
         <span>Enter opens detail</span>
       </div>
-      {/* Which session store is being served (scope tag + database path). */}
       <div className="hermes-lcm-path">
         {data ? (
           <>
-            {data.storage_scope === "project_local"
-              ? <span className="hermes-lcm-tag hermes-lcm-tag-src">Project store</span>
-              : (data.storage_scope === "global"
-                  ? <span className="hermes-lcm-tag">Global store</span>
-                  : null)}
+            {lcmScopeLabel
+              ? (
+                <span className={"hermes-lcm-tag" + (data.storage_scope === "global" ? "" : " hermes-lcm-tag-src")}>
+                  {lcmScopeLabel}
+                </span>
+              )
+              : null}
             <span>{data.path}</span>
           </>
         ) : ""}
@@ -812,9 +836,7 @@ function App(): React.ReactElement {
           <div className="hermes-lcm-empty-orb" aria-hidden="true" />
           <div className="hermes-lcm-empty-copy">
             <div className="hermes-lcm-empty-kicker">Lossless Context Store</div>
-            <h2>{data.storage_scope === "project_local"
-              ? "Project session store not found"
-              : "Global LCM database not found"}</h2>
+            <h2>{missingStoreTitle(data.storage_scope)}</h2>
             <p>The dashboard can render once the session store exists. Until then, the search, timeline, and detail views remain unavailable.</p>
           </div>
         </div>
@@ -826,9 +848,7 @@ function App(): React.ReactElement {
           <div className="hermes-lcm-empty-copy">
             <div className="hermes-lcm-empty-kicker">Lossless Context Store</div>
             <h2>No LCM sessions indexed yet</h2>
-            <p>{data.storage_scope === "project_local"
-              ? "This project's session store (.tracedecay/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh."
-              : "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns."}</p>
+            <p>{emptyStoreCopy(data.storage_scope)}</p>
           </div>
         </div>
       ) : null}

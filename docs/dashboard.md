@@ -80,7 +80,7 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 | Variable | Description |
 |----------|-------------|
-| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over project-local store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the project's `.tracedecay/sessions.db` and only falls back to `~/.tracedecay/global.db` if the project store cannot be opened |
+| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over resolved project-store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the active project's resolved session store. New installs use the user-level profile shard; explicit repo-local and legacy projects continue to resolve to their local store. |
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode) |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
@@ -254,11 +254,12 @@ Transcript ingest is **per project**, not global:
 
 | Store | Path | Written by | `storage_scope` |
 |-------|------|------------|-----------------|
-| Project-local (default) | `<project>/.tracedecay/sessions.db` | All transcript ingest for sessions belonging to that project root | `"project_local"` |
+| User project store (default) | `~/.tracedecay/projects/<project-id>/sessions.db` | All transcript ingest for sessions belonging to that project root | `"profile_sharded"` |
+| Project-local (explicit or legacy) | `<project>/.tracedecay/sessions.db` | Transcript ingest for projects intentionally initialized with repo-local storage | `"project_local"` |
 | Hermes profile | `<hermes_home>/.tracedecay/sessions.db` | Hermes-side ingest | `"hermes_profile"` |
 | Global | `~/.tracedecay/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
 
-The dashboard serves the **project-local store** by default (where Cursor hooks and hookless-agent catch-up sweeps actually ingest). The LCM header shows a **"Project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
+The dashboard serves the active project's resolved store by default. New projects are profile-sharded at the user level and scoped to the current project; explicit repo-local and legacy installs still report `"project_local"`. The LCM header shows a **"User project store"**, **"Project store"**, or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
 
 Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests, the smoke harness, and the Hermes wrapper, which points it at a Hermes profile's `sessions.db`). When this override is active, `storage_scope` becomes `"global"`.
 
@@ -498,9 +499,9 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
   "version": "0.0.2",
   "mode": "standalone",
   "project_root": "/home/user/my-project",
-  "memory_db": "/home/user/my-project/.tracedecay/tracedecay.db",
-  "lcm_db": "/home/user/my-project/.tracedecay/sessions.db",
-  "lcm_scope": "project_local",
+  "memory_db": "/home/user/.tracedecay/projects/proj_1234/tracedecay.db",
+  "lcm_db": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "lcm_scope": "profile_sharded",
   "features": {
     "memory": true,
     "lcm": true,
@@ -861,8 +862,8 @@ Summary statistics and recent sessions/nodes.
 **Response Structure:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "overview": {
     "messages_total": 1500,
@@ -904,8 +905,8 @@ Full-text search with facets.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "query": "authentication",
   "limit": 25,

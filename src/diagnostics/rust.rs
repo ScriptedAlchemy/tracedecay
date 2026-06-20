@@ -5,10 +5,9 @@
 //! `Diagnostic` rows: zero when the message has no spans (rare; usually a
 //! cross-cutting note), one per `spans[]` entry otherwise.
 //!
-//! The cargo target dir is forced to `.tracedecay/target/` so concurrent
-//! IDE / user `cargo check` runs don't fight us for `target/`'s lockfile.
-//! That doubles disk usage on the project but is the only safe option
-//! without coordination.
+//! The cargo target dir is forced outside the project tree so concurrent
+//! IDE / user `cargo check` runs don't fight us for `target/`'s lockfile
+//! and diagnostics do not create repo-local `TraceDecay` folders.
 //!
 //! Per-package and per-file scopes drop to `cargo check -p <pkg>`; cargo
 //! has no native single-file mode, so the `File` scope falls back to
@@ -112,11 +111,14 @@ impl Driver for CargoDriver {
     }
 }
 
-/// `.tracedecay/target/` is our private cargo target dir — set so we don't
-/// race with the user's IDE or interactive `cargo check`. Created lazily
-/// by cargo on first run.
+/// Private cargo target dir for diagnostics. Created lazily by cargo on first
+/// run and kept outside the project tree so diagnostics never create
+/// project-local `.tracedecay` folders.
 fn target_dir_for(project_root: &Path) -> PathBuf {
-    crate::config::get_tracedecay_dir(project_root).join("target")
+    std::env::temp_dir()
+        .join("tracedecay-target")
+        .join(crate::storage::default_profile_project_id(project_root))
+        .join("diagnostics")
 }
 
 /// Convert cargo's reported `file_name` (project-relative or absolute) into
@@ -205,8 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn target_dir_under_dot_tracedecay() {
+    fn target_dir_is_outside_project_tree() {
         let p = target_dir_for(Path::new("/tmp/proj"));
-        assert_eq!(p, Path::new("/tmp/proj/.tracedecay/target"));
+        assert_eq!(
+            p,
+            Path::new("/tmp/tracedecay-target")
+                .join(crate::storage::default_profile_project_id(Path::new(
+                    "/tmp/proj"
+                )))
+                .join("diagnostics")
+        );
     }
 }

@@ -1502,9 +1502,9 @@ async fn codex_post_compact(event_json: &str) {
         if let Err(err) = db
             .replace_codex_compaction_summary(
                 &pending.node_id,
-                &summary,
+                &summary.text,
                 "codex_app_server",
-                config.model.as_deref(),
+                summary.model.as_deref().or(config.model.as_deref()),
             )
             .await
         {

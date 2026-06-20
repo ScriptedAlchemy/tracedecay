@@ -20,6 +20,12 @@ pub struct CodexAppServerSummaryConfig {
     pub timeout: Duration,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerSummary {
+    pub text: String,
+    pub model: Option<String>,
+}
+
 impl Default for CodexAppServerSummaryConfig {
     fn default() -> Self {
         Self {
@@ -61,7 +67,7 @@ fn configured_model(config: &CodexAppServerSummaryConfig) -> Option<&str> {
 pub fn summarize_with_codex_app_server(
     request: &LcmSummaryRequest,
     config: &CodexAppServerSummaryConfig,
-) -> Result<String> {
+) -> Result<CodexAppServerSummary> {
     let prompt = build_codex_summary_prompt(request);
     let model = configured_model(config);
     let child = Command::new(&config.codex_bin)
@@ -126,6 +132,7 @@ pub fn summarize_with_codex_app_server(
         &json!({"method": "thread/start", "id": 1, "params": thread_params}),
     )?;
     let thread_response = wait_for_response(&line_rx, deadline, 1)?;
+    let thread_model = find_model_id(&thread_response);
     let thread_id = thread_response
         .pointer("/result/thread/id")
         .or_else(|| thread_response.pointer("/result/id"))
@@ -152,15 +159,19 @@ pub fn summarize_with_codex_app_server(
         &json!({"method": "turn/start", "id": 2, "params": turn_params}),
     )?;
 
-    let text = wait_for_turn_summary(&line_rx, deadline)?;
-    let text = strip_reasoning_tags(&text);
+    let mut summary = wait_for_turn_summary(&line_rx, deadline)?;
+    if summary.model.is_none() {
+        summary.model = thread_model;
+    }
+    let text = strip_reasoning_tags(&summary.text);
     let text = text.trim();
     if text.is_empty() {
         return Err(TraceDecayError::Config {
             message: "codex app-server returned an empty summary".to_string(),
         });
     }
-    Ok(text.to_string())
+    summary.text = text.to_string();
+    Ok(summary)
 }
 
 struct ChildGuard {
@@ -203,11 +214,15 @@ fn wait_for_response(
 fn wait_for_turn_summary(
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
     deadline: Instant,
-) -> Result<String> {
+) -> Result<CodexAppServerSummary> {
     let mut text = String::new();
+    let mut model = None;
     loop {
         let line = recv_line(line_rx, deadline)?;
         let value: Value = serde_json::from_str(&line)?;
+        if model.is_none() {
+            model = find_model_id(&value);
+        }
         if let Some(error) = value.get("error") {
             return Err(TraceDecayError::Config {
                 message: format!("codex app-server turn failed: {error}"),
@@ -225,7 +240,7 @@ fn wait_for_turn_summary(
                 }
             }
             Some("turn/completed") => {
-                return Ok(text);
+                return Ok(CodexAppServerSummary { text, model });
             }
             _ => {}
         }
@@ -267,13 +282,54 @@ fn collect_item_text(value: Option<&Value>) -> Option<String> {
             (!text.is_empty()).then_some(text)
         }
         Value::Object(map) => {
-            for key in ["text", "message", "content"] {
+            for key in ["text", "message", "item", "content"] {
                 if let Some(text) = collect_item_text(map.get(key)) {
                     return Some(text);
                 }
             }
             None
         }
+        _ => None,
+    }
+}
+
+fn find_model_id(value: &Value) -> Option<String> {
+    const MODEL_KEYS: [&str; 13] = [
+        "model",
+        "model_id",
+        "modelId",
+        "model_name",
+        "modelName",
+        "model_slug",
+        "modelSlug",
+        "model_display_name",
+        "modelDisplayName",
+        "display_model",
+        "displayModel",
+        "display_model_name",
+        "displayModelName",
+    ];
+    match value {
+        Value::Object(map) => {
+            for key in MODEL_KEYS {
+                if let Some(model) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|model| !model.trim().is_empty())
+                {
+                    return Some(model.trim().to_string());
+                }
+            }
+            map.iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "provider" | "model_provider" | "modelProvider" | "clientInfo"
+                    )
+                })
+                .find_map(|(_, child)| find_model_id(child))
+        }
+        Value::Array(items) => items.iter().find_map(find_model_id),
         _ => None,
     }
 }
@@ -319,6 +375,9 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::sessions::lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
+    use serde_json::json;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn prompt_contains_source_messages_and_no_tool_instruction() {
@@ -360,5 +419,49 @@ mod tests {
             strip_reasoning_tags("before <thinking>hidden</thinking> after").trim(),
             "before  after"
         );
+    }
+
+    #[test]
+    fn completed_item_text_descends_through_params_item_content() {
+        let event = json!({
+            "params": {
+                "item": {
+                    "content": [
+                        {"type": "output_text", "text": "first "},
+                        {"type": "output_text", "text": "second"}
+                    ]
+                }
+            }
+        });
+
+        assert_eq!(
+            collect_item_text(event.get("params")).as_deref(),
+            Some("first second")
+        );
+    }
+
+    #[test]
+    fn turn_summary_records_actual_model_from_app_server_events() {
+        let (tx, rx) = mpsc::channel();
+        assert!(tx
+            .send(Ok(json!({
+                "method": "item/completed",
+                "params": {
+                    "model": "gpt-5.5-codex-actual",
+                    "item": {"content": [{"text": "summary text"}]}
+                }
+            })
+            .to_string()))
+            .is_ok());
+        assert!(tx
+            .send(Ok(json!({"method": "turn/completed"}).to_string()))
+            .is_ok());
+
+        let summary = match wait_for_turn_summary(&rx, Instant::now() + Duration::from_secs(1)) {
+            Ok(summary) => summary,
+            Err(err) => panic!("turn summary should be returned: {err}"),
+        };
+        assert_eq!(summary.text, "summary text");
+        assert_eq!(summary.model.as_deref(), Some("gpt-5.5-codex-actual"));
     }
 }

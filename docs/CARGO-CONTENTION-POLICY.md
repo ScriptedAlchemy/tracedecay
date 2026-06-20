@@ -16,23 +16,23 @@ Live evidence observed while authoring this policy: `target/debug/` and `target/
 
 ## Why the MCP tools are not affected
 
-The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_affected_tests`, `tracedecay_affected`) already pin `--target-dir .tracedecay/target/` in `src/diagnostics/rust.rs` (`target_dir_for()`), deliberately so concurrent IDE / user `cargo check` runs don't race for `target/`'s lockfile. That path is owned by the MCP server. **Workers running their own `cargo` from the terminal are the only unmanaged case** — and they default to the repo's `target/`, which is the user's ~399 GB interactive dir.
+The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_affected_tests`, `tracedecay_affected`) already pin `--target-dir /tmp/tracedecay-target/<project-id>/diagnostics/` in `src/diagnostics/rust.rs` (`target_dir_for()`), deliberately so concurrent IDE / user `cargo check` runs don't race for `target/`'s lockfile and diagnostics never create repo-local TraceDecay folders. **Workers running their own `cargo` from the terminal are the only unmanaged case** — and they default to the repo's `target/`, which is the user's ~399 GB interactive dir.
 
 ## Policy
 
 1. **Default: per-task isolated target dir.** Every cargo-heavy card exports, before its first `cargo` command:
 
    ```sh
-   export CARGO_TARGET_DIR="$HERMES_KANBAN_WORKSPACE/.tracedecay/target/$HERMES_KANBAN_TASK"
+   export CARGO_TARGET_DIR="/tmp/tracedecay-target/$HERMES_KANBAN_TASK"
    ```
 
-   This is an independent cargo target root (cargo creates its own `debug/` / `release/` / `.cargo-lock` inside it). Different path ⇒ different lock ⇒ **zero contention** with other workers, with the MCP tool's `.tracedecay/target/`, or with the user's `target/`. `.gitignore` already covers `.tracedecay`, so these dirs never pollute `git status`.
+   This is an independent cargo target root (cargo creates its own `debug/` / `release/` / `.cargo-lock` inside it). Different path ⇒ different lock ⇒ **zero contention** with other workers, with the MCP diagnostics target, or with the user's `target/`. Because the target lives under `/tmp`, it cannot pollute `git status` or create a project-local TraceDecay folder.
 
 2. **Never run bare `cargo` against the repo's `target/`.** That dir is the user's interactive build cache. A worker building there contends with the human *and* with every other default-target worker. Always export `CARGO_TARGET_DIR` first.
 
-3. **Leave `.tracedecay/target/` (no task suffix) to the MCP tools.** Do not `cargo clean` it, do not point a worker at it. It is shared by `tracedecay_diagnostics` / `tracedecay_run_affected_tests`.
+3. **Leave `/tmp/tracedecay-target/<project-id>/diagnostics/` to the MCP tools.** Do not `cargo clean` it, do not point a worker at it. It is shared by `tracedecay_diagnostics` / `tracedecay_run_affected_tests`.
 
-4. **Reserved serialized lane for full-workspace integration.** A single shared dir `.tracedecay/target/integration/` is reserved for the one card type that genuinely benefits from a warm, shared, whole-workspace cache: the final "is the whole workspace green?" verification before merge. Only one integration card may use it at a time — the board owner keeps integration cards serial (chain them with dependencies) so they reuse the cache instead of rebuilding it. Because it is a separate dir, an integration build never contends with the per-task dev dirs.
+4. **Reserved serialized lane for full-workspace integration.** A single shared dir `/tmp/tracedecay-target/integration/` is reserved for the one card type that genuinely benefits from a warm, shared, whole-workspace cache: the final "is the whole workspace green?" verification before merge. Only one integration card may use it at a time — the board owner keeps integration cards serial (chain them with dependencies) so they reuse the cache instead of rebuilding it. Because it is a separate dir, an integration build never contends with the per-task dev dirs.
 
 5. **Cleanup.** Per-task dirs are scratch. Before `kanban_complete`, a worker reclaims its disk (~1.6–4 GB each) with:
 
@@ -43,7 +43,7 @@ The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_a
    The owner periodically GCs dirs left behind by crashed / timed-out runs:
 
    ```sh
-   ls "$HERMES_KANBAN_WORKSPACE/.tracedecay/target/"
+   ls /tmp/tracedecay-target/
    # remove entries whose task id is no longer running/ready/todo
    ```
 
@@ -59,12 +59,12 @@ The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_a
 
 ```text
 Cargo policy (see docs/CARGO-CONTENTION-POLICY.md):
-  export CARGO_TARGET_DIR="$HERMES_KANBAN_WORKSPACE/.tracedecay/target/$HERMES_KANBAN_TASK"
+  export CARGO_TARGET_DIR="/tmp/tracedecay-target/$HERMES_KANBAN_TASK"
 Run all cargo check/test/build/clippy AFTER that export. Never use the bare
 repo `target/` (it is the user's interactive dir and is contended). Before
 kanban_complete, reclaim disk:  rm -rf "$CARGO_TARGET_DIR"
 Full-workspace integration checks use the serialized
-`.tracedecay/target/integration/` lane — only one such card at a time.
+`/tmp/tracedecay-target/integration/` lane — only one such card at a time.
 ```
 
 ## Verification checklist for a cargo-heavy card

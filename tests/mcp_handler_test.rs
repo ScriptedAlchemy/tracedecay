@@ -13,11 +13,12 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
+use tracedecay::memory::store::MemoryStore;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
@@ -106,11 +107,30 @@ impl Drop for HomeEnvGuard {
 // Shared setup
 // ---------------------------------------------------------------------------
 
+struct TestProject {
+    dir: TempDir,
+    _env_lock: MutexGuard<'static, ()>,
+    _home_guard: HomeEnvGuard,
+    _global_db_guard: GlobalDbEnvGuard,
+}
+
+impl std::ops::Deref for TestProject {
+    type Target = TempDir;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
+}
+
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-async fn setup_project() -> (TraceDecay, TempDir) {
+async fn setup_project() -> (TraceDecay, TestProject) {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path();
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -157,7 +177,15 @@ fn test_helper() { assert!(!helper().is_empty()); }
 
     let cg = TraceDecay::init(project).await.unwrap();
     index_all_retrying_sync_lock(&cg).await;
-    (cg, dir)
+    (
+        cg,
+        TestProject {
+            dir,
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
@@ -614,14 +642,14 @@ async fn active_project_tool_reports_resolved_store_metadata() {
         Some("active_project")
     );
     assert_eq!(payload["storage"]["class"].as_str(), Some("code_project"));
-    assert_eq!(payload["storage"]["mode"].as_str(), Some("project_local"));
+    assert_eq!(payload["storage"]["mode"].as_str(), Some("profile_sharded"));
     assert_eq!(
         payload["storage"]["graph_db_path"].as_str(),
         Some(graph_db_path.as_str())
     );
     assert!(payload["storage"]["data_root"]
         .as_str()
-        .is_some_and(|path| path.ends_with(".tracedecay")));
+        .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects")));
     assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
 }
 
@@ -5043,6 +5071,90 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert!(status["memory"].get("helpful_count").is_some());
     assert!(status["memory"].get("unhelpful_count").is_some());
     assert!(status["memory"].get("missing_vector_count").is_some());
+}
+
+#[tokio::test]
+async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
+    fn git(project: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    index_all_retrying_sync_lock(&cg).await;
+    git(&project, &["checkout", "-b", "feature"]);
+    let cg = TraceDecay::open(&project).await.unwrap();
+    assert_ne!(
+        cg.db_path(),
+        cg.store_layout().graph_db_path,
+        "test must serve a branch DB distinct from the shared project store"
+    );
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Branch memory writes stay project-scoped",
+            "category": "project",
+            "entity": "Branch memory"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+
+    let (branch_db, _) = Database::open(&cg.db_path()).await.unwrap();
+    assert!(
+        MemoryStore::new(branch_db.conn())
+            .get_fact(fact_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "MCP memory writes must not be scoped to the branch graph DB"
+    );
+
+    let (project_db, _) = Database::open(&cg.store_layout().graph_db_path)
+        .await
+        .unwrap();
+    assert!(
+        MemoryStore::new(project_db.conn())
+            .get_fact(fact_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "MCP memory writes must land in the shared project memory store"
+    );
 }
 
 #[tokio::test]

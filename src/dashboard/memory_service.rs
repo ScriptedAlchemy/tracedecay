@@ -57,6 +57,13 @@ pub(crate) async fn fetch_entities(
 }
 
 async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
+    let Ok(rows) = memory_queries::trust_histogram_rows(state).await else {
+        return Vec::new();
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
     let mut buckets: Vec<Value> = (0..10)
         .map(|i| {
             json!({
@@ -66,17 +73,15 @@ async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
             })
         })
         .collect();
-    if let Ok(rows) = memory_queries::trust_histogram_rows(state).await {
-        for row in rows {
-            let idx = row
-                .get("bucket")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                .clamp(0, 9) as usize;
-            let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
-            if let Some(count) = buckets[idx].get_mut("count") {
-                *count = json!(count.as_i64().unwrap_or(0) + added);
-            }
+    for row in rows {
+        let idx = row
+            .get("bucket")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .clamp(0, 9) as usize;
+        let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
+        if let Some(count) = buckets[idx].get_mut("count") {
+            *count = json!(count.as_i64().unwrap_or(0) + added);
         }
     }
     buckets

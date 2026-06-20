@@ -1900,6 +1900,14 @@ impl GlobalDb {
                  WHERE r.provider = ?1
                    AND r.session_id = ?2
                    AND r.ordinal < ?3
+                   AND r.ordinal > COALESCE((
+                       SELECT MAX(prev.ordinal)
+                       FROM session_messages prev
+                       WHERE prev.provider = ?1
+                         AND prev.session_id = ?2
+                         AND prev.ordinal < ?3
+                         AND COALESCE(prev.kind, 'message') = 'summary'
+                   ), -9223372036854775808)
                    AND COALESCE(m.kind, 'message') <> 'summary'
                  ORDER BY r.store_id",
                 params![

@@ -486,6 +486,7 @@ pub(crate) struct CodexTurnUsage {
     input: i64,
     output: i64,
     cache_read: i64,
+    reasoning: i64,
     total: i64,
     seen: bool,
     last_cumulative: Option<i64>,
@@ -518,30 +519,50 @@ impl CodexTurnUsage {
         if cumulative.is_some() {
             self.last_cumulative = cumulative;
         }
-        let Some(last) = info.get("last_token_usage") else {
+        let Some(last) = info
+            .get("last_token_usage")
+            .or_else(|| info.get("total_token_usage"))
+        else {
             return true;
         };
-        let (Some(input), Some(output)) = (
-            last.get("input_tokens").and_then(Value::as_i64),
-            last.get("output_tokens").and_then(Value::as_i64),
-        ) else {
-            return true;
-        };
+        let input = last
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let output = last
+            .get("output_tokens")
+            .or_else(|| last.get("completion_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let cached = last
             .get("cached_input_tokens")
+            .or_else(|| last.get("cache_read_input_tokens"))
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .max(0);
+        let reasoning = last
+            .get("reasoning_output_tokens")
+            .or_else(|| last.get("reasoning_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let total = last
+            .get("total_tokens")
+            .and_then(Value::as_i64)
+            .or(cumulative)
+            .unwrap_or_else(|| input.saturating_add(output).saturating_add(reasoning));
+        if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 {
+            return true;
+        }
         self.input = self
             .input
             .saturating_add((input.saturating_sub(cached)).max(0));
         self.cache_read = self.cache_read.saturating_add(cached);
-        self.output = self.output.saturating_add(output.max(0));
-        self.total = self.total.saturating_add(
-            last.get("total_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or_else(|| input.saturating_add(output)),
-        );
+        self.reasoning = self.reasoning.saturating_add(reasoning);
+        self.output = self
+            .output
+            .saturating_add(output.max(0).saturating_add(reasoning));
+        self.total = self.total.saturating_add(total.max(0));
         self.seen = true;
         true
     }
@@ -561,12 +582,16 @@ impl CodexTurnUsage {
                 Value::from(self.cache_read),
             );
         }
+        if self.reasoning > 0 {
+            usage.insert("reasoning_tokens".to_string(), Value::from(self.reasoning));
+        }
         if self.total > 0 {
             usage.insert("total_tokens".to_string(), Value::from(self.total));
         }
         self.input = 0;
         self.output = 0;
         self.cache_read = 0;
+        self.reasoning = 0;
         self.total = 0;
         self.seen = false;
         Some(Value::Object(usage))

@@ -884,15 +884,29 @@ fn event_dispatch_messages(
 }
 
 fn cursor_model_string(value: &Value) -> Option<String> {
-    ["model", "model_id", "modelId", "model_name", "modelName"]
-        .into_iter()
-        .find_map(|key| {
-            value
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|model| !model.trim().is_empty())
-                .map(str::to_string)
-        })
+    [
+        "model",
+        "model_id",
+        "modelId",
+        "model_name",
+        "modelName",
+        "model_slug",
+        "modelSlug",
+        "model_display_name",
+        "modelDisplayName",
+        "display_model",
+        "displayModel",
+        "display_model_name",
+        "displayModelName",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {

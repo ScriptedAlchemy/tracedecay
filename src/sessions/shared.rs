@@ -174,9 +174,9 @@ pub(crate) fn append_tool_calls_metadata(
 /// Token-usage counter keys recognized by the savings dashboard
 /// (`dashboard/savings_api.rs` `MESSAGE_TOKENS_CTE`): both the Anthropic
 /// (`input_tokens`/`output_tokens`/`cache_*`) and `OpenAI`
-/// (`prompt_tokens`/`completion_tokens`) shapes, plus `total_tokens` for
-/// reference.
-const USAGE_COUNTER_KEYS: [&str; 7] = [
+/// (`prompt_tokens`/`completion_tokens`) shapes, plus total/reasoning counters
+/// for reference.
+const USAGE_COUNTER_KEYS: [&str; 9] = [
     "input_tokens",
     "output_tokens",
     "prompt_tokens",
@@ -184,6 +184,8 @@ const USAGE_COUNTER_KEYS: [&str; 7] = [
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
     "total_tokens",
+    "reasoning_tokens",
+    "reasoning_output_tokens",
 ];
 
 /// Extracts a `usage` counters object from a transcript record/message,
@@ -197,6 +199,20 @@ pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
         if let Some(count) = usage.get(key).and_then(Value::as_i64) {
             counters.insert(key.to_string(), Value::from(count));
         }
+    }
+    if !counters.contains_key("cache_read_input_tokens") {
+        if let Some(count) = usage.get("cached_input_tokens").and_then(Value::as_i64) {
+            counters.insert("cache_read_input_tokens".to_string(), Value::from(count));
+        }
+    }
+    if !counters.is_empty()
+        && !counters.contains_key("input_tokens")
+        && !counters.contains_key("prompt_tokens")
+        && !counters.contains_key("output_tokens")
+        && !counters.contains_key("completion_tokens")
+    {
+        counters.insert("input_tokens".to_string(), Value::from(0));
+        counters.insert("output_tokens".to_string(), Value::from(0));
     }
     (!counters.is_empty()).then_some(Value::Object(counters))
 }
@@ -289,4 +305,45 @@ pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<S
         .iter()
         .find(|message| message.role == "user")
         .map(|message| preview_title(&title_text_from_stored_content(&message.text)))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::usage_counters_from;
+
+    #[test]
+    fn usage_counters_keep_cache_only_rows_actual() {
+        let Some(usage) = usage_counters_from(&json!({
+            "usage": {
+                "cache_read_input_tokens": 123,
+                "total_tokens": 123
+            }
+        })) else {
+            panic!("cache-only usage should be retained");
+        };
+
+        assert_eq!(usage["input_tokens"], 0);
+        assert_eq!(usage["output_tokens"], 0);
+        assert_eq!(usage["cache_read_input_tokens"], 123);
+        assert_eq!(usage["total_tokens"], 123);
+    }
+
+    #[test]
+    fn usage_counters_normalize_openai_cached_input_alias() {
+        let Some(usage) = usage_counters_from(&json!({
+            "usage": {
+                "cached_input_tokens": 456,
+                "total_tokens": 456
+            }
+        })) else {
+            panic!("OpenAI cache alias should be retained");
+        };
+
+        assert_eq!(usage["input_tokens"], 0);
+        assert_eq!(usage["output_tokens"], 0);
+        assert_eq!(usage["cache_read_input_tokens"], 456);
+        assert_eq!(usage["total_tokens"], 456);
+    }
 }

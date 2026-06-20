@@ -195,7 +195,7 @@ tracedecay init
 
 **Non-interactive environments** (CI, containers, headless shells): `init`, `status`, and bare invocation skip prompts and use safe defaults. `init` creates the index without modifying `.gitignore` (prints a notice); `status` exits cleanly without creating an index if none exists.
 
-This creates the active project's local TraceDecay store. Repo-local projects create `.tracedecay/` with the graph database; legacy `.tokensave/` directories are still honored. Profile-backed projects keep graph/session artifacts in a private profile shard while the repo may contain only an enrollment marker. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
+This creates the active project's TraceDecay store. By default, graph/session artifacts live in a user-level profile shard scoped to this project; explicit repo-local projects create `.tracedecay/` with the graph database, and legacy `.tokensave/` directories are still honored. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
 
 <details>
 <summary><strong>What install writes for Claude Code</strong></summary>
@@ -974,7 +974,7 @@ Large projects take longer on the first full index.
 
 | Variable | Effect |
 |----------|--------|
-| `TRACEDECAY_GLOBAL_DB` | Override the path to the global database (used for LCM session storage selection). When set, the dashboard serves this store instead of the project-local sessions.db. |
+| `TRACEDECAY_GLOBAL_DB` | Override the path to the global database or session store for dashboard LCM selection. When unset, the dashboard serves the active project's resolved session store, profile-sharded by default. |
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode). |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd). |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode). |
