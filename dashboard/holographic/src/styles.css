@@ -308,6 +308,45 @@ input[type="range"] {
   flex-wrap: wrap;
 }
 
+.hm-searchbox {
+  position: relative;
+}
+
+.hm-searchbox > svg,
+.hm-searchbox > span {
+  position: absolute;
+  left: 0.625rem;
+  top: 50%;
+  width: 0.875rem;
+  height: 0.875rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.hm-searchbox .ts-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.35rem 1.75rem 0.35rem 2rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.hm-searchbox .ts-button {
+  position: absolute;
+  right: 0.375rem;
+  top: 50%;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0;
+  transform: translateY(-50%);
+}
+
+.hm-searchbox .ts-button svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
 .hv-chart svg {
   display: block;
 }

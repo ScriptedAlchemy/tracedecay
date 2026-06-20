@@ -354,7 +354,7 @@ function SearchBox({
   setQuery: (value: string) => void;
 }) {
   return (
-    <div className="relative min-w-0 w-full sm:max-w-xl">
+    <div className="hm-searchbox relative min-w-0 w-full sm:max-w-xl">
       {refreshing ? (
         <Spinner className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[0.875rem] text-primary" />
       ) : (
