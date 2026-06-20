@@ -1,9 +1,11 @@
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+use libsql::{Builder, Connection, OpenFlags, Value};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::migrate::inventory::{MigrationInventory, StoreStatus};
 use crate::migrate::registry::{
@@ -143,6 +145,21 @@ pub struct MigrationExportReport {
 pub struct MigrationCleanupSourcesReport {
     pub migration_id: String,
     pub removed_artifacts: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqliteLogicalSummary {
+    user_version: i64,
+    schema: Vec<String>,
+    tables: Vec<SqliteTableSummary>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqliteTableSummary {
+    name: String,
+    columns: Vec<String>,
+    row_count: u64,
+    checksum: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -969,6 +986,9 @@ fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
     if !source_meta.is_file() || !target_meta.is_file() {
         return Err(invalid_manifest("migration artifact is not a regular file"));
     }
+    if is_sqlite_database_file(source)? && is_sqlite_database_file(target)? {
+        return verify_sqlite_artifact_contents(source, target);
+    }
     if fs::read(source)? != fs::read(target)? {
         return Err(invalid_manifest(&format!(
             "migration target '{}' differs from source '{}'",
@@ -977,6 +997,347 @@ fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+fn is_sqlite_database_file(path: &Path) -> io::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut header = [0_u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(header == *b"SQLite format 3\0"),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
+    let source = source.to_path_buf();
+    let target = target.to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(io::Error::other)?;
+        runtime.block_on(async {
+            let source_summary = summarize_sqlite_database(&source).await?;
+            let target_summary = summarize_sqlite_database(&target).await?;
+            Ok::<_, io::Error>((source, target, source_summary, target_summary))
+        })
+    });
+    let (source, target, source_summary, target_summary) = worker
+        .join()
+        .map_err(|_| invalid_manifest("SQLite logical verification thread panicked"))??;
+    if source_summary != target_summary {
+        return Err(invalid_manifest(&format!(
+            "SQLite logical verification failed for target '{}' against source '{}'",
+            target.display(),
+            source.display()
+        )));
+    }
+    Ok(())
+}
+
+async fn summarize_sqlite_database(path: &Path) -> io::Result<SqliteLogicalSummary> {
+    let db = Builder::new_local(path)
+        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .build()
+        .await
+        .map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to open SQLite DB '{}': {e}",
+                path.display()
+            ))
+        })?;
+    let conn = db.connect().map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to connect to SQLite DB '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if !sqlite_quick_check(&conn, path).await? {
+        return Err(invalid_manifest(&format!(
+            "SQLite quick_check failed for '{}'",
+            path.display()
+        )));
+    }
+    let user_version = sqlite_i64(&conn, "PRAGMA user_version", path).await?;
+    let schema = sqlite_schema_summary(&conn, path).await?;
+    let tables = sqlite_table_summaries(&conn, path).await?;
+    Ok(SqliteLogicalSummary {
+        user_version,
+        schema,
+        tables,
+    })
+}
+
+async fn sqlite_quick_check(conn: &Connection, path: &Path) -> io::Result<bool> {
+    let mut rows = conn.query("PRAGMA quick_check", ()).await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to run quick_check on '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let Some(row) = rows.next().await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to read quick_check result for '{}': {e}",
+            path.display()
+        ))
+    })?
+    else {
+        return Ok(false);
+    };
+    let result = row.get::<String>(0).map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to decode quick_check result for '{}': {e}",
+            path.display()
+        ))
+    })?;
+    Ok(result == "ok")
+}
+
+async fn sqlite_i64(conn: &Connection, sql: &str, path: &Path) -> io::Result<i64> {
+    let mut rows = conn.query(sql, ()).await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to query SQLite metadata for '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let Some(row) = rows.next().await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to read SQLite metadata for '{}': {e}",
+            path.display()
+        ))
+    })?
+    else {
+        return Err(invalid_manifest(&format!(
+            "SQLite metadata query returned no rows for '{}'",
+            path.display()
+        )));
+    };
+    row.get::<i64>(0).map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to decode SQLite metadata for '{}': {e}",
+            path.display()
+        ))
+    })
+}
+
+async fn sqlite_schema_summary(conn: &Connection, path: &Path) -> io::Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name, tbl_name, sql",
+            (),
+        )
+        .await
+        .map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to read SQLite schema for '{}': {e}",
+                path.display()
+            ))
+        })?;
+    let mut schema = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to read SQLite schema row for '{}': {e}",
+            path.display()
+        ))
+    })? {
+        let name = row.get::<String>(1).map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to decode SQLite schema name for '{}': {e}",
+                path.display()
+            ))
+        })?;
+        if is_fts_shadow_table(&name) {
+            continue;
+        }
+        let entry = format!(
+            "{}\x1f{}\x1f{}\x1f{}",
+            row.get::<String>(0).map_err(|e| invalid_manifest(&format!(
+                "failed to decode SQLite schema type for '{}': {e}",
+                path.display()
+            )))?,
+            name,
+            row.get::<String>(2).map_err(|e| invalid_manifest(&format!(
+                "failed to decode SQLite schema table for '{}': {e}",
+                path.display()
+            )))?,
+            row.get::<String>(3).map_err(|e| invalid_manifest(&format!(
+                "failed to decode SQLite schema SQL for '{}': {e}",
+                path.display()
+            )))?
+        );
+        schema.push(entry);
+    }
+    Ok(schema)
+}
+
+async fn sqlite_table_summaries(
+    conn: &Connection,
+    path: &Path,
+) -> io::Result<Vec<SqliteTableSummary>> {
+    let mut rows = conn
+        .query(
+            "SELECT name, COALESCE(sql, '')
+             FROM sqlite_schema
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+            (),
+        )
+        .await
+        .map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to list SQLite tables for '{}': {e}",
+                path.display()
+            ))
+        })?;
+    let mut tables = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to read SQLite table row for '{}': {e}",
+            path.display()
+        ))
+    })? {
+        let name = row.get::<String>(0).map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to decode SQLite table name for '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let sql = row.get::<String>(1).map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to decode SQLite table SQL for '{}': {e}",
+                path.display()
+            ))
+        })?;
+        if is_fts_shadow_table(&name) || is_virtual_table_sql(&sql) {
+            continue;
+        }
+        tables.push(sqlite_table_summary(conn, path, &name).await?);
+    }
+    Ok(tables)
+}
+
+async fn sqlite_table_summary(
+    conn: &Connection,
+    path: &Path,
+    table: &str,
+) -> io::Result<SqliteTableSummary> {
+    let columns = sqlite_table_columns(conn, path, table).await?;
+    let mut checksum = Sha256::new();
+    checksum.update(table.as_bytes());
+    for column in &columns {
+        checksum.update(b"\x1f");
+        checksum.update(column.as_bytes());
+    }
+    let mut row_count = 0_u64;
+    if !columns.is_empty() {
+        let column_list = columns
+            .iter()
+            .map(|column| quote_sqlite_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {column_list} FROM {} ORDER BY {column_list}",
+            quote_sqlite_identifier(table)
+        );
+        let mut rows = conn.query(&sql, ()).await.map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to read SQLite table '{}' from '{}': {e}",
+                table,
+                path.display()
+            ))
+        })?;
+        while let Some(row) = rows.next().await.map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to read SQLite row from table '{}' in '{}': {e}",
+                table,
+                path.display()
+            ))
+        })? {
+            row_count = row_count.saturating_add(1);
+            for index in 0..columns.len() {
+                let index = i32::try_from(index).map_err(|e| {
+                    invalid_manifest(&format!(
+                        "too many SQLite columns in table '{}' in '{}': {e}",
+                        table,
+                        path.display()
+                    ))
+                })?;
+                let value = row.get::<Value>(index).map_err(|e| {
+                    invalid_manifest(&format!(
+                        "failed to decode SQLite row from table '{}' in '{}': {e}",
+                        table,
+                        path.display()
+                    ))
+                })?;
+                checksum.update(sqlite_value_fingerprint(value).as_bytes());
+                checksum.update(b"\x1e");
+            }
+        }
+    }
+    Ok(SqliteTableSummary {
+        name: table.to_string(),
+        columns,
+        row_count,
+        checksum: hex::encode(checksum.finalize()),
+    })
+}
+
+async fn sqlite_table_columns(
+    conn: &Connection,
+    path: &Path,
+    table: &str,
+) -> io::Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({})", quote_sqlite_identifier(table));
+    let mut rows = conn.query(&sql, ()).await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to inspect SQLite table '{}' in '{}': {e}",
+            table,
+            path.display()
+        ))
+    })?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| {
+        invalid_manifest(&format!(
+            "failed to read SQLite table info for '{}' in '{}': {e}",
+            table,
+            path.display()
+        ))
+    })? {
+        columns.push(row.get::<String>(1).map_err(|e| {
+            invalid_manifest(&format!(
+                "failed to decode SQLite column name for '{}' in '{}': {e}",
+                table,
+                path.display()
+            ))
+        })?);
+    }
+    Ok(columns)
+}
+
+fn is_fts_shadow_table(name: &str) -> bool {
+    name.contains("_fts_")
+}
+
+fn is_virtual_table_sql(sql: &str) -> bool {
+    sql.to_ascii_uppercase().contains("VIRTUAL TABLE")
+}
+
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sqlite_value_fingerprint(value: Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Integer(value) => format!("integer:{value}"),
+        Value::Real(value) => format!("real:{:016x}", value.to_bits()),
+        Value::Text(value) => format!("text:{}:{value}", value.len()),
+        Value::Blob(value) => format!("blob:{}:{}", value.len(), hex::encode(value)),
+    }
 }
 
 fn verify_directory_contents(source: &Path, target: &Path) -> io::Result<()> {

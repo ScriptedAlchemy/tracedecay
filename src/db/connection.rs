@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::path::Path;
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase};
+use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -93,6 +93,32 @@ impl Database {
         let migrated = migrations::migrate(&conn).await?;
 
         Ok((Self { conn, _db: db }, migrated))
+    }
+
+    /// Opens an existing database in read-only mode.
+    ///
+    /// This intentionally skips write-oriented PRAGMAs and migrations so
+    /// status/verification paths can inspect read-only `SQLite` files without
+    /// creating WAL files or attempting schema updates.
+    pub async fn open_read_only(db_path: &Path) -> Result<(Self, bool)> {
+        let db = Builder::new_local(db_path)
+            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to open database read-only: {e}"),
+                operation: "open_read_only".to_string(),
+            })?;
+
+        let conn = db.connect().map_err(|e| TraceDecayError::Database {
+            message: format!("failed to connect to database read-only: {e}"),
+            operation: "open_read_only".to_string(),
+        })?;
+
+        let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
+        Self::apply_read_only_pragmas(&conn, file_size).await?;
+
+        Ok((Self { conn, _db: db }, false))
     }
 
     /// Returns a reference to the underlying libsql connection.
@@ -226,6 +252,23 @@ impl Database {
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to apply pragmas: {e}"),
             operation: "apply_pragmas".to_string(),
+        })?;
+        Ok(())
+    }
+
+    async fn apply_read_only_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
+        let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 120000;
+             PRAGMA cache_size = -{cache_kb};
+             PRAGMA temp_store = MEMORY;
+             PRAGMA mmap_size = {mmap};",
+        ))
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to apply read-only pragmas: {e}"),
+            operation: "apply_read_only_pragmas".to_string(),
         })?;
         Ok(())
     }

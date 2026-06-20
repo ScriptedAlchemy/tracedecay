@@ -2,8 +2,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::sample_node;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tracedecay::branch_meta::BranchMeta;
+use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::MigrationInventory;
 use tracedecay::migrate::manifest::{
@@ -286,6 +292,36 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
         stderr.contains("Non-interactive: skipping index creation"),
         "stderr should explain the non-interactive default\nstderr:\n{stderr}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn status_json_reads_readonly_project_database() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let db_path = project.path().join(".tracedecay/tracedecay.db");
+    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
+        .await
+        .unwrap();
+    db.checkpoint().await.unwrap();
+    db.close();
+    let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
+    permissions.set_mode(0o444);
+    std::fs::set_permissions(&db_path, permissions).unwrap();
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["status", "--json"]);
+    let output = run_with_timeout(command, Duration::from_secs(30));
+
+    assert!(
+        output.status.success(),
+        "status --json should read readonly DB\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["node_count"], 1);
 }
 
 #[tokio::test]
