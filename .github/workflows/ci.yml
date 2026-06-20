@@ -65,7 +65,14 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
+        if: runner.os != 'Windows'
         run: cargo test --workspace
+
+      - name: Run tests (Windows, serialized)
+        if: runner.os == 'Windows'
+        env:
+          RUST_TEST_THREADS: "1"
+        run: cargo test --workspace -- --test-threads=1
 
   clippy:
     name: Clippy
