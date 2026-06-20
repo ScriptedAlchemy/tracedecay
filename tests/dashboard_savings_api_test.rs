@@ -1,6 +1,6 @@
 //! Integration tests for the Savings & Cost dashboard API
-//! (`/api/plugins/savings/*`), against a seeded temp global DB serving both
-//! the savings ledger and the session store (`TRACEDECAY_GLOBAL_DB` override).
+//! (`/api/plugins/savings/*`), against a seeded temp global DB for accounting
+//! and a project-local session store for transcript cost rows.
 //!
 //! Pricing runs offline (`TRACEDECAY_OFFLINE=1`) with the cache pointed at a
 //! nonexistent temp path, so the bundled fallback snapshot is exercised.
@@ -20,6 +20,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::CostTurn;
@@ -332,6 +333,12 @@ async fn start_fixture() -> Fixture {
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
+    seed_global_db(
+        &project_session_db_path(&project_root),
+        &project_root,
+        day_start,
+    )
+    .await;
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {

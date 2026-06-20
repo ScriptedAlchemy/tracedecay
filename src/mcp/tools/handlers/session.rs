@@ -1099,7 +1099,11 @@ async fn open_lcm_storage(
             let Some(project_root) = project_root else {
                 return LcmStorageResolution::Unavailable(project_local_storage_without_project());
             };
-            let db_path = crate::sessions::cursor::project_session_db_path(project_root);
+            let Some(db_path) =
+                crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+            else {
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+            };
             let db = match mode {
                 LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
                 LcmOpenMode::ReadOnlyExisting => GlobalDb::open_read_only_at(&db_path).await,
@@ -1328,7 +1332,19 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         .unwrap_or(10)
         .clamp(1, 50) as usize;
 
-    let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+    let Some(db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(cg.project_root()).await
+    else {
+        return Ok(tool_json(
+            Some(cg.project_root()),
+            &json!({
+                "status": "unavailable",
+                "message": "could not resolve project-local tracedecay session database",
+                "results": [],
+                "count": 0
+            }),
+        ));
+    };
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(
             Some(cg.project_root()),

@@ -40,7 +40,7 @@ mod savings_pricing;
 mod token_count;
 mod util;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -74,9 +74,13 @@ pub(crate) struct CuratePreviewEntry {
 
 #[derive(Clone)]
 pub(crate) struct DashboardState {
-    /// Project database (code graph + holographic memory store).
+    /// Active code-graph database. This can be branch-specific.
+    pub(crate) graph_conn: libsql::Connection,
+    /// Display path of the active code-graph database.
+    pub(crate) graph_db_path: String,
+    /// Project memory database. This is shared across branches.
     pub(crate) mem_conn: libsql::Connection,
-    /// Display path of the project database.
+    /// Display path of the project memory database.
     pub(crate) mem_db_path: String,
     /// LCM session store (project-local `sessions.db`, or the global DB
     /// when overridden/unavailable), when available.
@@ -115,14 +119,13 @@ pub(crate) struct LcmStoreSelection {
 /// LCM tools use for `storage_scope = "project_local"`, creating it on first
 /// run.
 ///
-/// An explicit `TRACEDECAY_GLOBAL_DB` override always wins (scope `"global"`;
-/// legacy `TOKENSAVE_GLOBAL_DB` is still accepted): tests, the smoke harness,
-/// and the Hermes wrapper use it to pin the
-/// dashboard to a specific store. The legacy global DB is also the fallback
-/// if the project store cannot be opened.
+/// The global DB is only a fallback for sessions. `TRACEDECAY_GLOBAL_DB`
+/// still controls the savings/accounting ledger, but it must not pull the
+/// dashboard away from the project-local session store transcript ingest uses.
 pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStoreSelection {
-    if !crate::global_db::global_db_path_is_overridden() {
-        let project_db_path = crate::sessions::cursor::project_session_db_path(project_root);
+    if let Some(project_db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+    {
         if let Some(db) = GlobalDb::open_at(&project_db_path).await {
             return LcmStoreSelection {
                 conn: Some(db.dashboard_connection()),
@@ -141,12 +144,68 @@ pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStor
     }
 }
 
+async fn open_dashboard_connection(path: &Path) -> Option<libsql::Connection> {
+    let db = libsql::Builder::new_local(path).build().await.ok()?;
+    db.connect().ok()
+}
+
+async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM memory_facts", ())
+        .await
+        .ok()?;
+    rows.next().await.ok()??.get::<i64>(0).ok()
+}
+
+pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Connection, String) {
+    let project_root = cg.project_root();
+    let default_path = crate::config::get_project_db_path(project_root);
+    let candidates = [
+        default_path,
+        project_root
+            .join(crate::config::TRACEDECAY_DIR)
+            .join(crate::config::LEGACY_DB_FILENAME),
+        project_root
+            .join(crate::config::LEGACY_TOKENSAVE_DIR)
+            .join(crate::config::LEGACY_DB_FILENAME),
+    ];
+    let graph_path = cg.dashboard_db_path();
+    let mut first_open: Option<(libsql::Connection, String)> = None;
+    let mut seen = std::collections::BTreeSet::new();
+
+    for path in candidates {
+        if !seen.insert(path.clone()) || !path.is_file() {
+            continue;
+        }
+        let conn = if path == graph_path {
+            Some(cg.dashboard_connection())
+        } else {
+            open_dashboard_connection(&path).await
+        };
+        let Some(conn) = conn else {
+            continue;
+        };
+        let display_path = path.display().to_string();
+        if first_open.is_none() {
+            first_open = Some((conn.clone(), display_path.clone()));
+        }
+        if memory_fact_count(&conn).await.unwrap_or(0) > 0 {
+            return (conn, display_path);
+        }
+    }
+
+    first_open.unwrap_or_else(|| {
+        (
+            cg.dashboard_connection(),
+            cg.dashboard_db_path().display().to_string(),
+        )
+    })
+}
+
 /// Builds the dashboard state shared by the CLI `run` path and the
 /// `tracedecay_dashboard` MCP tool.
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    if let Err(err) = cg.memory_status().await {
-        eprintln!("Warning: dashboard memory repair failed: {err}");
-    }
+    let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg.project_root()).await;
     // Re-hydrate the last dry-run curation preview from its sidecar so it
     // survives server restarts (staleness is recomputed on read anyway).
@@ -156,8 +215,10 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let state = DashboardState {
-        mem_conn: cg.dashboard_connection(),
-        mem_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_conn: cg.dashboard_connection(),
+        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        mem_conn,
+        mem_db_path,
         lcm_conn: lcm.conn,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
@@ -346,13 +407,14 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "mode": "standalone",
         "project_root": state.project_root.display().to_string(),
         "memory_db": state.mem_db_path,
+        "graph_db": state.graph_db_path,
         "lcm_db": state.lcm_db_path,
         "lcm_scope": state.lcm_scope,
         "features": {
             "memory": true,
-            "lcm": state.lcm_conn.is_some(),
-            "lcm_gc": state.lcm_conn.is_some(),
-            "lcm_payload_health": state.lcm_conn.is_some(),
+            "lcm": true,
+            "lcm_gc": true,
+            "lcm_payload_health": true,
             "graph": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side

@@ -113,13 +113,12 @@ impl Default for MemoryCurateOptions {
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
 async fn cli_state(cg: &TraceDecay) -> DashboardState {
-    // Same vector/bank repair the dashboard runs before serving similarity.
-    if let Err(err) = cg.memory_status().await {
-        eprintln!("Warning: memory repair failed: {err}");
-    }
+    let (mem_conn, mem_db_path) = super::resolve_project_memory_store(cg).await;
     DashboardState {
-        mem_conn: cg.dashboard_connection(),
-        mem_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_conn: cg.dashboard_connection(),
+        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        mem_conn,
+        mem_db_path,
         lcm_conn: None,
         lcm_db_path: String::new(),
         lcm_scope: "project_local",

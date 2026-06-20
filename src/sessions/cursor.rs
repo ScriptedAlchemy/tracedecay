@@ -30,15 +30,22 @@ pub fn project_session_db_path(project_root: &Path) -> PathBuf {
 }
 
 pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
+    let db_path = resolved_project_session_db_path(project_root).await?;
+    GlobalDb::open_at(&db_path).await
+}
+
+pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
     if is_hermes_profile_home(project_root) {
-        return GlobalDb::open_at(&hermes_profile_session_db_path(project_root)).await;
+        return Some(hermes_profile_session_db_path(project_root));
     }
     let layout = resolve_layout_for_current_profile(project_root).ok()?;
-    if layout.storage_mode == StorageMode::ProfileSharded || layout.data_root.is_dir() {
-        return GlobalDb::open_at(&layout.sessions_db_path).await;
+    if layout.storage_mode == StorageMode::ProfileSharded {
+        return Some(layout.sessions_db_path);
     }
-    let db_path = registry_profile_session_db_path(project_root).await?;
-    GlobalDb::open_at(&db_path).await
+    if let Some(db_path) = registry_profile_session_db_path(project_root).await {
+        return Some(db_path);
+    }
+    layout.data_root.is_dir().then_some(layout.sessions_db_path)
 }
 
 fn is_hermes_profile_home(project_root: &Path) -> bool {
@@ -711,12 +718,7 @@ fn event_message(
             || format!("{session_id}:{ordinal}"),
             std::string::ToString::to_string,
         );
-    let model = record
-        .get("model")
-        .or_else(|| message.get("model"))
-        .or_else(|| event.get("model"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let model = cursor_record_model(record, message, event);
 
     Some(SessionMessageRecord {
         provider: "cursor".to_string(),
@@ -788,12 +790,8 @@ fn event_dispatch_messages(
             ordinal: source_offset.saturating_add(index as i64),
             text,
             kind: Some("tool_dispatch".to_string()),
-            model: record
-                .get("model")
-                .or_else(|| message.get("model"))
-                .or_else(|| event.get("model"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            model: cursor_dispatch_model(item)
+                .or_else(|| cursor_record_model(record, message, event)),
             tool_names: Some(name.to_string()),
             source_path: Some(transcript_path.to_string_lossy().to_string()),
             source_offset: Some(source_offset),
@@ -806,6 +804,30 @@ fn event_dispatch_messages(
         });
     }
     out
+}
+
+fn cursor_model_string(value: &Value) -> Option<String> {
+    ["model", "model_id", "modelId", "model_name", "modelName"]
+        .into_iter()
+        .find_map(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn cursor_record_model(record: &Value, message: &Value, event: &Value) -> Option<String> {
+    cursor_model_string(record)
+        .or_else(|| cursor_model_string(message))
+        .or_else(|| cursor_model_string(event))
+}
+
+fn cursor_dispatch_model(item: &Value) -> Option<String> {
+    item.get("input")
+        .and_then(cursor_model_string)
+        .or_else(|| cursor_model_string(item))
 }
 
 fn is_subagent_dispatch_tool(name: &str) -> bool {

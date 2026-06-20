@@ -373,10 +373,12 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
             global_db_path.display()
         ),
     };
-    if seed_lcm {
-        seed_lcm_fixture(&global_db, &project_root).await;
-    }
     drop(global_db);
+    if seed_lcm {
+        let session_store = open_project_session_store(&project_root).await;
+        seed_lcm_fixture(&session_store, &project_root).await;
+        drop(session_store);
+    }
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -723,7 +725,152 @@ fn dashboard_reports_resolved_branch_db_path() {
         let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
         server.abort();
         assert_eq!(status, 200);
-        assert_eq!(capabilities["memory_db"], expected);
+        assert_eq!(capabilities["graph_db"], expected);
+    });
+}
+
+#[test]
+fn dashboard_uses_project_memory_db_and_branch_graph_db() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let project_root = tmp.path().join("project");
+        let global_db_path = tmp.path().join("global").join("global.db");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+
+        fs::create_dir_all(project_root.join("src"))
+            .unwrap_or_else(|err| panic!("failed to create src dir: {err}"));
+        git(&project_root, &["init", "-b", "main"]);
+        fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn main_branch_symbol() {}\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write fixture lib.rs: {err}"));
+        commit_all(&project_root, "initial commit");
+
+        let main = match TraceDecay::init(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to initialize fixture project: {err}"),
+        };
+        index_all_retrying_sync_lock(&main, "failed to index main branch fixture").await;
+        drop(main);
+
+        git(&project_root, &["checkout", "-b", "feature/dashboard-storage"]);
+        fs::write(
+            project_root.join("src/feature.rs"),
+            "pub fn feature_branch_symbol() {}\n",
+        )
+        .unwrap_or_else(|err| panic!("failed to write feature fixture: {err}"));
+        if let Err(err) = branch::add_branch_tracking(&project_root, "feature/dashboard-storage").await
+        {
+            panic!("failed to track feature branch: {err}");
+        }
+
+        let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
+        let project_db = libsql::Builder::new_local(&project_db_path)
+            .build()
+            .await
+            .unwrap_or_else(|err| panic!("failed to open project DB: {err}"));
+        let project_conn = project_db
+            .connect()
+            .unwrap_or_else(|err| panic!("failed to connect to project DB: {err}"));
+        project_conn
+            .execute(
+                "INSERT INTO memory_facts
+                    (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                libsql::params![
+                    9001_i64,
+                    "Project memory must survive branch dashboard routing",
+                    "project",
+                    "[\"dashboard\",\"storage\"]",
+                    0.99_f64,
+                    1_i64,
+                    1_i64,
+                    1_700_100_000_i64,
+                    1_700_100_000_i64,
+                ],
+            )
+            .await
+            .unwrap_or_else(|err| panic!("failed to seed project memory fact: {err}"));
+
+        let cg = match TraceDecay::open(&project_root).await {
+            Ok(cg) => cg,
+            Err(err) => panic!("failed to open feature branch fixture: {err}"),
+        };
+        let branch_db_path = cg.db_path();
+        assert!(
+            branch_db_path
+                .display()
+                .to_string()
+                .replace('\\', "/")
+                .contains(".tracedecay/branches/"),
+            "fixture should serve a branch graph DB path, got {}",
+            branch_db_path.display()
+        );
+
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let server = tokio::spawn(async move {
+            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
+        });
+        let agent = http_agent();
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["memory_db"], project_db_path.display().to_string());
+        assert_eq!(capabilities["graph_db"], branch_db_path.display().to_string());
+
+        let (status, memory) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/?limit=5&graph_limit=5"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(memory["holographic"]["overview"]["facts"], 1);
+
+        let (status, memory_status) =
+            get_json(&agent, &format!("{base_url}/api/plugins/holographic/status"));
+        assert_eq!(status, 200);
+        assert_eq!(memory_status["path"], project_db_path.display().to_string());
+        assert_eq!(memory_status["memory"]["fact_count"], 1);
+
+        let (status, fact) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/fact/9001"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(fact["fact"]["fact_id"], 9001);
+
+        let (status, trust_history) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/holographic/fact/9001/trust-history"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(trust_history["fact_id"], 9001);
+
+        let (status, graph) =
+            get_json(&agent, &format!("{base_url}/api/plugins/graph/overview"));
+        assert_eq!(status, 200);
+        assert_eq!(graph["path"], branch_db_path.display().to_string());
+        assert!(
+            graph["totals"]["nodes"].as_i64().unwrap_or_default() > 0,
+            "graph overview should still read the branch graph DB"
+        );
+
+        let (status, graph_search) = get_json(
+            &agent,
+            &format!("{base_url}/api/plugins/graph/search?q=feature_branch_symbol"),
+        );
+        server.abort();
+        assert_eq!(status, 200);
+        assert!(
+            graph_search["total"].as_i64().unwrap_or_default() > 0,
+            "graph search should read the branch graph DB"
+        );
     });
 }
 
@@ -1822,8 +1969,8 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         assert_eq!(status, 200);
         assert_eq!(overview["exists"], true);
         assert_eq!(
-            overview["storage_scope"], "global",
-            "TRACEDECAY_GLOBAL_DB override fixtures serve the global scope"
+            overview["storage_scope"], "project_local",
+            "LCM serves the project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
         );
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
@@ -2027,11 +2174,10 @@ fn lcm_serves_project_session_store_without_global_override() {
     });
 }
 
-/// An explicit `TRACEDECAY_GLOBAL_DB` override pins the dashboard to that
-/// store even when the project-local session store exists and has rows —
-/// the contract the smoke harness and the Hermes wrapper rely on.
+/// `TRACEDECAY_GLOBAL_DB` pins savings/accounting, but LCM sessions still
+/// come from the project-local store that transcript ingest writes.
 #[test]
-fn lcm_global_override_wins_over_project_store() {
+fn lcm_project_store_wins_over_global_accounting_override() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2043,7 +2189,7 @@ fn lcm_global_override_wins_over_project_store() {
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
 
         let cg = setup_project(&project_root).await;
-        // The project store has rows; the overridden global store has none.
+        // The project store has rows; the overridden global accounting store has none.
         let session_store = open_project_session_store(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
         drop(session_store);
@@ -2059,23 +2205,26 @@ fn lcm_global_override_wins_over_project_store() {
 
         let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
         assert_eq!(status, 200);
-        assert_eq!(capabilities["lcm_scope"], "global");
+        assert_eq!(capabilities["lcm_scope"], "project_local");
 
         let (status, overview) = get_json(
             &agent,
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "global");
+        assert_eq!(overview["storage_scope"], "project_local");
         assert_eq!(overview["exists"], true);
         assert_eq!(
-            overview["overview"]["messages_total"], 0,
-            "override must serve the pinned (empty) store, not the project store"
+            overview["overview"]["messages_total"], 3,
+            "LCM must serve the project store, not the empty accounting DB"
         );
         let path = overview["path"]
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
-        assert_eq!(path, global_db_path.display().to_string());
+        assert!(
+            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
+            "expected project session DB path, got {path}"
+        );
 
         server.abort();
     });
