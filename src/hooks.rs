@@ -1488,7 +1488,7 @@ async fn codex_post_compact(event_json: &str) {
         let Some(pending) = pending.pop() else {
             return;
         };
-        let config = codex_app_server_summary_config();
+        let config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
         let summary = match crate::sessions::codex_app_server::summarize_with_codex_app_server(
             &pending.request,
             &config,
@@ -1502,9 +1502,9 @@ async fn codex_post_compact(event_json: &str) {
         if let Err(err) = db
             .replace_codex_compaction_summary(
                 &pending.node_id,
-                &summary.text,
-                &summary.route,
-                summary.model.as_deref(),
+                &summary,
+                "codex_app_server",
+                config.model.as_deref(),
             )
             .await
         {
@@ -1512,27 +1512,6 @@ async fn codex_post_compact(event_json: &str) {
         }
     };
     let _ = tokio::time::timeout(CODEX_POST_COMPACT_BUDGET, work).await;
-}
-
-fn codex_app_server_summary_config(
-) -> crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
-    let mut config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::default();
-    if let Ok(bin) = std::env::var("TRACEDECAY_CODEX_BIN") {
-        if !bin.trim().is_empty() {
-            config.codex_bin = bin;
-        }
-    }
-    if let Ok(model) = std::env::var("TRACEDECAY_CODEX_SUMMARY_MODEL") {
-        if !model.trim().is_empty() {
-            config.model = Some(model);
-        }
-    }
-    if let Ok(secs) = std::env::var("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS") {
-        if let Ok(secs) = secs.parse::<u64>() {
-            config.timeout = Duration::from_secs(secs.clamp(5, 300));
-        }
-    }
-    config
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {

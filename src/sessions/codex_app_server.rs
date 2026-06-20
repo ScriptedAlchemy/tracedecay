@@ -29,17 +29,32 @@ impl Default for CodexAppServerSummaryConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CodexAppServerSummary {
-    pub text: String,
-    pub model: Option<String>,
-    pub route: String,
+impl CodexAppServerSummaryConfig {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Ok(bin) = std::env::var("TRACEDECAY_CODEX_BIN") {
+            if !bin.trim().is_empty() {
+                config.codex_bin = bin;
+            }
+        }
+        if let Ok(model) = std::env::var("TRACEDECAY_CODEX_SUMMARY_MODEL") {
+            if !model.trim().is_empty() {
+                config.model = Some(model);
+            }
+        }
+        if let Ok(secs) = std::env::var("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS") {
+            if let Ok(secs) = secs.parse::<u64>() {
+                config.timeout = Duration::from_secs(secs.clamp(5, 300));
+            }
+        }
+        config
+    }
 }
 
 pub fn summarize_with_codex_app_server(
     request: &LcmSummaryRequest,
     config: &CodexAppServerSummaryConfig,
-) -> Result<CodexAppServerSummary> {
+) -> Result<String> {
     let prompt = build_codex_summary_prompt(request);
     let child = Command::new(&config.codex_bin)
         .arg("app-server")
@@ -137,11 +152,7 @@ pub fn summarize_with_codex_app_server(
             message: "codex app-server returned an empty summary".to_string(),
         });
     }
-    Ok(CodexAppServerSummary {
-        text: text.to_string(),
-        model: config.model.clone(),
-        route: "codex_app_server".to_string(),
-    })
+    Ok(text.to_string())
 }
 
 struct ChildGuard {

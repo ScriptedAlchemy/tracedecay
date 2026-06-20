@@ -2173,41 +2173,38 @@ impl GlobalDb {
         limit: usize,
     ) -> Result<Vec<PendingCodexCompactionSummary>, crate::sessions::lcm::LcmError> {
         let limit = limit.clamp(1, 100) as i64;
-        let mut rows = if let Some(session_id) = session_id {
-            self.conn
-                .query(
-                    "SELECT node_id, session_id
-                     FROM lcm_summary_nodes
-                     WHERE provider = 'codex'
-                       AND session_id = ?1
-                       AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                       AND COALESCE(
-                             json_extract(metadata_json, '$.tracedecay_summary_source'),
-                             ''
-                           ) <> 'codex_app_server'
-                     ORDER BY depth DESC, created_at DESC
-                     LIMIT ?2",
-                    params![session_id, limit],
-                )
-                .await?
+        let (sql, query_params) = if let Some(session_id) = session_id {
+            (
+                "SELECT node_id, session_id
+                 FROM lcm_summary_nodes
+                 WHERE provider = 'codex'
+                   AND session_id = ?1
+                   AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                   AND COALESCE(
+                         json_extract(metadata_json, '$.tracedecay_summary_source'),
+                         ''
+                       ) <> 'codex_app_server'
+                 ORDER BY depth DESC, created_at DESC
+                 LIMIT ?2",
+                vec![Value::Text(session_id.to_string()), Value::Integer(limit)],
+            )
         } else {
-            self.conn
-                .query(
-                    "SELECT node_id, session_id
-                     FROM lcm_summary_nodes
-                     WHERE provider = 'codex'
-                       AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                       AND COALESCE(
-                             json_extract(metadata_json, '$.tracedecay_summary_source'),
-                             ''
-                           ) <> 'codex_app_server'
-                     ORDER BY created_at DESC, depth DESC
-                     LIMIT ?1",
-                    params![limit],
-                )
-                .await?
+            (
+                "SELECT node_id, session_id
+                 FROM lcm_summary_nodes
+                 WHERE provider = 'codex'
+                   AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                   AND COALESCE(
+                         json_extract(metadata_json, '$.tracedecay_summary_source'),
+                         ''
+                       ) <> 'codex_app_server'
+                 ORDER BY created_at DESC, depth DESC
+                 LIMIT ?1",
+                vec![Value::Integer(limit)],
+            )
         };
 
+        let mut rows = self.conn.query(sql, query_params).await?;
         let mut pending = Vec::new();
         while let Some(row) = rows.next().await? {
             let node_id: String = row.get(0)?;
@@ -2243,21 +2240,17 @@ impl GlobalDb {
             )
             .await?;
         let mut source_messages = Vec::new();
-        let mut start_store_id: Option<i64> = None;
-        let mut end_store_id: Option<i64> = None;
         while let Some(row) = rows.next().await? {
             let store_id: i64 = row.get(0)?;
             let role: String = row.get(1)?;
             let content: String = row.get(2)?;
-            start_store_id.get_or_insert(store_id);
-            end_store_id = Some(store_id);
             source_messages.push(LcmSummarySourceMessage {
                 store_id,
                 role,
                 content,
             });
         }
-        let (Some(start_store_id), Some(end_store_id)) = (start_store_id, end_store_id) else {
+        let (Some(first), Some(last)) = (source_messages.first(), source_messages.last()) else {
             return Ok(None);
         };
         Ok(Some(LcmSummaryRequest {
@@ -2266,8 +2259,8 @@ impl GlobalDb {
             focus_topic: Some("Codex context compaction".to_string()),
             prompt: "Summarize the visible transcript messages that Codex compacted. Preserve durable user intent, implementation decisions, file/module names, unresolved tasks, and verification status. Return only the summary text.".to_string(),
             source_range: LcmSummarySourceRange {
-                from_store_id: start_store_id,
-                to_store_id: end_store_id,
+                from_store_id: first.store_id,
+                to_store_id: last.store_id,
             },
             source_messages,
             extraction_request: None,
