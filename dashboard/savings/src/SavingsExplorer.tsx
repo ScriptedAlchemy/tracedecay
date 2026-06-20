@@ -61,10 +61,12 @@ export default function SavingsExplorer() {
    */
   function fetchIntoState<T>(
     fetch: () => Promise<T>,
-    setState: (value: T) => void,
+    setState: (value: T | null) => void,
+    { clearBeforeLoad = false }: { clearBeforeLoad?: boolean } = {},
   ): () => void {
     let active = true;
     setError("");
+    if (clearBeforeLoad) setState(null);
     fetch().then(
       (data) => {
         if (active) setState(data);
@@ -93,7 +95,7 @@ export default function SavingsExplorer() {
 
   useEffect(() => {
     if (view !== "savings") return;
-    return fetchIntoState(() => api.ledger({ range }), setLedger);
+    return fetchIntoState(() => api.ledger({ range }), setLedger, { clearBeforeLoad: true });
   }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -101,12 +103,13 @@ export default function SavingsExplorer() {
     return fetchIntoState(
       () => api.sessions({ range, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
       setSessions,
+      { clearBeforeLoad: true },
     );
   }, [view, range, page, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (view !== "models") return;
-    return fetchIntoState(() => api.models({ range }), setModels);
+    return fetchIntoState(() => api.models({ range }), setModels, { clearBeforeLoad: true });
   }, [view, range, retryToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sessionStats = overview?.sessions;
@@ -176,7 +179,7 @@ export default function SavingsExplorer() {
       )}
 
       {view === "savings" && (
-        <SavingsOverviewPanel overview={overview} ledger={ledger} prices={prices} />
+        <SavingsOverviewPanel overview={overview} ledger={ledger} range={range} prices={prices} />
       )}
       {view === "sessions" && (
         <SessionsPanel

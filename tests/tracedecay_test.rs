@@ -1,8 +1,9 @@
 //! Tests for the `TraceDecay` orchestrator methods that aren't fully exercised
 //! by the MCP handler tests.
 
-use std::{fs, process::Command};
+use std::{fs, process::Command, time::Duration};
 use tempfile::TempDir;
+use tracedecay::errors::TraceDecayError;
 use tracedecay::tracedecay::{is_test_file, TraceDecay};
 use tracedecay::types::{EdgeKind, NodeKind};
 
@@ -314,7 +315,7 @@ async fn test_check_file_staleness_deleted_indexed_file() {
 }
 
 #[tokio::test]
-async fn sync_refuses_to_mutate_fallback_branch_db() {
+async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -340,24 +341,23 @@ async fn sync_refuses_to_mutate_fallback_branch_db() {
 
     let feature_cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
-    assert_eq!(feature_cg.serving_branch(), Some("main"));
-    assert!(feature_cg.is_fallback());
-
-    let err = feature_cg
-        .sync()
-        .await
-        .expect_err("syncing a fallback DB should be refused");
-    let message = err.to_string();
-    assert!(
-        message.contains("feature/sync-safety") && message.contains("tracedecay branch add"),
-        "error should explain how to track the branch, got: {message}",
-    );
+    assert_eq!(feature_cg.serving_branch(), Some("feature/sync-safety"));
+    assert!(!feature_cg.is_fallback());
+    for attempt in 0..40 {
+        match feature_cg.sync().await {
+            Ok(_) => break,
+            Err(TraceDecayError::SyncLock { .. }) if attempt < 39 => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(err) => panic!("auto-tracked branch sync should write to the branch DB: {err}"),
+        }
+    }
 
     let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
     let main_files = main_cg.get_all_files().await.unwrap();
     assert!(
         !main_files.iter().any(|file| file.path == "src/feature.rs"),
-        "fallback sync must not insert feature files into the main DB"
+        "auto-tracked branch sync must not insert feature files into the main DB"
     );
 }
 

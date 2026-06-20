@@ -106,7 +106,7 @@ export function BarList<Row extends Record<string, unknown>>({
   emptyText,
 }: {
   rows: Array<Row>;
-  keyName: string;
+  keyName: keyof Row & string;
   onPick?: (row: Row) => void;
   rowKey?: (row: Row) => string;
   titleFor?: (row: Row) => string;

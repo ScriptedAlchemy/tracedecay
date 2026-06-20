@@ -154,6 +154,7 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
         }
         Ok(
             crate::branch::BranchAddOutcome::AlreadyTracked
+            | crate::branch::BranchAddOutcome::Deferred
             | crate::branch::BranchAddOutcome::NotIndexed,
         ) => {}
         Err(err) => {

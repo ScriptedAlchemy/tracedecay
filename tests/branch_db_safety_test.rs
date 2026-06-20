@@ -5,7 +5,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::branch::{self, BranchAddOutcome};
-use tracedecay::branch_meta::{load_branch_meta, save_branch_meta, BranchMeta};
+use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::tracedecay::TraceDecay;
 
 fn git(project: &Path, args: &[&str]) {
@@ -39,7 +39,7 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
-async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
+async fn open_untracked_project() -> (TempDir, PathBuf, TraceDecay) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().to_path_buf();
 
@@ -59,15 +59,15 @@ async fn open_untracked_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
     )
     .unwrap();
 
-    let fallback = TraceDecay::open(&project).await.unwrap();
-    assert_eq!(fallback.active_branch(), Some("feature/untracked"));
-    assert_eq!(fallback.serving_branch(), Some("main"));
-    assert!(fallback.is_fallback());
+    let feature = TraceDecay::open(&project).await.unwrap();
+    assert_eq!(feature.active_branch(), Some("feature/untracked"));
+    assert_eq!(feature.serving_branch(), Some("feature/untracked"));
+    assert!(!feature.is_fallback());
 
-    (dir, project, fallback)
+    (dir, project, feature)
 }
 
-async fn open_missing_tracked_branch_project() -> (TempDir, PathBuf, TraceDecay) {
+async fn open_detached_fallback_project() -> (TempDir, PathBuf, TraceDecay) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().to_path_buf();
 
@@ -80,28 +80,24 @@ async fn open_missing_tracked_branch_project() -> (TempDir, PathBuf, TraceDecay)
     main.index_all().await.unwrap();
     drop(main);
 
-    let tracedecay_dir = project.join(".tracedecay");
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("feature/tracked", "branches/feature_tracked.db", "main");
-    save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    git(&project, &["checkout", "--detach"]);
 
-    git(&project, &["checkout", "-b", "feature/tracked"]);
     fs::write(
-        project.join("src/tracked_only.rs"),
-        "pub fn tracked_only() {}\n",
+        project.join("src/detached_only.rs"),
+        "pub fn detached_only() {}\n",
     )
     .unwrap();
 
     let fallback = TraceDecay::open(&project).await.unwrap();
-    assert_eq!(fallback.active_branch(), Some("feature/tracked"));
+    assert_eq!(fallback.active_branch(), None);
     assert_eq!(fallback.serving_branch(), Some("main"));
     assert!(fallback.is_fallback());
     assert!(
         fallback
             .fallback_warning()
             .unwrap_or_default()
-            .contains("feature/tracked"),
-        "missing tracked branch DB should explain the fallback branch"
+            .contains("detached HEAD"),
+        "detached HEAD should explain the fallback branch"
     );
 
     (dir, project, fallback)
@@ -117,14 +113,45 @@ async fn assert_main_db_missing_symbol(project: &Path, symbol: &str, message: &s
 fn assert_fallback_write_refused(err: impl std::fmt::Display) {
     let message = err.to_string();
     assert!(
-        message.contains("fallback") && message.contains("tracedecay branch add"),
+        message.contains("fallback")
+            && (message.contains("tracedecay branch add")
+                || message.contains("Check out a tracked branch")),
         "unexpected error: {message}"
     );
 }
 
 #[tokio::test]
+async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
+    let (_dir, project, feature) = open_untracked_project().await;
+
+    assert!(
+        !feature
+            .search("untracked_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "auto-tracked branch should contain the branch-only symbol"
+    );
+
+    let meta = load_branch_meta(&project.join(".tracedecay")).unwrap();
+    let feature_entry = meta
+        .branches
+        .get("feature/untracked")
+        .expect("open should add the live branch to branch metadata");
+    assert_eq!(feature_entry.parent.as_deref(), Some("main"));
+
+    drop(feature);
+    assert_main_db_missing_symbol(
+        &project,
+        "untracked_only",
+        "auto-tracked branch sync must not index branch files into main DB",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn sync_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+    let (_dir, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback.sync().await.unwrap_err();
     assert_fallback_write_refused(err);
@@ -132,15 +159,15 @@ async fn sync_refuses_to_write_when_opened_on_fallback_branch() {
     drop(fallback);
     assert_main_db_missing_symbol(
         &project,
-        "untracked_only",
-        "fallback sync must not index untracked branch files into main DB",
+        "detached_only",
+        "fallback sync must not index detached files into main DB",
     )
     .await;
 }
 
 #[tokio::test]
 async fn full_index_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+    let (_dir, project, fallback) = open_detached_fallback_project().await;
 
     let err = match fallback.index_all().await {
         Ok(_) => panic!("full index should refuse fallback writes"),
@@ -151,18 +178,18 @@ async fn full_index_refuses_to_write_when_opened_on_fallback_branch() {
     drop(fallback);
     assert_main_db_missing_symbol(
         &project,
-        "untracked_only",
-        "fallback full index must not index untracked branch files into main DB",
+        "detached_only",
+        "fallback full index must not index detached files into main DB",
     )
     .await;
 }
 
 #[tokio::test]
 async fn stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+    let (_dir, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
-        .sync_if_stale(&["src/untracked_only.rs".to_string()])
+        .sync_if_stale(&["src/detached_only.rs".to_string()])
         .await
         .unwrap_err();
     assert_fallback_write_refused(err);
@@ -170,18 +197,18 @@ async fn stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
     drop(fallback);
     assert_main_db_missing_symbol(
         &project,
-        "untracked_only",
-        "fallback stale sync must not index untracked branch files into main DB",
+        "detached_only",
+        "fallback stale sync must not index detached files into main DB",
     )
     .await;
 }
 
 #[tokio::test]
 async fn silent_stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
-    let (_dir, project, fallback) = open_untracked_fallback_project().await;
+    let (_dir, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
-        .sync_if_stale_silent(&["src/untracked_only.rs".to_string()])
+        .sync_if_stale_silent(&["src/detached_only.rs".to_string()])
         .await
         .unwrap_err();
     assert_fallback_write_refused(err);
@@ -189,30 +216,8 @@ async fn silent_stale_sync_refuses_to_write_when_opened_on_fallback_branch() {
     drop(fallback);
     assert_main_db_missing_symbol(
         &project,
-        "untracked_only",
-        "fallback silent stale sync must not index untracked branch files into main DB",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn tracked_branch_with_missing_db_falls_back_and_refuses_writes() {
-    let (_dir, project, fallback) = open_missing_tracked_branch_project().await;
-
-    let results = fallback.search("tracked_only", 10).await.unwrap();
-    assert!(
-        results.is_empty(),
-        "fallback reads should stay on the parent DB when the tracked branch DB is missing"
-    );
-
-    let err = fallback.sync().await.unwrap_err();
-    assert_fallback_write_refused(err);
-
-    drop(fallback);
-    assert_main_db_missing_symbol(
-        &project,
-        "tracked_only",
-        "missing tracked-branch DB fallback must not index feature files into the parent DB",
+        "detached_only",
+        "fallback silent stale sync must not index detached files into main DB",
     )
     .await;
 }

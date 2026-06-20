@@ -270,9 +270,9 @@ fn emit_dashboard_asset_inputs() -> String {
     let source_stamp = dashboard_source_stamp(&source_inputs);
     if !missing.is_empty() {
         auto_build_dashboard_assets("missing", &missing);
-    } else if dashboard_dist_stale(source_stamp.as_deref()) {
-        auto_build_dashboard_assets("stale", &[]);
-    } else if dashboard_sources_changed(source_stamp.as_deref()) {
+    } else if dashboard_dist_stale(source_stamp.as_deref())
+        || dashboard_sources_changed(source_stamp.as_deref())
+    {
         auto_build_dashboard_assets("stale", &[]);
     }
     // Record the source content hash we just accepted so the next build can
