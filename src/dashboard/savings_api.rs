@@ -9,8 +9,8 @@
 //!   cost computed from real usage data at ingest — labeled `actual`).
 //!   Ledger aggregation reuses [`GlobalDb::sum_savings`] /
 //!   [`GlobalDb::savings_history`], the same queries `tracedecay gain` runs.
-//! - **Session store** (the LCM store the dashboard already serves —
-//!   project-local `sessions.db` by default): `sessions` +
+//! - **Session store** (the resolved LCM store the dashboard already serves):
+//!   `sessions` +
 //!   `session_messages`, whose `model` and `metadata_json` columns drive
 //!   per-session cost accounting.
 //!

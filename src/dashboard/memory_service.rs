@@ -24,7 +24,7 @@ pub(crate) fn providers_stub() -> Value {
         "memory_options": [
             {
                 "name": "tracedecay",
-                "description": "TraceDecay holographic memory store (project-local memory_facts)."
+                "description": "TraceDecay holographic memory store (resolved project memory_facts)."
             }
         ],
         "context_engine": "tracedecay",
@@ -704,7 +704,7 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
             active_facts_at_save: total,
             memory_fingerprint_at_save,
         };
-        super::curate_preview_store::save(&state.project_root, &entry).await;
+        super::curate_preview_store::save(&state.dashboard_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
         return Ok(report);
     }
@@ -725,7 +725,7 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
     }
 
     *state.curate_preview.write().await = None;
-    super::curate_preview_store::clear(&state.project_root).await;
+    super::curate_preview_store::clear(&state.dashboard_root).await;
 
     let _ = MemoryStore::new(&state.mem_conn)
         .record_oplog(
@@ -893,7 +893,7 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
 
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
-        super::curate_preview_store::clear(&state.project_root).await;
+        super::curate_preview_store::clear(&state.dashboard_root).await;
         let _ = MemoryStore::new(&state.mem_conn)
             .record_oplog(
                 "curate_apply",

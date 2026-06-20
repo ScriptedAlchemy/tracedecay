@@ -1,11 +1,11 @@
 //! Code graph dashboard API, backed by tracedecay's indexed graph tables.
 //!
-//! The explorer reads the project-local `nodes`, `edges`, and `files` tables
-//! directly and returns compact payloads suitable for search, inspection,
-//! progressive subgraph expansion, and shortest-path queries. Every endpoint
-//! is bounded: subgraphs cap node/edge counts, search is paginated, and the
-//! path BFS caps depth and visited-set size, so responses stay interactive
-//! even on graphs with tens of thousands of nodes.
+//! The explorer reads the resolved project graph `nodes`, `edges`, and
+//! `files` tables directly and returns compact payloads suitable for search,
+//! inspection, progressive subgraph expansion, and shortest-path queries.
+//! Every endpoint is bounded: subgraphs cap node/edge counts, search is
+//! paginated, and the path BFS caps depth and visited-set size, so responses
+//! stay interactive even on graphs with tens of thousands of nodes.
 
 use axum::extract::State;
 use axum::http::StatusCode;

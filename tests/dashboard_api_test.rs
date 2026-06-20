@@ -11,12 +11,14 @@ use common::{
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::branch;
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::memory::encoding::HolographicEncoder;
 use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::{write_enrollment_marker, EnrollmentMarker, StorageMode};
 use tracedecay::tracedecay::TraceDecay;
 
 /// Longer than 200 chars on purpose: list/projection payloads truncate
@@ -30,7 +32,9 @@ otherwise assume the integration is broken when the store simply has no rows yet
 struct DashboardFixture {
     _tmp: TempDir,
     _env_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
     base_url: String,
+    project_root: std::path::PathBuf,
     project_db_path: std::path::PathBuf,
     server: tokio::task::JoinHandle<()>,
 }
@@ -361,7 +365,18 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
+    let profile_root = tmp.path().join("profile").join(".tracedecay");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    if let Err(err) = write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "dashboard_fixture".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    ) {
+        panic!("failed to enroll dashboard fixture in profile storage: {err}");
+    }
 
     let cg = setup_project(&project_root).await;
     seed_memory_fixture(&cg).await;
@@ -382,7 +397,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
+    let project_db_path = cg.store_layout().graph_db_path.clone();
     let server = tokio::spawn(async move {
         let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
     });
@@ -393,7 +408,9 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     DashboardFixture {
         _tmp: tmp,
         _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
         base_url,
+        project_root,
         project_db_path,
         server,
     }
@@ -633,12 +650,7 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
         clear_fact_vector_without_touching_updated_at(&fixture, 103).await;
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let project_root = fixture
-            .project_db_path
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| panic!("fixture DB path should be under .tracedecay"))
-            .to_path_buf();
+        let project_root = fixture.project_root.clone();
         let cg = match TraceDecay::open(&project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to reopen fixture project: {err}"),
@@ -1959,6 +1971,36 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         let fixture = start_dashboard_fixture(true).await;
         let agent = http_agent();
 
+        let (status, capabilities) =
+            get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["storage_mode"], "profile_sharded");
+        assert_eq!(
+            capabilities["memory_db"],
+            fixture.project_db_path.display().to_string()
+        );
+        assert_eq!(
+            capabilities["store_root"],
+            fixture
+                .project_db_path
+                .parent()
+                .unwrap_or_else(|| panic!("profile DB should have a parent"))
+                .display()
+                .to_string()
+        );
+        assert!(
+            capabilities["dashboard_root"]
+                .as_str()
+                .unwrap_or_default()
+                .replace('\\', "/")
+                .ends_with("projects/dashboard_fixture/dashboard")
+        );
+        assert_eq!(capabilities["lcm_scope"], "profile_sharded");
+        assert!(
+            !fixture.project_root.join(".tracedecay/sessions.db").exists(),
+            "profile-sharded dashboard fixture must not create a repo-local sessions DB"
+        );
+
         let (status, overview) = get_json(
             &agent,
             &format!(
@@ -1969,8 +2011,8 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
         assert_eq!(status, 200);
         assert_eq!(overview["exists"], true);
         assert_eq!(
-            overview["storage_scope"], "project_local",
-            "LCM serves the project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
+            overview["storage_scope"], "profile_sharded",
+            "LCM serves the resolved project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
         );
         assert_eq!(overview["overview"]["messages_total"], 3);
         assert_eq!(overview["overview"]["sessions_total"], 1);
@@ -2231,9 +2273,9 @@ fn lcm_project_store_wins_over_global_accounting_override() {
 }
 
 /// The dry-run curation preview must survive a dashboard restart: it is
-/// mirrored to `.tracedecay/dashboard/curation_preview.json` and re-hydrated
-/// by `build_state`, and applying curation clears both the memory copy and
-/// the sidecar.
+/// mirrored to the resolved dashboard sidecar path and re-hydrated by
+/// `build_state`, and applying curation clears both the memory copy and the
+/// sidecar.
 #[test]
 fn curation_preview_persists_across_dashboard_restarts() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -2249,9 +2291,9 @@ fn curation_preview_persists_across_dashboard_restarts() {
         let cg = setup_project(&project_root).await;
         seed_memory_fixture(&cg).await;
         let agent = http_agent();
-        let sidecar = project_root
-            .join(".tracedecay")
-            .join("dashboard")
+        let sidecar = cg
+            .store_layout()
+            .dashboard_root
             .join("curation_preview.json");
 
         async fn start_server(cg: TraceDecay) -> (String, tokio::task::JoinHandle<()>) {
