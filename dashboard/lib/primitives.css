@@ -1,18 +1,6 @@
-/*
- * Shared dashboard primitives stylesheet (`tdp-*`).
- *
- * Colors resolve exclusively through the host `--color-*` semantic variables
- * (defined by the standalone shell as aliases of its `--ts-*` tokens, and by
- * Hermes' shadcn palette). No color is hardcoded. Layout values (radii,
- * spacing, font sizes) are ported verbatim from graph/src/styles.css so the
- * primitives are visually identical to the original `tsg-*` markup.
- *
- * Delivery: build.mjs prepends this file to a plugin's dist/style.css when
- * that plugin opts in via `buildPlugin(..., { primitives: true })`.
- */
+/* Shared dashboard primitives (`tdp-*`), prepended to opted-in plugin CSS. */
 
 /* ----------------------------------------------------------- EmptyState */
-/* Ports `.tsg-empty` verbatim (--ts-text-3 -> --color-muted-foreground). */
 .tdp-empty {
   display: grid;
   place-items: center;
@@ -22,9 +10,6 @@
   padding: 0.75rem;
 }
 
-/* `variant="dashed"`: ports savings `.tss-empty` — a left-aligned dashed-border
- * box for no-data panels that carry an <h3>/<p> explanation. Overrides the
- * centered base (equal specificity, declared later). */
 .tdp-empty-dashed {
   place-items: start;
   min-height: 0;
@@ -49,9 +34,6 @@
 }
 
 /* ----------------------------------------------------------- ErrorPanel */
-/* Ports `.tsg-error` verbatim (--ts-red -> --color-destructive,
- * --ts-radius -> var(--ts-radius, 18px) so it resolves to graph's 18px in the
- * shell and falls back to the same 18px in hosts without --ts-radius). */
 .tdp-error {
   display: flex;
   align-items: center;
@@ -74,7 +56,6 @@
 }
 
 /* -------------------------------------------------------- SkeletonLines */
-/* New loading affordance; themed via host muted/border tokens. */
 .tdp-skeleton {
   display: grid;
   gap: 0.6rem;
@@ -104,7 +85,6 @@
 }
 
 /* ----------------------------------------------------------------- Stat */
-/* Ports the `.tss-stat` shape; themed via host tokens. */
 .tdp-stat {
   display: grid;
   gap: 0.2rem;
@@ -133,9 +113,6 @@
   font-size: 0.68rem;
 }
 
-/* `variant="compact"`: ports LCM's headline `.hermes-lcm-stat` tile — smaller,
- * tighter, with an uppercase label and a tabular (non-mono) value, sized to
- * sit several abreast in a flex strip. */
 .tdp-stat-compact {
   flex: 1 1 120px;
   border-radius: 8px;
@@ -158,7 +135,6 @@
 }
 
 /* -------------------------------------------------------------- BarList */
-/* Ports `.tsg-hub-list`. */
 .tdp-bar-list {
   display: grid;
   gap: 0.4rem;
@@ -166,7 +142,6 @@
   overflow: auto;
 }
 
-/* Ports `.tsg-hub`. */
 .tdp-bar-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -182,7 +157,6 @@
   font: inherit;
 }
 
-/* Ports `.tsg-hub:hover`. */
 .tdp-bar-row-pickable {
   cursor: pointer;
 }
@@ -192,14 +166,12 @@
   background: color-mix(in srgb, var(--color-primary) 8%, transparent);
 }
 
-/* Ports `.tsg-hub-dot`. */
 .tdp-bar-dot {
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 50%;
 }
 
-/* Ports `.tsg-hub-name`. */
 .tdp-bar-label {
   color: var(--color-foreground);
   font-weight: 700;
@@ -208,14 +180,12 @@
   white-space: nowrap;
 }
 
-/* Ports `.tsg-hub-meta`. */
 .tdp-bar-meta {
   color: var(--color-muted-foreground);
   font-family: var(--font-mono);
   font-size: 0.66rem;
 }
 
-/* Ports `.tsg-hub-degree`. */
 .tdp-bar-value {
   color: var(--color-primary);
   font-family: var(--font-mono);
@@ -223,9 +193,6 @@
   white-space: nowrap;
 }
 
-/* `proportional` mode: ports LCM's `.hermes-lcm-bar-*` — a head row (muted
- * label + tabular value) over a fill track whose width is ∝ the row's value.
- * The modifier collapses the 4-column row grid into a single stacked column. */
 .tdp-bar-row-prop {
   grid-template-columns: 1fr;
   gap: 0.3rem;
@@ -239,9 +206,6 @@
   font-size: 0.8rem;
 }
 
-/* In the proportional head the label is muted (not bold foreground) and the
- * value inherits the foreground color with tabular figures — matching the LCM
- * source/role/depth bars. */
 .tdp-bar-head .tdp-bar-label {
   color: var(--color-muted-foreground);
   font-weight: inherit;

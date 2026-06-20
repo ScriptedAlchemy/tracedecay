@@ -2,29 +2,8 @@ import React from "react";
 import { cn } from "./cn";
 import { Button } from "./sdk";
 
-/**
- * Shared dashboard UI primitives (`tdp-*` namespace).
- *
- * Built on the host-SDK design-system components and the host `--color-*`
- * CSS variables, so they theme correctly in both the standalone tracedecay
- * shell (which aliases every `--color-*` to its `--ts-*` token — see
- * shell/src/styles.css) and the Hermes dashboard (whose shadcn palette
- * defines the same `--color-*` names).
- *
- * Visual values are ported verbatim from the Code Graph Explorer
- * (graph/src/styles.css `tsg-*` classes) with their `--ts-*` colors resolved
- * through the equivalent `--color-*` host var, so a plugin that adopts these
- * looks identical to the original hand-rolled markup.
- */
-
-/**
- * Muted placeholder for empty/loading states.
- *
- * `variant`:
- *  - `"centered"` (default, ports `.tsg-empty`): centered muted block.
- *  - `"dashed"`: left-aligned dashed-border box (ports savings `.tss-empty`),
- *    for no-data panels that carry an `<h3>`/`<p>` explanation.
- */
+/** Shared dashboard UI primitives (`tdp-*`), themed through host `--color-*` variables. */
+/** Muted placeholder for empty/loading states. */
 export function EmptyState({
   children,
   variant = "centered",
@@ -41,10 +20,7 @@ export function EmptyState({
   );
 }
 
-/**
- * Destructive-tinted alert with an optional Retry button (ports `.tsg-error`).
- * Rendered with `role="alert"`.
- */
+/** Destructive-tinted alert with an optional Retry button. */
 export function ErrorPanel({
   error,
   onRetry,
@@ -94,15 +70,7 @@ export function SkeletonLines({
   );
 }
 
-/**
- * Big-value + small-label stat tile (ports the `.tss-stat` shape).
- *
- * `variant`:
- *  - `"default"`: bordered card tile with a large mono value (graph/savings).
- *  - `"compact"`: smaller, tighter tile with an uppercase label and tabular
- *    value (ports the LCM headline `.hermes-lcm-stat` row, which sits several
- *    abreast in a flex strip).
- */
+/** Big-value + small-label stat tile. */
 export function Stat({
   label,
   value,
@@ -125,24 +93,7 @@ export function Stat({
   );
 }
 
-/**
- * Label/value bar list of optionally-pickable rows (ports graph's
- * `.tsg-hub-list` / `.tsg-hub` shape).
- *
- * `keyName` selects the row field used as the visible label and default key.
- * Each row may also carry optional `value`, `meta`, and `color` fields.
- *
- * Options:
- *  - `proportional`: render each row as a head (label + value) over a fill
- *    track whose width is proportional to the row's numeric magnitude, ports
- *    the LCM `.hermes-lcm-bar-*` source/role/depth bars. The magnitude is read
- *    from `valueName` (default `"value"`); the displayed value is still the
- *    row's `value` field (a pre-formatted string), so the caller controls both
- *    the fill ratio and the exact rendered text.
- *  - `valueName`: field holding the numeric fill magnitude (default `"value"`).
- *  - `emptyText`: when set and `rows` is empty, renders an `EmptyState` with
- *    this text instead of an empty container.
- */
+/** Label/value bar list of optionally-pickable rows. */
 export function BarList<Row extends Record<string, unknown>>({
   rows,
   keyName,

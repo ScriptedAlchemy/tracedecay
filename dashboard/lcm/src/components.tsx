@@ -144,13 +144,6 @@ export function CopyButton(props: { text: any; label?: string; title?: string })
 }
 
 // --- chart-ish presentational components -----------------------------------
-// NOTE: BarList (label/value rows with proportional fills) now uses the shared
-// `tdp-bar-list` primitive (lib/primitives.tsx, `proportional` mode), which
-// ports this component's head + fill-track layout verbatim. The genuinely
-// chart-shaped presentational components below (TimelineChart, CompressionBars)
-// are NOT BarList duplicates — they render dated histograms and dual kept/saved
-// bars respectively — so they stay plugin-local.
-
 /** Responsive CSS bar chart (no SVG stretching, so bars stay crisp and the
  *  summary markers render as true round dots regardless of bucket count). */
 export function TimelineChart(props: { buckets?: any[]; nodeBuckets?: any[]; undatedCount?: any }): React.ReactElement {
