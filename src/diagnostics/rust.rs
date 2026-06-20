@@ -211,7 +211,8 @@ mod tests {
         let p = target_dir_for(Path::new("/tmp/proj"));
         assert_eq!(
             p,
-            Path::new("/tmp/tracedecay-target")
+            std::env::temp_dir()
+                .join("tracedecay-target")
                 .join(crate::storage::default_profile_project_id(Path::new(
                     "/tmp/proj"
                 )))
