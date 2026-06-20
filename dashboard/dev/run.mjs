@@ -18,15 +18,9 @@
  *
  *   tracedecay dev listening on http://127.0.0.1:7342/
  *
- * REACT EXTERNALIZATION (dev/prod divergence):
- * In prod, each plugin bundle aliases `react` → a window-SDK shim so separate
- * bundles share one React. The dev server does NOT set that alias: the dev
- * entry uses react-dom/client (createRoot), whose internals read private
- * symbols straight off the real `react` module; aliasing `react` to a shim
- * namespace breaks react-dom. A single Rsbuild bundle already shares one React
- * instance, so the shim is unnecessary. main.tsx instead puts real React +
- * hooks + components + utils + fetchJSON on window.__HERMES_PLUGIN_SDK__
- * before any plugin entry runs, so every SDK consumer behaves like prod.
+ * React: prod plugin bundles alias `react` to the host SDK shim. Dev keeps the
+ * real React module so react-dom/client can create the root; one Rsbuild graph
+ * already shares that instance across all imported plugins.
  */
 
 import { createRsbuild } from "@rsbuild/core";
