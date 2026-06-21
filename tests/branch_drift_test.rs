@@ -27,8 +27,9 @@ impl HomeEnvGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
+        let home = canonical_temp_path(home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
         Self {
             previous_home,
@@ -52,6 +53,17 @@ impl Drop for HomeEnvGuard {
             Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
             None => std::env::remove_var(USER_DATA_DIR_ENV),
         }
+    }
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
