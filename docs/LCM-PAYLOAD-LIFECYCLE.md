@@ -46,9 +46,9 @@ has the full map.
   (`src/sessions/lcm/payload.rs:117`) names each payload
   `payload_<sha256(provider\0session_id\0message_id\0content_hash)>.payload` and writes it
   under `payload_dir(storage_root)` = `<storage_root>/lcm-payloads`
-  (`payload.rs:52`). Project-local stores resolve the root to
-  `<project>/.tracedecay`; profile-scoped stores to `<hermes_home>/.tracedecay` (legacy
-  `.tokensave` fallback).
+  (`payload.rs:52`). User-level project stores resolve the root to
+  `~/.tracedecay/projects/<project-id>`; explicit local/legacy stores resolve to
+  `<project>/.tracedecay` (or legacy `.tracedecay` fallback).
 - **Schema.** `lcm_external_payloads` is keyed by `payload_ref` (PK) with
   `UNIQUE(provider, message_id, payload_ref)` and `FOREIGN KEY(provider, session_id)
   REFERENCES sessions ON DELETE CASCADE` (`src/sessions/lcm/schema.rs:133-149`). There is
@@ -390,8 +390,8 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 - Age- or content-based retention policy (delete payloads older/larger than N). This contract
   defines the *mechanical* lifetime only; age-based retention can layer on top later and would
   convert `live` payloads into `unreferenced` via a policy pass.
-- Cross-storage-root or cross-profile GC. Each store (project-local or profile-scoped) is GC'd
-  independently against its own DB.
+- Cross-project-store GC. Each resolved project store (user-level shard, explicit local store,
+  or legacy local store) is GC'd independently against its own DB.
 - Soft-delete, undo, archive, or restoration of reaped bodies. Reap is hard and permanent,
   consistent with memory fact deletion being hard-delete. The tombstone is informational only.
 - Cross-message / cross-owner payload deduplication. The owner-hash includes `message_id`; no

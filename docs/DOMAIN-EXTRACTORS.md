@@ -246,7 +246,7 @@ This means two rules in the same layer that extract the same string automaticall
 
 ### Project-local rules (primary use case)
 
-`.tracedecay/domain-symbols.toml` at the project root (an existing legacy `.tokensave/` directory is still honored as a fallback). Rules are private to the project; they are not committed alongside the source unless the project author chooses to.
+`.tracedecay/domain-symbols.toml` at the project root (an existing legacy `.tracedecay/` directory is still honored as a fallback). Rules are private to the project; they are not committed alongside the source unless the project author chooses to.
 
 ### Rule packs (shareable)
 

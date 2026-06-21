@@ -318,7 +318,7 @@ TRACEDECAY_LSP=0             # disable LSP globally (equivalent to --no-lsp)
 TRACEDECAY_LSP_TIMEOUT=30    # override timeout
 ```
 
-The legacy `TOKENSAVE_*` variable names are still honored as a fallback when the
+The legacy `TRACEDECAY_*` variable names are still honored as a fallback when the
 `TRACEDECAY_*` equivalents are unset.
 
 ## Performance Considerations

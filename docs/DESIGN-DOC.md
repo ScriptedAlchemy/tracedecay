@@ -370,7 +370,7 @@ subtracts the size of the tool's response, and accumulates the difference in the
 per-project database.
 
 A global database at `~/.tracedecay/global.db` aggregates totals across all projects
-(an existing legacy `~/.tokensave/` directory is still honored as a fallback).
+(an existing legacy `~/.tracedecay/` directory is still honored as a fallback).
 An opt-in worldwide counter (Cloudflare Worker) lets users contribute their totals
 anonymously. Upload is best-effort with 2-second timeouts and never blocks the CLI.
 

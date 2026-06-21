@@ -1,7 +1,7 @@
 # TraceDecay rebrand compatibility follow-up checklist
 
 Date: 2026-06-14
-Sources: `docs/REBRAND-COMPATIBILITY-POLICY.md`, `docs/TOKENSAVE-COMPATIBILITY-AUDIT.md`, `docs/TREESITTERS-RENAME-CONSTRAINTS.md`
+Sources: `docs/REBRAND-COMPATIBILITY-POLICY.md`, `docs/TRACEDECAY-COMPATIBILITY-AUDIT.md`, `docs/TREESITTERS-RENAME-CONSTRAINTS.md`
 
 Goal: turn the approved compatibility policy into small, implementation-ready follow-up tasks without making code changes in this document.
 
@@ -21,13 +21,13 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
   - `src/global_db.rs`
   - `src/dashboard/savings_pricing.rs`
   - any shared logging/warning utility chosen by the implementer
-- Why: the policy requires concise warnings when legacy `TOKENSAVE_*` spellings are honored, but current fallback helpers (`brand_env`, `env_with_legacy`) silently accept old names.
+- Why: the policy requires concise warnings when legacy `TRACEDECAY_*` spellings are honored, but current fallback helpers (`brand_env`, `env_with_legacy`) silently accept old names.
 - Done when:
   - there is one reusable helper for "old name honored" and "both old and new set; new wins"
   - warnings never print secret values
   - warnings are emitted at most once per key per process or invocation
 
-### W-02: Wire warnings into the generic `TRACEDECAY_*` / `TOKENSAVE_*` fallback path
+### W-02: Wire warnings into the generic `TRACEDECAY_*` / `TRACEDECAY_*` fallback path
 - Area: warning messages
 - Touchpoints:
   - `src/config.rs` (`brand_env`)
@@ -44,17 +44,17 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
   - `src/dashboard/savings_pricing.rs`
 - Why: pricing uses its own `env_with_legacy` helper instead of `brand_env`, so it will miss any shared warning work unless updated separately.
 - Done when:
-  - `TOKENSAVE_OFFLINE` and `TOKENSAVE_MODEL_PRICES_PATH` behave like other Category C fallbacks
+  - `TRACEDECAY_OFFLINE` and `TRACEDECAY_MODEL_PRICES_PATH` behave like other Category C fallbacks
   - logs mention keys only, not paths or values beyond what policy permits
 
-### W-04: Decide and codify `DISABLE_TOKENSAVE` boolean semantics
+### W-04: Decide and codify `DISABLE_TRACEDECAY` boolean semantics
 - Area: warning messages / env semantics
 - Touchpoints:
   - `src/main.rs`
   - `README.md`
   - `docs/dashboard.md`
   - new tests near current serve opt-out coverage
-- Why: `DISABLE_TOKENSAVE` is currently exact-string `true`, while most other boolean fallbacks use truthy parsing. The policy says not to change semantics casually.
+- Why: `DISABLE_TRACEDECAY` is currently exact-string `true`, while most other boolean fallbacks use truthy parsing. The policy says not to change semantics casually.
 - Done when:
   - the project explicitly chooses either "keep exact-string behavior" or "normalize to shared truthy parsing"
   - docs and tests match that choice
@@ -66,9 +66,9 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Area: env/config alias handling
 - Touchpoints:
   - `src/agents/hermes/profile_config.rs`
-  - `src/agents/hermes/tokensave_migration.rs`
+  - `src/agents/hermes/tracedecay_migration.rs`
   - `src/agents/hermes/lifecycle.rs`
-- Why: the policy requires `plugins.tokensave.project_root` to migrate cleanly to `plugins.tracedecay.project_root` when no current key exists.
+- Why: the policy requires `plugins.tracedecay.project_root` to migrate cleanly to `plugins.tracedecay.project_root` when no current key exists.
 - Done when:
   - reinstall/refresh preserves a legacy pin when appropriate
   - a current `plugins.tracedecay.project_root` still wins over the old key
@@ -78,7 +78,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Area: env/config alias handling
 - Touchpoints:
   - `src/agents/hermes/profile_config.rs`
-- Why: `plugins: ["tokensave"]`, `provider: tokensave`, and `engine: tokensave` are all Category B aliases that should be rewritten to canonical `tracedecay` behavior.
+- Why: `plugins: ["tracedecay"]`, `provider: tracedecay`, and `engine: tracedecay` are all Category B aliases that should be rewritten to canonical `tracedecay` behavior.
 - Done when:
   - enable/disable flows handle both old and new spellings predictably
   - conflicting non-tracedecay providers/engines still fail closed instead of being overwritten silently
@@ -94,9 +94,9 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
   - `src/agents/{cline,gemini,kilo,kimi,kiro,opencode,roo_code,vibe,zed}.rs`
   - `tests/agent_test.rs`
   - `tests/claude_agent_test.rs`
-- Why: the audit found strong legacy-specific tests for Cursor and Hermes, but weaker or unclear coverage for other integrations that also claim to remove `tokensave` artifacts.
+- Why: the audit found strong legacy-specific tests for Cursor and Hermes, but weaker or unclear coverage for other integrations that also claim to remove `tracedecay` artifacts.
 - Done when:
-  - each owned integration has at least one focused test proving legacy `tokensave` entries are reconciled or removed
+  - each owned integration has at least one focused test proving legacy `tracedecay` entries are reconciled or removed
   - tests distinguish generated artifacts from user-authored files
   - uninstall and reinstall both stay idempotent
 
@@ -105,7 +105,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Touchpoints:
   - `docs/PLUGINS-DESIGN.md`
   - plugin discovery implementation, if it exists
-- Why: docs currently claim `$TOKENSAVE_PLUGIN_PATH` and `.tokensave/plugins/` fallbacks, but the audit did not find implementation.
+- Why: docs currently claim `$TRACEDECAY_PLUGIN_PATH` and `.tracedecay/plugins/` fallbacks, but the audit did not find implementation.
 - Done when:
   - either implementation is located and covered by tests, or
   - the docs are downgraded to a compatibility target / follow-up instead of a guaranteed runtime behavior
@@ -124,7 +124,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Why: active docs should use TraceDecay as canonical naming while keeping short compatibility notes where runtime fallback still exists.
 - Done when:
   - examples default to `tracedecay`, `.tracedecay`, and `TRACEDECAY_*`
-  - any remaining `tokensave` mentions are clearly historical, compatibility-related, or external
+  - any remaining `tracedecay` mentions are clearly historical, compatibility-related, or external
   - daemon/service cleanup notes for old installs remain intact where still useful
 
 ### D-02: Add explicit compatibility-note wording for supported legacy env/path fallbacks
@@ -144,7 +144,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Touchpoints:
   - `AGENTS.md`
   - contributor-facing docs or PR templates, if the repo keeps one
-- Why: the policy includes a review checklist, but future PRs touching `tokensave` surfaces will drift unless reviewers can find the policy quickly.
+- Why: the policy includes a review checklist, but future PRs touching `tracedecay` surfaces will drift unless reviewers can find the policy quickly.
 - Done when:
   - contributor guidance points rebrand-related changes to `docs/REBRAND-COMPATIBILITY-POLICY.md`
   - reviewers have a short reminder to classify each touched surface into policy category A-E
@@ -167,7 +167,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
   - `tests/claude_agent_test.rs`
 - Why: the audit explicitly called out missing or unclear legacy-specific tests for Codex, Antigravity, Claude, Copilot, Kimi/Kilo/Roo/Cline/Gemini/Zed/OpenCode/Vibe.
 - Done when:
-  - there is at least one regression test per integration family with legacy `tokensave` config/artifacts
+  - there is at least one regression test per integration family with legacy `tracedecay` config/artifacts
   - owned files are removed/reconciled, unknown user files preserved
 
 ### T-03: Add a regression test for plugin-path fallback resolution or remove the docs claim
@@ -188,7 +188,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
   - any maintenance-command tests covering discovery/wipe previews
 - Why: the policy treats silent storage renames as forbidden. Existing tests cover parts of this, but future follow-up work should keep the no-migration contract visible.
 - Done when:
-  - legacy `.tokensave/` and `~/.tokensave/` usage remains in-place when it is the active data root
+  - legacy `.tracedecay/` and `~/.tracedecay/` usage remains in-place when it is the active data root
   - `.tracedecay/` still wins when both exist
   - maintenance/discovery flows continue to surface legacy project roots
 
@@ -196,7 +196,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 
 These are intentional non-goals unless the policy itself changes.
 
-### N-01: Do not auto-rename `.tokensave/`, `~/.tokensave/`, or `tokensave.db`
+### N-01: Do not auto-rename `.tracedecay/`, `~/.tracedecay/`, or `tracedecay.db`
 - Keep existing legacy project/user data roots active in place.
 - Any future migration must be explicit, backup-first, atomic, and reversible.
 - Primary touchpoints to leave behaviorally unchanged:
@@ -207,25 +207,25 @@ These are intentional non-goals unless the policy itself changes.
   - `src/diagnostics/rust.rs`
 
 ### N-02: Do not remove legacy maintenance discovery
-- Keep recognizing `.tokensave/tokensave.db` in list/status/wipe-style maintenance flows.
+- Keep recognizing `.tracedecay/tracedecay.db` in list/status/wipe-style maintenance flows.
 - This is compatibility, not historical fluff.
 
-### N-03: Do not rename or fork `tokensave-large-treesitters`
+### N-03: Do not rename or fork `tracedecay-large-treesitters`
 - Keep the exact upstream dependency names:
-  - `tokensave-large-treesitters`
-  - `tokensave-medium-treesitters`
-  - `tokensave-lite-treesitters`
+  - `tracedecay-large-treesitters`
+  - `tracedecay-medium-treesitters`
+  - `tracedecay-lite-treesitters`
 - Constraints are documented in `docs/TREESITTERS-RENAME-CONSTRAINTS.md`.
 - Only revisit if upstream renames all three crates or the project explicitly approves a maintained fork.
 
 ### N-04: Do not rename the worldwide counter endpoint yet
-- Keep `tokensave-counter` until a replacement endpoint is deployed with preserved continuity/behavior.
+- Keep `tracedecay-counter` until a replacement endpoint is deployed with preserved continuity/behavior.
 - Touchpoints:
   - `src/cloud.rs`
   - `SECURITY.md`
 
 ### N-05: Do not rewrite historical artifacts just to remove old names
-- Leave changelog history, old plans/specs, benchmark outputs, and `docs/TOKEN-SAVE-WHATSNEW.md` intact except for factual corrections.
+- Leave changelog history, old plans/specs, benchmark outputs, and `docs/TRACEDECAY-WHATSNEW.md` intact except for factual corrections.
 - This is archival history, not active product naming.
 
 ## Suggested implementation order
@@ -241,5 +241,5 @@ These are intentional non-goals unless the policy itself changes.
 ## Notes for future task authors
 
 - Use the policy categories in `docs/REBRAND-COMPATIBILITY-POLICY.md` when scoping each implementation card.
-- Keep ordinary schema/config compatibility separate from TokenSave-brand compatibility.
+- Keep ordinary schema/config compatibility separate from TraceDecay-brand compatibility.
 - Treat any task that touches legacy storage paths or deletes old files as higher risk than wording-only doc edits.

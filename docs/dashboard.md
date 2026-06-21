@@ -80,7 +80,7 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 | Variable | Description |
 |----------|-------------|
-| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over project-local store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the project's `.tracedecay/sessions.db` and only falls back to `~/.tracedecay/global.db` if the project store cannot be opened |
+| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over resolved project-store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the active project's resolved user-level profile session store. |
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode) |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
@@ -89,11 +89,8 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 | `TRACEDECAY_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tracedecay/model-prices.json`; mainly for tests) |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
 
-All `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) also accept their
-legacy `TOKENSAVE_*` / `DISABLE_TOKENSAVE` spellings as fallbacks; the
-`TRACEDECAY_*` name wins when both are set. Likewise, projects indexed before
-the rebrand with a `.tokensave/` data directory are still honored as a
-fallback wherever `.tracedecay/` paths are mentioned below.
+Use `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) for dashboard runtime
+configuration. Pre-rename `TRACEDECAY_*` spellings are not runtime fallbacks.
 
 ---
 
@@ -254,13 +251,12 @@ Transcript ingest is **per project**, not global:
 
 | Store | Path | Written by | `storage_scope` |
 |-------|------|------------|-----------------|
-| Project-local (default) | `<project>/.tracedecay/sessions.db` | All transcript ingest for sessions belonging to that project root | `"project_local"` |
-| Hermes profile | `<hermes_home>/.tracedecay/sessions.db` | Hermes-side ingest | `"hermes_profile"` |
+| User project store (default) | `~/.tracedecay/projects/<project-id>/sessions.db` | All transcript ingest for sessions belonging to that project root | `"profile_sharded"` |
 | Global | `~/.tracedecay/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
 
-The dashboard serves the **project-local store** by default (where Cursor hooks and hookless-agent catch-up sweeps actually ingest). The LCM header shows a **"Project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
+The dashboard serves the active project's resolved profile store by default. The LCM header shows a **"User project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
 
-Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests, the smoke harness, and the Hermes wrapper, which points it at a Hermes profile's `sessions.db`). When this override is active, `storage_scope` becomes `"global"`.
+Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests and the smoke harness). When this override is active, `storage_scope` becomes `"global"`.
 
 #### How Ingest Works Per Tool
 
@@ -268,7 +264,7 @@ Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (
 |------|---------|
 | Cursor | Cursor hooks ingest incrementally at end of turn / stop / session start (subagent transcripts included); no sweep needed |
 | Claude Code, Codex, Vibe, Cline / Roo / Kilo | No hooks — discovered by a catch-up sweep that scans each tool's home transcript directory (e.g. `~/.codex/sessions`) and ingests sessions whose recorded `cwd`/project matches the served project root |
-| Hermes | Hermes-side ingest into the Hermes profile store (not the project store) |
+| Hermes | Hermes-side ingest into the same resolved user-level project store as the generated TraceDecay adapter; unpinned profiles use the Hermes profile directory as their project identity |
 
 The catch-up sweep runs automatically when the MCP server starts
 (`tracedecay serve`) and when `tracedecay dashboard` starts with project-local
@@ -498,9 +494,9 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
   "version": "0.0.2",
   "mode": "standalone",
   "project_root": "/home/user/my-project",
-  "memory_db": "/home/user/my-project/.tracedecay/tracedecay.db",
-  "lcm_db": "/home/user/my-project/.tracedecay/sessions.db",
-  "lcm_scope": "project_local",
+  "memory_db": "/home/user/.tracedecay/projects/proj_1234/tracedecay.db",
+  "lcm_db": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "lcm_scope": "profile_sharded",
   "features": {
     "memory": true,
     "lcm": true,
@@ -514,7 +510,7 @@ Returns feature flags and server configuration. Used by the UI and wrappers to d
 
 **Fields:**
 - `mode`: `"standalone"` for direct use, `"hermes"` when wrapped by Hermes
-- `lcm_db` / `lcm_scope`: The LCM session store being served and its scope (`"project_local"` or `"global"`; see [Storage Scopes](#storage-scopes--where-messages-live))
+- `lcm_db` / `lcm_scope`: The LCM session store being served and its scope (`"profile_sharded"`, `"project_local"`, or `"global"`; see [Storage Scopes](#storage-scopes--where-messages-live))
 - `features.memory`: Whether the project database is available
 - `features.lcm`: Whether the LCM session store is available
 - `features.curation`: Whether similarity-dedup curation tools are enabled
@@ -861,8 +857,8 @@ Summary statistics and recent sessions/nodes.
 **Response Structure:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "overview": {
     "messages_total": 1500,
@@ -904,8 +900,8 @@ Full-text search with facets.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_1234/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "query": "authentication",
   "limit": 25,
@@ -951,8 +947,8 @@ Get a summary node with its source items.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_abc/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "node_id": "node-abc",
   "node": { /* node details */ },
@@ -1311,9 +1307,8 @@ tracedecay dashboard
 #   when `tracedecay serve` or `tracedecay dashboard` starts
 # - Explicit LCM tool calls
 
-# Check the project session store for rows
-ls -la .tracedecay/sessions.db
-sqlite3 .tracedecay/sessions.db 'SELECT COUNT(*) FROM lcm_raw_messages'
+# Check which project session store is active
+tracedecay status --json
 
 # The LCM header shows which store is being served ("Project store" /
 # "Global store") and its path. If it shows the global DB unexpectedly,

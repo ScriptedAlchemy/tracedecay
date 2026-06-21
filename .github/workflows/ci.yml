@@ -22,8 +22,6 @@ jobs:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
-    env:
-      CARGO_BUILD_JOBS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -65,38 +63,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        if: runner.os != 'Windows'
         run: cargo test --workspace
-
-      - name: Run tests (Windows, serialized)
-        if: runner.os == 'Windows'
-        env:
-          RUST_TEST_THREADS: "1"
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          cargo test --workspace --lib --bins -- --test-threads=1
-
-          $testFiles = @(Get-ChildItem -Path tests -Filter *.rs |
-            ForEach-Object { $_.BaseName } |
-            Sort-Object)
-
-          $integrationArgs = @("test", "--workspace")
-          foreach ($test in ($testFiles | Where-Object { $_ -ne "branch_db_safety_test" })) {
-            $integrationArgs += @("--test", $test)
-          }
-          $integrationArgs += @("--", "--test-threads=1")
-          cargo @integrationArgs
-
-          $cases = cargo test --test branch_db_safety_test -- --list |
-            Where-Object { $_ -match ': test$' } |
-            ForEach-Object { ($_ -split ':')[0] }
-
-          foreach ($case in $cases) {
-            cargo test --test branch_db_safety_test $case -- --exact --test-threads=1
-          }
-
-          cargo test --workspace --doc -- --test-threads=1
 
   clippy:
     name: Clippy
@@ -158,6 +125,10 @@ jobs:
         holographic/dist/style.css
         lcm/dist/index.js
         lcm/dist/style.css
+        graph/dist/index.js
+        graph/dist/style.css
+        savings/dist/index.js
+        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 

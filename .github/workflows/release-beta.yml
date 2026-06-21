@@ -172,7 +172,7 @@ jobs:
           done
 
       # NOTE: the Homebrew tap (ScriptedAlchemy/homebrew-tap) is an external
-      # repo — any legacy Formula/tokensave-beta.rb there must be removed
+      # repo — any previous beta formula there must be removed
       # separately; this step only writes Formula/tracedecay-beta.rb.
       - name: Update formula
         env:
@@ -243,7 +243,7 @@ jobs:
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
       # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
-      # repo — any legacy bucket/tokensave-beta.json there must be removed
+      # repo — any previous beta bucket manifest there must be removed
       # separately; this step only writes bucket/tracedecay-beta.json.
       - name: Update Scoop manifest
         env:
