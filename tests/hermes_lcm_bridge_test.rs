@@ -542,7 +542,7 @@ assert engine.hermes_home == "/tmp/hermes-from-env"
 status = engine.get_status()
 assert status["storage_scope"] == "profile_sharded"
 assert status["hermes_home"] == "/tmp/hermes-from-env"
-assert status["lcm_project_root"] == "/tmp/hermes-from-env"
+assert status["lcm_project_root"] is None
 
 engine.handle_tool_call(
     "lcm_grep",
@@ -551,12 +551,14 @@ engine.handle_tool_call(
 )
 
 assert calls[0][0] == "tracedecay_lcm_preflight"
-assert calls[0][1]["project_root"] == "/tmp/hermes-from-env"
+assert calls[0][1]["storage_scope"] == "hermes_profile"
+assert calls[0][1]["hermes_home"] == "/tmp/hermes-from-env"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "profile current turn"}]
 assert calls[1][0] == "tracedecay_lcm_grep"
-assert calls[1][1]["project_root"] == "/tmp/hermes-from-env"
+assert calls[1][1]["storage_scope"] == "hermes_profile"
+assert calls[1][1]["hermes_home"] == "/tmp/hermes-from-env"
 "#,
-        "generated context engine should use HERMES_HOME as the unpinned storage project",
+        "generated context engine should use HERMES_HOME as the unpinned profile store",
     );
 }
 
@@ -1010,12 +1012,18 @@ local_args = plugin._storage_args(project_root="/tmp/project", hermes_home="/tmp
 assert local_args == {"project_root": "/tmp/project"}
 
 profile_args = plugin._storage_args(hermes_home="/tmp/hermes-profile")
-assert profile_args == {"project_root": "/tmp/hermes-profile"}
+assert profile_args == {
+    "storage_scope": "hermes_profile",
+    "hermes_home": "/tmp/hermes-profile",
+}
 
 fallback_args = plugin._storage_args()
 # Match the plugin's expanduser fallback byte-for-byte: pathlib normalizes
 # separators on Windows while expanduser("~/.hermes") emits mixed ones.
-assert fallback_args == {"project_root": os.path.expanduser("~/.hermes")}
+assert fallback_args == {
+    "storage_scope": "hermes_profile",
+    "hermes_home": os.path.expanduser("~/.hermes"),
+}
 
 calls = []
 
@@ -1031,7 +1039,8 @@ profile_engine.should_compress_preflight(messages=[], current_tokens=123)
 name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "session-1"
-assert args["project_root"] == "/tmp/hermes"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == "/tmp/hermes"
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.on_session_start(
@@ -1061,7 +1070,8 @@ profile_engine.should_compress_preflight(messages=[], current_tokens=321)
 name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "next"
-assert args["project_root"] == "/tmp/hermes"
+assert args["storage_scope"] == "hermes_profile"
+assert args["hermes_home"] == "/tmp/hermes"
 
 class LegacyCtx:
     def register_tool(self, *args, **kwargs):
@@ -1678,9 +1688,10 @@ assert profile_result["status"] == "ok"
 assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
 assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert profile_argv[1:6] == ["tool", "--project", "/tmp/hermes-profile", "tracedecay_lcm_preflight", "--json"]
+assert profile_argv[1:4] == ["tool", "tracedecay_lcm_preflight", "--json"]
 profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
-assert profile_args["project_root"] == "/tmp/hermes-profile"
+assert profile_args["storage_scope"] == "hermes_profile"
+assert profile_args["hermes_home"] == "/tmp/hermes-profile"
 
 explicit = plugin.tools.call_tracedecay_tool(
     "tracedecay_lcm_status",

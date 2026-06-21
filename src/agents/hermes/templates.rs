@@ -925,8 +925,12 @@ def _tracedecay_binary_available() -> bool:
 
 def _storage_args(project_root=None, hermes_home=None):
     """Storage args for LCM/session state in the unified tracedecay store."""
-    root = project_root or hermes_home or _resolve_hermes_home()
-    return {"project_root": str(root)} if root else {}
+    if project_root:
+        return {"project_root": str(project_root)}
+    home = hermes_home or _resolve_hermes_home()
+    if home:
+        return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
+    return {}
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins

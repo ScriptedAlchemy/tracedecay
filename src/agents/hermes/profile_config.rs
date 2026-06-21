@@ -218,8 +218,11 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
         .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
     if let Some(provider_line) = provider_line {
-        let provider = lines[provider_line].trim();
-        if provider != "provider: tracedecay" {
+        let provider = memory_provider_value(&lines[provider_line])
+            .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
+        if provider == "tokensave" {
+            lines[provider_line] = "  provider: tracedecay".to_string();
+        } else if provider != "tracedecay" {
             return Err(
                 "Hermes memory provider already configured; refusing to overwrite it".to_string(),
             );
@@ -229,6 +232,11 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     }
 
     Ok(join_lines(&lines, had_trailing_newline))
+}
+
+fn memory_provider_value(line: &str) -> Option<&str> {
+    let value = line.trim().strip_prefix("provider:")?.trim();
+    Some(value.trim_matches(['"', '\'']))
 }
 
 fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
@@ -853,6 +861,35 @@ mod tests {
 
         assert_eq!(second, first);
         assert_eq!(second.matches("- tracedecay").count(), 1);
+    }
+
+    #[test]
+    fn enable_plugin_upgrades_legacy_memory_provider_name() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            "plugins:\n  enabled:\n    - tracedecay\nmemory:\n  provider: tokensave\n",
+        )
+        .unwrap();
+
+        enable_plugin(&config, None).unwrap();
+
+        let updated = read(&config);
+        assert!(updated.contains("memory:\n  provider: tracedecay\n"));
+    }
+
+    #[test]
+    fn enable_plugin_still_rejects_unrelated_memory_provider() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        let original = "memory:\n  provider: other\n";
+        std::fs::write(&config, original).unwrap();
+
+        let err = enable_plugin(&config, None).unwrap_err().to_string();
+
+        assert!(err.contains("Hermes memory provider already configured"));
+        assert_eq!(read(&config), original);
     }
 
     #[test]
