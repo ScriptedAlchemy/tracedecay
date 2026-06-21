@@ -21,7 +21,7 @@ authorized Q1/Q2. The current checkout has since adopted Option 1: the former
 `retrieval.rs::temporal_decay_factor` remains live.
 
 Every load-bearing number was re-measured against the live checkout DB
-(`.tracedecay/tokensave.db`) and every code anchor re-checked against `master`.
+(`.tracedecay/tracedecay.db`) and every code anchor re-checked against `master`.
 
 | Claim (from audits) | Re-measured | Match |
 |---|---|---|

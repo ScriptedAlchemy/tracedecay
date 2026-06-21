@@ -529,6 +529,34 @@ fn like_pattern(query: &str) -> String {
     pattern
 }
 
+fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
+    let mut aliases = Vec::new();
+    if let Some(path) = git_common_dir {
+        aliases.push(format!(
+            "git-common-dir:{}",
+            GlobalDb::canonical_project_key(path)
+        ));
+    }
+    aliases
+}
+
+fn normalize_git_remote_url(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return None;
+    }
+    let mut normalized = remote.trim_end_matches('/').to_string();
+    if let Some(rest) = normalized.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            normalized = format!("https://{host}/{path}");
+        }
+    }
+    if let Some(stripped) = normalized.strip_suffix(".git") {
+        normalized = stripped.to_string();
+    }
+    Some(normalized.to_ascii_lowercase())
+}
+
 async fn session_column_exists(conn: &Connection, column: &str) -> bool {
     let Ok(mut rows) = conn.query("PRAGMA table_info(sessions)", ()).await else {
         return false;
@@ -1008,7 +1036,7 @@ impl GlobalDb {
         let now = crate::tracedecay::current_timestamp();
         let canonical_root = Self::canonical_project_key(project_root);
         let display_root = project_root.to_string_lossy().to_string();
-        let git_common_dir = git_common_dir.map(|path| path.to_string_lossy().to_string());
+        let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().to_string());
         self.conn
             .execute(
                 "INSERT INTO code_projects
@@ -1026,7 +1054,7 @@ impl GlobalDb {
                     project_id,
                     canonical_root,
                     display_root,
-                    opt_text(git_common_dir.as_deref()),
+                    opt_text(git_common_dir_text.as_deref()),
                     opt_text(git_remote_url),
                     opt_text(default_branch),
                     now,
@@ -1035,6 +1063,9 @@ impl GlobalDb {
             .await
             .ok()?;
         self.upsert_project_alias(project_root, project_id).await?;
+        for alias in repo_identity_aliases(git_common_dir) {
+            self.upsert_project_alias_key(&alias, project_id).await?;
+        }
         self.get_code_project(project_id).await
     }
 
@@ -1043,8 +1074,16 @@ impl GlobalDb {
         alias_path: &Path,
         project_id: &str,
     ) -> Option<ProjectAliasRecord> {
-        let now = crate::tracedecay::current_timestamp();
         let alias = Self::canonical_project_key(alias_path);
+        self.upsert_project_alias_key(&alias, project_id).await
+    }
+
+    async fn upsert_project_alias_key(
+        &self,
+        alias: &str,
+        project_id: &str,
+    ) -> Option<ProjectAliasRecord> {
+        let now = crate::tracedecay::current_timestamp();
         self.conn
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
@@ -1061,7 +1100,7 @@ impl GlobalDb {
             .query(
                 "SELECT alias_path, project_id, last_seen_at
                  FROM project_aliases WHERE alias_path = ?1",
-                params![Self::canonical_project_key(alias_path)],
+                params![alias],
             )
             .await
             .ok()?;
@@ -1186,6 +1225,67 @@ impl GlobalDb {
         alias_path: &Path,
     ) -> Option<ProjectStoreResolution> {
         let alias = Self::canonical_project_key(alias_path);
+        self.resolve_project_store_by_alias_key(&alias).await
+    }
+
+    pub async fn resolve_project_store_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> Option<ProjectStoreResolution> {
+        let mut aliases = Vec::with_capacity(2);
+        aliases.push(Self::canonical_project_key(project_root));
+        aliases.extend(repo_identity_aliases(git_common_dir));
+        for alias in aliases {
+            if let Some(resolution) = self.resolve_project_store_by_alias_key(&alias).await {
+                return Some(resolution);
+            }
+        }
+        None
+    }
+
+    pub async fn resolve_unique_project_store_by_git_remote(
+        &self,
+        git_remote_url: &str,
+    ) -> Option<ProjectStoreResolution> {
+        let remote = normalize_git_remote_url(git_remote_url)?;
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT project_id, canonical_root, display_root, git_common_dir,
+                        git_remote_url, default_branch, created_at, last_seen_at
+                 FROM code_projects
+                 WHERE git_remote_url IS NOT NULL AND git_remote_url != ''
+                 ORDER BY project_id",
+                (),
+            )
+            .await
+            .ok()?;
+        let mut match_project = None;
+        while let Some(row) = rows.next().await.ok()? {
+            let project = row_to_code_project(&row, 0)?;
+            let Some(stored_remote) = project
+                .git_remote_url
+                .as_deref()
+                .and_then(normalize_git_remote_url)
+            else {
+                continue;
+            };
+            if stored_remote == remote {
+                if match_project.is_some() {
+                    return None;
+                }
+                match_project = Some(project);
+            }
+        }
+        self.resolve_project_store_for_project(&match_project?)
+            .await
+    }
+
+    async fn resolve_project_store_by_alias_key(
+        &self,
+        alias: &str,
+    ) -> Option<ProjectStoreResolution> {
         let mut rows = self
             .conn
             .query(
@@ -1211,6 +1311,34 @@ impl GlobalDb {
         let artifacts = self.list_store_artifacts(&store.store_id).await;
         Some(ProjectStoreResolution {
             project,
+            store,
+            graph_scopes,
+            artifacts,
+        })
+    }
+
+    async fn resolve_project_store_for_project(
+        &self,
+        project: &CodeProjectRecord,
+    ) -> Option<ProjectStoreResolution> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT store_id, project_id, store_kind, storage_mode, store_relpath,
+                        manifest_relpath, created_at, last_verified_at, last_write_at
+                 FROM store_instances
+                 WHERE project_id = ?1
+                 ORDER BY COALESCE(last_verified_at, created_at) DESC, store_id
+                 LIMIT 1",
+                params![project.project_id.as_str()],
+            )
+            .await
+            .ok()?;
+        let store = row_to_store_instance(&rows.next().await.ok()??, 0)?;
+        let graph_scopes = self.list_graph_scopes_for_store(&store.store_id).await;
+        let artifacts = self.list_store_artifacts(&store.store_id).await;
+        Some(ProjectStoreResolution {
+            project: project.clone(),
             store,
             graph_scopes,
             artifacts,

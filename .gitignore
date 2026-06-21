@@ -1,7 +1,6 @@
 /target
 .DS_Store
 .codegraph
-.tokensave
 .tracedecay
 .mcp.json
 !codex-plugin/.mcp.json
@@ -18,4 +17,3 @@ generated-illustrations/
 *.log
 *~
 *#
-

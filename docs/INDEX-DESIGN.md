@@ -4,7 +4,7 @@ How tracedecay builds and maintains a semantic code graph from source files, and
 
 ## Overview
 
-tracedecay indexes a codebase into a directed graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; existing `.tokensave/` directories remain a fallback. Profile-backed projects use the same schema through the storage resolver, with the physical DB in a private profile shard. Source files are parsed with tree-sitter to extract **nodes** (code entities) and **edges** (relationships between them). Cross-file references that cannot be resolved during single-file extraction are stored as **unresolved refs** and resolved in a second pass once all files have been processed.
+tracedecay indexes a codebase into a directed graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; existing `.tracedecay/` directories remain a fallback. Profile-backed projects use the same schema through the storage resolver, with the physical DB in a private profile shard. Source files are parsed with tree-sitter to extract **nodes** (code entities) and **edges** (relationships between them). Cross-file references that cannot be resolved during single-file extraction are stored as **unresolved refs** and resolved in a second pass once all files have been processed.
 
 The graph is kept up-to-date through incremental sync: only files whose content hash has changed are re-extracted. A lock in the active store prevents concurrent sync operations from the CLI and the embedded MCP file watcher (and from multiple MCP servers attached to the same project).
 

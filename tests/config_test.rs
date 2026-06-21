@@ -142,8 +142,9 @@ fn test_add_to_gitignore_adds_newline_if_missing() {
 
 #[test]
 fn test_resolve_path_with_value() {
-    let result = resolve_path(Some("/tmp/myproject".to_string()));
-    assert_eq!(result, std::path::PathBuf::from("/tmp/myproject"));
+    let path = std::env::temp_dir().join("myproject");
+    let result = resolve_path(Some(path.to_string_lossy().into_owned()));
+    assert_eq!(result, path);
 }
 
 #[test]

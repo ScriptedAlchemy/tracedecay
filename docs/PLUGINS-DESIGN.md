@@ -6,9 +6,9 @@ Replace compile-time, feature-gated language extractors with dynamically loaded 
 
 ## Problem with the current model
 
-Every language extractor is gated on a Cargo feature (`lang-lua`, `lang-zig`, …) and compiled into the binary at build time via `tokensave-large-treesitters`. Adding a language today means:
+Every language extractor is gated on a Cargo feature (`lang-lua`, `lang-zig`, …) and compiled into the binary at build time via `tracedecay-large-treesitters`. Adding a language today means:
 
-1. Adding a grammar crate dependency to `tokensave-large-treesitters` and cutting a release.
+1. Adding a grammar crate dependency to `tracedecay-large-treesitters` and cutting a release.
 2. Writing an extractor in `src/extraction/`, adding `#[cfg(feature = "…")]` gates in `mod.rs`, and updating `Cargo.toml`.
 3. Releasing a new version of `tracedecay` itself.
 
@@ -139,8 +139,8 @@ impl LanguageExtractor for ElixirExtractor { … }
 
 tracedecay searches the following directories in order, stopping at the first match for a given extension:
 
-1. `$TRACEDECAY_PLUGIN_PATH` (colon-separated, same convention as `PATH`; the legacy `TOKENSAVE_PLUGIN_PATH` is still honored as a fallback)
-2. `.tracedecay/plugins/` in the current project root (an existing `.tokensave/plugins/` is still honored as a fallback)
+1. `$TRACEDECAY_PLUGIN_PATH` (colon-separated, same convention as `PATH`; the legacy `TRACEDECAY_PLUGIN_PATH` is still honored as a fallback)
+2. `.tracedecay/plugins/` in the current project root (an existing `.tracedecay/plugins/` is still honored as a fallback)
 3. `~/.tracedecay/plugins/`
 4. Platform config dir (`%APPDATA%\tracedecay\plugins` on Windows, `~/Library/Application Support/tracedecay/plugins` on macOS)
 

@@ -2451,20 +2451,20 @@ fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
 
     assert!(
         !cursor_dir.join("mcp.json").exists(),
-        "local install should remove legacy tracedecay-only project MCP config"
+        "local install should remove project-local MCP config"
     );
     assert!(
         !cursor_dir.join("hooks.json").exists(),
-        "local install should remove legacy tracedecay-only project hooks"
+        "local install should remove project-local hooks"
     );
     assert!(
         !cursor_dir.join("rules/tracedecay.mdc").exists(),
-        "local install should remove legacy tracedecay project rule"
+        "local install should remove project-local rule"
     );
 }
 
 /// Global `tracedecay install --agent cursor` runs with the project as cwd and
-/// must sweep legacy project-local tracedecay artifacts there (old installs
+/// must sweep project-local tracedecay artifacts there (old installs
 /// predate the plugin), while preserving user-authored entries alongside them.
 #[test]
 fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
@@ -2507,7 +2507,7 @@ fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
             .unwrap();
     assert!(
         mcp["mcpServers"].get("tracedecay").is_none(),
-        "legacy project tracedecay MCP entry should be swept"
+        "project-local MCP entry should be swept"
     );
     assert!(
         mcp["mcpServers"].get("other").is_some(),
@@ -2515,12 +2515,12 @@ fn test_global_install_cursor_sweeps_legacy_project_artifacts_at_cwd() {
     );
     assert!(
         !cursor_dir.join("rules/tracedecay.mdc").exists(),
-        "legacy project tracedecay rule should be swept"
+        "project-local rule should be swept"
     );
 }
 
-/// The legacy sweep must never modify files *through* a symlinked `.cursor`
-/// that escapes the project. A symlinked `.cursor` with no legacy tracedecay
+/// The project-local sweep must never modify files *through* a symlinked `.cursor`
+/// that escapes the project. A symlinked `.cursor` with no TraceDecay
 /// artifacts is left alone (the plugin owns all surfaces, so there is nothing
 /// to write project-locally), but once legacy artifacts are detected behind
 /// the symlink the install refuses rather than reaching outside the project.

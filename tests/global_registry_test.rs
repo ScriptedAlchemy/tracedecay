@@ -6,6 +6,21 @@ use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, Sto
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+async fn upsert_test_store(db: &GlobalDb, project_id: &str, store_id: &str) {
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: store_id.to_string(),
+        project_id: project_id.to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: format!("projects/{project_id}"),
+        manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
+        last_verified_at: Some(100),
+        last_write_at: Some(101),
+    })
+    .await
+    .unwrap();
+}
+
 async fn table_exists(db_path: &Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -194,7 +209,20 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         .await
         .unwrap();
     assert_eq!(context.project.project_id, "proj_registry");
-    assert_eq!(context.aliases.len(), 1);
+    let alias_paths: Vec<_> = context
+        .aliases
+        .iter()
+        .map(|alias| alias.alias_path.as_str())
+        .collect();
+    let canonical_project_root = project_root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(alias_paths.contains(&canonical_project_root.as_str()));
+    assert!(alias_paths
+        .iter()
+        .any(|alias| alias.starts_with("git-common-dir:")));
     assert_eq!(context.stores.len(), 1);
     assert_eq!(context.stores[0].store.store_id, "store_registry");
     assert_eq!(context.stores[0].graph_scopes.len(), 1);
@@ -204,6 +232,87 @@ async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
         context.stores[0].artifacts[0].artifact_kind,
         "store_manifest"
     );
+}
+
+#[tokio::test]
+async fn registry_resolves_store_by_repo_identity_aliases() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let original = dir.path().join("original");
+    let renamed = dir.path().join("renamed");
+    let common_dir = dir.path().join("git/common");
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir_all(&renamed).unwrap();
+    std::fs::create_dir_all(&common_dir).unwrap();
+
+    db.upsert_code_project(
+        "proj_repo_identity",
+        &original,
+        Some(&common_dir),
+        Some("git@github.com:ScriptedAlchemy/tracedecay.git"),
+        Some("main"),
+    )
+    .await
+    .unwrap();
+    upsert_test_store(&db, "proj_repo_identity", "store_repo_identity").await;
+
+    let by_common_dir = db
+        .resolve_project_store_by_identity(&renamed, Some(&common_dir))
+        .await
+        .unwrap();
+    assert_eq!(by_common_dir.project.project_id, "proj_repo_identity");
+
+    let by_remote = db
+        .resolve_unique_project_store_by_git_remote(
+            "https://github.com/ScriptedAlchemy/tracedecay.git",
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_remote.store.store_id, "store_repo_identity");
+}
+
+#[tokio::test]
+async fn registry_remote_resolution_is_conservative_when_ambiguous() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let one = dir.path().join("one");
+    let two = dir.path().join("two");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+
+    db.upsert_code_project(
+        "proj_one",
+        &one,
+        None,
+        Some("git@github.com:ScriptedAlchemy/tracedecay.git"),
+        Some("main"),
+    )
+    .await
+    .unwrap();
+    upsert_test_store(&db, "proj_one", "store_one").await;
+    db.upsert_code_project(
+        "proj_two",
+        &two,
+        None,
+        Some("https://github.com/ScriptedAlchemy/tracedecay"),
+        Some("main"),
+    )
+    .await
+    .unwrap();
+    upsert_test_store(&db, "proj_two", "store_two").await;
+
+    assert!(db
+        .resolve_unique_project_store_by_git_remote(
+            "https://github.com/ScriptedAlchemy/tracedecay.git"
+        )
+        .await
+        .is_none());
 }
 
 #[tokio::test]

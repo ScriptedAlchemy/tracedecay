@@ -597,8 +597,8 @@ via `last_gc_at`. The dry-run is cheap (no I/O mutations, no locks beyond reads)
 and safe to run any time. A run skips apply if `now - last_gc_at <
 gc_interval_seconds` unless the operator forces it.
 
-**Per-store, not global.** Each store (project-local `<project>/.tracedecay` or
-profile-scoped `<hermes_home>/.tracedecay`) is GC'd independently against its
+**Per-store, not global.** Each resolved project store (user-level shard,
+explicit local store, or legacy local store) is GC'd independently against its
 own DB (contract §14). There is no cross-store coordination.
 
 ---

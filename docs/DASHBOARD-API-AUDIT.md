@@ -35,7 +35,7 @@ MCP can never diverge. Preserve one router builder.
 - `lcm_conn: Option<Connection>` — LCM session store (`lcm_raw_messages`,
   `lcm_summary_nodes`, `lcm_summary_sources` + FTS mirrors). Resolved by
   `resolve_lcm_store` (`mod.rs:117`): project-local `.tracedecay/sessions.db`
-  by default; `TRACEDECAY_GLOBAL_DB` override wins (legacy `TOKENSAVE_GLOBAL_DB`
+  by default; `TRACEDECAY_GLOBAL_DB` override wins (legacy `TRACEDECAY_GLOBAL_DB`
   still accepted); global DB is the fallback. `lcm_scope` ∈
   `{"project_local","global"}` records which.
 - `savings_db: Option<Arc<GlobalDb>>` — savings ledger (out of scope here).

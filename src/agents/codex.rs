@@ -414,7 +414,7 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
     }
     if let Err(err) = uninstall_mcp_server(config_path) {
         eprintln!(
-            "  Could not remove legacy tracedecay MCP config from {}: {err}",
+            "  Could not remove project-local Codex MCP config from {}: {err}",
             config_path.display()
         );
     }

@@ -98,7 +98,7 @@ scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
 scoop install tracedecay
 ```
 
-> **Note:** The Homebrew tap and Scoop bucket are external repositories updated separately from this one — until they pick up the rename, the package may still be published under the legacy `tokensave` name.
+> **Note:** The Homebrew tap and Scoop bucket are external repositories updated separately from this one — until they pick up the rename, the package may still be published under the legacy package name.
 
 **Cargo (any platform):**
 
@@ -151,12 +151,12 @@ For project-scoped setup, run from the repository root:
 tracedecay install --local --agent cursor
 ```
 
-Local install writes only workspace files such as `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tracedecay/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tracedecay` executable path. Hermes installs into `~/.hermes/plugins/tracedecay/` by default, or into `~/.hermes/profiles/<name>/plugins/tracedecay/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. The generated context engine resolves its project from explicit host kwargs first, then a `project_root` key on the Hermes config object, then the install-time pin, and finally the session cwd. Pin a profile to one project with `tracedecay install --agent hermes [--profile <name>] --project-root /abs/path` — the pin is written into the generated plugin, applies to every plugin tool call regardless of the Hermes working directory, and survives later unpinned reinstalls. Use `tracedecay uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. To refresh generated plugin code after an upgrade without any config writes, run `tracedecay update-plugin` (alias `update-plugins`): it rewrites only tracedecay-generated artifacts — the Hermes plugin files and dashboard page for every detected profile (pin re-read from `config.yaml`, never written), the Cursor plugin bundle, the Codex plugin bundle, and the Kiro managed agent — and leaves `config.yaml`, `config.toml`, `mcp.json`, settings, hooks, and prompt rules byte-for-byte intact. Config-managed integrations (Claude, Gemini, …) have no generated artifacts and are reported as untouched; `tracedecay reinstall` remains the command that reconciles their config entries. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tracedecay install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Project-local Hermes plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. For Codex, global install writes a Codex plugin source bundle to `~/plugins/tracedecay`, registers it in `~/.agents/plugins/marketplace.json`, and prints `codex plugin add tracedecay@personal`; hooks and AGENTS.md stay config-managed because current Codex plugin manifests accept MCP and skills but not hook declarations. For Cursor, both global and `--local` install put the plugin in `~/.cursor/plugins/local/tracedecay` and require a Cursor reload. The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so it resolves the active workspace instead of the plugin directory and uses that workspace's active project store rather than the legacy global Cursor MCP registration. Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tokensave.mdc` (legacy artifact name), or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior. The plugin hooks are:
+Local install writes only workspace files such as `.mcp.json`, `.codex/config.toml`, `.vscode/mcp.json`, `.hermes/plugins/tracedecay/`, or the equivalent project config for Claude, Codex, Gemini, Hermes, Kiro, OpenCode, Copilot/VS Code, Zed, Roo Code, Kimi, Kilo, and Vibe. Generated MCP configs and plugin wrappers use the resolved absolute `tracedecay` executable path. Hermes installs into `~/.hermes/plugins/tracedecay/` by default, or into `~/.hermes/profiles/<name>/plugins/tracedecay/` with `--profile <name>`; profile names are normalized to lowercase and must match `[a-z0-9][a-z0-9_-]{0,63}`. The generated context engine resolves its project from explicit host kwargs first, then a `project_root` key on the Hermes config object, then the install-time pin, and finally the session cwd. Pin a profile to one project with `tracedecay install --agent hermes [--profile <name>] --project-root /abs/path` — the pin is written into the generated plugin, applies to every plugin tool call regardless of the Hermes working directory, and survives later unpinned reinstalls. Use `tracedecay uninstall --agent hermes --profile <name>` to remove a named profile install; `reinstall` and `doctor --agent hermes` currently operate on the default profile. To refresh generated plugin code after an upgrade without any config writes, run `tracedecay update-plugin` (alias `update-plugins`): it rewrites only tracedecay-generated artifacts — the Hermes plugin files and dashboard page for every detected profile (pin re-read from `config.yaml`, never written), the Cursor plugin bundle, the Codex plugin bundle, and the Kiro managed agent — and leaves `config.yaml`, `config.toml`, `mcp.json`, settings, hooks, and prompt rules byte-for-byte intact. Config-managed integrations (Claude, Gemini, …) have no generated artifacts and are reported as untouched; `tracedecay reinstall` remains the command that reconciles their config entries. Hermes wrappers run from Hermes' current working directory, use a 600-second timeout, and include truncated stdout/stderr in error JSON. Hermes local install without `--profile` writes only project plugin files and `.hermes/config.yaml`; `tracedecay install --local --agent hermes --profile <name>` is a deliberate mixed-scope mode that targets the named profile instead. Project-local Hermes plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. For Codex, global install writes a Codex plugin source bundle to `~/plugins/tracedecay`, registers it in `~/.agents/plugins/marketplace.json`, and prints `codex plugin add tracedecay@personal`; hooks and AGENTS.md stay config-managed because current Codex plugin manifests accept MCP and skills but not hook declarations. For Cursor, both global and `--local` install put the plugin in `~/.cursor/plugins/local/tracedecay` and require a Cursor reload. The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so it resolves the active workspace instead of the plugin directory and uses that workspace's active project store rather than the legacy global Cursor MCP registration. Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc` (legacy artifact name), or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior. The plugin hooks are:
 
 - `sessionStart` — fire-and-forget; injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when no initialized project store is found).
 - `subagentStart` — blocks research/explore subagents until tracedecay MCP tools have been tried; the plugin's own `code-explorer`/`code-health-auditor`/`session-historian` agents are allow-listed.
 - `postToolUse` (unmatched — Cursor's docs enumerate no matcher value for semantic search) — fail-open; injects a soft `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor switches to `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`. Each hint category is emitted at most once per session (persisted in `.tracedecay/tool_hints_seen.json`).
-- `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into `.tracedecay/sessions.db` when `transcript_path` is present.
+- `beforeSubmitPrompt` — resets the local token counter for the new turn and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
 - `afterFileEdit` (unmatched, so every Agent edit tool counts) — runs a **targeted single-file** sync of just the edited path(s) via `sync_if_stale_silent`, never a full-tree scan (which would scale with repo size, not edit size).
 - `afterShellExecution` — on Agent-run `git checkout`/`switch`/`worktree add`, bootstraps/maintains tracedecay branch tracking (`branch add`); on other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop), runs a coalesced incremental sync.
 - `workspaceOpen` — ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
@@ -195,7 +195,7 @@ tracedecay init
 
 **Non-interactive environments** (CI, containers, headless shells): `init`, `status`, and bare invocation skip prompts and use safe defaults. `init` creates the index without modifying `.gitignore` (prints a notice); `status` exits cleanly without creating an index if none exists.
 
-This creates the active project's local TraceDecay store. Repo-local projects create `.tracedecay/` with the graph database; legacy `.tokensave/` directories are still honored. Profile-backed projects keep graph/session artifacts in a private profile shard while the repo may contain only an enrollment marker. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
+This creates the active project's TraceDecay store. Graph/session artifacts live in a user-level profile shard scoped to this project; `.tracedecay/` in the repo is only a lightweight marker/config directory. `init` is the explicit opt-in; `sync` only updates already-initialized projects, so the global post-commit hook does not create stores in repos you never intended to index. After `init`, use `tracedecay sync` for incremental updates.
 
 <details>
 <summary><strong>What install writes for Claude Code</strong></summary>
@@ -664,15 +664,11 @@ chmod +x .git/hooks/post-commit
 
 ### Upgrading from 5.x
 
-The standalone `tokensave daemon` command (5.x-era, pre-rename) and its launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The on-demand staleness model above is the current design.
-
-If you still have a daemon autostart from 5.x, remove it (the artifacts use the historical `tokensave` name):
-
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
-- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
-- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
-
-If you don't recall the exact name: `launchctl list | grep tokensave` / `systemctl --user list-units | grep tokensave` / `sc.exe query state= all | findstr -i tokensave`.
+The standalone daemon command from 5.x-era installs and its
+launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded
+OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it
+caused runaway CPU and memory on large monorepos with deep `node_modules` or
+`target` trees). The on-demand staleness model above is the current design.
 
 ---
 
@@ -942,7 +938,7 @@ Full-index benchmark on a 1,782-file mixed Rust/Java/Scala codebase (57K nodes, 
 
 ### "tracedecay not initialized"
 
-TraceDecay could not find an initialized project store. In repo-local mode, create `.tracedecay/` with `tracedecay init`; profile-backed projects also need their enrollment marker and profile shard.
+TraceDecay could not find an initialized project store. Run `tracedecay init` from the project root to create the user-level profile store and project enrollment marker.
 
 ```bash
 tracedecay init
@@ -974,7 +970,7 @@ Large projects take longer on the first full index.
 
 | Variable | Effect |
 |----------|--------|
-| `TRACEDECAY_GLOBAL_DB` | Override the path to the global database (used for LCM session storage selection). When set, the dashboard serves this store instead of the project-local sessions.db. |
+| `TRACEDECAY_GLOBAL_DB` | Override the path to the global database or session store for dashboard LCM selection. When unset, the dashboard serves the active project's resolved session store, profile-sharded by default. |
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode). |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd). |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode). |
@@ -982,7 +978,7 @@ Large projects take longer on the first full index.
 | `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback). |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing). |
 
-Legacy `TOKENSAVE_*` environment variables (and `DISABLE_TOKENSAVE`) from before the rename are still honored as a fallback; the `TRACEDECAY_*` names take precedence when both are set.
+Use `TRACEDECAY_*` environment variables for TraceDecay configuration. Pre-rename environment variable names are not runtime fallbacks.
 
 ### Disabling tracedecay for specific projects
 

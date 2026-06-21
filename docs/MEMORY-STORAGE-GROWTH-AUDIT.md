@@ -2,18 +2,18 @@
 
 Scope: the holographic (FHRR) memory subsystem that tracedecay exposes to Hermes
 as the `tracedecay` memory provider. This is the `src/memory/` module plus its
-SQLite tables in the per-project `tokensave.db` / `tracedecay.db`. The LCM
+SQLite tables in the per-project `tracedecay.db` / `tracedecay.db`. The LCM
 session store (`sessions.db`) and the code-graph node store are out of scope but
 referenced where they share infrastructure.
 
 All numbers below are measured against the live checkout DB
-(`.tracedecay/tokensave.db`, 129 facts) unless stated otherwise.
+(`.tracedecay/tracedecay.db`, 129 facts) unless stated otherwise.
 
 ---
 
 ## 1. Where the data lives
 
-Tables in `tokensave.db` (schema in `src/db/migrations.rs`, runtime access in
+Tables in `tracedecay.db` (schema in `src/db/migrations.rs`, runtime access in
 `src/memory/store.rs`, `src/memory/retrieval.rs`):
 
 | Table | Role | Growth | Observed (129 facts) |
@@ -28,7 +28,7 @@ Tables in `tokensave.db` (schema in `src/db/migrations.rs`, runtime access in
 | `memory_bank_dirty` | Dirty-bank rebuild queue | bounded | 3 rows |
 | `vectors` | Code-graph node embeddings (NOT memory) | per graph node | 0 rows here |
 
-Schema anchors (`sqlite3 .tracedecay/tokensave.db ".schema <t>"`):
+Schema anchors (`sqlite3 .tracedecay/tracedecay.db ".schema <t>"`):
 - `memory_facts(... hrr_vector BLOB, hrr_algebra TEXT DEFAULT 'amari_fhrr', hrr_dim INTEGER DEFAULT 2048, access_count, last_recalled_at)`
 - `memory_banks(bank_name UNIQUE, vector BLOB, hrr_dim, fact_count, updated_at)`
 - `memory_entities(entity_id PK, name, normalized_name UNIQUE, entity_type, aliases, created_at)`
@@ -230,5 +230,5 @@ facts/category but that only hurts the superposition fast-path, not correctness.
 - Capacity formula: `src/tracedecay.rs:3472`
 - Trust/decay: `src/memory/trust.rs`
 - Hygiene gates: `src/memory/hygiene.rs`
-- Schema: `src/db/migrations.rs`; live DB `.tracedecay/tokensave.db`
+- Schema: `src/db/migrations.rs`; live DB `.tracedecay/tracedecay.db`
 - Crate: `amari-holographic = "0.23.0"` (`Cargo.toml:144`)

@@ -3,7 +3,7 @@
 Status: integration gate passed (2026-06-10) — see "Final integration gate"
 at the end of this doc. Phase 3 complete (curation implemented; hard-delete
 semantics, no archive). Nothing committed; everything is in the working trees
-of `/home/zack/projects/tokensave` and `/home/zack/hermes-agent`.
+of `/home/zack/projects/tracedecay` and `/home/zack/hermes-agent`.
 
 Hermes integration (2026-06-10): boot failure fixed, the tracedecay-backed
 dashboard is render-verified inside a live `hermes dashboard`, and the old
@@ -128,7 +128,7 @@ tracedecay dashboard [--path <project>] [--host 127.0.0.1] [--port 7341]
 ### Holographic memory (`/api/plugins/holographic`, `src/dashboard/memory_api.rs`)
 
 Backed by the **project DB** (`.tracedecay/tracedecay.db`; a legacy
-`.tokensave/` directory is still honored as a fallback). Old backend was
+`.tracedecay/` directory is still honored as a fallback). Old backend was
 Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 
 | Route | Old source | New source | Status |
@@ -152,7 +152,7 @@ used `cat:<category>`); `dim` ← `hrr_dim`; timestamps are unix epoch seconds
 ### LCM (`/api/plugins/hermes-lcm`, `src/dashboard/lcm_api.rs`)
 
 Backed by the **global DB** (`~/.tracedecay/global.db`; overridable via
-`TRACEDECAY_GLOBAL_DB` — legacy `TOKENSAVE_*` variable names are still honored
+`TRACEDECAY_GLOBAL_DB` — legacy `TRACEDECAY_*` variable names are still honored
 as fallbacks). Old backend was `$HERMES_HOME/lcm.db`
 (`messages`/`summary_nodes` + FTS).
 
@@ -343,16 +343,16 @@ tracedecay-side curation/archive Phase 3 work.) All work here is confined to
 ### How the dashboard was launched
 
 Commands below are reproduced verbatim as run on 2026-06-10, pre-rebrand
-(old `tokensave` binary and `TOKENSAVE_*` variable names; both are still
+(old `tracedecay` binary and `TRACEDECAY_*` variable names; both are still
 honored as legacy fallbacks):
 
 ```bash
-# Build the working tokensave binary used by the wrapper (see note below).
-# (target/debug/tokensave already had the dashboard subcommand.)
+# Build the working tracedecay binary used by the wrapper (see note below).
+# (target/debug/tracedecay already had the dashboard subcommand.)
 
 cd /home/zack/hermes-agent
-TOKENSAVE_BIN=/home/zack/projects/tokensave/target/debug/tokensave \
-TOKENSAVE_DASHBOARD_PROJECT=/home/zack/projects/tokensave \
+TRACEDECAY_BIN=/home/zack/projects/tracedecay/target/debug/tracedecay \
+TRACEDECAY_DASHBOARD_PROJECT=/home/zack/projects/tracedecay \
 HERMES_HOME=/home/zack/.hermes \
 uv run --no-sync hermes dashboard --port 9215 --host 127.0.0.1 --no-open --skip-build
 ```
@@ -375,22 +375,22 @@ uv run --no-sync hermes dashboard --port 9215 --host 127.0.0.1 --no-open --skip-
   project 10 / decision 7), HRR coverage rings (100%), trust distribution,
   facts/day chart, and fact/entity/bank lists.
 - **LCM** internal tab renders the first-class empty state ("No LCM sessions
-  indexed yet") for the local `~/.tokensave/global.db` (zero LCM rows at the
+  indexed yet") for the local `~/.tracedecay/global.db` (zero LCM rows at the
   time; pre-rebrand path), with the `Database detected` badge.
-- Spawn confirmed: with no `TOKENSAVE_DASHBOARD_URL` set (pre-rebrand variable
+- Spawn confirmed: with no `TRACEDECAY_DASHBOARD_URL` set (pre-rebrand variable
   name), the wrapper spawned
-  `tokensave dashboard --host 127.0.0.1 --port 0 --path
-  /home/zack/projects/tokensave` as a **child of the hermes python process**
+  `tracedecay dashboard --host 127.0.0.1 --port 0 --path
+  /home/zack/projects/tracedecay` as a **child of the hermes python process**
   (verified via PPID), and `/api/plugins/hermes-intelligence/capabilities`
   returned `mode: "hermes"`.
 
-Note on the binary (then named `tokensave`): a concurrent effort in this repo
+Note on the binary (then named `tracedecay`): a concurrent effort in this repo
 was mid-flight on a curation/archive **v13 schema migration**. After it rebuilt
-`target/debug/tokensave` (09:03), fresh spawns failed while opening the v12
+`target/debug/tracedecay` (09:03), fresh spawns failed while opening the v12
 project DB (`v13: failed to add archive columns to memory_facts: SQLite
 failure: near "EXISTS": syntax error`) — its WIP, not the wrapper's. The live
 post-retirement screenshots were therefore taken with the wrapper pointed at a
-healthy standalone server via `TOKENSAVE_DASHBOARD_URL=http://127.0.0.1:7350`
+healthy standalone server via `TRACEDECAY_DASHBOARD_URL=http://127.0.0.1:7350`
 (the task-sanctioned external-mode fallback). Spawn mode itself was verified
 working earlier with the pre-rebuild binary. Once the v13 migration lands
 cleanly, spawn mode needs no wrapper changes.
@@ -533,9 +533,9 @@ conservatism backstop, and callers can pass a higher `threshold` /
 ## Remaining stubbed / known gaps (post Phase 3)
 
 1. LCM data scope: MOSTLY RESOLVED — the standalone dashboard now serves the
-   project-local `.tracedecay/sessions.db` (where transcript ingest writes),
-   with `TRACEDECAY_GLOBAL_DB` pinning an explicit store (also the path for
-   hermes-profile stores: point it at `<hermes_home>/.tracedecay/sessions.db`).
+   resolved project session store (user-level profile shard by default, local
+   only for explicit/legacy stores), with `TRACEDECAY_GLOBAL_DB` pinning an
+   explicit test/smoke store.
    Remaining: an in-UI store *switcher* for browsing multiple stores.
 2. The wrapper picks the project root from `TRACEDECAY_DASHBOARD_PROJECT` or
    Hermes' cwd — no per-request/workspace project selection.
@@ -569,17 +569,15 @@ conservatism backstop, and callers can pass a higher `threshold` /
         the holographic_plus **memory provider** (tools, curator, retrieval,
         `on_session_end`) is fully intact. See the Hermes live-render section
         below.
-- [ ] LCM: surface provider/profile selection (project-local vs global vs
-      hermes-profile stores); consider storing real `token_estimate`,
+- [ ] LCM: surface provider/profile selection (resolved project stores vs
+      global override stores); consider storing real `token_estimate`,
       `tool_name`, `pinned` in `lcm_raw_messages` so the session drawer
       stops approximating.
       - 2026-06-10 PARTIAL — project-local vs global selection shipped. The
-        dashboard now serves the project's `.tracedecay/sessions.db` (where
-        Cursor hooks + the hookless-agent catch-up sweep actually ingest)
-        instead of the always-empty `~/.tracedecay/global.db`; a
-        `TRACEDECAY_GLOBAL_DB` override still pins the store (smoke harness /
-        Hermes wrapper contract, which is also the path for hermes-profile
-        stores: point the override at `<hermes_home>/.tracedecay/sessions.db`).
+        dashboard now serves the resolved project session store (where Cursor
+        hooks + the hookless-agent catch-up sweep actually ingest) instead of
+        the always-empty `~/.tracedecay/global.db`; a `TRACEDECAY_GLOBAL_DB`
+        override still pins the store for smoke harnesses.
         Additive `storage_scope` field on every LCM payload + `lcm_scope` in
         capabilities; LCM header shows "Project store"/"Global store".
         `tracedecay dashboard` startup now spawns the same detached catch-up
@@ -629,7 +627,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
 
 ```bash
 # 1. Build UI assets (required before cargo build when UI changed)
-cd /home/zack/projects/tokensave/dashboard && npm install && npm run build
+cd /home/zack/projects/tracedecay/dashboard && npm install && npm run build
 
 # Optional smoke checks (browser automation)
 # Empty-state LCM:
@@ -638,13 +636,13 @@ TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-empty.db npm run smoke -- --e
 TRACEDECAY_GLOBAL_DB=/tmp/tracedecay-dashboard-lcm-nonempty.db npm run smoke -- --expect-lcm=non-empty
 
 # 2. Build + run standalone
-cd /home/zack/projects/tokensave
+cd /home/zack/projects/tracedecay
 cargo build --bin tracedecay
 ./target/debug/tracedecay dashboard            # http://127.0.0.1:7341/
 
 # 3. Hermes-hosted (wrapper spawns the server automatically)
-TRACEDECAY_BIN=/home/zack/projects/tokensave/target/debug/tracedecay \
-TRACEDECAY_DASHBOARD_PROJECT=/home/zack/projects/tokensave \
+TRACEDECAY_BIN=/home/zack/projects/tracedecay/target/debug/tracedecay \
+TRACEDECAY_DASHBOARD_PROJECT=/home/zack/projects/tracedecay \
 hermes dashboard   # → "TraceDecay" tab (named "Hermes Intelligence" at port time)
 ```
 
