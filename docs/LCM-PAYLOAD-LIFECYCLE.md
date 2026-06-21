@@ -48,7 +48,7 @@ has the full map.
   under `payload_dir(storage_root)` = `<storage_root>/lcm-payloads`
   (`payload.rs:52`). User-level project stores resolve the root to
   `~/.tracedecay/projects/<project-id>`; explicit local/legacy stores resolve to
-  `<project>/.tracedecay` (or legacy `.tokensave` fallback).
+  `<project>/.tracedecay` (or legacy `.tracedecay` fallback).
 - **Schema.** `lcm_external_payloads` is keyed by `payload_ref` (PK) with
   `UNIQUE(provider, message_id, payload_ref)` and `FOREIGN KEY(provider, session_id)
   REFERENCES sessions ON DELETE CASCADE` (`src/sessions/lcm/schema.rs:133-149`). There is

@@ -1,7 +1,7 @@
 //! Branch metadata persistence for multi-branch indexing.
 //!
 //! Stores tracking information in `branch-meta.json` inside the project data
-//! dir (`.tracedecay/`, or legacy `.tokensave/`).
+//! dir.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ const BRANCH_META_FILENAME: &str = "branch-meta.json";
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchEntry {
-    /// Relative path to the DB file (e.g. `tracedecay.db` — `tokensave.db`
-    /// in legacy data dirs — or `branches/feature_foo.db`).
+    /// Relative path to the DB file, such as `tracedecay.db` or
+    /// `branches/feature_foo.db`.
     pub db_file: String,
     /// Branch this was copied from (None for the default branch).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,16 +36,13 @@ pub struct BranchMeta {
 
 impl BranchMeta {
     /// Creates a new metadata with a single default branch entry pointing at
-    /// the standard `tracedecay.db`. Prefer [`BranchMeta::new_for_dir`] when
-    /// the data dir is at hand so legacy `.tokensave/` projects keep pointing
-    /// at their existing `tokensave.db`.
+    /// the standard `tracedecay.db`.
     pub fn new(default_branch: &str) -> Self {
         Self::with_db_file(default_branch, crate::config::DB_FILENAME)
     }
 
     /// Creates a new metadata whose default-branch entry references the main
-    /// DB filename appropriate for `data_dir` (`tracedecay.db`, or
-    /// `tokensave.db` inside a legacy dir).
+    /// DB filename appropriate for `data_dir`.
     pub fn new_for_dir(data_dir: &Path, default_branch: &str) -> Self {
         Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
     }
@@ -195,11 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn new_for_dir_tracks_data_dir_brand() {
-        let legacy = BranchMeta::new_for_dir(Path::new("/p/.tokensave"), "main");
-        assert_eq!(legacy.branches["main"].db_file, "tokensave.db");
-        let fresh = BranchMeta::new_for_dir(Path::new("/p/.tracedecay"), "main");
-        assert_eq!(fresh.branches["main"].db_file, "tracedecay.db");
+    fn new_for_dir_tracks_current_db_file() {
+        let meta = BranchMeta::new_for_dir(Path::new("/p/.tracedecay"), "main");
+        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
     }
 
     #[test]

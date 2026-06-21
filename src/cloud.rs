@@ -1,5 +1,5 @@
-//! HTTP client for the worldwide token counter Cloudflare Worker and
-//! GitHub release version checking.
+//! HTTP client for the worldwide counter Cloudflare Worker and GitHub release
+//! version checking.
 //!
 //! All operations are best-effort with timeouts. Failures are silently
 //! ignored and never block the CLI.
@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 /// The Cloudflare Worker endpoint URL.
-const WORKER_URL: &str = "https://tokensave-counter.enzinol.workers.dev";
+const WORKER_URL: &str = "https://tracedecay-counter.enzinol.workers.dev";
 
 /// GitHub API endpoint for the latest stable release.
 const GITHUB_RELEASES_URL: &str =
@@ -137,32 +137,15 @@ pub(crate) fn asset_name(version: &str, is_beta: bool) -> String {
     platform_asset_name(prefix, version)
 }
 
-/// Legacy (pre-rebrand) archive name. Releases published while the project
-/// was still called "tokensave" carry `tokensave-v*` / `tokensave-beta-v*`
-/// assets; upgrades to/from those versions must keep working.
-pub(crate) fn legacy_asset_name(version: &str, is_beta: bool) -> String {
-    let prefix = if is_beta {
-        "tokensave-beta"
-    } else {
-        "tokensave"
-    };
-    platform_asset_name(prefix, version)
-}
-
 fn platform_asset_name(prefix: &str, version: &str) -> String {
     let platform = current_platform();
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
     format!("{prefix}-v{version}-{platform}.{ext}")
 }
 
-/// Candidate asset names for explicit release installs, newest naming first.
-/// The install path probes these in order so both post-rebrand
-/// (`tracedecay-v*`) and legacy (`tokensave-v*`) archives remain installable.
-pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 2] {
-    [
-        asset_name(version, is_beta),
-        legacy_asset_name(version, is_beta),
-    ]
+/// Candidate asset names for explicit release installs.
+pub(crate) fn asset_name_candidates(version: &str, is_beta: bool) -> [String; 1] {
+    [asset_name(version, is_beta)]
 }
 
 /// First major version of the pre-reset release line that already shipped
@@ -185,12 +168,10 @@ fn release_is_pre_reset_epoch(tag_name: &str) -> bool {
 }
 
 /// True when the release is a valid upgrade candidate for the current
-/// platform: it must carry the post-rebrand asset name (`tracedecay-v*` /
-/// `tracedecay-beta-v*`) for this platform and not belong to the pre-reset
-/// version epoch. Intentionally stricter than explicit install probing
-/// (`asset_name_candidates`): legacy-only `tokensave-*` releases (1.x–3.x)
-/// and pre-reset `tracedecay-*` releases (4.x–6.x) must never be offered as
-/// the "latest" upgrade, even if old releases reappear.
+/// platform: it must carry the `tracedecay-v*` / `tracedecay-beta-v*` asset
+/// name for this platform and not belong to the pre-reset version epoch.
+/// Pre-reset `tracedecay-*` releases (4.x-6.x) must never be offered as the
+/// "latest" upgrade, even if old releases reappear.
 fn release_has_current_platform_asset(release: &GitHubRelease) -> bool {
     if release_is_pre_reset_epoch(&release.tag_name) {
         return false;
@@ -398,26 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn skips_release_with_only_legacy_tokensave_asset() {
-        // Legacy `tokensave-v*` assets remain valid for explicit version
-        // installs, but latest-version detection must ignore them.
-        let expected = legacy_asset_name("0.9.9", false);
-        let r = release("v0.9.9", false, &[&expected]);
-        assert!(!release_has_current_platform_asset(&r));
-    }
-
-    #[test]
     fn accepts_beta_release_with_matching_beta_asset() {
         let expected = asset_name("0.9.9-beta.1", true);
         let r = release("v0.9.9-beta.1", true, &[&expected]);
         assert!(release_has_current_platform_asset(&r));
-    }
-
-    #[test]
-    fn skips_beta_release_with_only_legacy_tokensave_beta_asset() {
-        let expected = legacy_asset_name("0.9.9-beta.1", true);
-        let r = release("v0.9.9-beta.1", true, &[&expected]);
-        assert!(!release_has_current_platform_asset(&r));
     }
 
     #[test]
@@ -426,8 +391,7 @@ mod tests {
         // filter should still reject — the naming convention says beta
         // releases carry `*-beta-v...` assets.
         let stable_name = asset_name("0.9.9-beta.1", false);
-        let legacy_stable_name = legacy_asset_name("0.9.9-beta.1", false);
-        let r = release("v0.9.9-beta.1", true, &[&stable_name, &legacy_stable_name]);
+        let r = release("v0.9.9-beta.1", true, &[&stable_name]);
         assert!(!release_has_current_platform_asset(&r));
     }
 
@@ -465,9 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn asset_name_candidates_orders_new_name_first() {
-        let [first, second] = asset_name_candidates("9.9.9", false);
+    fn asset_name_candidates_use_current_name() {
+        let [first] = asset_name_candidates("9.9.9", false);
         assert!(first.starts_with("tracedecay-v9.9.9-"));
-        assert!(second.starts_with("tokensave-v9.9.9-"));
     }
 }

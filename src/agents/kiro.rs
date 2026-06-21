@@ -28,9 +28,7 @@ use super::{
 pub struct KiroIntegration;
 
 const PROMPT_MARKER: &str = "## Prefer tracedecay MCP tools";
-const LEGACY_PROMPT_MARKER: &str = "## Prefer tokensave MCP tools";
 const PROMPT_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
-const LEGACY_PROMPT_END_MARKER: &str = "<!-- tokensave:kiro:end -->";
 const KIRO_AGENT_NAME: &str = "tracedecay";
 const OWNED_AGENT_DESCRIPTION: &str =
     "Default Kiro agent with tracedecay MCP tools and code-research guardrails.";
@@ -464,15 +462,15 @@ call graph work, symbol lookup, or other code research until tracedecay MCP tool
 have been tried. Delegation is still appropriate for long-running execution work \
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
 For project/storage identity questions, use `tracedecay_active_project` or \
-`tracedecay_storage_status` instead of inferring from repo-local marker files or \
+`tracedecay_storage_status` instead of inferring from marker files or \
 direct DB paths.\n\n\
 If a code analysis question cannot be fully answered by tracedecay MCP tools, prefer \
 built-in MCP tools first. If the user explicitly needs raw store inspection, use the \
 resolved graph DB path reported by `tracedecay_storage_status` rather than a hardcoded \
-repo-local path. Use SQL for structural queries that go beyond the MCP tools.\n\n\
+repo path. Use SQL for structural queries that go beyond the MCP tools.\n\n\
 For durable project/user facts, prefer `tracedecay_fact_store`, \
 `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Use \
-`tracedecay_message_search` for project-local Cursor transcript recall when prior \
+`tracedecay_message_search` for active-project transcript recall when prior \
 conversation context matters. Do not store secrets, credentials, or unnecessary PII \
 in persistent facts.\n\n\
 If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
@@ -500,9 +498,8 @@ fn uninstall_mcp_server(path: &Path) {
         eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
         return;
     };
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
         return;
     }
@@ -528,7 +525,7 @@ fn remove_steering_rules(path: &Path) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
     };
-    if !contents.contains(PROMPT_MARKER) && !contents.contains(LEGACY_PROMPT_MARKER) {
+    if !contents.contains(PROMPT_MARKER) {
         eprintln!("  Kiro steering does not contain tracedecay rules, skipping");
         return;
     }
@@ -639,14 +636,8 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
 }
 
 fn tracedecay_prompt_block_range(contents: &str) -> Option<Range<usize>> {
-    let (start, marker) = if let Some(start) = contents.find(PROMPT_MARKER) {
-        (start, PROMPT_END_MARKER)
-    } else {
-        (
-            contents.find(LEGACY_PROMPT_MARKER)?,
-            LEGACY_PROMPT_END_MARKER,
-        )
-    };
+    let start = contents.find(PROMPT_MARKER)?;
+    let marker = PROMPT_END_MARKER;
     let end_marker = contents[start..].find(marker)?;
     let end = start + end_marker + marker.len();
     Some(start..end)

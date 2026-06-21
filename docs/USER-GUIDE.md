@@ -72,7 +72,7 @@ cd /path/to/your/project
 tracedecay init
 ```
 
-TraceDecay will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tokensave/` directories are still honored. Profile-backed projects keep graph/session artifacts in a private profile shard. You'll see a spinner with file-by-file progress and an ETA.
+TraceDecay will scan every supported source file, extract symbols (functions, classes, methods, imports, type relationships, complexity metrics), and store everything in the active project store. Graph/session artifacts live in a private user-level profile shard scoped to this project; the repo `.tracedecay/` directory is only a lightweight marker/config directory. You'll see a spinner with file-by-file progress and an ETA.
 
 Once it finishes, run `tracedecay status` to see what was indexed:
 
@@ -159,7 +159,7 @@ tracedecay gitignore on           # enable (default)
 tracedecay gitignore off          # disable — index everything
 ```
 
-Don't forget to add `.tracedecay` to your `.gitignore` so repo-local databases or enrollment markers do not get committed:
+Don't forget to add `.tracedecay` to your `.gitignore` so enrollment markers do not get committed:
 
 ```bash
 echo .tracedecay >> .gitignore
@@ -473,22 +473,22 @@ Or run `tracedecay sync` manually when you need a fresh index.
 
 ### Upgrading from 5.x
 
-The standalone `tokensave daemon` command and its system-service autostart
-were removed in 6.0.0 (when the project was still named TokenSave). If you had
+The standalone `tracedecay daemon` command and its system-service autostart
+were removed in 6.0.0 (when the project was still named TraceDecay). If you had
 a daemon autostart installed under 5.x, remove it manually. Note the service
-names below use the old `tokensave` branding because that is what 5.x installed.
+names below use the old `tracedecay` branding because that is what 5.x installed.
 
 If you don't remember the exact service/plist name, list them first:
 
-- macOS: `launchctl list | grep tokensave`
-- Linux: `systemctl --user list-units | grep tokensave`
-- Windows: `sc.exe query state= all | findstr -i tokensave`
+- macOS: `launchctl list | grep tracedecay`
+- Linux: `systemctl --user list-units | grep tracedecay`
+- Windows: `sc.exe query state= all | findstr -i tracedecay`
 
 Then remove the entry matching your install:
 
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
-- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
-- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
+- macOS: `launchctl unload ~/Library/LaunchAgents/com.tracedecay.daemon.plist && rm ~/Library/LaunchAgents/com.tracedecay.daemon.plist`
+- Linux: `systemctl --user disable --now tracedecay-daemon && rm ~/.config/systemd/user/tracedecay-daemon.service`
+- Windows: `sc.exe delete tracedecay-daemon` (from an elevated terminal)
 
 Once your agent is attached, MCP tool calls keep the index fresh on demand.
 
@@ -807,9 +807,9 @@ Repo-local projects create `.tracedecay/` inside each project you index. Profile
 - `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
 - `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard previews when those features are used
 
-Add `.tracedecay` to your `.gitignore` so repo-local databases or enrollment markers are not committed.
+Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 
-Projects indexed before the TraceDecay rename may still have a `.tokensave/` directory with a `tokensave.db` inside — it is still honored as a fallback, so you don't need to re-index.
+Projects indexed before the TraceDecay rename should be migrated into the user-level profile store; runtime storage no longer falls back to `.tracedecay/`.
 
 ### Per-user: `~/.tracedecay/`
 

@@ -1,12 +1,9 @@
 //! LCM dashboard API, backed by tracedecay's LCM session store.
 //!
-//! Port of the hermes-lcm `dashboard/plugin_api.py` onto the session-store
-//! tables `lcm_raw_messages`, `lcm_summary_nodes`, and `lcm_summary_sources`.
-//! The store served is selected by [`super::resolve_lcm_store`]: the resolved
-//! active project store where transcript ingest writes, or the global DB as a
-//! fallback. Every payload reports the active store via the additive `path` +
-//! `storage_scope` fields. Payload shapes otherwise mirror the original routes
-//! so the ported UI bundle works unchanged.
+//! Serves Hermes-compatible LCM routes from `lcm_raw_messages`,
+//! `lcm_summary_nodes`, and `lcm_summary_sources`. The store is selected by
+//! [`super::resolve_lcm_store`], and every payload reports it via `path` and
+//! `storage_scope`.
 //!
 //! Schema mapping (hermes-lcm → tracedecay):
 //! - `messages`               → `lcm_raw_messages` (`source` ← `provider`,

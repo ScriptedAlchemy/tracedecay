@@ -2173,16 +2173,61 @@ pub async fn hook_stop() {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::config::USER_DATA_DIR_ENV;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
+        let _lock = env_lock().lock().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let data_dir = project.path().join(".tracedecay");
-        std::fs::create_dir(&data_dir).unwrap();
-        std::fs::write(data_dir.join("tracedecay.db"), "").unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_hook_codex_prompt".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
         let event = serde_json::json!({
             "session_id": "codex-session-1",
-            "cwd": project.path(),
+            "cwd": project_root,
             "prompt": "Please explain the impact of changing parse_user"
         })
         .to_string();

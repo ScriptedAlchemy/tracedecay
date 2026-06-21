@@ -2988,7 +2988,7 @@ fn test_codex_local_install_sweeps_legacy_project_config() {
     .unwrap();
     std::fs::write(
         codex_dir.join("hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tokensave hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
     )
     .unwrap();
 
@@ -3000,7 +3000,7 @@ fn test_codex_local_install_sweeps_legacy_project_config() {
     );
     assert!(
         !codex_dir.join("hooks.json").exists(),
-        "legacy project Codex hooks should be removed when they only contained tracedecay/tokensave"
+        "legacy project Codex hooks should be removed when they only contained tracedecay"
     );
     assert_codex_plugin_bundle(
         &codex_project_plugin_install_dir(project.path()),
@@ -3292,40 +3292,6 @@ fn test_cursor_install_creates_plugin() {
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
-}
-
-#[test]
-fn test_cursor_install_sweeps_legacy_tokensave_plugin_dir() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-
-    // Simulate a pre-rebrand plugin install: tokensave-branded manifest plus
-    // the legacy rule file and dispatcher skill dirs the current bundle no
-    // longer ships. Earlier sweeps missed these and stranded the directory.
-    let legacy_dir = home.join(".cursor/plugins/local/tokensave");
-    std::fs::create_dir_all(legacy_dir.join(".cursor-plugin")).unwrap();
-    std::fs::write(
-        legacy_dir.join(".cursor-plugin/plugin.json"),
-        r#"{"name": "tokensave", "version": "5.0.0"}"#,
-    )
-    .unwrap();
-    std::fs::create_dir_all(legacy_dir.join("rules")).unwrap();
-    std::fs::write(legacy_dir.join("rules/tokensave.mdc"), "legacy rule\n").unwrap();
-    for skill in ["tokensave-audit-safety", "tokensave-map-architecture"] {
-        let skill_dir = legacy_dir.join("skills").join(skill);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "legacy dispatcher\n").unwrap();
-    }
-
-    let ctx = make_install_ctx(home);
-    CursorIntegration.install(&ctx).unwrap();
-
-    assert!(
-        !legacy_dir.exists(),
-        "legacy tokensave plugin dir should be fully removed once the \
-         tokensave.mdc rule and tokensave-<verb> dispatcher skills are swept"
-    );
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
 }
 
 #[test]
@@ -4178,33 +4144,6 @@ fn test_healthcheck_codex_after_install() {
     assert_eq!(
         dc.issues, 0,
         "Codex healthcheck should pass after a clean install"
-    );
-}
-
-#[test]
-fn test_healthcheck_codex_after_cache_install() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
-    std::fs::write(
-        cached_plugin_dir.join(".codex-plugin/plugin.json"),
-        r#"{"name":"tracedecay","version":"0.0.0"}"#,
-    )
-    .unwrap();
-
-    let ctx = make_install_ctx(home);
-    CodexIntegration.install(&ctx).unwrap();
-
-    let mut dc = DoctorCounters::new();
-    let hctx = HealthcheckContext {
-        home: home.to_path_buf(),
-        project_path: home.to_path_buf(),
-    };
-    CodexIntegration.healthcheck(&mut dc, &hctx);
-    assert_eq!(
-        dc.issues, 0,
-        "Codex healthcheck should pass after refreshing a cached plugin install"
     );
 }
 

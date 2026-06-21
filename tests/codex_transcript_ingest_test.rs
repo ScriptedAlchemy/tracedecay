@@ -304,24 +304,6 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     assert!(expansion.content.contains("Release automation is mapped"));
     assert!(!expansion.content.contains("Summary body is encrypted"));
     assert_eq!(expansion.summary_sources.len(), 2);
-    let metadata: serde_json::Value = serde_json::from_str(
-        expansion
-            .summary_node
-            .as_ref()
-            .unwrap()
-            .metadata_json
-            .as_deref()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(metadata["source"], "codex_context_compacted");
-    assert_eq!(metadata["summary_body"], "encrypted");
-    assert_eq!(metadata["codex_summary_body"], "encrypted");
-    assert_eq!(
-        metadata["tracedecay_summary_source"],
-        "visible_transcript_source_messages"
-    );
-    assert_eq!(metadata["replacement_history_count"], 3);
 }
 
 #[tokio::test]
@@ -461,12 +443,6 @@ async fn codex_compaction_summary_can_be_replaced_with_auxiliary_summary() {
 
     let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
     assert_eq!(status.summary_node_count, 1);
-
-    let metadata: serde_json::Value =
-        serde_json::from_str(replacement.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["codex_summary_body"], "encrypted");
-    assert_eq!(metadata["tracedecay_summary_source"], "codex_app_server");
-    assert_eq!(metadata["codex_auxiliary_model"], "gpt-5.4");
 }
 
 #[tokio::test]

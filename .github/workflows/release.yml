@@ -203,7 +203,7 @@ jobs:
           done
 
       # NOTE: the Homebrew tap (ScriptedAlchemy/homebrew-tap) is an external
-      # repo — the old Formula/tokensave.rb there must be removed/renamed
+      # repo — the previous formula there must be removed/renamed
       # separately; this step only writes the new Formula/tracedecay.rb.
       - name: Update formula
         env:
@@ -245,7 +245,6 @@ jobs:
 
           cd tap
           # Clean up the legacy pre-rebrand formula if it still exists.
-          git rm -f --ignore-unmatch Formula/tokensave.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/tracedecay.rb
@@ -275,7 +274,7 @@ jobs:
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
       # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
-      # repo — the old bucket/tokensave.json there must be removed separately;
+      # repo — the previous bucket manifest there must be removed separately;
       # this step only writes the new bucket/tracedecay.json.
       - name: Update Scoop manifest
         env:
@@ -316,7 +315,6 @@ jobs:
           mkdir -p bucket
           cp ../tracedecay.json bucket/tracedecay.json
           # Clean up legacy pre-rebrand manifests (root-level and bucket/).
-          git rm -f --ignore-unmatch tokensave.json bucket/tokensave.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add bucket/tracedecay.json

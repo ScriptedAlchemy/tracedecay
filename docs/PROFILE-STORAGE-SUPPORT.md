@@ -10,7 +10,7 @@ User-level project storage is the default:
 
 - New projects resolve to profile-sharded stores such as `~/.tracedecay/projects/<project_id>/`.
 - Repo-local `.tracedecay/` is used only for explicit local installs or legacy projects.
-- Legacy projects with `.tokensave/` continue to use that directory in place when `.tracedecay/` is absent.
+- Legacy projects with `.tracedecay/` continue to use that directory in place when `.tracedecay/` is absent.
 - `~/.tracedecay/global.db` remains user-level accounting/registry state, not the canonical graph DB.
 
 Profile-sharded stores contain graph DBs, sessions, payloads, response handles, branch DBs, and dashboard sidecars. Hermes agents use the same user-level project store as other adapters; unpinned Hermes profiles use the profile home as their project identity.
@@ -42,7 +42,7 @@ Migration and storage-status tests should share fixture builders instead of reim
 Reusable fixtures should cover:
 
 - Repo-local `.tracedecay/` stores with graph DB, sessions DB, branch metadata, response handles, and dashboard sidecars.
-- Legacy `.tokensave/` stores that remain active in place.
+- Legacy `.tracedecay/` stores that remain active in place.
 - Profile-sharded code-project stores with a repo enrollment marker and private profile shard.
 - Hermes profile-home project identities resolved through the user-level store.
 - Stale or unregistered registry rows, moved repos, worktrees, symlinked roots, dirty sentinels, sync locks, and `.branch-add.lock`.

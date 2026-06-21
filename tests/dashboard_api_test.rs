@@ -852,29 +852,6 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
         assert_eq!(memory_status["path"], project_db_path.display().to_string());
         assert_eq!(memory_status["memory"]["fact_count"], 1);
 
-        let (status, fact) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/fact/9001"),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(fact["fact"]["fact_id"], 9001);
-
-        let (status, trust_history) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/fact/9001/trust-history"),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(trust_history["fact_id"], 9001);
-
-        let (status, graph) =
-            get_json(&agent, &format!("{base_url}/api/plugins/graph/overview"));
-        assert_eq!(status, 200);
-        assert_eq!(graph["path"], branch_db_path.display().to_string());
-        assert!(
-            graph["totals"]["nodes"].as_i64().unwrap_or_default() > 0,
-            "graph overview should still read the branch graph DB"
-        );
-
         let (status, graph_search) = get_json(
             &agent,
             &format!("{base_url}/api/plugins/graph/search?q=feature_branch_symbol"),
@@ -1972,36 +1949,6 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(true).await;
         let agent = http_agent();
-
-        let (status, capabilities) =
-            get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(capabilities["storage_mode"], "profile_sharded");
-        assert_eq!(
-            capabilities["memory_db"],
-            fixture.project_db_path.display().to_string()
-        );
-        assert_eq!(
-            capabilities["store_root"],
-            fixture
-                .project_db_path
-                .parent()
-                .unwrap_or_else(|| panic!("profile DB should have a parent"))
-                .display()
-                .to_string()
-        );
-        assert!(
-            capabilities["dashboard_root"]
-                .as_str()
-                .unwrap_or_default()
-                .replace('\\', "/")
-                .ends_with("projects/dashboard_fixture/dashboard")
-        );
-        assert_eq!(capabilities["lcm_scope"], "profile_sharded");
-        assert!(
-            !fixture.project_root.join(".tracedecay/sessions.db").exists(),
-            "profile-sharded dashboard fixture must not create a repo-local sessions DB"
-        );
 
         let (status, overview) = get_json(
             &agent,

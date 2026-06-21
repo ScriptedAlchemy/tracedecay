@@ -83,12 +83,17 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     )
     .unwrap();
 
-    let fake_bin = tmp.path().join("cursor-agent-fake");
-    std::fs::write(
-        &fake_bin,
-        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n",
-    )
-    .unwrap();
+    let fake_bin = tmp.path().join(if cfg!(windows) {
+        "cursor-agent-fake.cmd"
+    } else {
+        "cursor-agent-fake"
+    });
+    let fake_body = if cfg!(windows) {
+        "@echo off\r\necho Cursor auxiliary summary: keep compaction summaries in LCM.\r\n"
+    } else {
+        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n"
+    };
+    std::fs::write(&fake_bin, fake_body).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -114,7 +119,7 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     };
 
     let outcome = cursor_pre_compact_for_event_with_config(&event.to_string(), &config).await;
-    assert_eq!(outcome.status, "ok");
+    assert_eq!(outcome.status, "ok", "{}", outcome.reason);
     assert_eq!(outcome.summary_nodes_created, 1);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -152,8 +157,21 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
 }
 
 #[tokio::test]
+// Intentional: this test asserts the resolved profile session DB path, so it
+// pins process-wide profile env while opening and checking that path.
+#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile = tmp.path().join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir(project.join(".tracedecay")).unwrap();
@@ -1085,26 +1103,32 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 }
 
 #[tokio::test]
-async fn cursor_sweep_skips_projects_without_tracedecay() {
+// Intentional: this test pins process-wide profile storage while the Cursor
+// sweep resolves its project session DB.
+#[allow(clippy::await_holding_lock)]
+async fn cursor_sweep_ingests_profile_stored_project_without_local_marker() {
     let tmp = TempDir::new().unwrap();
-    let scratch = init_project(&tmp);
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile = tmp.path().join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
     let home = tmp.path().join("home");
-    let unindexed = tmp.path().join("unindexed");
-    std::fs::create_dir_all(&unindexed).unwrap();
-    write_sweep_fixture(&home, &unindexed);
+    let project = tmp.path().join("unindexed");
+    std::fs::create_dir_all(&project).unwrap();
+    write_sweep_fixture(&home, &project);
 
-    let db = open_project_session_db(&scratch).await.unwrap();
+    let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let skipped = ingest_source(&db, &sweep, &unindexed, None).await;
-    assert_eq!(skipped.sessions_upserted, 0);
-    assert_eq!(skipped.messages_upserted, 0);
-
-    // Once the project is indexed, the same sweep picks its transcripts up.
-    std::fs::create_dir_all(unindexed.join(".tracedecay")).unwrap();
-    std::fs::write(unindexed.join(".tracedecay/tracedecay.db"), "").unwrap();
-    let indexed = ingest_source(&db, &sweep, &unindexed, None).await;
+    let indexed = ingest_source(&db, &sweep, &project, None).await;
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
+    assert!(!project.join(".tracedecay").exists());
 }
 
 #[tokio::test]

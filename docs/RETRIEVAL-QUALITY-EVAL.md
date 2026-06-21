@@ -56,7 +56,7 @@ ranking function:
 `extract_entities` (`entities.rs:13-39`) captures five shapes:
 - quoted spans (`"..."` / `'...'`),
 - `aka`/`also known as` aliases (`entities.rs:64-105`),
-- code tokens that look like file paths, `::` Rust symbols, or `tracedecay_`/`tokensave_` tool
+- code tokens that look like file paths, `::` Rust symbols, or `tracedecay_`/`tracedecay_` tool
   names (`entities.rs:107-119, 217-238`),
 - **multi-word capitalized sequences** — requires **≥2 consecutive capitalized words**
   (`extract_capitalized_names` / `push_capitalized_sequence`, `entities.rs:121-151`),

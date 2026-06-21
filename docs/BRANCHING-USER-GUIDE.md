@@ -35,7 +35,7 @@ which branches have their own database. In repo-local mode, the storage layout l
     release_3_4.db
 ```
 
-Projects indexed before the rebrand may still use a legacy `.tokensave/` directory
+Projects indexed before the rebrand may still use a legacy `.tracedecay/` directory
 with the same layout; it is honored as a fallback.
 
 Profile-backed projects keep the same logical layout in their profile shard. The repository may contain only an enrollment marker, while `branch-meta.json`, `tracedecay.db`, and `branches/*.db` live under the resolved store root.

@@ -1,14 +1,14 @@
 # Daemon Mode Implementation Plan
 
-> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated planning artifact keeps the TokenSave-era names it was written with.
+> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated planning artifact keeps the TraceDecay-era names it was written with.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A background daemon that watches all tracked tokensave projects for file changes and automatically runs incremental syncs.
+**Goal:** A background daemon that watches all tracked tracedecay projects for file changes and automatically runs incremental syncs.
 
-**Architecture:** A new `tokensave daemon` subcommand backed by `src/daemon.rs`. Uses `notify` for filesystem watching, tokio timers for per-project debounce, and `daemon-kit` for cross-platform daemonization (fork on Unix via daemonize2, Windows Service via windows-service), PID file management, and service installation (launchd/systemd/Windows Service). Discovers projects from the global DB, re-polls every 60s for new ones.
+**Architecture:** A new `tracedecay daemon` subcommand backed by `src/daemon.rs`. Uses `notify` for filesystem watching, tokio timers for per-project debounce, and `daemon-kit` for cross-platform daemonization (fork on Unix via daemonize2, Windows Service via windows-service), PID file management, and service installation (launchd/systemd/Windows Service). Discovers projects from the global DB, re-polls every 60s for new ones.
 
-**Tech Stack:** Rust, `daemon-kit` (cross-platform daemon/service), `notify` v7 (file watcher), tokio (async runtime, timers), existing `TokenSave::sync()`, existing `GlobalDb`.
+**Tech Stack:** Rust, `daemon-kit` (cross-platform daemon/service), `notify` v7 (file watcher), tokio (async runtime, timers), existing `TraceDecay::sync()`, existing `GlobalDb`.
 
 ---
 
@@ -132,7 +132,7 @@ feat: add GlobalDb::list_project_paths()
 - [ ] **Step 1: Create daemon.rs with duration parser and daemon-kit Daemon instance**
 
 ```rust
-//! Background daemon that watches all tracked tokensave projects for file
+//! Background daemon that watches all tracked tracedecay projects for file
 //! changes and runs incremental syncs automatically.
 
 use std::path::PathBuf;
@@ -140,7 +140,7 @@ use std::time::Duration;
 
 use daemon_kit::{Daemon, DaemonConfig};
 
-use crate::errors::{Result, TokenSaveError};
+use crate::errors::{Result, TraceDecayError};
 
 /// Parse a human-readable duration string like "15s" or "1m" into a Duration.
 /// Returns None if the format is unrecognized.
@@ -155,20 +155,20 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     }
 }
 
-/// Build the daemon-kit Daemon instance with tokensave paths.
-fn build_daemon() -> std::result::Result<Daemon, TokenSaveError> {
-    let home = dirs::home_dir().ok_or_else(|| TokenSaveError::Config {
+/// Build the daemon-kit Daemon instance with tracedecay paths.
+fn build_daemon() -> std::result::Result<Daemon, TraceDecayError> {
+    let home = dirs::home_dir().ok_or_else(|| TraceDecayError::Config {
         message: "cannot determine home directory".to_string(),
     })?;
-    let ts_dir = home.join(".tokensave");
-    let bin = crate::agents::which_tokensave().unwrap_or_else(|| "tokensave".to_string());
+    let ts_dir = home.join(".tracedecay");
+    let bin = crate::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
 
-    let config = DaemonConfig::new("tokensave-daemon")
+    let config = DaemonConfig::new("tracedecay-daemon")
         .pid_dir(&ts_dir)
         .log_file(ts_dir.join("daemon.log"))
         .executable(PathBuf::from(bin))
         .service_args(vec!["daemon".to_string(), "--foreground".to_string()])
-        .description("tokensave file watcher daemon");
+        .description("tracedecay file watcher daemon");
 
     Ok(Daemon::new(config))
 }
@@ -254,7 +254,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 
 /// Directories to ignore inside watched projects.
 const IGNORED_DIRS: &[&str] = &[
-    ".tokensave", ".git", "node_modules", "target", ".build",
+    ".tracedecay", ".git", "node_modules", "target", ".build",
     "__pycache__", ".next", "dist", "build", ".cache",
 ];
 
@@ -262,7 +262,7 @@ const IGNORED_DIRS: &[&str] = &[
 /// a shutdown signal is received.
 pub async fn run(foreground: bool) -> Result<()> {
     if let Some(pid) = running_daemon_pid() {
-        return Err(TokenSaveError::Config {
+        return Err(TraceDecayError::Config {
             message: format!("daemon already running (PID: {pid})"),
         });
     }
@@ -380,7 +380,7 @@ async fn discover_projects() -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|s| {
             let p = PathBuf::from(&s);
-            if p.is_dir() && crate::tokensave::TokenSave::is_initialized(&p) {
+            if p.is_dir() && crate::tracedecay::TraceDecay::is_initialized(&p) {
                 Some(p)
             } else {
                 None
@@ -423,7 +423,7 @@ fn create_watcher(project_root: &Path, tx: mpsc::Sender<PathBuf>) -> Option<Reco
 /// Run an incremental sync on a single project. Best-effort.
 async fn sync_project(project_root: &Path) {
     let start = std::time::Instant::now();
-    let Ok(cg) = crate::tokensave::TokenSave::open(project_root).await else {
+    let Ok(cg) = crate::tracedecay::TraceDecay::open(project_root).await else {
         daemon_log(&format!("failed to open {}", project_root.display()));
         return;
     };
@@ -538,7 +538,7 @@ pub async fn run(foreground: bool) -> Result<()> {
                 })
             })
         })
-        .map_err(|e| TokenSaveError::Config {
+        .map_err(|e| TraceDecayError::Config {
             message: format!("daemon error: {e}"),
         })
 }
@@ -546,10 +546,10 @@ pub async fn run(foreground: bool) -> Result<()> {
 /// Stop the running daemon.
 pub fn stop() -> Result<()> {
     let daemon = build_daemon()?;
-    daemon.stop().map_err(|e| TokenSaveError::Config {
+    daemon.stop().map_err(|e| TraceDecayError::Config {
         message: format!("{e}"),
     })?;
-    eprintln!("tokensave daemon stopped");
+    eprintln!("tracedecay daemon stopped");
     Ok(())
 }
 
@@ -557,11 +557,11 @@ pub fn stop() -> Result<()> {
 pub fn status() -> i32 {
     match running_daemon_pid() {
         Some(pid) => {
-            eprintln!("tokensave daemon is running (PID: {pid})");
+            eprintln!("tracedecay daemon is running (PID: {pid})");
             0
         }
         None => {
-            eprintln!("tokensave daemon is not running");
+            eprintln!("tracedecay daemon is not running");
             1
         }
     }
@@ -570,7 +570,7 @@ pub fn status() -> i32 {
 /// Install autostart service (launchd/systemd/Windows Service).
 pub fn enable_autostart() -> Result<()> {
     let daemon = build_daemon()?;
-    daemon.install_service().map_err(|e| TokenSaveError::Config {
+    daemon.install_service().map_err(|e| TraceDecayError::Config {
         message: format!("{e}"),
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Autostart service installed");
@@ -580,7 +580,7 @@ pub fn enable_autostart() -> Result<()> {
 /// Remove autostart service.
 pub fn disable_autostart() -> Result<()> {
     let daemon = build_daemon()?;
-    daemon.uninstall_service().map_err(|e| TokenSaveError::Config {
+    daemon.uninstall_service().map_err(|e| TraceDecayError::Config {
         message: format!("{e}"),
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Autostart service removed");
@@ -635,16 +635,16 @@ In the `match command { ... }` block, add:
 ```rust
 Commands::Daemon { foreground, stop, status, enable_autostart, disable_autostart } => {
     if stop {
-        tokensave::daemon::stop()?;
+        tracedecay::daemon::stop()?;
     } else if status {
-        let code = tokensave::daemon::status();
+        let code = tracedecay::daemon::status();
         std::process::exit(code);
     } else if enable_autostart {
-        tokensave::daemon::enable_autostart()?;
+        tracedecay::daemon::enable_autostart()?;
     } else if disable_autostart {
-        tokensave::daemon::disable_autostart()?;
+        tracedecay::daemon::disable_autostart()?;
     } else {
-        tokensave::daemon::run(foreground).await?;
+        tracedecay::daemon::run(foreground).await?;
     }
 }
 ```
@@ -658,7 +658,7 @@ fn check_daemon(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mDaemon\x1b[0m");
     match crate::daemon::running_daemon_pid() {
         Some(pid) => dc.pass(&format!("Daemon is running (PID: {pid})")),
-        None => dc.warn("Daemon is not running — run `tokensave daemon` to start"),
+        None => dc.warn("Daemon is not running — run `tracedecay daemon` to start"),
     }
     if crate::daemon::is_autostart_enabled() {
         #[cfg(target_os = "macos")]
@@ -668,7 +668,7 @@ fn check_daemon(dc: &mut DoctorCounters) {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         dc.pass("Autostart enabled");
     } else {
-        dc.warn("Autostart not configured — run `tokensave daemon --enable-autostart`");
+        dc.warn("Autostart not configured — run `tracedecay daemon --enable-autostart`");
     }
 }
 ```
@@ -682,11 +682,11 @@ Run: `cargo build && cargo test`
 - [ ] **Step 5: Manual test**
 
 ```bash
-./target/debug/tokensave daemon --status
-./target/debug/tokensave daemon --foreground &
-./target/debug/tokensave daemon --status
-./target/debug/tokensave daemon --stop
-./target/debug/tokensave doctor | grep -A2 Daemon
+./target/debug/tracedecay daemon --status
+./target/debug/tracedecay daemon --foreground &
+./target/debug/tracedecay daemon --status
+./target/debug/tracedecay daemon --stop
+./target/debug/tracedecay doctor | grep -A2 Daemon
 ```
 
 - [ ] **Step 6: Commit**
@@ -706,10 +706,10 @@ feat: daemon CLI subcommand and doctor integration
 Add a new `## [Unreleased]` or version section with:
 ```markdown
 ### Added
-- **Daemon mode** — `tokensave daemon` watches all tracked projects for file changes and runs incremental syncs automatically; debounce configurable via `daemon_debounce` in `~/.tokensave/config.toml` (default `"15s"`)
-- **Daemon management** — `--stop`, `--status`, `--foreground` flags for process control; PID file at `~/.tokensave/daemon.pid`
+- **Daemon mode** — `tracedecay daemon` watches all tracked projects for file changes and runs incremental syncs automatically; debounce configurable via `daemon_debounce` in `~/.tracedecay/config.toml` (default `"15s"`)
+- **Daemon management** — `--stop`, `--status`, `--foreground` flags for process control; PID file at `~/.tracedecay/daemon.pid`
 - **Autostart service** — `--enable-autostart` / `--disable-autostart` generates and manages a launchd plist (macOS) or systemd user unit (Linux)
-- **Doctor daemon checks** — `tokensave doctor` now reports daemon running status and autostart configuration
+- **Doctor daemon checks** — `tracedecay doctor` now reports daemon running status and autostart configuration
 ```
 
 - [ ] **Step 2: Full test suite**

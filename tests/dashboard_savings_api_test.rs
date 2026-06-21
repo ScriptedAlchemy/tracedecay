@@ -1,6 +1,6 @@
 //! Integration tests for the Savings & Cost dashboard API
 //! (`/api/plugins/savings/*`), against a seeded temp global DB for accounting
-//! and a project-local session store for transcript cost rows.
+//! and the resolved project session store for transcript cost rows.
 //!
 //! Pricing runs offline (`TRACEDECAY_OFFLINE=1`) with the cache pointed at a
 //! nonexistent temp path, so the bundled fallback snapshot is exercised.

@@ -87,7 +87,6 @@ impl AgentIntegration for KiloIntegration {
         let json = load_jsonc_file(&config_path);
         let servers = json.get("mcp");
         servers.and_then(|v| v.get("tracedecay")).is_some()
-            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -140,11 +139,10 @@ fn uninstall_mcp_server(config_path: &Path) {
         let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
             return;
         };
-        let removed_new = servers.remove("tracedecay").is_some();
-        let removed_legacy = servers.remove("tokensave").is_some();
-        if (removed_new || removed_legacy) && backup_and_write_json(config_path, &settings) {
+        let removed = servers.remove("tracedecay").is_some();
+        if removed && backup_and_write_json(config_path, &settings) {
             eprintln!(
-                "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+                "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
                 config_path.display()
             );
         }
@@ -153,17 +151,16 @@ fn uninstall_mcp_server(config_path: &Path) {
 
     let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
         return;
     };
 
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
         return;
@@ -171,7 +168,7 @@ fn uninstall_mcp_server(config_path: &Path) {
 
     if backup_and_write_json(config_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             config_path.display()
         );
     }

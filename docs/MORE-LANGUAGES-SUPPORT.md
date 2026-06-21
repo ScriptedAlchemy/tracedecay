@@ -14,7 +14,7 @@ Each language needs 4 things:
 
 | # | What | Where | Pattern to follow |
 |---|------|-------|-------------------|
-| 1 | Tree-sitter grammar | `tokensave-large-treesitters` crate on crates.io | Add dep + register in `all_languages()` |
+| 1 | Tree-sitter grammar | `tracedecay-large-treesitters` crate on crates.io | Add dep + register in `all_languages()` |
 | 2 | Extractor | `src/extraction/{lang}_extractor.rs` (~400-700 lines) | Implement `LanguageExtractor` trait |
 | 3 | Wiring | `Cargo.toml` + `src/extraction/mod.rs` | Feature flag, `mod` decl, registry push |
 | 4 | Tests | `tests/fixtures/sample.{ext}` + `tests/{lang}_extraction_test.rs` | Sample file + extraction assertions |
@@ -31,7 +31,7 @@ pub trait LanguageExtractor: Send + Sync {
 
 ### Grammar sourcing
 
-- **Crate on crates.io:** Add as a dependency to `tokensave-large-treesitters` and register in `all_languages()`. This is the standard path.
+- **Crate on crates.io:** Add as a dependency to `tracedecay-large-treesitters` and register in `all_languages()`. This is the standard path.
 - **Vendor from C source:** If no Rust crate exists, compile the grammar's C source via `build.rs` (same pattern as `protobuf` and `cobol` in the bundled crate).
 - **No grammar at all:** Either write a regex-based extractor (skip tree-sitter) or wait for a community grammar.
 

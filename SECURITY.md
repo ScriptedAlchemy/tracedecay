@@ -26,7 +26,7 @@ When a vulnerability is found, the fix is shipped as a new release — there are
 
 ### What tracedecay stores
 
-tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tokensave/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
+tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tracedecay/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
 
 - Symbol names, signatures, and docstrings
 - File paths, sizes, and content hashes
@@ -37,7 +37,7 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-saved counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate tracedecayd counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
 
 ### Network access
 
@@ -49,7 +49,7 @@ Outbound connections are limited to:
 |-------------|---------|------|-------------|
 | `api.github.com` | Check for new releases | None (public API) | Silently ignored |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
-| `tokensave-counter.enzinol.workers.dev` | Aggregate token-saved counter (endpoint keeps its pre-rename name) | None | Silently ignored |
+| `tracedecay-counter.enzinol.workers.dev` | Aggregate tracedecayd counter (endpoint keeps its pre-rename name) | None | Silently ignored |
 | `raw.githubusercontent.com` | Fetch model pricing from [LiteLLM](https://github.com/BerriAI/litellm) | None (public file) | Falls back to embedded pricing |
 
 All best-effort network calls use short timeouts (1-5 seconds) and never block the CLI or MCP server. The pricing fetch (5s timeout) only runs during `tracedecay cost` and is cached for 24 hours at `~/.tracedecay/pricing.json`.
@@ -119,7 +119,7 @@ The Windows-elevation `unsafe` documented in earlier versions was removed alongs
 
 ## Best Practices
 
-- Add `.tracedecay/` (and, for projects indexed before the rename, `.tokensave/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
+- Add `.tracedecay/` (and, for projects indexed before the rename, `.tracedecay/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
 - If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.

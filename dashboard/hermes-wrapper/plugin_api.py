@@ -29,8 +29,7 @@ Configuration (environment always wins, then deploy-time defaults below):
   unpinned profile-scoped installs. Source-tree development falls back to the
   Hermes process cwd when no deploy-time default has been baked in.
 
-Legacy ``TOKENSAVE_*`` aliases remain accepted as fallbacks during the
-TraceDecay rebrand; ``TRACEDECAY_*`` wins when both are present.
+Use ``TRACEDECAY_*`` environment variables for runtime configuration.
 
 Hermes-only extension: ``POST /curation/llm-plan`` layers LLM-based curation
 (ported from the holographic_plus curator's one-shot review tier) on top of
@@ -90,8 +89,8 @@ _LISTENING_URL_RE = re.compile(r"https?://[^\s]+")
 
 
 def _env(name: str) -> str | None:
-    """Read TRACEDECAY_<name>, falling back to legacy TOKENSAVE_<name>."""
-    return os.environ.get(f"TRACEDECAY_{name}") or os.environ.get(f"TOKENSAVE_{name}")
+    """Read TRACEDECAY_<name>."""
+    return os.environ.get(f"TRACEDECAY_{name}")
 
 _SPAWN_TIMEOUT_SECONDS = 30.0
 _PROXY_TIMEOUT_SECONDS = 30.0
@@ -196,15 +195,11 @@ def _dashboard_env() -> dict[str, str]:
     `subprocess.Popen` inherits by default, but constructing the child env
     explicitly makes the Hermes profile contract visible and stable: the
     spawned Rust server must resolve `HERMES_HOME` and any `TRACEDECAY_*`
-    / legacy `TOKENSAVE_*` overrides exactly like the wrapper process did.
+    overrides exactly like the wrapper process did.
     """
     env = os.environ.copy()
     for key, value in os.environ.items():
-        if (
-            key == "HERMES_HOME"
-            or key.startswith("TRACEDECAY_")
-            or key.startswith("TOKENSAVE_")
-        ):
+        if key == "HERMES_HOME" or key.startswith("TRACEDECAY_"):
             env[key] = value
     return env
 
@@ -217,8 +212,7 @@ def _spawn_dashboard() -> str:
             status_code=503,
             detail=(
                 "tracedecay binary not found. Install tracedecay or set "
-                "TRACEDECAY_BIN / TRACEDECAY_DASHBOARD_URL "
-                "(legacy TOKENSAVE_* aliases are also accepted)."
+                "TRACEDECAY_BIN / TRACEDECAY_DASHBOARD_URL."
             ),
         )
     project = _project_root()

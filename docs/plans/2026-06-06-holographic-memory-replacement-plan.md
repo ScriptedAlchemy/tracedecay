@@ -2,19 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the current `tokensave` cross-session memory implementation with a Rust-native holographic fact memory backed by `amari-holographic`, SQLite, FTS5, trust scoring, and MCP tools inspired by Hermes Holographic.
+**Goal:** Replace the current `tracedecay` cross-session memory implementation with a Rust-native holographic fact memory backed by `amari-holographic`, SQLite, FTS5, trust scoring, and MCP tools inspired by Hermes Holographic.
 
-**Architecture:** Keep memory local to `.tokensave/tokensave.db`, but replace `memory_decisions` / `memory_code_areas` as the active model with a fact/entity store. Use `amari-holographic` for the VSA/HRR algebra, SQLite/FTS5 for durable metadata and lexical recall, and a Rust retrieval layer that blends FTS5, token overlap, holographic similarity, trust, and optional temporal decay. Existing memory tools become compatibility wrappers over the new fact store, while new first-class MCP tools expose add/search/probe/related/reason/contradict/update/remove/list/feedback/status behavior.
+**Architecture:** Keep memory local to `.tracedecay/tracedecay.db`, but replace `memory_decisions` / `memory_code_areas` as the active model with a fact/entity store. Use `amari-holographic` for the VSA/HRR algebra, SQLite/FTS5 for durable metadata and lexical recall, and a Rust retrieval layer that blends FTS5, token overlap, holographic similarity, trust, and optional temporal decay. Existing memory tools become compatibility wrappers over the new fact store, while new first-class MCP tools expose add/search/probe/related/reason/contradict/update/remove/list/feedback/status behavior.
 
-**Tech Stack:** Rust 2021, `libsql`, `serde`, `serde_json`, `sha2`, `amari-holographic`, `tokio`, FTS5, existing `tokensave` MCP handler patterns. Future Python interop can use PyO3/maturin for Rust-to-Python exports and `pyo3_bindgen` only when Rust needs generated bindings to existing Python modules.
+**Tech Stack:** Rust 2021, `libsql`, `serde`, `serde_json`, `sha2`, `amari-holographic`, `tokio`, FTS5, existing `tracedecay` MCP handler patterns. Future Python interop can use PyO3/maturin for Rust-to-Python exports and `pyo3_bindgen` only when Rust needs generated bindings to existing Python modules.
 
 ---
 
 ## Deep-Dive Findings
 
-The current memory system is intentionally small: `DecisionRecord` and `CodeAreaRecord` live in `src/tokensave.rs`; migrations create `memory_decisions`, `memory_code_areas`, and `memory_decisions_fts`; MCP definitions expose `tokensave_record_decision`, `tokensave_record_code_area`, and `tokensave_session_recall`; tests live in `tests/memory_test.rs` and `tests/mcp_handler_test.rs`.
+The current memory system is intentionally small: `DecisionRecord` and `CodeAreaRecord` live in `src/tracedecay.rs`; migrations create `memory_decisions`, `memory_code_areas`, and `memory_decisions_fts`; MCP definitions expose `tracedecay_record_decision`, `tracedecay_record_code_area`, and `tracedecay_session_recall`; tests live in `tests/memory_test.rs` and `tests/mcp_handler_test.rs`.
 
-Hermes Holographic is broader than the current `tokensave` memory model. It stores facts, entities, fact-entity links, trust scores, retrieval counters, optional HRR vectors, category memory banks, and FTS5 indexes. Its tool surface is `fact_store` with actions `add`, `search`, `probe`, `related`, `reason`, `contradict`, `update`, `remove`, and `list`, plus `fact_feedback` for helpful/unhelpful scoring.
+Hermes Holographic is broader than the current `tracedecay` memory model. It stores facts, entities, fact-entity links, trust scores, retrieval counters, optional HRR vectors, category memory banks, and FTS5 indexes. Its tool surface is `fact_store` with actions `add`, `search`, `probe`, `related`, `reason`, `contradict`, `update`, `remove`, and `list`, plus `fact_feedback` for helpful/unhelpful scoring.
 
 Hermes' Python HRR implementation uses deterministic SHA-256 phase atoms, phase-add binding, phase-subtract unbinding, circular-mean bundling, and phase cosine similarity. `amari-holographic` gives Rust-native binding, bundling, unbinding, similarity, `HolographicMemory`, `RetrievalResult`, `CapacityInfo`, and resonator cleanup, so the math should be adopted rather than ported.
 
@@ -34,7 +34,7 @@ The plan deliberately avoids a feature flag. Holographic memory becomes the only
 - Create `src/memory/trust.rs`: trust clamping, feedback deltas, retrieval counters, and temporal decay math.
 - Modify `src/lib.rs`: export `memory`.
 - Modify `src/db/migrations.rs`: add v11 schema and fresh-schema tables/triggers.
-- Modify `src/tokensave.rs`: remove active decision/code-area memory methods, add fact memory facade methods, and keep compatibility wrappers.
+- Modify `src/tracedecay.rs`: remove active decision/code-area memory methods, add fact memory facade methods, and keep compatibility wrappers.
 - Modify `src/mcp/tools/definitions.rs`: add new holographic memory tool schemas and update old memory tool descriptions.
 - Modify `src/mcp/tools/handlers/memory.rs`: replace current handlers with fact-store handlers and wrappers.
 - Modify `src/mcp/tools/handlers/mod.rs`: dispatch new tool names.
@@ -124,13 +124,13 @@ relevance = (0.40 * fts_score) + (0.30 * jaccard_score) + (0.30 * holographic_sc
 score = relevance * trust_score * temporal_decay
 ```
 
-`retrieval_count` and `last_retrieved_at` update only for facts returned to the MCP caller. `min_trust` defaults to `0.3`, matching Hermes. `tokensave_memory_status` must report trust distribution buckets (`0.0-0.25`, `0.25-0.5`, `0.5-0.75`, `0.75-1.0`), feedback counts, and facts below the default recall threshold so later Hermes integration can decide when to prune, ask for confirmation, or mark memories stale.
+`retrieval_count` and `last_retrieved_at` update only for facts returned to the MCP caller. `min_trust` defaults to `0.3`, matching Hermes. `tracedecay_memory_status` must report trust distribution buckets (`0.0-0.25`, `0.25-0.5`, `0.5-0.75`, `0.75-1.0`), feedback counts, and facts below the default recall threshold so later Hermes integration can decide when to prune, ask for confirmation, or mark memories stale.
 
 ---
 
 ## Rust API Contract
 
-The implementation should expose these typed request/response structs from `src/memory/types.rs` and facade methods on `TokenSave`:
+The implementation should expose these typed request/response structs from `src/memory/types.rs` and facade methods on `TraceDecay`:
 
 ```rust
 pub struct AddFactRequest {
@@ -157,7 +157,7 @@ pub struct FeedbackRequest {
 }
 ```
 
-Required `TokenSave` facade methods:
+Required `TraceDecay` facade methods:
 
 ```rust
 add_fact(request) -> FactRecord
@@ -181,11 +181,11 @@ These APIs are intentionally close to Hermes' provider methods, but use typed Ru
 
 Add these first-class tools:
 
-- `tokensave_fact_store`: action-based tool matching Hermes semantics with actions `add`, `search`, `probe`, `related`, `reason`, `contradict`, `update`, `remove`, and `list`.
-- `tokensave_fact_feedback`: rate a fact as `helpful` or `unhelpful`.
-- `tokensave_memory_status`: report fact counts, entity counts, bank status, algebra name, dimension, estimated capacity, missing-vector count, and migration/backfill status.
+- `tracedecay_fact_store`: action-based tool matching Hermes semantics with actions `add`, `search`, `probe`, `related`, `reason`, `contradict`, `update`, `remove`, and `list`.
+- `tracedecay_fact_feedback`: rate a fact as `helpful` or `unhelpful`.
+- `tracedecay_memory_status`: report fact counts, entity counts, bank status, algebra name, dimension, estimated capacity, missing-vector count, and migration/backfill status.
 
-`tokensave_fact_store` input must accept the Hermes-compatible fields below. The tool name remains `tokensave_`-prefixed because the current tool registry asserts that all exposed MCP tools use that prefix.
+`tracedecay_fact_store` input must accept the Hermes-compatible fields below. The tool name remains `tracedecay_`-prefixed because the current tool registry asserts that all exposed MCP tools use that prefix.
 
 ```json
 {
@@ -206,9 +206,9 @@ Add these first-class tools:
 }
 ```
 
-`tokensave_fact_store` output must include `results` or `fact`, `count`, and, for ranked retrieval actions, per-result `score`, `trust_score`, `fts_score`, `jaccard_score`, `holographic_score`, and `why`. This is required for later Hermes integration and for debugging trust/ranking behavior.
+`tracedecay_fact_store` output must include `results` or `fact`, `count`, and, for ranked retrieval actions, per-result `score`, `trust_score`, `fts_score`, `jaccard_score`, `holographic_score`, and `why`. This is required for later Hermes integration and for debugging trust/ranking behavior.
 
-`tokensave_fact_feedback` input must accept:
+`tracedecay_fact_feedback` input must accept:
 
 ```json
 {
@@ -219,29 +219,29 @@ Add these first-class tools:
 }
 ```
 
-`tokensave_fact_feedback` output must include `fact_id`, `action`, `old_trust`, `new_trust`, `trust_delta`, `helpful_count`, `unhelpful_count`, and `event_id`.
+`tracedecay_fact_feedback` output must include `fact_id`, `action`, `old_trust`, `new_trust`, `trust_delta`, `helpful_count`, `unhelpful_count`, and `event_id`.
 
 Keep these compatibility wrappers:
 
-- `tokensave_record_decision`: writes a `decision` category fact.
-- `tokensave_record_code_area`: writes or updates a `code_area` category fact.
-- `tokensave_session_recall`: delegates to hybrid search/list and can include code-area facts.
+- `tracedecay_record_decision`: writes a `decision` category fact.
+- `tracedecay_record_code_area`: writes or updates a `code_area` category fact.
+- `tracedecay_session_recall`: delegates to hybrid search/list and can include code-area facts.
 
 ---
 
 ## Hermes Integration Contract
 
-Future Hermes integration should not read `.tokensave/tokensave.db` directly. It should call MCP tools or the typed Rust facade. The mapping is:
+Future Hermes integration should not read `.tracedecay/tracedecay.db` directly. It should call MCP tools or the typed Rust facade. The mapping is:
 
-- Hermes `fact_store(action="add")` -> `tokensave_fact_store { "action": "add", "source": "hermes", ... }`
-- Hermes `fact_store(action="search")` / provider `prefetch(query)` -> `tokensave_fact_store { "action": "search", "query": query, "min_trust": 0.3, "limit": 5 }`
-- Hermes `fact_store(action="probe")` -> `tokensave_fact_store { "action": "probe", "entity": entity }`
-- Hermes `fact_store(action="related")` -> `tokensave_fact_store { "action": "related", "entity": entity }`
-- Hermes `fact_store(action="reason")` -> `tokensave_fact_store { "action": "reason", "entities": entities }`
-- Hermes `fact_store(action="contradict")` -> `tokensave_fact_store { "action": "contradict", "threshold": 0.3 }`
-- Hermes `fact_feedback(action="helpful"|"unhelpful")` -> `tokensave_fact_feedback`
-- Hermes `system_prompt_block()` -> `tokensave_memory_status` summarized by the integration layer.
-- Hermes `on_memory_write(action="add", target, content)` -> `tokensave_fact_store { "action": "add", "category": "user_pref"|"general", "source": "hermes" }`
+- Hermes `fact_store(action="add")` -> `tracedecay_fact_store { "action": "add", "source": "hermes", ... }`
+- Hermes `fact_store(action="search")` / provider `prefetch(query)` -> `tracedecay_fact_store { "action": "search", "query": query, "min_trust": 0.3, "limit": 5 }`
+- Hermes `fact_store(action="probe")` -> `tracedecay_fact_store { "action": "probe", "entity": entity }`
+- Hermes `fact_store(action="related")` -> `tracedecay_fact_store { "action": "related", "entity": entity }`
+- Hermes `fact_store(action="reason")` -> `tracedecay_fact_store { "action": "reason", "entities": entities }`
+- Hermes `fact_store(action="contradict")` -> `tracedecay_fact_store { "action": "contradict", "threshold": 0.3 }`
+- Hermes `fact_feedback(action="helpful"|"unhelpful")` -> `tracedecay_fact_feedback`
+- Hermes `system_prompt_block()` -> `tracedecay_memory_status` summarized by the integration layer.
+- Hermes `on_memory_write(action="add", target, content)` -> `tracedecay_fact_store { "action": "add", "category": "user_pref"|"general", "source": "hermes" }`
 
 The MCP outputs must be JSON-serializable, must not expose raw vector bytes, and must include stable `fact_id` values so Hermes can call feedback after using a memory. This is the key integration invariant: every recalled fact can be rated later.
 
@@ -249,19 +249,19 @@ The MCP outputs must be JSON-serializable, must not expose raw vector bytes, and
 
 ## Future Python Interop Contract
 
-Python interoperability should remain outside the core memory replacement path so `tokensave` does not require a Python runtime to build or run. If future Hermes integration needs Python packaging, add a separate wrapper crate or package rather than putting PyO3 into the main binary.
+Python interoperability should remain outside the core memory replacement path so `tracedecay` does not require a Python runtime to build or run. If future Hermes integration needs Python packaging, add a separate wrapper crate or package rather than putting PyO3 into the main binary.
 
 There are two distinct directions:
 
-- Rust exposed to Python: use PyO3 plus maturin in a future `tokensave-py` wrapper that calls the typed Rust memory facade (`add_fact`, `search_facts`, `record_fact_feedback`, `memory_status`). This is the right path if Hermes wants to import `tokensave` as a Python module.
+- Rust exposed to Python: use PyO3 plus maturin in a future `tracedecay-py` wrapper that calls the typed Rust memory facade (`add_fact`, `search_facts`, `record_fact_feedback`, `memory_status`). This is the right path if Hermes wants to import `tracedecay` as a Python module.
 - Python exposed to Rust: use `pyo3_bindgen` as a build dependency only in a bridge/test crate when Rust needs generated bindings to an existing Python module, such as a Hermes provider shim or compatibility harness. `pyo3_bindgen` generates Rust bindings to Python modules; it does not by itself package Rust APIs for Python callers.
 
 Future wrapper APIs must preserve the same contract as MCP: stable `fact_id`, ranked score components, trust fields, feedback event IDs, and no raw vector bytes in normal responses.
 
 Potential future files:
 
-- `crates/tokensave-py/Cargo.toml`: PyO3/maturin wrapper crate.
-- `crates/tokensave-py/src/lib.rs`: Python module exports for fact store, feedback, and status.
+- `crates/tracedecay-py/Cargo.toml`: PyO3/maturin wrapper crate.
+- `crates/tracedecay-py/src/lib.rs`: Python module exports for fact store, feedback, and status.
 - `crates/hermes-bridge/build.rs`: optional `pyo3_bindgen` generation for importing Hermes Python contracts during compatibility tests.
 - `tests/hermes_bridge_contract_test.rs`: verifies Python-facing and MCP-facing payloads stay equivalent.
 
@@ -299,7 +299,7 @@ Potential future files:
 
 - [ ] 18. Create `src/memory/entities.rs` with `normalize_entity_name` that lowercases, trims whitespace, collapses repeated spaces, and preserves code identifiers.
 - [ ] 19. Implement Hermes-style entity extraction for capitalized multi-word names, double-quoted strings, single-quoted strings, and `aka` / `also known as` patterns.
-- [ ] 20. Add code-aware extraction for project memory: file paths like `src/foo.rs`, symbol-like tokens like `TokenSave::init`, and tool names like `tokensave_context`.
+- [ ] 20. Add code-aware extraction for project memory: file paths like `src/foo.rs`, symbol-like tokens like `TraceDecay::init`, and tool names like `tracedecay_context`.
 - [ ] 21. Deduplicate extracted entities by normalized name while preserving first-seen display names.
 - [ ] 22. Add tests for quoted entities, aliases, capitalized names, file paths, Rust symbols, MCP tool names, and deduplication order.
 
@@ -315,7 +315,7 @@ Potential future files:
 
 ### Phase 6: SQLite Store Layer
 
-- [ ] 30. Create `src/memory/store.rs` with `MemoryStore<'a>` or a lightweight facade around `libsql::Connection` obtained from `TokenSave`.
+- [ ] 30. Create `src/memory/store.rs` with `MemoryStore<'a>` or a lightweight facade around `libsql::Connection` obtained from `TraceDecay`.
 - [ ] 31. Implement `add_fact(AddFactRequest, default_trust)` with duplicate detection by `content`, explicit `source`, JSON `metadata`, explicit entities, extracted entities, and initial `trust_score`.
 - [ ] 32. Implement entity resolution by `normalized_name`, alias JSON matching, and insertion into `memory_fact_entities`.
 - [ ] 33. Implement `update_fact(UpdateFactRequest)` for content, category, tags, source, metadata, trust delta, and entity relinking when content changes.
@@ -341,9 +341,9 @@ Potential future files:
 - [ ] 47. Implement `contradict(category, threshold, limit)` using entity overlap plus low holographic/content similarity, capped at a safe comparison limit.
 - [ ] 48. Add retrieval tests for FTS operator sanitization, Jaccard reranking, holographic probe, multi-entity reason, related, contradiction, min-trust filtering, trust-weighted ordering, score-component output, and retrieval counters.
 
-### Phase 9: TokenSave Facade
+### Phase 9: TraceDecay Facade
 
-- [ ] 49. Add new typed `TokenSave` methods: `add_fact(AddFactRequest)`, `search_facts(SearchFactsRequest)`, `probe_entity`, `related_facts`, `reason_facts`, `contradict_facts`, `update_fact(UpdateFactRequest)`, `remove_fact`, `list_facts`, `record_fact_feedback(FeedbackRequest)`, and `memory_status`.
+- [ ] 49. Add new typed `TraceDecay` methods: `add_fact(AddFactRequest)`, `search_facts(SearchFactsRequest)`, `probe_entity`, `related_facts`, `reason_facts`, `contradict_facts`, `update_fact(UpdateFactRequest)`, `remove_fact`, `list_facts`, `record_fact_feedback(FeedbackRequest)`, and `memory_status`.
 - [ ] 50. Replace `record_decision` so it writes a `decision` fact, with `reason`, `files`, and `tags` incorporated into tags/entities/content in a predictable way.
 - [ ] 51. Replace `record_code_area` so it writes or updates a `code_area` fact keyed by path and preserves touch-count semantics through tags or metadata if needed for old callers.
 - [ ] 52. Replace `session_recall` so it delegates to `search_facts` when `query` exists and `list_facts` when omitted, preserving `since` and `limit` behavior where practical.
@@ -351,14 +351,14 @@ Potential future files:
 
 ### Phase 10: MCP Tooling
 
-- [ ] 54. Add `tokensave_fact_store`, `tokensave_fact_feedback`, and `tokensave_memory_status` definitions in `src/mcp/tools/definitions.rs` with exact JSON schemas matching the MCP Surface section, Hermes-compatible field names, and clear guidance to use `probe` or `reason` before answering user/project-memory questions.
-- [ ] 55. Rewrite `src/mcp/tools/handlers/memory.rs` to parse the action enum, validate required fields per action, call the new `TokenSave` facade, and format JSON output through the existing `ToolResult` envelope.
+- [ ] 54. Add `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status` definitions in `src/mcp/tools/definitions.rs` with exact JSON schemas matching the MCP Surface section, Hermes-compatible field names, and clear guidance to use `probe` or `reason` before answering user/project-memory questions.
+- [ ] 55. Rewrite `src/mcp/tools/handlers/memory.rs` to parse the action enum, validate required fields per action, call the new `TraceDecay` facade, and format JSON output through the existing `ToolResult` envelope.
 - [ ] 56. Update `src/mcp/tools/handlers/mod.rs` dispatch and `src/tool_command.rs` grouping for all new memory tools.
-- [ ] 57. Add MCP handler tests for every `tokensave_fact_store` action, `tokensave_fact_feedback` helpful/unhelpful paths, feedback event fields, `tokensave_memory_status` trust distribution fields, malformed input, Hermes-compatible payload names, and the three compatibility wrappers.
+- [ ] 57. Add MCP handler tests for every `tracedecay_fact_store` action, `tracedecay_fact_feedback` helpful/unhelpful paths, feedback event fields, `tracedecay_memory_status` trust distribution fields, malformed input, Hermes-compatible payload names, and the three compatibility wrappers.
 
 ### Phase 11: Documentation And Validation
 
-- [ ] 58. Update `README.md`, `docs/USER-GUIDE.md`, and `src/mcp/server.rs` schema notes to describe the holographic fact store, trust scoring, entity recall, compositional reasoning, contradiction detection, compatibility wrappers, the Hermes integration mapping from `fact_store` / `fact_feedback` to `tokensave_` MCP tools, and the future Python interop split between PyO3/maturin and `pyo3_bindgen`.
+- [ ] 58. Update `README.md`, `docs/USER-GUIDE.md`, and `src/mcp/server.rs` schema notes to describe the holographic fact store, trust scoring, entity recall, compositional reasoning, contradiction detection, compatibility wrappers, the Hermes integration mapping from `fact_store` / `fact_feedback` to `tracedecay_` MCP tools, and the future Python interop split between PyO3/maturin and `pyo3_bindgen`.
 - [ ] 59. Run focused validation: `cargo test memory_test`, `cargo test mcp_handler_test`, `cargo test migration_test`, and `cargo check`.
 - [ ] 60. Run full validation with `cargo test`, review output for performance or flaky timing issues, then prepare a follow-up implementation summary and migration notes for users.
 

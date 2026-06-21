@@ -37,9 +37,7 @@ fn vibe_prompt_path(home: &Path) -> std::path::PathBuf {
 
 /// The TOML marker that identifies a tracedecay MCP server entry.
 const TOML_MARKER: &str = "name = \"tracedecay\"";
-const LEGACY_TOML_MARKER: &str = "name = \"tokensave\"";
 const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
-const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 impl AgentIntegration for VibeIntegration {
     fn name(&self) -> &'static str {
@@ -109,7 +107,7 @@ impl AgentIntegration for VibeIntegration {
             return false;
         }
         let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
-        contents.contains(TOML_MARKER) || contents.contains(LEGACY_TOML_MARKER)
+        contents.contains(TOML_MARKER)
     }
 }
 
@@ -230,9 +228,9 @@ fn uninstall_mcp_server(config_path: &Path) {
         return;
     };
 
-    if !contents.contains(TOML_MARKER) && !contents.contains(LEGACY_TOML_MARKER) {
+    if !contents.contains(TOML_MARKER) {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
         return;
@@ -262,7 +260,7 @@ fn uninstall_mcp_server(config_path: &Path) {
             }
         }
 
-        if line.contains(TOML_MARKER) || line.contains(LEGACY_TOML_MARKER) {
+        if line.contains(TOML_MARKER) {
             // This line is inside the tracedecay block — remove it and
             // the preceding [[mcp_servers]] header.
             // Pop the header we already pushed.
@@ -305,7 +303,7 @@ fn uninstall_mcp_server(config_path: &Path) {
     } else {
         std::fs::write(config_path, &new_contents).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             config_path.display()
         );
     }
@@ -319,15 +317,11 @@ fn uninstall_prompt_rules(prompt_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(prompt_path) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
-        eprintln!("  Vibe prompt does not contain tracedecay/tokensave rules, skipping");
+    if !contents.contains("tracedecay") {
+        eprintln!("  Vibe prompt does not contain tracedecay rules, skipping");
         return;
     }
-    let marker = if contents.contains(PROMPT_RULE_MARKER) {
-        PROMPT_RULE_MARKER
-    } else {
-        LEGACY_PROMPT_RULE_MARKER
-    };
+    let marker = PROMPT_RULE_MARKER;
     let Some(start) = contents.find(marker) else {
         return;
     };

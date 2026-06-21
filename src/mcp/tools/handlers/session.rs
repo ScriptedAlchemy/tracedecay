@@ -897,7 +897,7 @@ fn lcm_unavailable() -> ToolResult {
         None,
         &json!({
             "status": "unavailable",
-            "message": "could not open project-local tracedecay session database",
+            "message": "could not open active project tracedecay session database",
         }),
     )
 }
@@ -934,7 +934,7 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
     lcm_scoped_unavailable(
         storage_scope,
         format!(
-            "{storage_scope} LCM status storage is not available from the project-local handler"
+            "{storage_scope} LCM status storage is not available from the active project handler"
         ),
     )
 }
@@ -1326,7 +1326,7 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
             Some(cg.project_root()),
             &json!({
                 "status": "unavailable",
-                "message": "could not resolve project-local tracedecay session database",
+                "message": "could not resolve active project tracedecay session database",
                 "results": [],
                 "count": 0
             }),
@@ -1337,7 +1337,7 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
             Some(cg.project_root()),
             &json!({
                 "status": "unavailable",
-                "message": "could not open project-local tracedecay session database",
+                "message": "could not open active project tracedecay session database",
                 "results": [],
                 "count": 0
             }),

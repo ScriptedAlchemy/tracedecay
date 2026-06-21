@@ -35,10 +35,6 @@ fn cli_plugin_path(home: &Path) -> std::path::PathBuf {
     home.join(".gemini/antigravity-cli/plugins/tracedecay.json")
 }
 
-fn legacy_cli_plugin_path(home: &Path) -> std::path::PathBuf {
-    home.join(".gemini/antigravity-cli/plugins/tokensave.json")
-}
-
 impl AgentIntegration for AntigravityIntegration {
     fn name(&self) -> &'static str {
         "Antigravity"
@@ -109,7 +105,6 @@ impl AgentIntegration for AntigravityIntegration {
         let mcp_path = mcp_config_path(&ctx.home);
         uninstall_mcp_server(&mcp_path);
         uninstall_cli_plugin(&cli_plugin_path(&ctx.home));
-        uninstall_cli_plugin(&legacy_cli_plugin_path(&ctx.home));
 
         eprintln!();
         eprintln!("Uninstall complete. Tracedecay has been removed from Antigravity.");
@@ -137,23 +132,20 @@ impl AgentIntegration for AntigravityIntegration {
             if mcp_path.exists() {
                 let servers = load_json_file(&mcp_path).get("mcpServers").cloned();
                 servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
-                    || servers.as_ref().and_then(|v| v.get("tokensave")).is_some()
             } else {
                 false
             }
         };
         let cli_ok = {
             let plugin_path = cli_plugin_path(home);
-            let legacy_path = legacy_cli_plugin_path(home);
             let has_entry = |path: &std::path::Path| {
                 if !path.exists() {
                     return false;
                 }
                 let servers = load_json_file(path).get("mcpServers").cloned();
                 servers.as_ref().and_then(|v| v.get("tracedecay")).is_some()
-                    || servers.as_ref().and_then(|v| v.get("tokensave")).is_some()
             };
-            has_entry(&plugin_path) || has_entry(&legacy_path)
+            has_entry(&plugin_path)
         };
         ide_ok || cli_ok
     }
@@ -181,17 +173,16 @@ fn uninstall_mcp_server(mcp_path: &Path) {
         .and_then(|v| v.as_object_mut())
     else {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             mcp_path.display()
         );
         return;
     };
 
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             mcp_path.display()
         );
         return;
@@ -212,7 +203,7 @@ fn uninstall_mcp_server(mcp_path: &Path) {
         let pretty = serde_json::to_string_pretty(&settings).unwrap_or_default();
         std::fs::write(mcp_path, format!("{pretty}\n")).ok();
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             mcp_path.display()
         );
     }

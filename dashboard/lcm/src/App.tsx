@@ -54,7 +54,7 @@ function missingStoreTitle(scope: string | undefined): string {
 
 function emptyStoreCopy(scope: string | undefined): string {
   if (scope === "project_local") {
-    return "This project's session store (.tracedecay/sessions.db) exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
+    return "This project's active session store exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
   }
   if (scope === "profile_sharded") {
     return "This project's user-level session store exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";

@@ -13,7 +13,7 @@ implementation. It builds on two prior audits in this repo:
 - `docs/MEMORY-STORAGE-GROWTH-AUDIT.md` — per-fact cost, capacity math, unbounded-growth paths.
 
 Real numbers below are measured against the live checkout DB
-(`.tracedecay/tokensave.db`, 78.5 MB total; **129 facts**, memory subsystem
+(`.tracedecay/tracedecay.db`, 78.5 MB total; **129 facts**, memory subsystem
 **2.43 MiB**) on the `master` working tree at `5ad31c4`.
 
 > **Current-status update (post-Q3/Q6):** two gaps this analysis flagged have
@@ -301,7 +301,7 @@ story.
   `src/tracedecay.rs:3386` (`memory_status`), `:3367` (`repair_derived_memory`).
 - Prior audits: `docs/DASHBOARD-API-AUDIT.md`, `docs/MEMORY-STORAGE-GROWTH-AUDIT.md`,
   `docs/HOLOGRAPHIC-DASHBOARD-SEAMS.md`.
-- Live DB: `.tracedecay/tokensave.db` (129 facts; memory subsystem 2.43 MiB of
+- Live DB: `.tracedecay/tracedecay.db` (129 facts; memory subsystem 2.43 MiB of
   78.5 MB total; 5 orphan entities; 3 dirty banks; 129/129 facts never recalled).
 
 *Generated for Kanban task t_f47ae50b. Source audited at the `master` working

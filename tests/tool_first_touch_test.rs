@@ -11,6 +11,17 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+fn canonical_temp_path(path: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
 fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tracedecay"))
         .current_dir(cwd)
@@ -27,13 +38,15 @@ fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
 fn fact_store_creates_profile_store_on_first_touch() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
-    let profile = home.path().join(".hermes");
+    let home_path = canonical_temp_path(home.path());
+    let cwd_path = canonical_temp_path(cwd.path());
+    let profile = home_path.join(".hermes");
     std::fs::create_dir_all(&profile).unwrap();
 
     let profile_arg = profile.to_string_lossy().to_string();
     let output = run_tool(
-        cwd.path(),
-        home.path(),
+        &cwd_path,
+        &home_path,
         &[
             "--project",
             &profile_arg,
@@ -50,7 +63,7 @@ fn fact_store_creates_profile_store_on_first_touch() {
         String::from_utf8_lossy(&output.stderr)
     );
     let graph_db_path =
-        tracedecay::storage::resolve_layout(&profile, &home.path().join(".tracedecay"))
+        tracedecay::storage::resolve_layout(&profile, &home_path.join(".tracedecay"))
             .unwrap()
             .graph_db_path;
     assert!(
@@ -61,8 +74,8 @@ fn fact_store_creates_profile_store_on_first_touch() {
 
     // The store persists: a follow-up search finds the fact.
     let output = run_tool(
-        cwd.path(),
-        home.path(),
+        &cwd_path,
+        &home_path,
         &[
             "--project",
             &profile_arg,
@@ -84,9 +97,11 @@ fn fact_store_creates_profile_store_on_first_touch() {
 fn store_tools_without_explicit_project_still_require_init() {
     let cwd = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
+    let cwd_path = canonical_temp_path(cwd.path());
+    let home_path = canonical_temp_path(home.path());
     let output = run_tool(
-        cwd.path(),
-        home.path(),
+        &cwd_path,
+        &home_path,
         &["fact_store", "--args", r#"{"action":"list"}"#],
     );
     assert!(
@@ -94,7 +109,7 @@ fn store_tools_without_explicit_project_still_require_init() {
         "without --project an uninitialised cwd must keep the init guidance"
     );
     assert!(
-        !cwd.path().join(".tracedecay").exists(),
+        !cwd_path.join(".tracedecay").exists(),
         "no store may be silently created in the working directory"
     );
 }
@@ -104,10 +119,13 @@ fn code_graph_tools_keep_strict_init_requirement() {
     let target = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
-    let target_arg = target.path().to_string_lossy().to_string();
+    let target_path = canonical_temp_path(target.path());
+    let cwd_path = canonical_temp_path(cwd.path());
+    let home_path = canonical_temp_path(home.path());
+    let target_arg = target_path.to_string_lossy().to_string();
     let output = run_tool(
-        cwd.path(),
-        home.path(),
+        &cwd_path,
+        &home_path,
         &["--project", &target_arg, "status", "--json"],
     );
     assert!(
@@ -119,5 +137,5 @@ fn code_graph_tools_keep_strict_init_requirement() {
         stderr.contains("no TraceDecay index found"),
         "expected init guidance, got:\n{stderr}"
     );
-    assert!(!target.path().join(".tracedecay").exists());
+    assert!(!target_path.join(".tracedecay").exists());
 }

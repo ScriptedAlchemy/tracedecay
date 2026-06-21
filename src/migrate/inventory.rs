@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use libsql::{Builder, OpenFlags};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, db_filename, LEGACY_TOKENSAVE_DIR, TRACEDECAY_DIR};
+use crate::config::{self, db_filename, TRACEDECAY_DIR};
 use crate::errors::Result;
 use crate::global_db;
 use crate::storage::{BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME};
@@ -28,7 +28,6 @@ pub struct MigrationInventory {
 #[serde(rename_all = "snake_case")]
 pub enum StoreBrand {
     TraceDecay,
-    LegacyTokensave,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,16 +157,6 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
                     StoreRole::CodeProjectStore,
                 )
                 .await?;
-                inspect_data_dir_candidate(
-                    root,
-                    LEGACY_TOKENSAVE_DIR,
-                    options.follow_symlinks,
-                    &mut seen_data_dirs,
-                    &mut stores,
-                    &mut skipped,
-                    StoreRole::CodeProjectStore,
-                )
-                .await?;
                 if stores.len() == before {
                     stores.push(missing_registered_store(root));
                 }
@@ -216,16 +205,6 @@ async fn scan_root(
             StoreRole::CodeProjectStore,
         )
         .await?;
-        inspect_data_dir_candidate(
-            &dir,
-            LEGACY_TOKENSAVE_DIR,
-            follow_symlinks,
-            seen_data_dirs,
-            stores,
-            skipped,
-            StoreRole::CodeProjectStore,
-        )
-        .await?;
 
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -254,7 +233,7 @@ async fn scan_root(
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == TRACEDECAY_DIR || name == LEGACY_TOKENSAVE_DIR {
+            if name == TRACEDECAY_DIR {
                 continue;
             }
             if should_prune_dir(&name) {
@@ -299,11 +278,7 @@ async fn inspect_data_dir_candidate(
     if !seen_data_dirs.insert(key) {
         return Ok(());
     }
-    let brand = if dir_name == LEGACY_TOKENSAVE_DIR {
-        StoreBrand::LegacyTokensave
-    } else {
-        StoreBrand::TraceDecay
-    };
+    let brand = StoreBrand::TraceDecay;
     let db_path = data_dir.join(db_filename(&data_dir));
     let store = inspect_project_store(project_root, &data_dir, db_path, brand, role).await?;
     stores.push(store);
@@ -496,32 +471,12 @@ async fn inspect_hermes_profile_dir(
         StoreRole::HermesProfileStore,
     )
     .await?;
-    inspect_data_dir_candidate(
-        profile_dir,
-        LEGACY_TOKENSAVE_DIR,
-        follow_symlinks,
-        seen_data_dirs,
-        stores,
-        skipped,
-        StoreRole::HermesProfileStore,
-    )
-    .await?;
     inspect_hermes_state_db(profile_dir, seen_state_dbs, stores).await;
 
     if let Some(project_root) = read_hermes_project_pin(&profile_dir.join("config.yaml")) {
         inspect_data_dir_candidate(
             &project_root,
             TRACEDECAY_DIR,
-            follow_symlinks,
-            seen_data_dirs,
-            stores,
-            skipped,
-            StoreRole::CodeProjectStore,
-        )
-        .await?;
-        inspect_data_dir_candidate(
-            &project_root,
-            LEGACY_TOKENSAVE_DIR,
             follow_symlinks,
             seen_data_dirs,
             stores,
@@ -614,9 +569,7 @@ async fn inspect_global_db(path: &Path, path_overridden: bool) -> GlobalDbInvent
         exists,
         path_overridden,
         accounting_mode: global_db::global_accounting_mode().as_str().to_string(),
-        legacy_home_fallback: config::user_data_dir()
-            .and_then(|dir| dir.file_name().map(|name| name == LEGACY_TOKENSAVE_DIR))
-            .unwrap_or(false),
+        legacy_home_fallback: false,
         project_count,
         session_count,
         lcm_raw_message_count,
@@ -790,9 +743,6 @@ fn read_hermes_project_pin(config_path: &Path) -> Option<PathBuf> {
     let lines = config.lines().collect::<Vec<_>>();
     let (plugins_start, plugins_end) = find_top_level_section(&lines, "plugins")?;
     read_project_pin_from_plugin_block(&lines, plugins_start, plugins_end, "tracedecay")
-        .or_else(|| {
-            read_project_pin_from_plugin_block(&lines, plugins_start, plugins_end, "tokensave")
-        })
         .map(PathBuf::from)
 }
 

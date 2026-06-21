@@ -32,7 +32,7 @@ The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_a
 
 3. **Leave `/tmp/tracedecay-target/<project-id>/diagnostics/` to the MCP tools.** Do not `cargo clean` it, do not point a worker at it. It is shared by `tracedecay_diagnostics` / `tracedecay_run_affected_tests`.
 
-4. **Reserved serialized lane for full-workspace integration.** A single shared dir `/tmp/tracedecay-target/integration/` is reserved for the one card type that genuinely benefits from a warm, shared, whole-workspace cache: the final "is the whole workspace green?" verification before merge. Only one integration card may use it at a time — the board owner keeps integration cards serial (chain them with dependencies) so they reuse the cache instead of rebuilding it. Because it is a separate dir, an integration build never contends with the per-task dev dirs.
+4. **Full-workspace integration uses its own target dir.** Integration checks follow the same per-invocation rule as other cargo-heavy cards. Use a unique target dir for the integration run so full-suite verification can run without blocking unrelated workers.
 
 5. **Cleanup.** Per-task dirs are scratch. Before `kanban_complete`, a worker reclaims its disk (~1.6–4 GB each) with:
 
@@ -51,7 +51,7 @@ The tracedecay MCP diagnostic tools (`tracedecay_diagnostics`, `tracedecay_run_a
 
 ## Rejected alternatives
 
-- **Serialize all cargo cards on one shared target (the board's old implicit behavior).** Rejected: it collapses the board to a single effective cargo lane, defeating the point of concurrent multi-model workers. Reserve serialization for the single integration lane only.
+- **Serialize cargo cards on one shared target.** Rejected: it collapses the board to a single effective cargo lane, defeating the point of concurrent multi-model workers.
 - **Set a repo-level `build.target-dir` in `.cargo/config.toml`.** Rejected: it would also hijack the user's interactive builds into one dir, re-creating contention with the human. The override must be per-invocation via the env var, not repo-wide.
 - **Share compiled deps across per-task dirs.** Not natively supported by cargo without `sccache` / `cargo-chef`. Noted as a future optimization if cold-build time becomes a bottleneck; until then the bounded one-time compile per task is far cheaper than lock contention or serialization.
 
@@ -63,8 +63,8 @@ Cargo policy (see docs/CARGO-CONTENTION-POLICY.md):
 Run all cargo check/test/build/clippy AFTER that export. Never use the bare
 repo `target/` (it is the user's interactive dir and is contended). Before
 kanban_complete, reclaim disk:  rm -rf "$CARGO_TARGET_DIR"
-Full-workspace integration checks use the serialized
-`/tmp/tracedecay-target/integration/` lane — only one such card at a time.
+Full-workspace integration checks use their own target dir too, so they do not
+block unrelated workers.
 ```
 
 ## Verification checklist for a cargo-heavy card

@@ -9,7 +9,7 @@ Recall memory **before** reaching for external or web search — prior sessions 
 
 ## Workflow
 
-1. **Past conversations → `tracedecay_message_search`** (`query`, optional `provider`, `limit`) over ingested Cursor/Codex/agent transcripts (project-local FTS index).
+1. **Past conversations → `tracedecay_message_search`** (`query`, optional `provider`, `limit`) over ingested Cursor/Codex/agent transcripts (active project FTS index).
 2. **Durable facts → `tracedecay_fact_store`** with `action: "search"` (or `"probe"` / `"reason"`), plus `query` and `min_trust`.
 3. **If the user asks to inspect or repair memory health → `tracedecay_memory_status`** (repairs derived vectors/banks; returns fact/entity counts + trust distribution).
 4. **If the user rates a recalled fact → `tracedecay_fact_feedback`** (`helpful` / `unhelpful`) to tune its trust score.

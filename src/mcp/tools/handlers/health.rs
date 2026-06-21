@@ -1111,7 +1111,7 @@ pub(super) async fn handle_session_start(
     let tracedecay_dir = &cg.store_layout().data_root;
     std::fs::create_dir_all(tracedecay_dir).map_err(|e| {
         crate::errors::TraceDecayError::Config {
-            message: format!("failed to create .tracedecay dir: {e}"),
+            message: format!("failed to create active store data root: {e}"),
         }
     })?;
     let baseline_path = tracedecay_dir.join("session_baseline.json");

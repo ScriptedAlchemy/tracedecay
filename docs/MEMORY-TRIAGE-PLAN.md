@@ -20,7 +20,7 @@ the current checkout, only `retrieval.rs::temporal_decay_factor` remains.
 | Trust-decay | `docs/TRUST-DECAY-SEMANTICS.md` | persisted vs. ranking decay, dead code, explainability gaps |
 | Visibility | `docs/MEMORY-HEALTH-VISIBILITY-GAPS.md` | dashboard/CLI/doctor/MCP surfacing gaps (G1–G11) |
 
-All four audited the same live checkout (`.tracedecay/tokensave.db`, 129 facts,
+All four audited the same live checkout (`.tracedecay/tracedecay.db`, 129 facts,
 memory subsystem 2.43 MiB of a 78.5 MiB DB) and agree on the headline numbers.
 Load-bearing anchors were re-verified for this synthesis. The historical
 `src/memory/trust.rs:46` anchor named the now-removed persisted-aging routine;

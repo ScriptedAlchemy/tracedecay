@@ -258,7 +258,7 @@ fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
         "Retrieve Truncated Response",
-        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are project-local, expire automatically, and never reference remote storage. Only call it when the missing details are needed to answer the user's request.",
+        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. Only call it when the missing details are needed to answer the user's request.",
         json!({
             "type": "object",
             "properties": {
@@ -1899,7 +1899,7 @@ fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Search ingested Cursor/Codex/agent transcript messages stored in tracedecay's project-local session-message FTS index.",
+        "Search ingested Cursor/Codex/agent transcript messages stored in tracedecay's active project session-message FTS index.",
         json!({
             "type": "object",
             "properties": {
@@ -1980,7 +1980,7 @@ fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, payload byte totals, and payload GC status from project-local or Hermes profile sessions.db storage.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, payload byte totals, and payload GC status from the active project or Hermes profile session store.",
         json!({
             "type": "object",
             "properties": {
@@ -2066,7 +2066,7 @@ fn def_lcm_load_session() -> ToolDefinition {
     def(
         "tracedecay_lcm_load_session",
         "LCM Load Session",
-        "Load ordered lossless raw session messages with stable pagination and bounded content slices from project-local or Hermes profile LCM storage.",
+        "Load ordered lossless raw session messages with stable pagination and bounded content slices from the active project or Hermes profile LCM store.",
         json!({
             "type": "object",
             "properties": {
@@ -2132,7 +2132,7 @@ fn def_lcm_grep() -> ToolDefinition {
     def(
         "tracedecay_lcm_grep",
         "LCM Grep",
-        "Search bounded LCM raw-message snippets and optional summary text in project-local or Hermes profile sessions.db storage.",
+        "Search bounded LCM raw-message snippets and optional summary text in the active project or Hermes profile session store.",
         json!({
             "type": "object",
             "properties": {
@@ -2204,7 +2204,7 @@ fn def_lcm_describe() -> ToolDefinition {
     def(
         "tracedecay_lcm_describe",
         "LCM Describe",
-        "Describe one session's LCM raw-message and summary-DAG shape from project-local or Hermes profile storage without exposing full payload bodies.",
+        "Describe one session's LCM raw-message and summary-DAG shape from the active project or Hermes profile store without exposing full payload bodies.",
         json!({
             "type": "object",
             "properties": {
@@ -2247,7 +2247,7 @@ fn def_lcm_expand() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand",
         "LCM Expand",
-        "Expand one raw message, summary node, or external payload through the bounded LCM query API from project-local or Hermes profile storage.",
+        "Expand one raw message, summary node, or external payload through the bounded LCM query API from the active project or Hermes profile store.",
         json!({
             "type": "object",
             "properties": {
@@ -2317,7 +2317,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand_query",
         "LCM Expand Query",
-        "Assemble bounded LCM retrieval context for a prompt from project-local or Hermes profile storage; host integrations synthesize the final answer when needs_synthesis is true.",
+        "Assemble bounded LCM retrieval context for a prompt from the active project or Hermes profile store; host integrations synthesize the final answer when needs_synthesis is true.",
         json!({
             "type": "object",
             "properties": {
@@ -2378,7 +2378,7 @@ fn def_lcm_preflight() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_preflight",
         "LCM Preflight",
-        "Run compression preflight checks against project-local or Hermes profile LCM storage.",
+        "Run compression preflight checks against the active project or Hermes profile LCM store.",
         json!({
             "type": "object",
             "properties": {
@@ -2468,7 +2468,7 @@ fn def_lcm_compress() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_compress",
         "LCM Compress",
-        "Advance the LCM compression lifecycle in project-local or Hermes profile storage without invoking an auxiliary LLM.",
+        "Advance the LCM compression lifecycle in the active project or Hermes profile store without invoking an auxiliary LLM.",
         json!({
             "type": "object",
             "properties": {
@@ -2873,7 +2873,7 @@ fn def_diagnostics() -> ToolDefinition {
          message, driver, and the enclosing graph node when one can be \
          resolved. Replaces the recurring 'run cargo → parse text → read \
          file' loop with a single structured response. \
-         \n\nNote: the cargo target dir is forced to .tracedecay/target/ so \
+         \n\nNote: the cargo target dir is forced to /tmp/tracedecay-target/<project_id>/diagnostics so \
          we don't race with the user's interactive cargo runs. The first \
          call against a fresh tree builds dependencies from scratch, which \
          can take several minutes on large workspaces; subsequent calls \

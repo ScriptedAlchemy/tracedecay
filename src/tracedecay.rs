@@ -3459,7 +3459,25 @@ impl TraceDecay {
 
     pub fn project_branch_diagnostics(project_root: &Path) -> BranchDiagnostics {
         let store_layout = storage::resolve_layout_for_current_profile(project_root)
-            .unwrap_or_else(|_| storage::project_local_layout(project_root));
+            .unwrap_or_else(|_| {
+                let profile_root = storage::default_profile_root()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(crate::config::TRACEDECAY_DIR));
+                storage::default_profile_sharded_layout(project_root, &profile_root).unwrap_or_else(
+                    |_| {
+                        storage::profile_sharded_layout(
+                            project_root,
+                            &profile_root,
+                            &storage::EnrollmentMarker {
+                                project_id: storage::default_profile_project_id(project_root),
+                                storage_mode: storage::StorageMode::ProfileSharded,
+                            },
+                        )
+                        .unwrap_or_else(|err| {
+                            panic!("default profile project id must be valid: {err}")
+                        })
+                    },
+                )
+            });
         let current_branch = branch::current_branch(project_root);
         let (serving_db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,

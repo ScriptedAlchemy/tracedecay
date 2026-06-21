@@ -1,7 +1,7 @@
 //! Tree-sitter grammar provider.
 //!
-//! All grammars are served from the `tokensave-large-treesitters` bundled
-//! crate via a lazily-initialised lookup table.
+//! All grammars are served from the bundled tree-sitter crate via a
+//! lazily-initialised lookup table.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -24,7 +24,7 @@ mod wgsl_grammar {
 /// Cached map of language key -> `Language` built once from the bundled crate.
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
     #[allow(unused_mut)]
-    let mut map: HashMap<&'static str, Language> = tokensave_large_treesitters::all_languages()
+    let mut map: HashMap<&'static str, Language> = tracedecay_large_treesitters::all_languages()
         .into_iter()
         .map(|(name, lang_fn)| (name, lang_fn.into()))
         .collect();

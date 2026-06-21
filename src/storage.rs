@@ -175,22 +175,6 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
     Ok(true)
 }
 
-pub fn project_local_layout(project_root: &Path) -> StoreLayout {
-    let data_root = config::get_tracedecay_dir(project_root);
-    StoreLayout::new(
-        ProjectIdentity {
-            project_id: None,
-            display_root: project_root.to_path_buf(),
-            primary_alias: project_root.to_path_buf(),
-        },
-        StoreKind::CodeProject,
-        StorageMode::ProjectLocal,
-        project_root.to_path_buf(),
-        data_root,
-        None,
-    )
-}
-
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
     profile_root.join("projects").join(project_id)
 }
@@ -256,10 +240,14 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
         Some(marker) if marker.storage_mode == StorageMode::ProfileSharded => {
             profile_sharded_layout(project_root, profile_root, &marker)
         }
-        Some(_) => Ok(project_local_layout(project_root)),
-        None if project_local_database_exists(project_root) => {
-            Ok(project_local_layout(project_root))
-        }
+        Some(marker) => Err(TraceDecayError::Config {
+            message: format!(
+                "unsupported storage_mode={:?} in enrollment marker for '{}'; \
+                 run TraceDecay migration to move this project into the user profile store",
+                marker.storage_mode,
+                project_root.display()
+            ),
+        }),
         None => default_profile_sharded_layout(project_root, profile_root),
     }
 }
@@ -276,26 +264,19 @@ pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLa
             let profile_root = default_profile_root()?;
             profile_sharded_layout(project_root, &profile_root, &marker)
         }
-        Some(_) => Ok(project_local_layout(project_root)),
-        None if project_local_database_exists(project_root) => {
-            Ok(project_local_layout(project_root))
-        }
+        Some(marker) => Err(TraceDecayError::Config {
+            message: format!(
+                "unsupported storage_mode={:?} in enrollment marker for '{}'; \
+                 run TraceDecay migration to move this project into the user profile store",
+                marker.storage_mode,
+                project_root.display()
+            ),
+        }),
         None => {
             let profile_root = default_profile_root()?;
             default_profile_sharded_layout(project_root, &profile_root)
         }
     }
-}
-
-pub fn project_local_database_exists(project_root: &Path) -> bool {
-    project_root
-        .join(TRACEDECAY_DIR)
-        .join(config::DB_FILENAME)
-        .exists()
-        || project_root
-            .join(config::LEGACY_TOKENSAVE_DIR)
-            .join(config::LEGACY_DB_FILENAME)
-            .exists()
 }
 
 pub fn resolve_project_session_db_path(project_root: &Path) -> Result<PathBuf> {

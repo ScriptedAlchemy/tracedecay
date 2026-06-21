@@ -2,7 +2,7 @@
 //!
 //! Pricing lifecycle:
 //! 1. **Cached file** at `pricing.json` in the user data dir
-//!    (`~/.tracedecay/`, or legacy `~/.tokensave/`) -- checked first.
+//!    (`~/.tracedecay/`) -- checked first.
 //! 2. **Embedded fallback** baked into the binary -- used when no cache exists.
 //! 3. **Remote refresh** from `LiteLLM`'s public pricing JSON -- fetched at most
 //!    once every 24 hours, stored to the cache file.
@@ -51,8 +51,7 @@ pub struct ModelPricing {
     pub cache_read_per_mtok: f64,
 }
 
-/// Path to the cached pricing file: `pricing.json` in the user data dir
-/// (`~/.tracedecay/`, or legacy `~/.tokensave/`).
+/// Path to the cached pricing file: `pricing.json` in the user data dir.
 fn cache_path() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|dir| dir.join("pricing.json"))
 }

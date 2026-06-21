@@ -12,9 +12,12 @@ use crate::sessions::source::{
     TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
-use crate::storage::{project_local_layout, resolve_layout_for_current_profile, StorageMode};
+use crate::storage::{
+    default_profile_project_id, default_profile_root, profile_sharded_data_root,
+    resolve_layout_for_current_profile, SESSIONS_DB_FILENAME,
+};
 
-const PROJECT_SESSION_DB_FILENAME: &str = "sessions.db";
+const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -24,7 +27,12 @@ pub struct CursorTranscriptIngestStats {
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
     resolve_layout_for_current_profile(project_root).map_or_else(
-        |_| project_local_layout(project_root).sessions_db_path,
+        |_| {
+            let profile_root = default_profile_root()
+                .unwrap_or_else(|_| PathBuf::from(crate::config::TRACEDECAY_DIR));
+            profile_sharded_data_root(&profile_root, &default_profile_project_id(project_root))
+                .join(PROJECT_SESSION_DB_FILENAME)
+        },
         |layout| layout.sessions_db_path,
     )
 }
@@ -35,14 +43,13 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 }
 
 pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
-    let layout = resolve_layout_for_current_profile(project_root).ok()?;
-    if layout.storage_mode == StorageMode::ProfileSharded {
+    if let Ok(layout) = resolve_layout_for_current_profile(project_root) {
         return Some(layout.sessions_db_path);
     }
     if let Some(db_path) = registry_profile_session_db_path(project_root).await {
         return Some(db_path);
     }
-    layout.data_root.is_dir().then_some(layout.sessions_db_path)
+    None
 }
 
 async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
@@ -60,20 +67,9 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
-    // Prefer .tracedecay; fall back to an existing legacy .tokensave; default
-    // to .tracedecay for fresh profiles.
-    let primary = hermes_home.join(".tracedecay");
-    let base = if primary.is_dir() {
-        primary
-    } else {
-        let legacy = hermes_home.join(".tokensave");
-        if legacy.is_dir() {
-            legacy
-        } else {
-            primary
-        }
-    };
-    base.join(PROJECT_SESSION_DB_FILENAME)
+    hermes_home
+        .join(crate::config::TRACEDECAY_DIR)
+        .join(PROJECT_SESSION_DB_FILENAME)
 }
 
 pub fn resolve_hermes_profile_session_db_path(
@@ -111,31 +107,12 @@ pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesP
     }
 }
 
-/// Resolves the brand data directory within a Hermes profile home.
-///
-/// Prefers `.tracedecay` when it already exists; falls back to the legacy
-/// `.tokensave` directory for existing installs (backward-compat dual-accept
-/// site — see rebrand notes). New directories are always created as
-/// `.tracedecay`.
-///
-/// LEGACY-COMPAT: `hermes_home/.tokensave` accepted alongside `.tracedecay`.
+/// Resolves the `TraceDecay` data directory within a Hermes profile home.
 fn resolve_hermes_profile_tracedecay_dir(
     hermes_home: &Path,
     create_missing: bool,
 ) -> std::result::Result<PathBuf, String> {
-    let tracedecay_dir = hermes_home.join(".tracedecay");
-    let legacy_dir = hermes_home.join(".tokensave");
-
-    // Pick which directory to use: prefer .tracedecay if it already exists;
-    // accept legacy .tokensave for existing installs; default to .tracedecay
-    // for new ones so create_missing writes the new name.
-    let brand_dir = match (
-        std::fs::symlink_metadata(&tracedecay_dir),
-        std::fs::symlink_metadata(&legacy_dir),
-    ) {
-        (Err(e1), Ok(_)) if e1.kind() == std::io::ErrorKind::NotFound => legacy_dir.clone(),
-        _ => tracedecay_dir.clone(),
-    };
+    let brand_dir = hermes_home.join(crate::config::TRACEDECAY_DIR);
 
     match std::fs::symlink_metadata(&brand_dir) {
         Ok(metadata) => {
@@ -410,11 +387,6 @@ impl TranscriptSource for CursorSweepSource {
     }
 
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        // Only indexed projects keep a project-local session store; roots
-        // without a tracedecay data dir are skipped outright.
-        if !crate::config::get_tracedecay_dir(project_root).is_dir() {
-            return Vec::new();
-        }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
         };
@@ -489,8 +461,7 @@ impl TranscriptSource for CursorSweepSource {
 
 /// Compute the `~/.cursor/projects` directory slug Cursor derives from a
 /// workspace path: every normal path component joined with `-`, case
-/// preserved (verified against real `~/.cursor/projects` entries, e.g.
-/// `/home/zack/projects/tokensave` → `home-zack-projects-tokensave`).
+/// preserved (verified against real `~/.cursor/projects` entries).
 /// Returns `None` for non-UTF-8, relative, or traversal-containing paths.
 pub fn cursor_project_slug(project_root: &Path) -> Option<String> {
     let mut parts = Vec::new();

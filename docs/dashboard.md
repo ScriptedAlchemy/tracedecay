@@ -80,7 +80,7 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 
 | Variable | Description |
 |----------|-------------|
-| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over resolved project-store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the active project's resolved session store. New installs use the user-level profile shard; explicit repo-local and legacy projects continue to resolve to their local store. |
+| `TRACEDECAY_GLOBAL_DB` | Pin the LCM session store to an explicit database path. When set, it wins over resolved project-store selection (`storage_scope` becomes `"global"`); when unset, the dashboard serves the active project's resolved user-level profile session store. |
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode) |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
@@ -89,11 +89,8 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 | `TRACEDECAY_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tracedecay/model-prices.json`; mainly for tests) |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
 
-All `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) also accept their
-legacy `TOKENSAVE_*` / `DISABLE_TOKENSAVE` spellings as fallbacks; the
-`TRACEDECAY_*` name wins when both are set. Likewise, projects indexed before
-the rebrand with a `.tokensave/` data directory are still honored as a
-fallback wherever `.tracedecay/` paths are mentioned below.
+Use `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) for dashboard runtime
+configuration. Pre-rename `TRACEDECAY_*` spellings are not runtime fallbacks.
 
 ---
 
@@ -255,10 +252,9 @@ Transcript ingest is **per project**, not global:
 | Store | Path | Written by | `storage_scope` |
 |-------|------|------------|-----------------|
 | User project store (default) | `~/.tracedecay/projects/<project-id>/sessions.db` | All transcript ingest for sessions belonging to that project root | `"profile_sharded"` |
-| Project-local (explicit or legacy) | `<project>/.tracedecay/sessions.db` | Older or explicitly local projects only | `"project_local"` |
 | Global | `~/.tracedecay/global.db` | Cross-project registry (project paths, savings ledger) — **no session messages are ingested here** | `"global"` |
 
-The dashboard serves the active project's resolved store by default. New projects are profile-sharded at the user level and scoped to the current project; explicit repo-local and legacy installs still report `"project_local"`. The LCM header shows a **"User project store"**, **"Project store"**, or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
+The dashboard serves the active project's resolved profile store by default. The LCM header shows a **"User project store"** or **"Global store"** badge. Every LCM API payload reports the active store via the additive `path` + `storage_scope` fields.
 
 Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (used by tests and the smoke harness). When this override is active, `storage_scope` becomes `"global"`.
 
@@ -951,8 +947,8 @@ Get a summary node with its source items.
 **Response:**
 ```json
 {
-  "path": "/home/user/my-project/.tracedecay/sessions.db",
-  "storage_scope": "project_local",
+  "path": "/home/user/.tracedecay/projects/proj_abc/sessions.db",
+  "storage_scope": "profile_sharded",
   "exists": true,
   "node_id": "node-abc",
   "node": { /* node details */ },

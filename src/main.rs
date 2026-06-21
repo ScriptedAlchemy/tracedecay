@@ -295,7 +295,7 @@ fn run_startup_preamble(command: &Commands) {
 
     if is_first_run && !skip_startup_maintenance {
         eprintln!(
-            "note: tracedecay uploads anonymous token-saved counts to a worldwide counter.\n\
+            "note: tracedecay uploads anonymous token savings counts to a worldwide counter.\n\
              \x20     Run `tracedecay disable-upload-counter` to opt out."
         );
     }
@@ -1095,12 +1095,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             tracedecay::dashboard::run(&cg, &host, port, open).await?;
         }
         Commands::Serve { path, timings } => {
-            if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true"))
-                || matches!(std::env::var("DISABLE_TOKENSAVE").as_deref(), Ok("true"))
-            {
+            if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true")) {
                 // Allow users to opt out per-project by setting
-                // DISABLE_TRACEDECAY=true (legacy DISABLE_TOKENSAVE still supported).
-                // The process exits cleanly so the host does not retry.
+                // DISABLE_TRACEDECAY=true. The process exits cleanly so the
+                // host does not retry.
                 return Ok(());
             }
             let original_cwd = std::env::current_dir().ok();

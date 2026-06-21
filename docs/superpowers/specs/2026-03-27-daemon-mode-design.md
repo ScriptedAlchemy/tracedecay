@@ -1,27 +1,27 @@
 # Daemon Mode Design Spec
 
-> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated design artifact keeps the TokenSave-era names it was written with.
+> **Rebrand note:** The project has since been renamed **TraceDecay** (binary/crate `tracedecay`, MCP tools `tracedecay_*`). This dated design artifact keeps the TraceDecay-era names it was written with.
 
 ## Goal
 
-A background daemon that watches all tracked tokensave projects for file changes and automatically runs incremental syncs, keeping the code graph up-to-date without manual `tokensave sync` invocations.
+A background daemon that watches all tracked tracedecay projects for file changes and automatically runs incremental syncs, keeping the code graph up-to-date without manual `tracedecay sync` invocations.
 
 ## CLI Surface
 
 ```
-tokensave daemon              # start (forks to background, writes PID file)
-tokensave daemon --foreground # stay in foreground (for debugging / service managers)
-tokensave daemon --stop       # kill running daemon via PID file
-tokensave daemon --status     # check if running
-tokensave daemon --enable-autostart   # install launchd/systemd service
-tokensave daemon --disable-autostart  # remove service
+tracedecay daemon              # start (forks to background, writes PID file)
+tracedecay daemon --foreground # stay in foreground (for debugging / service managers)
+tracedecay daemon --stop       # kill running daemon via PID file
+tracedecay daemon --status     # check if running
+tracedecay daemon --enable-autostart   # install launchd/systemd service
+tracedecay daemon --disable-autostart  # remove service
 ```
 
 All flags are mutually exclusive. `--foreground` is useful for debugging and when the daemon is managed by an external service manager.
 
 ## Config
 
-Add `daemon_debounce` to `~/.tokensave/config.toml`:
+Add `daemon_debounce` to `~/.tracedecay/config.toml`:
 
 ```toml
 daemon_debounce = "15s"
@@ -36,7 +36,7 @@ A simple duration parser understands `s` (seconds) and `m` (minutes). Examples: 
 | Component | File | Responsibility |
 |-----------|------|----------------|
 | DaemonRunner | `src/daemon.rs` | Core event loop: project discovery, file watching, debounce, sync dispatch |
-| PID management | `src/daemon.rs` | Write/read/check `~/.tokensave/daemon.pid` |
+| PID management | `src/daemon.rs` | Write/read/check `~/.tracedecay/daemon.pid` |
 | Duration parser | `src/daemon.rs` | Parse `"15s"` / `"1m"` strings into `Duration` |
 | Service installer | `src/daemon.rs` | Generate launchd plist (macOS) / systemd user unit (Linux) |
 | CLI integration | `src/main.rs` | `Commands::Daemon` enum variant with flags |
@@ -50,24 +50,24 @@ A simple duration parser understands `s` (seconds) and `m` (minutes). Examples: 
 
 3. **File change event:** When `notify` fires an event, determine which project it belongs to (by matching the event path against watched project roots). Mark that project as "dirty" and start/reset its per-project debounce timer.
 
-4. **Debounce fires (default 15s after last change):** Open `TokenSave::open()` for the dirty project, call `sync()`, log the result (files added/modified/removed, duration). Update global DB token count.
+4. **Debounce fires (default 15s after last change):** Open `TraceDecay::open()` for the dirty project, call `sync()`, log the result (files added/modified/removed, duration). Update global DB token count.
 
-5. **Filtering:** Ignore change events inside `.tokensave/`, `.git/`, `node_modules/`, `target/`, `.build/`, and other common build output directories. Also ignore events for files that don't match any supported language extension.
+5. **Filtering:** Ignore change events inside `.tracedecay/`, `.git/`, `node_modules/`, `target/`, `.build/`, and other common build output directories. Also ignore events for files that don't match any supported language extension.
 
 ### Self-Daemonizing
 
-On `tokensave daemon` (without `--foreground`):
+On `tracedecay daemon` (without `--foreground`):
 
 1. Fork the process using `fork()` (Unix) or equivalent
-2. Detach from terminal (setsid, close stdin/stdout/stderr, redirect to log file `~/.tokensave/daemon.log`)
-3. Write PID to `~/.tokensave/daemon.pid`
+2. Detach from terminal (setsid, close stdin/stdout/stderr, redirect to log file `~/.tracedecay/daemon.log`)
+3. Write PID to `~/.tracedecay/daemon.pid`
 4. Enter the main event loop
 
 On `--foreground`: skip the fork, keep stderr/stdout attached, still write PID file.
 
 ### PID File Management
 
-- **Path:** `~/.tokensave/daemon.pid`
+- **Path:** `~/.tracedecay/daemon.pid`
 - **Write:** On daemon start, write the PID as a plain integer
 - **Read:** On `--stop` and `--status`, read the PID and check if the process is alive (`kill(pid, 0)` on Unix)
 - **Stale detection:** If PID file exists but the process is dead, treat as not running. On start, overwrite stale PID files.
@@ -80,8 +80,8 @@ Read PID file, check process alive, send SIGTERM. Wait up to 5 seconds for proce
 ### `--status`
 
 Read PID file, check process alive. Print:
-- "tokensave daemon is running (PID: 12345)" or
-- "tokensave daemon is not running"
+- "tracedecay daemon is running (PID: 12345)" or
+- "tracedecay daemon is not running"
 
 Exit code 0 if running, 1 if not.
 
@@ -89,17 +89,17 @@ Exit code 0 if running, 1 if not.
 
 **macOS (launchd):**
 
-Write `~/Library/LaunchAgents/com.tokensave.daemon.plist`:
+Write `~/Library/LaunchAgents/com.tracedecay.daemon.plist`:
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tokensave.daemon</string>
+    <string>com.tracedecay.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/tokensave</string>
+        <string>/path/to/tracedecay</string>
         <string>daemon</string>
         <string>--foreground</string>
     </array>
@@ -108,9 +108,9 @@ Write `~/Library/LaunchAgents/com.tokensave.daemon.plist`:
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>~/.tokensave/daemon.log</string>
+    <string>~/.tracedecay/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>~/.tokensave/daemon.log</string>
+    <string>~/.tracedecay/daemon.log</string>
 </dict>
 </plist>
 ```
@@ -119,13 +119,13 @@ Then run `launchctl load <plist>`.
 
 **Linux (systemd):**
 
-Write `~/.config/systemd/user/tokensave-daemon.service`:
+Write `~/.config/systemd/user/tracedecay-daemon.service`:
 ```ini
 [Unit]
-Description=tokensave file watcher daemon
+Description=tracedecay file watcher daemon
 
 [Service]
-ExecStart=/path/to/tokensave daemon --foreground
+ExecStart=/path/to/tracedecay daemon --foreground
 Restart=on-failure
 RestartSec=5
 
@@ -133,13 +133,13 @@ RestartSec=5
 WantedBy=default.target
 ```
 
-Then run `systemctl --user enable --now tokensave-daemon.service`.
+Then run `systemctl --user enable --now tracedecay-daemon.service`.
 
 ### `--disable-autostart`
 
 **macOS:** `launchctl unload <plist>`, then delete the plist file.
 
-**Linux:** `systemctl --user disable --now tokensave-daemon.service`, then delete the unit file.
+**Linux:** `systemctl --user disable --now tracedecay-daemon.service`, then delete the unit file.
 
 ## Error Handling
 
@@ -151,7 +151,7 @@ Then run `systemctl --user enable --now tokensave-daemon.service`.
 
 ## Doctor Integration
 
-Add a "Daemon" section to `tokensave doctor` output:
+Add a "Daemon" section to `tracedecay doctor` output:
 
 ```
 Daemon
@@ -160,7 +160,7 @@ Daemon
 or
 ```
 Daemon
-  ! Daemon is not running — run `tokensave daemon` to start
+  ! Daemon is not running — run `tracedecay daemon` to start
 ```
 
 Also check if autostart is enabled:
@@ -169,7 +169,7 @@ Also check if autostart is enabled:
 ```
 or
 ```
-  ! Autostart not configured — run `tokensave daemon --enable-autostart`
+  ! Autostart not configured — run `tracedecay daemon --enable-autostart`
 ```
 
 ## Dependencies
@@ -179,7 +179,7 @@ or
 
 ## Logging
 
-The daemon writes to `~/.tokensave/daemon.log`. Log format:
+The daemon writes to `~/.tracedecay/daemon.log`. Log format:
 
 ```
 [2026-03-27 14:32:01] started, watching 3 projects

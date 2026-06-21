@@ -26,7 +26,7 @@ after merges.
 
 | Artifact | Path | Notes |
 |---|---|---|
-| Data dir | `<root>/.tracedecay/` (legacy `<root>/.tokensave/`) | Brand-aware; legacy dir honored as fallback if it already exists. |
+| Data dir | `<root>/.tracedecay/` (legacy `<root>/.tracedecay/`) | Brand-aware; legacy dir honored as fallback if it already exists. |
 | Default-branch DB | `<data_dir>/tracedecay.db` (+ `.db-wal`/`.db-shm`) | The DB for `main`/`master`. |
 | Branch DBs | `<data_dir>/branches/<stem>.db` (+ sidecars) | One per non-default tracked branch. |
 | Branch metadata | `<data_dir>/branch-meta.json` | Source of truth: `default_branch`, tracked branches, `db_file`, `parent`, timestamps. |
@@ -49,7 +49,7 @@ tracedecay branch list                  > drift-before.txt 2>&1
 tracedecay status --short              >> drift-before.txt 2>&1
 
 # 2. Snapshot metadata and every branch DB (including WAL/SHM sidecars).
-DATA_DIR="$(git rev-parse --show-toplevel)/.tracedecay"   # or .tokensave on legacy projects
+DATA_DIR="$(git rev-parse --show-toplevel)/.tracedecay"   # or .tracedecay on legacy projects
 BACKUP="$DATA_DIR/../.tracedecay-recovery-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP"
 cp -a "$DATA_DIR/branch-meta.json" "$BACKUP/" 2>/dev/null

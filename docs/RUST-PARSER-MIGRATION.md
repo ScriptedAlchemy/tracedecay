@@ -66,7 +66,7 @@ Counting the work:
 | Small scanner (one or two tokens) | Bash, Ruby, Lua, Dart, PHP | ~100–300 lines to port |
 | Medium scanner | Rust, Python, C++, C#, Scala, Kotlin, Swift | ~300–800 lines to port |
 | Large scanner | **Markdown** | ~1500 lines C++, the urgent one |
-| Vendored | Cobol, Dockerfile | Live in `tokensave-large-treesitters/vendor/`; we already control these |
+| Vendored | Cobol, Dockerfile | Live in `tracedecay-large-treesitters/vendor/`; we already control these |
 
 The migration value is highest for grammars where `--rust` is a clean win (top row) and for markdown (the bug source). The middle rows are real engineering work that has to be amortized across each grammar.
 
@@ -216,7 +216,7 @@ The reason this whole project exists. The C++ scanner is a few thousand lines bu
 
 ### Phase 6: cleanup
 
-- Drop `tokensave-large-treesitters` / `-medium` / `-lite` dependencies.
+- Drop `tracedecay-large-treesitters` / `-medium` / `-lite` dependencies.
 - Drop the `[env]` block in `.cargo/config.toml`.
 - Drop `safe_extract`'s `catch_unwind` if the parity suite has been clean for a release cycle. (Or keep it; the cost is one closure per file and the safety value is real.)
 - Issue #49 stays closed but the comment is updated to point at the Rust port.

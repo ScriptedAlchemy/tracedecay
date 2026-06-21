@@ -30,7 +30,7 @@ impl fmt::Display for TaskCategory {
 }
 
 impl TaskCategory {
-    fn strings(&self) -> (&'static str, &'static str) {
+    fn strings(self) -> (&'static str, &'static str) {
         match self {
             Self::Coding => ("coding", "Coding"),
             Self::Debugging => ("debugging", "Debugging"),
@@ -49,11 +49,11 @@ impl TaskCategory {
     }
 
     pub fn as_str(&self) -> &'static str {
-        self.strings().0
+        (*self).strings().0
     }
 
     pub fn label(&self) -> &'static str {
-        self.strings().1
+        (*self).strings().1
     }
 }
 

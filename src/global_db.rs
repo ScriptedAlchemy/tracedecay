@@ -1,8 +1,7 @@
 //! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
-//! Stored at `~/.tracedecay/global.db` (or a legacy `~/.tokensave/global.db`
-//! when that dir already exists — see [`crate::config::user_data_dir`]), this
-//! DB holds one row per project with the project's DB path and its cumulative
+//! Stored at `~/.tracedecay/global.db`, this DB holds one row per project with
+//! the project's DB path and its cumulative
 //! tokens-saved count. All operations are best-effort: failures are silently
 //! ignored so they never block the main MCP server loop.
 
@@ -233,18 +232,15 @@ const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
 );
 
 const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
-/// Legacy env-var spelling, still honored as a fallback.
-const LEGACY_GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
 fn global_db_path_override() -> Option<PathBuf> {
-    [GLOBAL_DB_PATH_ENV, LEGACY_GLOBAL_DB_PATH_ENV]
-        .iter()
-        .find_map(|name| std::env::var_os(name).filter(|path| !path.is_empty()))
+    std::env::var_os(GLOBAL_DB_PATH_ENV)
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
 }
 
 /// Returns the path to the global database: `global.db` inside the user-level
-/// data dir (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present).
+/// data dir (`~/.tracedecay/` by default).
 pub fn global_db_path() -> Option<PathBuf> {
     if let Some(path) = global_db_path_override() {
         return Some(path);
@@ -252,10 +248,9 @@ pub fn global_db_path() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|dir| dir.join("global.db"))
 }
 
-/// True when `TRACEDECAY_GLOBAL_DB` (or the legacy `TOKENSAVE_GLOBAL_DB`)
-/// pins the global DB to an explicit path. Consumers (the dashboard LCM
-/// store selection) treat the override as an operator decision that wins
-/// over project-local store discovery.
+/// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
+/// Consumers treat the override as an operator decision that wins over project
+/// store discovery.
 pub fn global_db_path_is_overridden() -> bool {
     global_db_path_override().is_some()
 }
@@ -266,12 +261,10 @@ pub fn global_db_path_is_overridden() -> bool {
 pub enum AccountingMode {
     /// No env override — global accounting is on by default.
     Default,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (or legacy `TOKENSAVE_ENABLE_GLOBAL_DB`)
-    /// explicitly enabled it.
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` explicitly enabled it.
     EnabledByEnv,
     /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
-    /// `TRACEDECAY_DISABLE_GLOBAL_DB` (or their legacy `TOKENSAVE_*`
-    /// spellings) explicitly disabled it.
+    /// `TRACEDECAY_DISABLE_GLOBAL_DB` explicitly disabled it.
     DisabledByEnv,
 }
 
@@ -313,12 +306,8 @@ pub fn env_flag(name: &str) -> bool {
 /// Savings dashboard reads the ledger — an opt-in gate here silently left
 /// the ledger empty while lifetime counters kept growing. Precedence:
 ///
-/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set (or legacy
-///    `TOKENSAVE_ENABLE_GLOBAL_DB`) → its truthiness decides (the spelling
-///    existing agent installers already write).
-/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` (or legacy spelling) truthy → disabled
-///    (opt-out; set by `.cargo/config.toml` so `cargo test` runs stay
-///    hermetic).
+/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.
+/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
     if let Some(value) = crate::config::brand_env("ENABLE_GLOBAL_DB") {

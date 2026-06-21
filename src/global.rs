@@ -204,7 +204,7 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 }
 
 /// Best-effort: register this project in the user-level global DB and
-/// accumulate the token-saved delta into the pending upload counter.
+/// accumulate the token savings delta into the pending upload counter.
 pub(crate) async fn update_global_db(cg: &TraceDecay) {
     if !tracedecay::user_config::UserConfig::exists() {
         return;
@@ -358,8 +358,8 @@ pub(crate) async fn gather_target_projects(
     }
 }
 
-/// Returns project roots whose data dir (`.tracedecay`, or legacy
-/// `.tokensave`) lives in cwd, an ancestor, or a descendant.
+/// Returns project roots whose `.tracedecay` data dir lives in cwd, an
+/// ancestor, or a descendant.
 pub(crate) fn gather_local_projects(
     home_tracedecay: &Option<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
@@ -404,16 +404,9 @@ pub(crate) fn gather_local_projects_from(
 
     let mut cursor: Option<&Path> = Some(cwd);
     while let Some(dir) = cursor {
-        // Both brand dirs count: a root can hold a `.tracedecay/` or a
-        // legacy `.tokensave/` index.
-        for dir_name in [
-            tracedecay::config::TRACEDECAY_DIR,
-            tracedecay::config::LEGACY_TOKENSAVE_DIR,
-        ] {
-            let ts = dir.join(dir_name);
-            if is_project_dir(dir, &ts) && seen.insert(dir.to_path_buf()) {
-                out.push(dir.to_path_buf());
-            }
+        let ts = dir.join(tracedecay::config::TRACEDECAY_DIR);
+        if is_project_dir(dir, &ts) && seen.insert(dir.to_path_buf()) {
+            out.push(dir.to_path_buf());
         }
         cursor = dir.parent();
     }
@@ -423,8 +416,8 @@ pub(crate) fn gather_local_projects_from(
     out
 }
 
-/// Iteratively walks `start` looking for project data dirs
-/// (`.tracedecay/tracedecay.db`, or legacy `.tokensave/tokensave.db`).
+/// Iteratively walks `start` looking for `.tracedecay/tracedecay.db` project
+/// data dirs.
 ///
 /// Skips common heavy directories (node_modules, target, .git, etc.) and never
 /// descends into a data dir once found. Tracks canonicalized directories
@@ -465,9 +458,7 @@ pub(crate) fn find_descendant_tracedecay(
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == tracedecay::config::TRACEDECAY_DIR
-                || name_str == tracedecay::config::LEGACY_TOKENSAVE_DIR
-            {
+            if name_str == tracedecay::config::TRACEDECAY_DIR {
                 // Only canonicalize when the entry could match the home skip;
                 // doing it for every dir entry would mean one syscall per
                 // entry on tree walks of arbitrary size.
@@ -614,31 +605,6 @@ mod gather_tests {
             ),
         )
         .unwrap();
-    }
-
-    /// Plant a legacy `.tokensave/tokensave.db` marker — pre-rebrand projects
-    /// must keep being detected.
-    fn make_legacy_project(root: &Path) {
-        let ts = root.join(".tokensave");
-        fs::create_dir_all(&ts).unwrap();
-        fs::write(ts.join("tokensave.db"), b"").unwrap();
-    }
-
-    #[test]
-    fn finds_legacy_project_at_cwd_and_descendant() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        make_legacy_project(&cwd);
-        let child = cwd.join("sub").join("legacy");
-        fs::create_dir_all(&child).unwrap();
-        make_legacy_project(&child);
-
-        let out = gather_local_projects_from(&cwd, &None);
-        assert!(out.contains(&cwd), "legacy cwd project missing: {out:?}");
-        assert!(
-            out.contains(&child),
-            "legacy descendant project missing: {out:?}"
-        );
     }
 
     #[test]

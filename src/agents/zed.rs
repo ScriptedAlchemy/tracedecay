@@ -92,7 +92,6 @@ impl AgentIntegration for ZedIntegration {
         let json = load_jsonc_file(&settings_path);
         let servers = json.get("context_servers");
         servers.and_then(|v| v.get("tracedecay")).is_some()
-            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -144,16 +143,14 @@ fn uninstall_context_server(settings_path: &Path) {
         .get_mut("context_servers")
         .and_then(|v| v.as_object_mut())
     {
-        let removed_new = map.remove("tracedecay").is_some();
-        let removed_legacy = map.remove("tokensave").is_some();
-        removed_new || removed_legacy
+        map.remove("tracedecay").is_some()
     } else {
         false
     };
 
     if !removed {
         eprintln!(
-            "  No tracedecay/tokensave context server in {}, skipping",
+            "  No tracedecay context server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -174,7 +171,7 @@ fn uninstall_context_server(settings_path: &Path) {
     // backup_and_write_json leaves a .bak so any mistake is recoverable (issue #63).
     if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave context server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay context server from {}",
             settings_path.display()
         );
     }

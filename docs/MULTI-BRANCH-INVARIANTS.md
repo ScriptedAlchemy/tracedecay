@@ -18,8 +18,8 @@ All `file:line` references are against the current tree.
 
 | Artifact | Path | Owner | Notes |
 |---|---|---|---|
-| Project data dir | `<root>/.tracedecay/` (legacy `<root>/.tokensave/`) | `config::get_tracedecay_dir` (`config.rs:87`) | Prefer `.tracedecay`; fall back to an *existing* legacy dir read+write. Brand-aware everywhere via `db_filename` (`config.rs:115`). |
-| Default-branch DB | `<data_dir>/tracedecay.db` (legacy `tokensave.db`) | `init`/`resolve_db_for_branch` | `DB_FILENAME` for new dirs; `LEGACY_DB_FILENAME` inside legacy dirs. |
+| Project data dir | `<root>/.tracedecay/` (legacy `<root>/.tracedecay/`) | `config::get_tracedecay_dir` (`config.rs:87`) | Prefer `.tracedecay`; fall back to an *existing* legacy dir read+write. Brand-aware everywhere via `db_filename` (`config.rs:115`). |
+| Default-branch DB | `<data_dir>/tracedecay.db` (legacy `tracedecay.db`) | `init`/`resolve_db_for_branch` | `DB_FILENAME` for new dirs; `LEGACY_DB_FILENAME` inside legacy dirs. |
 | Branch DBs | `<data_dir>/branches/<stem>.db` (+ `.db-wal`/`.db-shm`) | `branch_meta::ensure_branches_dir` (`branch_meta.rs:148`), created in `add_branch_tracking`/CLI `branch add` | One SQLite file per non-default tracked branch. |
 | Branch metadata | `<data_dir>/branch-meta.json` | `branch_meta::{load,save}_branch_meta` (`branch_meta.rs:125,141`) | Source of truth for `default_branch`, tracked branches, `db_file`, `parent`, timestamps. |
 | In-memory state | `TraceDecay { active_branch, serving_branch, fallback_warning }` | `tracedecay.rs` (struct ~line 298-306) | Resolved at `open()` time; see §3. |
