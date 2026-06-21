@@ -1,6 +1,6 @@
 //! Integration tests for the LCM dashboard API
 //! (`/api/plugins/hermes-lcm/*`) against a seeded temp session store served
-//! through the `TRACEDECAY_GLOBAL_DB` override path.
+//! from the profile-sharded project session DB.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::lcm::{LcmCleanConfig, LcmGcConfig, LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
@@ -29,7 +30,7 @@ struct Fixture {
     _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
-    global_db_path: std::path::PathBuf,
+    session_db_path: std::path::PathBuf,
     _project_root: std::path::PathBuf,
     session_id: String,
     child_node_id: String,
@@ -217,12 +218,12 @@ async fn start_fixture() -> Fixture {
 
     let global_db_path = tmp.path().join("global").join("global.db");
     let env_guards = vec![EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path)];
-    let (session_id, child_node_id, parent_node_id) =
-        seed_lcm_store(&global_db_path, &project_root).await;
-
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
+    let session_db_path = project_session_db_path(&project_root);
+    let (session_id, child_node_id, parent_node_id) =
+        seed_lcm_store(&session_db_path, &project_root).await;
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -235,7 +236,7 @@ async fn start_fixture() -> Fixture {
         _env_guards: env_guards,
         base_url,
         server,
-        global_db_path,
+        session_db_path,
         _project_root: project_root,
         session_id,
         child_node_id,
@@ -256,7 +257,7 @@ fn lcm_overview_and_search_preserve_shapes() {
         let (status, caps) = get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(caps["features"]["lcm"], true);
-        assert_eq!(caps["lcm_scope"], "global");
+        assert_eq!(caps["lcm_scope"], "profile_sharded");
 
         let (status, overview) = get_json(
             &agent,
@@ -267,7 +268,7 @@ fn lcm_overview_and_search_preserve_shapes() {
         );
         assert_eq!(status, 200);
         assert_eq!(overview["exists"], true);
-        assert_eq!(overview["storage_scope"], "global");
+        assert_eq!(overview["storage_scope"], "profile_sharded");
         assert_eq!(overview["overview"]["messages_total"], 2);
         assert_eq!(overview["overview"]["summary_nodes_total"], 2);
         assert_eq!(overview["latest_sessions"][0]["session_id"], fixture.session_id);
@@ -381,9 +382,9 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture().await;
-        let db = GlobalDb::open_at(&fixture.global_db_path)
+        let db = GlobalDb::open_at(&fixture.session_db_path)
             .await
-            .expect("global db should reopen");
+            .expect("session db should reopen");
         let mut external = message(
             "payload-tool-1",
             &fixture.session_id,
@@ -395,12 +396,12 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
             None,
         );
         external.kind = Some("tool_result".to_string());
-        db.lcm_store(fixture.global_db_path.parent().expect("global db parent"))
+        db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))
             .ingest_raw_message(&external)
             .await
             .expect("payload-backed message should ingest");
         let payload_dir = fixture
-            .global_db_path
+            .session_db_path
             .parent()
             .unwrap()
             .join("lcm-payloads");
@@ -488,9 +489,9 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture().await;
-        let db = GlobalDb::open_at(&fixture.global_db_path)
+        let db = GlobalDb::open_at(&fixture.session_db_path)
             .await
-            .expect("global db should reopen");
+            .expect("session db should reopen");
         let body = format!("cross surface payload secret {}", "Y".repeat(300_000));
         let mut external = message(
             "payload-tool-agreement",
@@ -503,13 +504,13 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
             None,
         );
         external.kind = Some("tool_result".to_string());
-        db.lcm_store(fixture.global_db_path.parent().expect("global db parent"))
+        db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))
             .ingest_raw_message(&external)
             .await
             .expect("payload-backed message should ingest");
 
         let payload_dir = fixture
-            .global_db_path
+            .session_db_path
             .parent()
             .unwrap()
             .join("lcm-payloads");

@@ -9,8 +9,8 @@
 //!   cost computed from real usage data at ingest — labeled `actual`).
 //!   Ledger aggregation reuses [`GlobalDb::sum_savings`] /
 //!   [`GlobalDb::savings_history`], the same queries `tracedecay gain` runs.
-//! - **Session store** (the LCM store the dashboard already serves —
-//!   project-local `sessions.db` by default): `sessions` +
+//! - **Session store** (the resolved LCM store the dashboard already serves):
+//!   `sessions` +
 //!   `session_messages`, whose `model` and `metadata_json` columns drive
 //!   per-session cost accounting.
 //!
@@ -615,7 +615,8 @@ pub(crate) async fn models(
         let day_tiers = overlay.as_deref().map(|messages| {
             fold_overlay(messages, |msg| {
                 let ts = msg.timestamp.unwrap_or(0);
-                (ts > 0 && (since == 0 || ts >= since)).then(|| (ts / 86_400) * 86_400)
+                (ts > 0 && (since == 0 || ts >= since))
+                    .then(|| ((ts / 86_400) * 86_400, msg.model.clone()))
             })
         });
 
@@ -649,10 +650,18 @@ pub(crate) async fn models(
         );
 
         let daily_sql = format!(
-            "SELECT (timestamp / 86400) * 86400 AS day, {TOKEN_AGG_COLUMNS}
-             FROM ({MESSAGE_TOKENS_CTE})
-             WHERE timestamp IS NOT NULL AND timestamp > 0 AND (?1 = 0 OR timestamp >= ?1)
-             GROUP BY day ORDER BY day ASC LIMIT 366"
+            "WITH daily AS (
+                SELECT (timestamp / 86400) * 86400 AS day, model, {TOKEN_AGG_COLUMNS}
+                FROM ({MESSAGE_TOKENS_CTE})
+                WHERE timestamp IS NOT NULL AND timestamp > 0 AND (?1 = 0 OR timestamp >= ?1)
+                GROUP BY day, model
+             ),
+             latest_days AS (
+                SELECT day FROM daily GROUP BY day ORDER BY day DESC LIMIT 366
+             )
+             SELECT daily.*
+             FROM daily JOIN latest_days ON latest_days.day = daily.day
+             ORDER BY daily.day ASC, daily.messages DESC"
         );
         let daily_rows = query_rows(conn, &daily_sql, libsql::params![since])
             .await
@@ -662,8 +671,14 @@ pub(crate) async fn models(
                 .iter()
                 .map(|row| {
                     let day = i64_field(row, "day");
-                    let tiers = day_tiers.as_ref().and_then(|map| map.get(&day));
-                    merge(token_block(row, tiers), json!({ "day": day }))
+                    let model = str_field(row, "model");
+                    let tiers = day_tiers
+                        .as_ref()
+                        .and_then(|map| map.get(&(day, model.to_string())));
+                    merge(
+                        token_block(row, tiers),
+                        json!({ "day": day, "model": model_value(model) }),
+                    )
                 })
                 .collect(),
         );

@@ -23,7 +23,7 @@ use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
 use super::util::{qmarks, query_rows};
-use super::{token_count, DashboardState};
+use super::{storage_mode_label, token_count, DashboardState};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -113,19 +113,22 @@ impl Default for MemoryCurateOptions {
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
 async fn cli_state(cg: &TraceDecay) -> DashboardState {
-    // Same vector/bank repair the dashboard runs before serving similarity.
-    if let Err(err) = cg.memory_status().await {
-        eprintln!("Warning: memory repair failed: {err}");
-    }
+    let (mem_conn, mem_db_path) = super::resolve_project_memory_store(cg).await;
+    let store_layout = cg.store_layout();
     DashboardState {
-        mem_conn: cg.dashboard_connection(),
-        mem_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_conn: cg.dashboard_connection(),
+        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        mem_conn,
+        mem_db_path,
         lcm_conn: None,
         lcm_db_path: String::new(),
-        lcm_scope: "project_local",
+        lcm_scope: storage_mode_label(&store_layout.storage_mode).to_string(),
         savings_db: None,
         savings_db_path: String::new(),
         project_root: cg.project_root().to_path_buf(),
+        storage_mode: storage_mode_label(&store_layout.storage_mode).to_string(),
+        store_root: store_layout.data_root.clone(),
+        dashboard_root: store_layout.dashboard_root.clone(),
         curate_preview: Arc::new(RwLock::new(None)),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     }

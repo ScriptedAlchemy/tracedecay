@@ -60,7 +60,8 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
            CASE WHEN json_valid(metadata_json) THEN
                CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
            END AS usage_cache_write
-    FROM session_messages";
+    FROM session_messages
+    WHERE kind IS NULL OR kind <> 'summary'";
 
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
 /// is exact (the model's real tokenizer) or a labeled approximation.
@@ -145,12 +146,14 @@ struct CachedCount {
 /// Cached non-usage overlay plus the `session_messages` fingerprint it was
 /// built from.
 struct OverlayCache {
-    /// `(COUNT(*), MAX(rowid))` of `session_messages` at build time. Inserts
-    /// change both; deletes change the count. (In-place row rewrites that
-    /// keep count and rowid are not detected — ingest only inserts.)
-    fingerprint: (i64, i64),
+    /// Cheap aggregate fingerprint of `session_messages` at build time.
+    /// Includes metadata/text/model lengths so usage backfills invalidate the
+    /// overlay even when they update existing rows in place.
+    fingerprint: OverlayFingerprint,
     overlay: Arc<Vec<MessageTokens>>,
 }
+
+type OverlayFingerprint = (i64, i64, i64, i64, i64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub(crate) struct TokenCountCache {
@@ -224,11 +227,16 @@ pub(crate) async fn non_usage_message_tokens(
     Some(overlay)
 }
 
-/// `(COUNT(*), MAX(rowid))` of `session_messages` — see [`OverlayCache`].
-async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<(i64, i64)> {
+/// Aggregate fingerprint of `session_messages` — see [`OverlayCache`].
+async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT COUNT(*) AS count, COALESCE(MAX(rowid), 0) AS max_rowid FROM session_messages",
+        "SELECT COUNT(*) AS count,
+                COALESCE(MAX(rowid), 0) AS max_rowid,
+                COALESCE(SUM(LENGTH(COALESCE(metadata_json, ''))), 0) AS metadata_len,
+                COALESCE(SUM(LENGTH(COALESCE(text, ''))), 0) AS text_len,
+                COALESCE(SUM(LENGTH(COALESCE(model, ''))), 0) AS model_len
+         FROM session_messages",
         (),
     )
     .await
@@ -237,6 +245,9 @@ async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<(i64, i64)> {
     Some((
         row.get("count").and_then(Value::as_i64).unwrap_or(0),
         row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
+        row.get("metadata_len").and_then(Value::as_i64).unwrap_or(0),
+        row.get("text_len").and_then(Value::as_i64).unwrap_or(0),
+        row.get("model_len").and_then(Value::as_i64).unwrap_or(0),
     ))
 }
 
@@ -499,5 +510,63 @@ mod tests {
         assert!(bpe <= text.len() as i64);
         let cl = count_text_tokens(text, "gpt-4");
         assert!(cl > 0);
+    }
+
+    #[tokio::test]
+    async fn overlay_fingerprint_changes_when_metadata_is_backfilled() {
+        let db = match libsql::Builder::new_local(":memory:").build().await {
+            Ok(db) => db,
+            Err(err) => panic!("failed to build in-memory database: {err}"),
+        };
+        let conn = match db.connect() {
+            Ok(conn) => conn,
+            Err(err) => panic!("failed to connect to in-memory database: {err}"),
+        };
+        if let Err(err) = conn
+            .execute_batch(
+            "CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );
+            INSERT INTO session_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, metadata_json)
+            VALUES
+                ('codex', 'm1', 's1', 'assistant', 1, 1, 'hello', NULL, 'gpt-5', NULL);",
+            )
+            .await
+        {
+            panic!("failed to seed session_messages: {err}");
+        }
+
+        let Some(before) = overlay_fingerprint(&conn).await else {
+            panic!("overlay fingerprint should exist");
+        };
+        if let Err(err) = conn
+            .execute(
+                "UPDATE session_messages
+             SET metadata_json = '{\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'
+             WHERE provider = 'codex' AND message_id = 'm1'",
+                (),
+            )
+            .await
+        {
+            panic!("failed to backfill metadata usage: {err}");
+        }
+        let Some(after) = overlay_fingerprint(&conn).await else {
+            panic!("overlay fingerprint should exist after backfill");
+        };
+
+        assert_eq!(before.0, after.0, "row count should be unchanged");
+        assert_eq!(before.1, after.1, "max rowid should be unchanged");
+        assert_ne!(before, after, "metadata backfill must invalidate overlay");
     }
 }

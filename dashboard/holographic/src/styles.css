@@ -176,6 +176,30 @@ input[type="range"] {
   letter-spacing: -0.01em;
 }
 
+.hm-stat {
+  display: grid;
+  gap: 0.35rem;
+  min-height: 4.1rem;
+  align-content: start;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--hm-text) 4%, transparent), transparent 42%),
+    color-mix(in srgb, var(--hm-bg) 48%, transparent);
+}
+
+.hm-stat-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+
+.hm-stat-label {
+  margin-top: 0;
+  line-height: 1.25;
+  text-transform: lowercase;
+}
+
 .ts-card-content p {
   margin-top: 0;
   margin-bottom: 0;
@@ -221,6 +245,43 @@ input[type="range"] {
   [class*="grid-cols-[4.5rem_5.5rem"] {
     grid-template-columns: 1fr;
   }
+
+  .hv-viewswitch {
+    flex-wrap: nowrap;
+    max-width: 100%;
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+    scrollbar-width: none;
+  }
+
+  .hv-viewswitch::-webkit-scrollbar {
+    display: none;
+  }
+
+  .hm-system-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+  }
+
+  .hm-system-strip .hm-stat {
+    min-height: 3.15rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 12px;
+  }
+
+  .hm-system-strip .hm-stat-value {
+    font-size: 0.95rem;
+    line-height: 1.1;
+  }
+
+  .hm-system-strip .hm-stat-label {
+    font-size: 0.66rem;
+    letter-spacing: 0.05em;
+  }
+
+  .hm-path-stat {
+    grid-column: 1 / -1;
+  }
 }
 
 /* ===================================================== hv-* chart system ===
@@ -245,6 +306,51 @@ input[type="range"] {
 /* View switcher wraps instead of hiding tabs behind invisible scroll. */
 .hv-viewswitch {
   flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .hv-viewswitch {
+    flex-wrap: nowrap;
+  }
+}
+
+.hm-searchbox {
+  position: relative;
+}
+
+.hm-searchbox > svg,
+.hm-searchbox > span {
+  position: absolute;
+  left: 0.625rem;
+  top: 50%;
+  width: 0.875rem;
+  height: 0.875rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.hm-searchbox .ts-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.35rem 1.75rem 0.35rem 2rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.hm-searchbox .ts-button {
+  position: absolute;
+  right: 0.375rem;
+  top: 50%;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0;
+  transform: translateY(-50%);
+}
+
+.hm-searchbox .ts-button svg {
+  width: 0.875rem;
+  height: 0.875rem;
 }
 
 .hv-chart svg {

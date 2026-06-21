@@ -8,9 +8,8 @@
 //! - `/api/plugins/holographic/*`  → project memory store
 //!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
-//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the project-local
-//!   `.tracedecay/sessions.db` where transcript ingest writes; see
-//!   [`resolve_lcm_store`] for the `TRACEDECAY_GLOBAL_DB` override and the
+//!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
+//!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
 //!   global-DB fallback)
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
@@ -40,7 +39,7 @@ mod savings_pricing;
 mod token_count;
 mod util;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -52,6 +51,7 @@ use tokio::sync::RwLock;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
@@ -74,23 +74,33 @@ pub(crate) struct CuratePreviewEntry {
 
 #[derive(Clone)]
 pub(crate) struct DashboardState {
-    /// Project database (code graph + holographic memory store).
+    /// Active code-graph database. This can be branch-specific.
+    pub(crate) graph_conn: libsql::Connection,
+    /// Display path of the active code-graph database.
+    pub(crate) graph_db_path: String,
+    /// Project memory database. This is shared across branches.
     pub(crate) mem_conn: libsql::Connection,
-    /// Display path of the project database.
+    /// Display path of the project memory database.
     pub(crate) mem_db_path: String,
-    /// LCM session store (project-local `sessions.db`, or the global DB
-    /// when overridden/unavailable), when available.
+    /// LCM session store for the resolved active project store, or the global
+    /// fallback when no project store is available.
     pub(crate) lcm_conn: Option<libsql::Connection>,
     /// Display path of the LCM session store actually being served.
     pub(crate) lcm_db_path: String,
-    /// Which store `lcm_conn` points at: `"project_local"` or `"global"`.
-    pub(crate) lcm_scope: &'static str,
+    /// Which store `lcm_conn` points at, e.g. `"profile_sharded"` or `"global"`.
+    pub(crate) lcm_scope: String,
     /// Global accounting DB (savings ledger, lifetime counters, turns) used
     /// by the Savings & Cost tab, when available.
     pub(crate) savings_db: Option<Arc<GlobalDb>>,
     /// Display path of the global accounting DB.
     pub(crate) savings_db_path: String,
     pub(crate) project_root: PathBuf,
+    /// Storage mode resolved for the active project store.
+    pub(crate) storage_mode: String,
+    /// Resolved active project store root.
+    pub(crate) store_root: PathBuf,
+    /// Resolved dashboard sidecar root inside the active project store.
+    pub(crate) dashboard_root: PathBuf,
     /// Last saved dry-run curation preview (shared across all clones of the state).
     pub(crate) curate_preview: Arc<RwLock<Option<CuratePreviewEntry>>>,
     /// In-process BPE token-count cache for the Savings & Cost tab (backed
@@ -102,32 +112,28 @@ pub(crate) struct DashboardState {
 pub(crate) struct LcmStoreSelection {
     pub(crate) conn: Option<libsql::Connection>,
     pub(crate) path: String,
-    pub(crate) scope: &'static str,
+    pub(crate) scope: String,
 }
 
-/// Selects the LCM session store for `project_root`.
+/// Selects the LCM session store for the resolved active project store.
 ///
-/// Transcript ingest writes per project: Cursor's end-of-turn hooks and the
-/// MCP serve startup catch-up sweep (Claude/Codex/Vibe/Cline-like) both
-/// upsert into `<project>/.tracedecay/sessions.db`, never into
-/// `~/.tracedecay/global.db`. So the dashboard serves the project-local store
-/// by default — opened with the same writable schema-ensuring path the MCP
-/// LCM tools use for `storage_scope = "project_local"`, creating it on first
-/// run.
+/// Transcript ingest writes to the active code-project store selected by the
+/// storage resolver. For profile-backed projects, that is the user-level shard
+/// under `~/.tracedecay/projects/<project_id>/`, not a repo-local DB.
 ///
-/// An explicit `TRACEDECAY_GLOBAL_DB` override always wins (scope `"global"`;
-/// legacy `TOKENSAVE_GLOBAL_DB` is still accepted): tests, the smoke harness,
-/// and the Hermes wrapper use it to pin the
-/// dashboard to a specific store. The legacy global DB is also the fallback
-/// if the project store cannot be opened.
-pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStoreSelection {
-    if !crate::global_db::global_db_path_is_overridden() {
-        let project_db_path = crate::sessions::cursor::project_session_db_path(project_root);
+/// The global DB is only a fallback for sessions. `TRACEDECAY_GLOBAL_DB`
+/// still controls the savings/accounting ledger, but it must not pull the
+/// dashboard away from the resolved active project store transcript ingest uses.
+pub(crate) async fn resolve_lcm_store(cg: &TraceDecay) -> LcmStoreSelection {
+    let project_root = cg.project_root();
+    if let Some(project_db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+    {
         if let Some(db) = GlobalDb::open_at(&project_db_path).await {
             return LcmStoreSelection {
                 conn: Some(db.dashboard_connection()),
                 path: project_db_path.display().to_string(),
-                scope: "project_local",
+                scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
             };
         }
     }
@@ -137,36 +143,100 @@ pub(crate) async fn resolve_lcm_store(project_root: &std::path::Path) -> LcmStor
         path: crate::global_db::global_db_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
-        scope: "global",
+        scope: "global".to_string(),
     }
+}
+
+pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
+    match mode {
+        StorageMode::ProjectLocal => "project_local",
+        StorageMode::ProfileSharded => "profile_sharded",
+    }
+}
+
+async fn open_dashboard_connection(path: &Path) -> Option<libsql::Connection> {
+    let db = libsql::Builder::new_local(path).build().await.ok()?;
+    db.connect().ok()
+}
+
+async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM memory_facts", ())
+        .await
+        .ok()?;
+    rows.next().await.ok()??.get::<i64>(0).ok()
+}
+
+pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Connection, String) {
+    let candidates = [cg.store_layout().graph_db_path.clone()];
+    let graph_path = cg.dashboard_db_path();
+    let mut first_open: Option<(libsql::Connection, String)> = None;
+    let mut seen = std::collections::BTreeSet::new();
+
+    for path in candidates {
+        if !seen.insert(path.clone()) || !path.is_file() {
+            continue;
+        }
+        let conn = if path == graph_path {
+            Some(cg.dashboard_connection())
+        } else {
+            open_dashboard_connection(&path).await
+        };
+        let Some(conn) = conn else {
+            continue;
+        };
+        let display_path = path.display().to_string();
+        if first_open.is_none() {
+            first_open = Some((conn.clone(), display_path.clone()));
+        }
+        if memory_fact_count(&conn).await.unwrap_or(0) > 0 {
+            return (conn, display_path);
+        }
+    }
+
+    first_open.unwrap_or_else(|| {
+        (
+            cg.dashboard_connection(),
+            cg.dashboard_db_path().display().to_string(),
+        )
+    })
 }
 
 /// Builds the dashboard state shared by the CLI `run` path and the
 /// `tracedecay_dashboard` MCP tool.
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    if let Err(err) = cg.memory_status().await {
-        eprintln!("Warning: dashboard memory repair failed: {err}");
-    }
-    let lcm = resolve_lcm_store(cg.project_root()).await;
+    let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
+    let lcm = resolve_lcm_store(cg).await;
     // Re-hydrate the last dry-run curation preview from its sidecar so it
     // survives server restarts (staleness is recomputed on read anyway).
-    let persisted_preview = curate_preview_store::load(cg.project_root()).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let store_root = cg.store_layout().data_root.clone();
+    let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
+    let persisted_preview = curate_preview_store::load(&dashboard_root).await;
     let savings_db = GlobalDb::open().await.map(Arc::new);
     let savings_db_path = crate::global_db::global_db_path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let state = DashboardState {
-        mem_conn: cg.dashboard_connection(),
-        mem_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_conn: cg.dashboard_connection(),
+        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        mem_conn,
+        mem_db_path,
         lcm_conn: lcm.conn,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
         savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
+        storage_mode,
+        store_root,
+        dashboard_root,
         curate_preview: Arc::new(RwLock::new(persisted_preview)),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
     };
+    if let Err(err) = memory_api::repair_derived_memory(&state).await {
+        eprintln!("Dashboard memory repair skipped: {err}");
+    }
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     token_count::spawn_warm(state.clone());
@@ -206,7 +276,7 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 /// Pass `open: true` to also open the URL in the default browser (CLI --open).
 pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<()> {
     let state = build_state(cg).await;
-    if state.lcm_scope == "project_local" {
+    if state.lcm_scope != "global" {
         spawn_session_catch_up_ingest(state.project_root.clone());
     }
 
@@ -340,19 +410,24 @@ pub(crate) fn router(state: DashboardState) -> Router {
 /// Capability discovery for hosts and future Hermes-side extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
+    let has_lcm = state.lcm_conn.is_some();
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
         "mode": "standalone",
         "project_root": state.project_root.display().to_string(),
+        "storage_mode": state.storage_mode,
+        "store_root": state.store_root.display().to_string(),
+        "dashboard_root": state.dashboard_root.display().to_string(),
         "memory_db": state.mem_db_path,
+        "graph_db": state.graph_db_path,
         "lcm_db": state.lcm_db_path,
         "lcm_scope": state.lcm_scope,
         "features": {
             "memory": true,
-            "lcm": state.lcm_conn.is_some(),
-            "lcm_gc": state.lcm_conn.is_some(),
-            "lcm_payload_health": state.lcm_conn.is_some(),
+            "lcm": has_lcm,
+            "lcm_gc": has_lcm,
+            "lcm_payload_health": has_lcm,
             "graph": true,
             // Similarity-based dedup curation (delete/merge ops via /curate
             // and /curate/apply). LLM-proposed curation is a host-side

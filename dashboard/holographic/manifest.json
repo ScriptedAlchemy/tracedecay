@@ -4,7 +4,7 @@
   "description": "Holographic memory explorer + curation",
   "provider": {
     "kind": "memory",
-    "name": "holographic_plus"
+    "name": "tracedecay"
   },
   "tab": {
     "path": "/holographic-memory",

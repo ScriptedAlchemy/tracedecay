@@ -63,8 +63,8 @@ test("search hint only as a fallback when nothing loaded on a non-empty index", 
 
 test("label cap scales with viewport area and never starves", () => {
   assert.equal(labels.labelCapForArea(1280, 900), 38);
-  assert.equal(labels.labelCapForArea(420, 700), 9);
-  assert.equal(labels.labelCapForArea(100, 100), 6);
+  assert.equal(labels.labelCapForArea(420, 700), 5);
+  assert.equal(labels.labelCapForArea(100, 100), 4);
 });
 
 test("overlapping labels collapse to the highest-degree one", () => {

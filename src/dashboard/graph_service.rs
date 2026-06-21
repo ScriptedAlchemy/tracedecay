@@ -119,7 +119,7 @@ fn collect_node_ids(nodes: &[Value]) -> Vec<String> {
 }
 
 async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Vec<Value> {
-    graph_queries::node_rows_by_ids(&state.mem_conn, ids)
+    graph_queries::node_rows_by_ids(&state.graph_conn, ids)
         .await
         .into_iter()
         .map(node_with_span)
@@ -127,14 +127,14 @@ async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Vec<Value> {
 }
 
 async fn edges_for_ids(state: &DashboardState, ids: &[String], limit: i64) -> Vec<Value> {
-    graph_queries::edge_rows_for_ids(&state.mem_conn, ids, limit).await
+    graph_queries::edge_rows_for_ids(&state.graph_conn, ids, limit).await
 }
 
 /// Total (in + out) edge count per node, for the given ids. Drives the UI's
 /// size encoding and the "+N collapsed neighbors" affordance.
 async fn degrees_for_ids(state: &DashboardState, ids: &[String]) -> BTreeMap<String, i64> {
     let mut degrees = BTreeMap::new();
-    for row in graph_queries::degree_rows_for_ids(&state.mem_conn, ids).await {
+    for row in graph_queries::degree_rows_for_ids(&state.graph_conn, ids).await {
         if let (Some(id), Some(degree)) = (
             row.get("node_id").and_then(Value::as_str),
             row.get("degree").and_then(Value::as_i64),
@@ -168,19 +168,19 @@ static DEGREE_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<DegreeSumma
 
 async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
     let fingerprint = (
-        graph_queries::total_edges(&state.mem_conn).await,
-        graph_queries::max_edge_id(&state.mem_conn).await,
+        graph_queries::total_edges(&state.graph_conn).await,
+        graph_queries::max_edge_id(&state.graph_conn).await,
     );
     let cache = DEGREE_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     // Held across the rebuild so concurrent requests share one aggregation.
     let mut guard = cache.lock().await;
-    if let Some(existing) = guard.get(&state.mem_db_path) {
+    if let Some(existing) = guard.get(&state.graph_db_path) {
         if existing.fingerprint == fingerprint {
             return existing.clone();
         }
     }
 
-    let pool = graph_queries::degree_pool_rows(&state.mem_conn, DEGREE_POOL_CAP)
+    let pool = graph_queries::degree_pool_rows(&state.graph_conn, DEGREE_POOL_CAP)
         .await
         .iter()
         .filter_map(|row| {
@@ -189,33 +189,33 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
                 .map(|id| (id.to_string(), i64_field(row, "degree")))
         })
         .collect();
-    let top_connected = graph_queries::top_connected_rows(&state.mem_conn).await;
+    let top_connected = graph_queries::top_connected_rows(&state.graph_conn).await;
 
     let summary = Arc::new(DegreeSummary {
         fingerprint,
         pool,
         top_connected,
     });
-    guard.insert(state.mem_db_path.clone(), summary.clone());
+    guard.insert(state.graph_db_path.clone(), summary.clone());
     summary
 }
 
 pub(crate) async fn overview_payload(state: &DashboardState) -> Value {
-    let files = graph_queries::overview_file_rows(&state.mem_conn).await;
+    let files = graph_queries::overview_file_rows(&state.graph_conn).await;
     let summary = degree_summary(state).await;
 
     json!({
-        "path": state.mem_db_path,
+        "path": state.graph_db_path,
         "totals": {
-            "nodes": graph_queries::total_nodes(&state.mem_conn).await,
-            "edges": graph_queries::total_edges(&state.mem_conn).await,
-            "files": graph_queries::total_files(&state.mem_conn).await,
+            "nodes": graph_queries::total_nodes(&state.graph_conn).await,
+            "edges": graph_queries::total_edges(&state.graph_conn).await,
+            "files": graph_queries::total_files(&state.graph_conn).await,
         },
-        "nodes_by_kind": graph_queries::node_counts_by_kind(&state.mem_conn).await,
-        "edges_by_kind": graph_queries::edge_counts_by_kind(&state.mem_conn).await,
+        "nodes_by_kind": graph_queries::node_counts_by_kind(&state.graph_conn).await,
+        "edges_by_kind": graph_queries::edge_counts_by_kind(&state.graph_conn).await,
         "files_by_language": rows_by_language(&files),
         "top_connected": summary.top_connected,
-        "largest_files": graph_queries::largest_files(&state.mem_conn).await,
+        "largest_files": graph_queries::largest_files(&state.graph_conn).await,
     })
 }
 
@@ -225,8 +225,8 @@ pub(crate) async fn search_payload(
     limit: i64,
     offset: i64,
 ) -> Value {
-    let total = graph_queries::search_total(&state.mem_conn, query).await;
-    let results = graph_queries::search_rows(&state.mem_conn, query, limit, offset).await;
+    let total = graph_queries::search_total(&state.graph_conn, query).await;
+    let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await;
     let ids = collect_node_ids(&results);
     let degrees = degrees_for_ids(state, &ids).await;
     let results = attach_degrees(results.into_iter().map(node_with_span).collect(), &degrees);
@@ -242,11 +242,11 @@ pub(crate) async fn search_payload(
 }
 
 pub(crate) async fn node_exists(state: &DashboardState, node_id: &str) -> bool {
-    graph_queries::node_exists(&state.mem_conn, node_id).await
+    graph_queries::node_exists(&state.graph_conn, node_id).await
 }
 
 pub(crate) async fn node_payload(state: &DashboardState, node_id: &str) -> Option<Value> {
-    let row = graph_queries::node_row(&state.mem_conn, node_id).await?;
+    let row = graph_queries::node_row(&state.graph_conn, node_id).await?;
     let degrees = degrees_for_ids(state, &[node_id.to_string()]).await;
     let node = attach_degrees(vec![node_with_span(row)], &degrees)
         .into_iter()
@@ -256,10 +256,10 @@ pub(crate) async fn node_payload(state: &DashboardState, node_id: &str) -> Optio
 }
 
 pub(crate) async fn neighbors_payload(state: &DashboardState, node_id: &str, limit: i64) -> Value {
-    let callers = graph_queries::caller_rows(&state.mem_conn, node_id, limit).await;
-    let callees = graph_queries::callee_rows(&state.mem_conn, node_id, limit).await;
-    let edges = graph_queries::neighborhood_edge_rows(&state.mem_conn, node_id, limit).await;
-    let edges_by_kind = graph_queries::neighborhood_edge_counts(&state.mem_conn, node_id).await;
+    let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await;
+    let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await;
+    let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await;
+    let edges_by_kind = graph_queries::neighborhood_edge_counts(&state.graph_conn, node_id).await;
 
     let mut neighbor_ids = collect_node_ids(&callers);
     neighbor_ids.extend(collect_node_ids(&callees));
@@ -393,7 +393,7 @@ async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i
         .collect();
 
     let nodes = attach_degrees(nodes_by_ids(state, &selected).await, &degrees);
-    let total_nodes = graph_queries::total_nodes(&state.mem_conn).await;
+    let total_nodes = graph_queries::total_nodes(&state.graph_conn).await;
 
     json!({
         "seed_id": Value::Null,
@@ -421,7 +421,8 @@ pub(crate) async fn subgraph_payload(
     let seed_id = match node_id.filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(id),
         None if !query.is_empty() => {
-            let Some(id) = graph_queries::first_node_for_query(&state.mem_conn, query).await else {
+            let Some(id) = graph_queries::first_node_for_query(&state.graph_conn, query).await
+            else {
                 // Explicit query with no hit: an empty payload, not the
                 // default slice, so a failed search reads as "no match".
                 return json!({
@@ -441,7 +442,7 @@ pub(crate) async fn subgraph_payload(
         return default_subgraph(state, node_limit, edge_limit).await;
     };
 
-    let candidate_rows = graph_queries::subgraph_candidate_rows(&state.mem_conn, &seed_id).await;
+    let candidate_rows = graph_queries::subgraph_candidate_rows(&state.graph_conn, &seed_id).await;
     let mut all_ids = Vec::new();
     let mut seen = BTreeSet::new();
     for row in candidate_rows {
@@ -511,7 +512,7 @@ pub(crate) async fn path_payload(
         }
         let mut next = Vec::new();
         for chunk in frontier.chunks(400) {
-            for row in graph_queries::frontier_edge_rows(&state.mem_conn, chunk).await {
+            for row in graph_queries::frontier_edge_rows(&state.graph_conn, chunk).await {
                 let Some(source) = row.get("source").and_then(Value::as_str) else {
                     continue;
                 };

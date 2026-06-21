@@ -1,6 +1,6 @@
 //! Integration tests for the Savings & Cost dashboard API
-//! (`/api/plugins/savings/*`), against a seeded temp global DB serving both
-//! the savings ledger and the session store (`TRACEDECAY_GLOBAL_DB` override).
+//! (`/api/plugins/savings/*`), against a seeded temp global DB for accounting
+//! and the resolved project session store for transcript cost rows.
 //!
 //! Pricing runs offline (`TRACEDECAY_OFFLINE=1`) with the cache pointed at a
 //! nonexistent temp path, so the bundled fallback snapshot is exercised.
@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use common::{
@@ -20,6 +20,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::CostTurn;
@@ -32,6 +33,8 @@ struct Fixture {
     _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
+    session_db_path: PathBuf,
+    project_root: PathBuf,
     /// Start of the current UTC day; seeded timestamps hang off this.
     day_start: i64,
 }
@@ -298,6 +301,68 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
         ))
         .await
     );
+    assert!(
+        gdb.upsert_session_message(&message_record_at(
+            "cursor",
+            "m-codex-summary",
+            "sess-codex",
+            "assistant",
+            2,
+            Some(day_start + 520),
+            "Synthetic Codex compaction placeholder that is not real model output.",
+            "summary",
+            Some("gpt-5.3-codex-high"),
+            None,
+            None,
+            None,
+            None,
+        ))
+        .await
+    );
+}
+
+async fn seed_daily_limit_regression(db_path: &Path, project: &Path, latest_day: i64) {
+    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
+    assert!(
+        gdb.upsert_session(&session(
+            "sess-daily-limit",
+            project,
+            latest_day + 30,
+            "Daily limit regression"
+        ))
+        .await
+    );
+
+    for offset in 0..=366 {
+        let timestamp = latest_day - (offset * 86_400) + 60;
+        assert!(
+            gdb.upsert_session_message(&message(
+                &format!("m-daily-limit-{offset}"),
+                "sess-daily-limit",
+                "assistant",
+                offset,
+                timestamp,
+                "Daily limit accounting row.",
+                Some("daily-limit-a"),
+                None,
+            ))
+            .await
+        );
+    }
+
+    assert!(
+        gdb.upsert_session_message(&message(
+            "m-daily-limit-latest-b",
+            "sess-daily-limit",
+            "assistant",
+            500,
+            latest_day + 90,
+            "Second latest-day model bucket.",
+            Some("daily-limit-b"),
+            None,
+        ))
+        .await
+    );
 }
 
 async fn start_fixture() -> Fixture {
@@ -332,6 +397,8 @@ async fn start_fixture() -> Fixture {
     let cg = TraceDecay::init(&project_root)
         .await
         .expect("tracedecay init");
+    let session_db_path = project_session_db_path(&project_root);
+    seed_global_db(&session_db_path, &project_root, day_start).await;
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
@@ -345,6 +412,8 @@ async fn start_fixture() -> Fixture {
         _env_guards: env_guards,
         base_url,
         server,
+        session_db_path,
+        project_root,
         day_start,
     }
 }
@@ -456,6 +525,52 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         );
         assert_eq!(today["total"]["saved_tokens"], 14_250);
         assert_eq!(today["total"]["calls"], 2);
+    });
+}
+
+#[test]
+fn daily_model_series_limits_days_not_model_rows() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture().await;
+        seed_daily_limit_regression(
+            &fixture.session_db_path,
+            &fixture.project_root,
+            fixture.day_start,
+        )
+        .await;
+
+        let (_, models) = get_json(
+            &http_agent(),
+            &format!("{}/api/plugins/savings/models?range=all", fixture.base_url),
+        );
+        let daily = models["daily"].as_array().expect("daily rows");
+        let oldest_included_day = fixture.day_start - (365 * 86_400);
+        let excluded_day = fixture.day_start - (366 * 86_400);
+
+        assert!(
+            daily
+                .iter()
+                .any(|row| row["day"] == fixture.day_start && row["model"] == "daily-limit-a"),
+            "latest day/model row was truncated: {daily:?}"
+        );
+        assert!(
+            daily
+                .iter()
+                .any(|row| row["day"] == fixture.day_start && row["model"] == "daily-limit-b"),
+            "second latest-day model row was truncated: {daily:?}"
+        );
+        assert!(
+            daily.iter().any(|row| row["day"] == oldest_included_day),
+            "expected the 366th latest day to remain: {daily:?}"
+        );
+        assert!(
+            daily.iter().all(|row| row["day"] != excluded_day),
+            "row limit included an older day outside the 366-day window: {daily:?}"
+        );
     });
 }
 
@@ -611,8 +726,23 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         assert!((turns_by_model[0]["cost_usd"].as_f64().expect("cost") - 1.25).abs() < 1e-9);
 
         let daily = models["daily"].as_array().expect("daily");
-        assert_eq!(daily.len(), 1, "all seeded messages share one UTC day");
-        assert_eq!(daily[0]["day"], fixture.day_start);
+        assert_eq!(
+            daily.len(),
+            5,
+            "daily session costs should keep one row per day/model price bucket"
+        );
+        assert!(
+            daily.iter().all(|row| row["day"] == fixture.day_start),
+            "all seeded daily rows should stay in the same UTC day"
+        );
+        assert!(
+            daily.iter().any(|row| row["model"] == "gpt-5.5-high"),
+            "daily rows must carry model ids so frontend price lookup works"
+        );
+        assert!(
+            daily.iter().any(|row| row["model"].is_null()),
+            "unknown-model daily rows should remain explicit"
+        );
         let turns_by_day = models["turns"]["by_day"].as_array().expect("turns by day");
         assert_eq!(turns_by_day.len(), 1);
 
