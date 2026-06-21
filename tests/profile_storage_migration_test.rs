@@ -82,6 +82,20 @@ fn portable_relpath(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+fn run_git(project: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
     let db = libsql::Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -479,6 +493,55 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
     assert!(
         !project.join(".tracedecay/tracedecay.db").exists(),
         "profile-sharded init must not create a repo-local graph DB"
+    );
+}
+
+#[tokio::test]
+async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let home = root.join("home");
+    let project = root.join("repo-before-rename");
+    let renamed = root.join("repo-after-rename");
+    fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init"]);
+    run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:ScriptedAlchemy/tracedecay.git",
+        ],
+    );
+    let _home_guard = HomeEnvGuard::set(&home);
+
+    let initialized = TraceDecay::init(&project).await.unwrap();
+    let original_project_id = initialized
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .unwrap();
+    let original_data_root = initialized.store_layout().data_root.clone();
+    drop(initialized);
+    fs::rename(&project, &renamed).unwrap();
+
+    let reopened = TraceDecay::open(&renamed).await.unwrap();
+
+    assert_eq!(
+        reopened.store_layout().identity.project_id.as_deref(),
+        Some(original_project_id.as_str())
+    );
+    assert_eq!(reopened.store_layout().data_root, original_data_root);
+    assert!(
+        !home
+            .join(".tracedecay/projects")
+            .join(tracedecay::storage::default_profile_project_id(&renamed))
+            .join("tracedecay.db")
+            .exists(),
+        "renamed checkout must not create a second path-hash profile shard"
     );
 }
 

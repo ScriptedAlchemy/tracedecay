@@ -324,7 +324,7 @@ impl TraceDecay {
     /// Writes a default configuration to the resolved project store and
     /// initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
@@ -364,6 +364,45 @@ impl TraceDecay {
         &self.db
     }
 
+    async fn resolve_store_layout_for_project(project_root: &Path) -> Result<StoreLayout> {
+        if storage::read_enrollment_marker(project_root)?.is_some() {
+            return storage::resolve_layout_for_current_profile(project_root);
+        }
+
+        let profile_root = storage::default_profile_root()?;
+        let git_common_dir = git_common_dir(project_root);
+        let git_remote_url = git_remote_url(project_root);
+        if let Some(global_db) = GlobalDb::open().await {
+            let resolution = match global_db
+                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+                .await
+            {
+                Some(resolution) => Some(resolution),
+                None => match git_remote_url.as_deref() {
+                    Some(remote) => {
+                        global_db
+                            .resolve_unique_project_store_by_git_remote(remote)
+                            .await
+                    }
+                    None => None,
+                },
+            };
+
+            if let Some(resolution) = resolution {
+                return storage::profile_sharded_layout(
+                    project_root,
+                    &profile_root,
+                    &storage::EnrollmentMarker {
+                        project_id: resolution.project.project_id,
+                        storage_mode: storage::StorageMode::ProfileSharded,
+                    },
+                );
+            }
+        }
+
+        storage::default_profile_sharded_layout(project_root, &profile_root)
+    }
+
     /// Opens an existing `TraceDecay` project at the given root.
     ///
     /// If branch metadata exists, resolves the current git branch, auto-adds
@@ -373,7 +412,7 @@ impl TraceDecay {
     /// If the previous operation was interrupted (dirty sentinel exists),
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(project_root, active_branch.as_deref()).await?;
@@ -496,7 +535,7 @@ impl TraceDecay {
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
     pub async fn open_read_only(project_root: &Path) -> Result<Self> {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
 
@@ -605,7 +644,7 @@ impl TraceDecay {
     ///
     /// Returns an error if the branch is not tracked or the DB doesn't exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
+        let store_layout = Self::resolve_store_layout_for_project(project_root).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
 
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
@@ -839,11 +878,12 @@ fn profile_store_id(project_id: &str) -> String {
 fn git_common_dir(project_root: &Path) -> Option<PathBuf> {
     git_output(project_root, &["rev-parse", "--git-common-dir"]).map(|path| {
         let common_dir = PathBuf::from(path);
-        if common_dir.is_absolute() {
+        let resolved = if common_dir.is_absolute() {
             common_dir
         } else {
             project_root.join(common_dir)
-        }
+        };
+        resolved.canonicalize().unwrap_or(resolved)
     })
 }
 
