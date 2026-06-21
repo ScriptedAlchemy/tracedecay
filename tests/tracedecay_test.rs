@@ -13,7 +13,7 @@ use tracedecay::types::{EdgeKind, NodeKind};
 
 /// Creates a temporary Rust project with cross-file calls, then initializes
 /// and indexes a `TraceDecay`.
-async fn setup() -> (TraceDecay, TempDir) {
+async fn setup() -> (TempDir, TraceDecay) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -39,7 +39,7 @@ pub fn helper() { foo(); }
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    (cg, dir)
+    (dir, cg)
 }
 
 fn run_git(project: &std::path::Path, args: &[&str]) {
@@ -118,7 +118,7 @@ fn test_is_test_file_case_insensitive() {
 
 #[tokio::test]
 async fn test_get_all_files() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let files = cg.get_all_files().await.unwrap();
     assert!(
         files.len() >= 2,
@@ -132,7 +132,7 @@ async fn test_get_all_files() {
 
 #[tokio::test]
 async fn test_get_all_nodes() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let nodes = cg.get_all_nodes().await.unwrap();
     assert!(
         !nodes.is_empty(),
@@ -145,7 +145,7 @@ async fn test_get_all_nodes() {
 
 #[tokio::test]
 async fn test_get_all_edges() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let edges = cg.get_all_edges().await.unwrap();
     // foo() calls bar(), so there should be at least one edge
     assert!(!edges.is_empty(), "should have at least one edge");
@@ -157,7 +157,7 @@ async fn test_get_all_edges() {
 
 #[tokio::test]
 async fn test_get_file_dependents() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     // utils.rs calls foo from lib.rs, so lib.rs has utils.rs as a dependent
     // (or utils depends on lib). Let's check if lib.rs has dependents.
     let dependents = cg.get_file_dependents("src/lib.rs").await.unwrap();
@@ -176,7 +176,7 @@ async fn test_get_file_dependents() {
 
 #[tokio::test]
 async fn test_find_dead_code_functions() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let dead = cg
         .find_dead_code(&[NodeKind::Function], false)
         .await
@@ -202,7 +202,7 @@ async fn test_find_dead_code_functions() {
 
 #[tokio::test]
 async fn test_find_dead_code_custom_kinds() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     // Look for dead structs — our test project has none, should return empty
     let dead = cg.find_dead_code(&[NodeKind::Struct], false).await.unwrap();
     assert!(
@@ -217,7 +217,7 @@ async fn test_find_dead_code_custom_kinds() {
 
 #[tokio::test]
 async fn test_get_file_coupling_fan_in() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let coupling = cg.get_file_coupling(true, None, 10).await.unwrap();
     // Even if coupling is empty (due to how the extractor resolves cross-file refs),
     // the method should succeed.
@@ -229,7 +229,7 @@ async fn test_get_file_coupling_fan_in() {
 
 #[tokio::test]
 async fn test_get_file_coupling_fan_out() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let coupling = cg.get_file_coupling(false, None, 10).await.unwrap();
     for (path, count) in &coupling {
         assert!(!path.is_empty());
@@ -243,7 +243,7 @@ async fn test_get_file_coupling_fan_out() {
 
 #[tokio::test]
 async fn test_check_file_staleness_not_stale() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     // Right after indexing, files should not be stale
     let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
     // Immediately after indexing, the file should not be stale
@@ -256,7 +256,7 @@ async fn test_check_file_staleness_not_stale() {
 
 #[tokio::test]
 async fn test_check_file_staleness_after_modification() {
-    let (cg, dir) = setup().await;
+    let (dir, cg) = setup().await;
 
     // Wait a moment, then modify the file so mtime > indexed_at
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -441,7 +441,7 @@ async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path()
 
 #[tokio::test]
 async fn test_tokens_saved_round_trip() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
 
     // Initially should be 0
     let initial = cg.get_tokens_saved().await.unwrap();
@@ -464,7 +464,7 @@ async fn test_tokens_saved_round_trip() {
 
 #[tokio::test]
 async fn test_get_complexity_ranked() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let ranked = cg.get_complexity_ranked(None, None, 10).await.unwrap();
     // Should return functions/methods from our indexed project
     assert!(
@@ -484,7 +484,7 @@ async fn test_get_complexity_ranked() {
 
 #[tokio::test]
 async fn test_get_undocumented_public_symbols_no_filter() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let undoc = cg.get_undocumented_public_symbols(None, 50).await.unwrap();
     // foo is pub and has no docstring
     let names: Vec<&str> = undoc.iter().map(|n| n.name.as_str()).collect();
@@ -497,7 +497,7 @@ async fn test_get_undocumented_public_symbols_no_filter() {
 
 #[tokio::test]
 async fn test_get_undocumented_public_symbols_with_prefix() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let undoc = cg
         .get_undocumented_public_symbols(Some("src/utils"), 50)
         .await
@@ -518,7 +518,7 @@ async fn test_get_undocumented_public_symbols_with_prefix() {
 
 #[tokio::test]
 async fn test_get_node_distribution() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let dist = cg.get_node_distribution(None).await.unwrap();
     assert!(!dist.is_empty(), "should have node distribution data");
     // Each entry is (file_path, kind, count)
@@ -556,7 +556,7 @@ async fn test_is_initialized() {
 
 #[tokio::test]
 async fn test_get_god_classes_empty() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let god = cg.get_god_classes(None, 10).await.unwrap();
     // Pure Rust project with no classes should return empty
     assert!(
@@ -571,7 +571,7 @@ async fn test_get_god_classes_empty() {
 
 #[tokio::test]
 async fn test_get_inheritance_depth_empty() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let depths = cg.get_inheritance_depth(None, 10).await.unwrap();
     assert!(
         depths.is_empty(),
@@ -585,7 +585,7 @@ async fn test_get_inheritance_depth_empty() {
 
 #[tokio::test]
 async fn test_search() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let results = cg.search("foo", 10).await.unwrap();
     assert!(!results.is_empty(), "should find 'foo' via search");
     assert_eq!(results[0].node.name, "foo");
@@ -597,7 +597,7 @@ async fn test_search() {
 
 #[tokio::test]
 async fn test_get_stats() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     let stats = cg.get_stats().await.unwrap();
     assert!(stats.node_count > 0, "should have nodes");
     assert!(stats.file_count > 0, "should have files");
@@ -727,7 +727,7 @@ async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
 /// unconditionally.
 #[tokio::test]
 async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
 
     // Backdate every file's `indexed_at` to simulate a long-quiet repo
     // (typical state before a no-change sync). We use `1` rather than 0
@@ -762,7 +762,7 @@ async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
 /// only an `init`) honest.
 #[tokio::test]
 async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
-    let (cg, _dir) = setup().await;
+    let (_dir, cg) = setup().await;
     cg.db()
         .conn()
         .execute(
