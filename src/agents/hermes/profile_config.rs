@@ -220,9 +220,7 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     if let Some(provider_line) = provider_line {
         let provider = memory_provider_value(&lines[provider_line])
             .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
-        if provider == "tokensave" {
-            lines[provider_line] = "  provider: tracedecay".to_string();
-        } else if provider != "tracedecay" {
+        if provider != "tracedecay" {
             return Err(
                 "Hermes memory provider already configured; refusing to overwrite it".to_string(),
             );
@@ -861,22 +859,6 @@ mod tests {
 
         assert_eq!(second, first);
         assert_eq!(second.matches("- tracedecay").count(), 1);
-    }
-
-    #[test]
-    fn enable_plugin_upgrades_legacy_memory_provider_name() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join("config.yaml");
-        std::fs::write(
-            &config,
-            "plugins:\n  enabled:\n    - tracedecay\nmemory:\n  provider: tokensave\n",
-        )
-        .unwrap();
-
-        enable_plugin(&config, None).unwrap();
-
-        let updated = read(&config);
-        assert!(updated.contains("memory:\n  provider: tracedecay\n"));
     }
 
     #[test]
