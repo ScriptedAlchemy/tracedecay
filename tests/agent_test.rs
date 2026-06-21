@@ -4182,6 +4182,33 @@ fn test_healthcheck_codex_after_install() {
 }
 
 #[test]
+fn test_healthcheck_codex_after_cache_install() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
+    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+
+    let ctx = make_install_ctx(home);
+    CodexIntegration.install(&ctx).unwrap();
+
+    let mut dc = DoctorCounters::new();
+    let hctx = HealthcheckContext {
+        home: home.to_path_buf(),
+        project_path: home.to_path_buf(),
+    };
+    CodexIntegration.healthcheck(&mut dc, &hctx);
+    assert_eq!(
+        dc.issues, 0,
+        "Codex healthcheck should pass after refreshing a cached plugin install"
+    );
+}
+
+#[test]
 fn test_healthcheck_codex_local_install_checks_project_config() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

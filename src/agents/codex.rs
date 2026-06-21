@@ -951,6 +951,14 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    let cached_dirs = codex_plugin_cached_install_dirs(home);
+    if !cached_dirs.is_empty() {
+        for plugin_dir in cached_dirs {
+            doctor_check_plugin_dir(dc, &plugin_dir);
+        }
+        return;
+    }
+
     let plugin_dir = codex_plugin_install_dir(home);
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     if !manifest_path.exists() {
