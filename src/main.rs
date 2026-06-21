@@ -719,9 +719,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                         ag.post_install(Some(&project_path)).await;
                         if automation && id == "codex" {
                             let scoped_project_path = validate_codex_automation_project_path()?;
-                            tracedecay::agents::codex::print_codex_native_automation_guidance(
+                            tracedecay::agents::codex::install_codex_native_automation(
+                                &home,
                                 &scoped_project_path,
-                            );
+                            )?;
                         }
                     }
                     installed_names.push(ag.name().to_string());
@@ -779,9 +780,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     ag.post_install(project_path.as_deref()).await;
                     if automation && id == "codex" {
                         let scoped_project_path = validate_codex_automation_project_path()?;
-                        tracedecay::agents::codex::print_codex_native_automation_guidance(
+                        tracedecay::agents::codex::install_codex_native_automation(
+                            &home,
                             &scoped_project_path,
-                        );
+                        )?;
                     }
                 }
                 if !user_cfg.installed_agents.contains(&id) {

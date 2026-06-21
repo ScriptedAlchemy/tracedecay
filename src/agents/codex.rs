@@ -12,6 +12,7 @@
 //! until trusted. The installer prints that guidance after writing `hooks.json`.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
@@ -344,25 +345,153 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-/// Print the Codex-native automation request that should be run inside Codex.
-///
-/// Codex App automations are owned by Codex itself; the documented write path
-/// is asking Codex in a normal thread to create or update the automation. This
-/// helper intentionally writes no scheduler files.
-pub fn print_codex_native_automation_guidance(project_path: &Path) {
-    eprintln!();
-    eprintln!("\x1b[1mCodex-native TraceDecay automation\x1b[0m");
-    eprintln!("Open Codex in this project and send this prompt:");
-    eprintln!();
-    eprintln!("{}", codex_native_automation_prompt(project_path));
+const CODEX_TRACEDECAY_AUTOMATION_ID: &str = "watch-tracedecay-memory";
+const CODEX_TRACEDECAY_AUTOMATION_NAME: &str = "Watch TraceDecay Memory";
+const CODEX_TRACEDECAY_AUTOMATION_RRULE: &str = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45";
+
+pub fn install_codex_native_automation(home: &Path, project_path: &Path) -> Result<PathBuf> {
+    let automation_dir = home
+        .join(".codex/automations")
+        .join(CODEX_TRACEDECAY_AUTOMATION_ID);
+    let automation_path = automation_dir.join("automation.toml");
+    let now_ms = unix_timestamp_millis();
+    let created_at = existing_codex_automation_created_at(&automation_path).unwrap_or(now_ms);
+
+    std::fs::create_dir_all(&automation_dir).map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "cannot create Codex automation directory {}: {e}",
+            automation_dir.display()
+        ),
+    })?;
+    set_private_dir_permissions(&automation_dir);
+
+    let mut table = toml::map::Map::new();
+    table.insert("version".to_string(), toml::Value::Integer(1));
+    table.insert(
+        "id".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_ID.to_string()),
+    );
+    table.insert("kind".to_string(), toml::Value::String("cron".to_string()));
+    table.insert(
+        "name".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_NAME.to_string()),
+    );
+    table.insert(
+        "prompt".to_string(),
+        toml::Value::String(codex_native_automation_prompt(project_path)),
+    );
+    table.insert(
+        "status".to_string(),
+        toml::Value::String("ACTIVE".to_string()),
+    );
+    table.insert(
+        "rrule".to_string(),
+        toml::Value::String(CODEX_TRACEDECAY_AUTOMATION_RRULE.to_string()),
+    );
+    table.insert(
+        "model".to_string(),
+        toml::Value::String("gpt-5.5".to_string()),
+    );
+    table.insert(
+        "reasoning_effort".to_string(),
+        toml::Value::String("medium".to_string()),
+    );
+    table.insert(
+        "execution_environment".to_string(),
+        toml::Value::String("local".to_string()),
+    );
+    table.insert(
+        "cwds".to_string(),
+        toml::Value::Array(vec![toml::Value::String(
+            project_path.display().to_string(),
+        )]),
+    );
+    table.insert("created_at".to_string(), toml::Value::Integer(created_at));
+    table.insert("updated_at".to_string(), toml::Value::Integer(now_ms));
+
+    let contents =
+        toml::to_string(&toml::Value::Table(table)).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to serialize Codex automation TOML: {e}"),
+        })?;
+    safe_write_private_text_file(&automation_path, &contents)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Installed Codex automation {}",
+        automation_path.display()
+    );
+    Ok(automation_path)
 }
+
+fn existing_codex_automation_created_at(path: &Path) -> Option<i64> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let parsed = toml::from_str::<toml::Table>(&contents).ok()?;
+    parsed.get("created_at")?.as_integer()
+}
+
+fn safe_write_private_text_file(path: &Path, contents: &str) -> Result<()> {
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(e) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "failed to write new Codex automation file {}: {e}",
+                new_path.display()
+            ),
+        });
+    }
+    set_private_file_permissions(&new_path);
+    if let Err(e) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "failed to rename {} → {}: {e}",
+                new_path.display(),
+                path.display()
+            ),
+        });
+    }
+    set_private_file_permissions(path);
+    Ok(())
+}
+
+fn unix_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) {}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) {}
 
 pub fn codex_native_automation_prompt(project_path: &Path) -> String {
     format!(
-        "Create or update a native Codex standalone automation named `TraceDecay memory sweep` for project `{}`.\n\n\
-         Run it every 15 minutes in the local project checkout, not a separate TraceDecay-owned scheduler.\n\n\
-         Automation prompt:\n\
-         Use the installed TraceDecay plugin and user/profile-level TraceDecay store scoped to this project. Do not create repo-local TraceDecay storage or automation files. Review project memory and session context for stale, duplicate, or useful durable facts. Use TraceDecay memory/status/curation tools where appropriate. If there is nothing important, archive or report briefly; if there is a useful maintenance action, explain what changed or what needs review.",
+        "Watch the TraceDecay project at {}. Monitor TraceDecay project memory \
+         and relevant session context for stale, duplicate, contradictory, or \
+         useful durable facts. Use the installed TraceDecay plugin and the \
+         user/profile-level TraceDecay store scoped to this project. Do not \
+         create repo-local TraceDecay storage or automation files. Start \
+         read-only: inspect memory health/status and search/list/probe/contradict \
+         related facts before proposing changes. Do not delete or destructively \
+         mutate facts without explicit user confirmation. If nothing important \
+         changed, report briefly. If there is a useful maintenance action, \
+         explain what changed or what needs review, including fact ids and \
+         reasons when applicable.",
         project_path.display()
     )
 }
@@ -1418,12 +1547,92 @@ mod tests {
     }
 
     #[test]
-    fn codex_native_automation_prompt_uses_codex_owned_scheduler() {
-        let prompt = codex_native_automation_prompt(Path::new("/work/project"));
+    fn codex_native_automation_installs_global_project_scoped_record() {
+        let home = tempfile::TempDir::new().expect("temp home");
+        let project = Path::new("/work/project");
 
-        assert!(prompt.contains("native Codex standalone automation"));
-        assert!(prompt.contains("project `/work/project`"));
-        assert!(prompt.contains("user/profile-level TraceDecay store"));
-        assert!(prompt.contains("Do not create repo-local TraceDecay storage or automation files"));
+        let path =
+            install_codex_native_automation(home.path(), project).expect("automation install");
+        assert_eq!(
+            path,
+            home.path()
+                .join(".codex/automations/watch-tracedecay-memory/automation.toml")
+        );
+        assert!(
+            !project.join(".codex/automations").exists(),
+            "Codex automations must live in the global user profile, not the project"
+        );
+
+        let contents = std::fs::read_to_string(&path).expect("automation toml");
+        let parsed = toml::from_str::<toml::Table>(&contents).expect("valid toml");
+        assert_eq!(
+            parsed.get("id").and_then(|value| value.as_str()),
+            Some("watch-tracedecay-memory")
+        );
+        assert_eq!(
+            parsed.get("name").and_then(|value| value.as_str()),
+            Some("Watch TraceDecay Memory")
+        );
+        assert_eq!(
+            parsed.get("rrule").and_then(|value| value.as_str()),
+            Some("FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45")
+        );
+        assert_eq!(
+            parsed
+                .get("cwds")
+                .and_then(|value| value.as_array())
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str()),
+            Some("/work/project")
+        );
+        assert_eq!(
+            parsed.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            parsed
+                .get("reasoning_effort")
+                .and_then(|value| value.as_str()),
+            Some("medium")
+        );
+        assert!(parsed
+            .get("prompt")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("Do not create repo-local TraceDecay storage or automation files"));
+
+        let created_at = parsed
+            .get("created_at")
+            .and_then(|value| value.as_integer())
+            .expect("created_at");
+        install_codex_native_automation(home.path(), project).expect("automation reinstall");
+        let reparsed = std::fs::read_to_string(&path)
+            .expect("automation toml")
+            .parse::<toml::Table>()
+            .expect("valid toml");
+        assert_eq!(
+            reparsed
+                .get("created_at")
+                .and_then(|value| value.as_integer()),
+            Some(created_at),
+            "reinstall should preserve created_at for the existing Codex automation"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(path.parent().unwrap())
+                .expect("automation dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = std::fs::metadata(&path)
+                .expect("automation file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
     }
 }

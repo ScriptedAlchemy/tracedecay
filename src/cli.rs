@@ -108,7 +108,7 @@ pub enum Commands {
         /// used with --agent hermes).
         #[arg(long)]
         no_dashboard: bool,
-        /// Print a Codex-native TraceDecay automation setup prompt after install
+        /// Install/update a Codex-native project automation in ~/.codex
         /// (only used with --agent codex).
         #[arg(long)]
         automation: bool,
