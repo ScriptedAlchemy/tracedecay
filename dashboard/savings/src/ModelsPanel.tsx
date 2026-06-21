@@ -73,17 +73,10 @@ export default function ModelsPanel({
     (row) => row.value,
   );
   const dailyCost = fillDailySeries(
-    data.daily
-      .map((row) => {
-        const cost = rowCost(row, prices);
-        return { day: row.day, value: cost.usd ?? 0 };
-      })
-      .concat(
-        (data.turns.by_day || []).map((row) => ({
-          day: row.day,
-          value: row.cost_usd || 0,
-        })),
-      ),
+    data.daily.map((row) => {
+      const cost = rowCost(row, prices);
+      return { day: row.day, value: cost.usd ?? 0 };
+    }),
     (row) => row.value,
   );
 
@@ -124,26 +117,28 @@ export default function ModelsPanel({
                       row.tokenized.output_tokens +
                       row.estimated.output_tokens;
                     return (
-                      <tr key={`${row.model || "unknown"}-${index}`}>
-                        <td>{row.model || <em>unknown model</em>}</td>
-                        <td>
+                      <tr key={`${row.model || "unknown"}-${index}`} className="tss-model-row">
+                        <td data-label="Model" title={row.model || "unknown model"}>
+                          <span className="tss-model-name">{row.model || <em>unknown model</em>}</span>
+                        </td>
+                        <td data-label="OpenRouter slug" title={cost.resolved?.slug || "no price data"}>
                           {cost.resolved ? (
                             <span className="tss-slug">{cost.resolved.slug}</span>
                           ) : (
                             <em>no price data</em>
                           )}
                         </td>
-                        <td>{fmtTokens(row.sessions)}</td>
-                        <td>{fmtTokens(row.messages)}</td>
-                        <td>{fmtTokens(inputTokens)}</td>
-                        <td>{fmtTokens(outputTokens)}</td>
-                        <td>
+                        <td data-label="Sessions">{fmtTokens(row.sessions)}</td>
+                        <td data-label="Messages">{fmtTokens(row.messages)}</td>
+                        <td data-label="Tokens in">{fmtTokens(inputTokens)}</td>
+                        <td data-label="Tokens out">{fmtTokens(outputTokens)}</td>
+                        <td data-label="$/MTok in/out">
                           {cost.resolved
                             ? `${fmtUsd(cost.resolved.price.prompt_per_mtok)} · ${fmtUsd(cost.resolved.price.completion_per_mtok)}`
                             : "—"}
                         </td>
-                        <td>{cost.usd === null ? "—" : fmtUsd(cost.usd)}</td>
-                        <td>
+                        <td data-label="Cost">{cost.usd === null ? "—" : fmtUsd(cost.usd)}</td>
+                        <td data-label="Basis">
                           <BasisBadge basis={row.cost_basis} tokenizer={row.tokenizer} />
                         </td>
                       </tr>
@@ -209,10 +204,10 @@ export default function ModelsPanel({
                 <tbody>
                   {data.turns.by_model.map((row) => (
                     <tr key={row.model}>
-                      <td>{row.model}</td>
-                      <td>{fmtTokens(row.total_tokens)}</td>
-                      <td>{fmtUsd(row.cost_usd)}</td>
-                      <td>
+                      <td data-label="Model">{row.model}</td>
+                      <td data-label="Total tokens">{fmtTokens(row.total_tokens)}</td>
+                      <td data-label="Cost">{fmtUsd(row.cost_usd)}</td>
+                      <td data-label="Basis">
                         <BasisBadge basis="actual" />
                       </td>
                     </tr>

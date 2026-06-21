@@ -1,13 +1,9 @@
 //! LCM dashboard API, backed by tracedecay's LCM session store.
 //!
-//! Port of the hermes-lcm `dashboard/plugin_api.py` onto the session-store
-//! tables `lcm_raw_messages`, `lcm_summary_nodes`, and `lcm_summary_sources`.
-//! The store served is selected by [`super::resolve_lcm_store`]: the
-//! project-local `.tracedecay/sessions.db` (where transcript ingest writes)
-//! by default, or the global DB under a `TRACEDECAY_GLOBAL_DB` override /
-//! fallback. Every payload reports the active store via the additive
-//! `path` + `storage_scope` fields. Payload shapes otherwise mirror the
-//! original routes so the ported UI bundle works unchanged.
+//! Serves Hermes-compatible LCM routes from `lcm_raw_messages`,
+//! `lcm_summary_nodes`, and `lcm_summary_sources`. The store is selected by
+//! [`super::resolve_lcm_store`], and every payload reports it via `path` and
+//! `storage_scope`.
 //!
 //! Schema mapping (hermes-lcm → tracedecay):
 //! - `messages`               → `lcm_raw_messages` (`source` ← `provider`,
@@ -464,7 +460,7 @@ fn merge_object(target: &mut Map<String, Value>, value: Value) {
 fn lcm_storage_root(state: &DashboardState) -> PathBuf {
     Path::new(&state.lcm_db_path)
         .parent()
-        .map_or_else(|| state.project_root.join(".tracedecay"), Path::to_path_buf)
+        .map_or_else(|| state.store_root.clone(), Path::to_path_buf)
 }
 
 fn now_unix() -> i64 {

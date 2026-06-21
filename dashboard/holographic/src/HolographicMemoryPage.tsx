@@ -119,14 +119,14 @@ function Stat({
 }) {
   return (
     <div
-      className="border border-border bg-background/50 px-3 py-2"
+      className="hm-stat border border-border bg-background/50 px-3 py-2"
       title={hint}
       style={hint ? { cursor: "help" } : undefined}
     >
-      <div className="font-mono-ui text-lg leading-none text-foreground">
+      <div className="hm-stat-value font-mono-ui text-lg leading-none text-foreground">
         {value}
       </div>
-      <div className="mt-1 text-xs tracking-[0.08em] text-text-tertiary">
+      <div className="hm-stat-label mt-1 text-xs tracking-[0.08em] text-text-tertiary">
         {label}
       </div>
     </div>
@@ -159,7 +159,7 @@ function DataBars<T>({
       <h3 className="mb-3 font-mondwest text-display text-xs tracking-[0.12em] text-text-secondary">
         {title}
       </h3>
-      {header && <div className="mb-3">{header}</div>}
+      {header && items.length > 0 && <div className="mb-3">{header}</div>}
       <div className="flex flex-col gap-2">
         {items.length === 0 ? (
           <p className="text-xs text-text-tertiary">No data.</p>
@@ -214,7 +214,7 @@ function SystemStrip({
   const db = data.holographic;
 
   return (
-    <div className="grid gap-3 sm:grid-cols-[repeat(2,minmax(0,1fr))] xl:grid-cols-[repeat(7,minmax(0,1fr))]">
+    <div className="hm-system-strip grid gap-3 sm:grid-cols-[repeat(2,minmax(0,1fr))] xl:grid-cols-[repeat(7,minmax(0,1fr))]">
       <Stat label="memory provider" value={activeMemory} />
       <Stat label="context engine" value={provider.context_engine || "compressor"} />
       <Stat label="context engine tools" value={pluginEngine?.tools?.length ?? 0} />
@@ -237,11 +237,11 @@ function SystemStrip({
         }
       />
       <Stat label="database" value={db.exists ? "ready" : "missing"} />
-      <div className="min-w-0 border border-border bg-background/50 px-3 py-2 sm:col-span-2 xl:col-span-1">
-        <div className="truncate font-mono-ui text-xs text-foreground">
+      <div className="hm-stat hm-path-stat min-w-0 border border-border bg-background/50 px-3 py-2 sm:col-span-2 xl:col-span-1">
+        <div className="hm-stat-value truncate font-mono-ui text-xs text-foreground">
           {db.path}
         </div>
-        <div className="mt-1 text-xs tracking-[0.08em] text-text-tertiary">
+        <div className="hm-stat-label mt-1 text-xs tracking-[0.08em] text-text-tertiary">
           storage path
         </div>
       </div>
@@ -307,7 +307,7 @@ function MemoryHealthCard({
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        <div className="grid min-w-0 gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid min-w-0 gap-3 grid-cols-2 xl:grid-cols-4">
           <Stat label="facts" value={memory.fact_count} />
           <Stat label="entities" value={memory.entity_count} />
           <Stat label="banks" value={memory.bank_count} />
@@ -354,7 +354,7 @@ function SearchBox({
   setQuery: (value: string) => void;
 }) {
   return (
-    <div className="relative min-w-0 w-full sm:max-w-xl">
+    <div className="hm-searchbox relative min-w-0 w-full sm:max-w-xl">
       {refreshing ? (
         <Spinner className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[0.875rem] text-primary" />
       ) : (
@@ -1126,7 +1126,7 @@ export default function HolographicMemoryPage() {
         <div className="flex min-w-0 items-center gap-2">
           <BrainCircuit className="h-4 w-4 text-text-tertiary" />
           <h2 className="m-0 font-mondwest text-display text-xs tracking-[0.12em] text-text-tertiary">
-            Plugin Inspector
+            Holographic Memory
           </h2>
         </div>
         <Button

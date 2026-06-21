@@ -45,11 +45,9 @@ pub(crate) const CACHE_TTL_SECS: i64 = 86_400;
 
 /// Set to `1` to disable all network access for pricing.
 const OFFLINE_ENV: &str = "TRACEDECAY_OFFLINE";
-const OFFLINE_ENV_LEGACY: &str = "TOKENSAVE_OFFLINE";
 
 /// Overrides the on-disk cache path (tests use a temp file).
 const CACHE_PATH_ENV: &str = "TRACEDECAY_MODEL_PRICES_PATH";
-const CACHE_PATH_ENV_LEGACY: &str = "TOKENSAVE_MODEL_PRICES_PATH";
 
 /// Curated static snapshot of the `OpenRouter` response (same JSON shape).
 const FALLBACK_JSON: &str = include_str!("model_prices_fallback.json");
@@ -76,32 +74,18 @@ pub(crate) struct PriceTable {
     pub(crate) fetched_at: Option<i64>,
 }
 
-fn env_with_legacy(primary: &str, legacy: &str) -> Option<String> {
-    std::env::var(primary)
-        .ok()
-        .or_else(|| std::env::var(legacy).ok())
-}
-
 fn cache_path() -> Option<PathBuf> {
-    if let Some(path) = env_with_legacy(CACHE_PATH_ENV, CACHE_PATH_ENV_LEGACY) {
+    if let Ok(path) = std::env::var(CACHE_PATH_ENV) {
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }
     }
     let home = dirs::home_dir()?;
-    let preferred = home.join(".tracedecay").join("model-prices.json");
-    let legacy = home.join(".tokensave").join("model-prices.json");
-    // Prefer the new data dir; fall back to the legacy cache location until
-    // users naturally migrate.
-    if preferred.exists() || !legacy.exists() {
-        Some(preferred)
-    } else {
-        Some(legacy)
-    }
+    Some(home.join(".tracedecay").join("model-prices.json"))
 }
 
 fn offline() -> bool {
-    env_with_legacy(OFFLINE_ENV, OFFLINE_ENV_LEGACY).is_some_and(|v| !v.is_empty() && v != "0")
+    std::env::var(OFFLINE_ENV).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Reads a price field that `OpenRouter` serves as a per-token decimal string

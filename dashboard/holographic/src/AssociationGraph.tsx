@@ -367,7 +367,7 @@ export default function AssociationGraph({
           <CardTitle>Association Graph</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex h-[42rem] items-center justify-center border border-border bg-background/30 text-xs text-text-tertiary">
+          <div className="flex min-h-[12rem] items-center justify-center border border-border bg-background/30 px-4 text-center text-xs text-text-tertiary md:min-h-[18rem]">
             No graph data.
           </div>
         </CardContent>

@@ -129,12 +129,11 @@
 
 /* headline stat row */
 .hermes-lcm-statrow {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.75rem;
 }
 .hermes-lcm-stat {
-  flex: 1 1 120px;
   border: 1px solid var(--color-border);
   border-radius: 8px;
   background: var(--color-card);
@@ -187,8 +186,8 @@
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  width: fit-content;
-  max-width: 100%;
+  width: 100%;
+  max-width: 68rem;
 }
 .hermes-lcm-tl-undated {
   font-size: 0.7rem;
@@ -196,15 +195,16 @@
 .hermes-lcm-tl-bars {
   display: flex;
   align-items: flex-end;
-  gap: 5px;
+  gap: clamp(3px, 0.6vw, 7px);
   height: 84px;
   padding-bottom: 1px;
   border-bottom: 1px solid var(--color-border);
   overflow-x: auto;
 }
 .hermes-lcm-tl-col {
-  flex: 0 0 30px;
-  width: 30px;
+  flex: 1 0 clamp(18px, 3.2vw, 34px);
+  min-width: 18px;
+  max-width: 34px;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -844,6 +844,22 @@
   overflow: hidden;
 }
 
+.hermes-lcm .tdp-stat-compact {
+  min-width: 0;
+}
+
+.hermes-lcm .tdp-stat-value {
+  color: var(--lcm-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.hermes-lcm .tdp-stat-label {
+  margin-top: 0.4rem;
+  color: var(--lcm-text-3);
+}
+
 .hermes-lcm-card::before {
   content: "";
   position: absolute;
@@ -1190,6 +1206,29 @@
   .hermes-lcm-top {
     border-radius: 20px;
     flex-direction: column;
+    padding: 0.6rem;
+    align-items: stretch;
+  }
+
+  .hermes-lcm-search-wrap {
+    flex: 0 1 auto;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .hermes-lcm-search {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .hermes-lcm-select,
+  .hermes-lcm-status {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .hermes-lcm-statrow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .hermes-lcm-empty-panel {
@@ -1213,5 +1252,33 @@
 
   .hermes-lcm-pager {
     justify-content: stretch;
+  }
+
+  .hermes-lcm-rows {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .hermes-lcm-card .tdp-empty.hermes-lcm-empty {
+    min-height: auto;
+    padding: 0.75rem;
+  }
+}
+
+@media (max-width: 420px) {
+  .hermes-lcm-statrow {
+    gap: 0.6rem;
+  }
+
+  .hermes-lcm-stat {
+    padding: 0.75rem;
+  }
+
+  .hermes-lcm-stat-v {
+    font-size: 1.25rem;
+  }
+
+  .hermes-lcm .tdp-stat-value {
+    font-size: 1.25rem;
   }
 }

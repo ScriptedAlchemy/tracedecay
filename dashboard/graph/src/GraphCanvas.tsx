@@ -227,7 +227,11 @@ export default function GraphCanvas({
 
         // Collapsed-neighbor badge: full degree minus visible edges.
         const collapsed = Math.max(0, (node.degree || 0) - node.visibleDegree);
-        if (collapsed > 0 && camera.k > 0.35) {
+        const showCollapsedBadge =
+          collapsed > 0 &&
+          camera.k > 0.35 &&
+          (rect.width >= 560 || isSelected || isHovered || onPath);
+        if (showCollapsedBadge) {
           const bx = node.x + node.radius * 0.85;
           const by = node.y - node.radius * 0.85;
           const br = Math.max(6.5, 8 / camera.k);

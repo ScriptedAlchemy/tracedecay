@@ -24,9 +24,12 @@ use serde_json::{json, Map, Value};
 
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
-use super::util::{coerce_limit, http_detail, JsonPath, JsonQuery};
+use super::util::{coerce_limit, http_detail, query_i64, JsonPath, JsonQuery};
 use super::DashboardState;
-use crate::tracedecay::TraceDecay;
+use crate::memory::encoding::HolographicEncoder;
+use crate::memory::store::MemoryStore;
+use crate::memory::trust::DEFAULT_MIN_TRUST;
+use crate::memory::types::{MemoryRepairStats, MemoryStatus};
 
 #[derive(Deserialize)]
 pub(crate) struct OverviewParams {
@@ -81,11 +84,105 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
     Ok(row.get::<i64>(0).unwrap_or(0).max(0))
 }
 
-async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
-    let cg = TraceDecay::open(&state.project_root)
+pub(crate) async fn repair_derived_memory(
+    state: &DashboardState,
+) -> Result<MemoryRepairStats, String> {
+    let store = MemoryStore::new(&state.mem_conn);
+    let mut missing_vectors_repaired = 0;
+    loop {
+        let repaired = store
+            .compute_missing_vectors(500)
+            .await
+            .map_err(|e| e.to_string())?;
+        if repaired == 0 {
+            break;
+        }
+        missing_vectors_repaired += repaired;
+    }
+
+    let banks_rebuilt = store
+        .rebuild_dirty_banks()
         .await
         .map_err(|e| e.to_string())?;
-    let status = cg.memory_status().await.map_err(|e| e.to_string())?;
+
+    Ok(MemoryRepairStats {
+        missing_vectors_repaired,
+        banks_rebuilt,
+    })
+}
+
+async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
+    let hrr_dim = HolographicEncoder::DIMENSIONS;
+    let repair = repair_derived_memory(state).await?;
+    let status = MemoryStatus {
+        fact_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await
+            as usize,
+        entity_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_entities", ()).await
+            as usize,
+        bank_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_banks", ()).await
+            as usize,
+        algebra_name: "amari_fhrr".to_string(),
+        hrr_dim,
+        estimated_capacity: (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize,
+        trust_0_025_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < 0.25",
+            (),
+        )
+        .await as usize,
+        trust_025_050_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.25 AND trust_score < 0.50",
+            (),
+        )
+        .await as usize,
+        trust_050_075_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.50 AND trust_score < 0.75",
+            (),
+        )
+        .await as usize,
+        trust_075_100_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.75",
+            (),
+        )
+        .await as usize,
+        below_default_recall_threshold_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < ?1",
+            libsql::params![DEFAULT_MIN_TRUST],
+        )
+        .await as usize,
+        helpful_count: query_i64(
+            &state.mem_conn,
+            "SELECT COALESCE(SUM(helpful_count), 0) FROM memory_facts",
+            (),
+        )
+        .await as usize,
+        unhelpful_count: query_i64(
+            &state.mem_conn,
+            "SELECT COALESCE(SUM(unhelpful_count), 0) FROM memory_facts",
+            (),
+        )
+        .await as usize,
+        missing_vector_count: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts
+             WHERE hrr_vector IS NULL OR hrr_algebra != 'amari_fhrr' OR hrr_dim != ?1",
+            libsql::params![hrr_dim as i64],
+        )
+        .await as usize,
+        legacy_backfill_complete: query_i64(
+            &state.mem_conn,
+            "SELECT COUNT(*) FROM memory_facts
+             WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
+            (),
+        )
+        .await
+            > 0,
+        repair,
+    };
     let largest_bank_fact_count = largest_bank_fact_count(state).await?;
     let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
         largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
@@ -106,13 +203,11 @@ async fn fact_trust_history_payload(
     state: &DashboardState,
     fact_id: i64,
 ) -> Result<Option<Value>, String> {
-    let cg = TraceDecay::open(&state.project_root)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(_fact) = cg.get_fact(fact_id).await.map_err(|e| e.to_string())? else {
+    let store = MemoryStore::new(&state.mem_conn);
+    let Some(_fact) = store.get_fact(fact_id).await.map_err(|e| e.to_string())? else {
         return Ok(None);
     };
-    let trust_history = cg
+    let trust_history = store
         .fact_trust_history(fact_id)
         .await
         .map_err(|e| e.to_string())?;

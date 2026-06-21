@@ -1,10 +1,9 @@
 //! Sidecar persistence for the dashboard's last dry-run curation preview.
 //!
 //! The preview lives in memory (`DashboardState::curate_preview`) and is
-//! mirrored to `.tracedecay/dashboard/curation_preview.json` so a server
+//! mirrored to `<resolved-store>/dashboard/curation_preview.json` so a server
 //! restart does not lose it (the original `holographic_plus` backend also
-//! persisted previews to a JSON file). If only the legacy `.tokensave/`
-//! directory exists, the sidecar stays there for backward compatibility.
+//! persisted previews to a JSON file).
 //! The sidecar is a best-effort cache:
 //! load/save/clear failures are logged and never fail an API request, and
 //! the API shape of `GET /curation/preview` is unchanged — staleness is
@@ -14,19 +13,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::config::get_tracedecay_dir;
-
 use super::CuratePreviewEntry;
 
-pub(crate) fn sidecar_path(project_root: &Path) -> PathBuf {
-    get_tracedecay_dir(project_root)
-        .join("dashboard")
-        .join("curation_preview.json")
+pub(crate) fn sidecar_path(dashboard_root: &Path) -> PathBuf {
+    dashboard_root.join("curation_preview.json")
 }
 
 /// Loads the persisted preview, or `None` when absent/unreadable/malformed.
-pub(crate) async fn load(project_root: &Path) -> Option<CuratePreviewEntry> {
-    let path = sidecar_path(project_root);
+pub(crate) async fn load(dashboard_root: &Path) -> Option<CuratePreviewEntry> {
+    let path = sidecar_path(dashboard_root);
     let bytes = tokio::fs::read(&path).await.ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     let report = value.get("report")?.clone();
@@ -46,8 +41,8 @@ pub(crate) async fn load(project_root: &Path) -> Option<CuratePreviewEntry> {
     })
 }
 
-pub(crate) async fn save(project_root: &Path, entry: &CuratePreviewEntry) {
-    let path = sidecar_path(project_root);
+pub(crate) async fn save(dashboard_root: &Path, entry: &CuratePreviewEntry) {
+    let path = sidecar_path(dashboard_root);
     let payload = json!({
         "report": entry.report,
         "saved_at": entry.saved_at,
@@ -72,8 +67,8 @@ pub(crate) async fn save(project_root: &Path, entry: &CuratePreviewEntry) {
     }
 }
 
-pub(crate) async fn clear(project_root: &Path) {
-    let path = sidecar_path(project_root);
+pub(crate) async fn clear(dashboard_root: &Path) {
+    let path = sidecar_path(dashboard_root);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

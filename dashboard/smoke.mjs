@@ -152,6 +152,8 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
 
   const similarityViewButton = page.getByRole("button", { name: "Similarity" });
   await similarityViewButton.waitFor({ state: "visible" });
+  await assertNoHorizontalOverflow(page);
+  await assertViewSwitcherLayout(page, profile.name);
   await similarityViewButton.click();
   await page.getByText("Similar Pairs").waitFor({ state: "visible" });
 
@@ -214,6 +216,40 @@ async function runViewportSmoke(browser, baseUrl, profile, expectLcmMode) {
   }
 
   await context.close();
+}
+
+async function assertNoHorizontalOverflow(page) {
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    return {
+      clientWidth: doc.clientWidth,
+      scrollWidth: doc.scrollWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+    };
+  });
+  if (overflow.scrollWidth > overflow.clientWidth + 1) {
+    throw new Error(
+      `dashboard has horizontal overflow: ${JSON.stringify(overflow)}`,
+    );
+  }
+}
+
+async function assertViewSwitcherLayout(page, profileName) {
+  if (profileName !== "narrow") return;
+  const layout = await page.locator(".hv-viewswitch").first().evaluate((el) => {
+    const style = window.getComputedStyle(el);
+    return {
+      flexWrap: style.flexWrap,
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+    };
+  });
+  if (layout.flexWrap !== "nowrap") {
+    throw new Error(`narrow Holographic view switcher should not wrap: ${JSON.stringify(layout)}`);
+  }
+  if (layout.scrollWidth < layout.clientWidth) {
+    throw new Error(`narrow Holographic view switcher should remain scrollable: ${JSON.stringify(layout)}`);
+  }
 }
 
 async function main() {

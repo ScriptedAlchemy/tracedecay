@@ -24,7 +24,7 @@ pub(crate) fn providers_stub() -> Value {
         "memory_options": [
             {
                 "name": "tracedecay",
-                "description": "TraceDecay holographic memory store (project-local memory_facts)."
+                "description": "TraceDecay holographic memory store (resolved project memory_facts)."
             }
         ],
         "context_engine": "tracedecay",
@@ -57,6 +57,13 @@ pub(crate) async fn fetch_entities(
 }
 
 async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
+    let Ok(rows) = memory_queries::trust_histogram_rows(state).await else {
+        return Vec::new();
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
     let mut buckets: Vec<Value> = (0..10)
         .map(|i| {
             json!({
@@ -66,17 +73,15 @@ async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
             })
         })
         .collect();
-    if let Ok(rows) = memory_queries::trust_histogram_rows(state).await {
-        for row in rows {
-            let idx = row
-                .get("bucket")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                .clamp(0, 9) as usize;
-            let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
-            if let Some(count) = buckets[idx].get_mut("count") {
-                *count = json!(count.as_i64().unwrap_or(0) + added);
-            }
+    for row in rows {
+        let idx = row
+            .get("bucket")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .clamp(0, 9) as usize;
+        let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
+        if let Some(count) = buckets[idx].get_mut("count") {
+            *count = json!(count.as_i64().unwrap_or(0) + added);
         }
     }
     buckets
@@ -704,7 +709,7 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
             active_facts_at_save: total,
             memory_fingerprint_at_save,
         };
-        super::curate_preview_store::save(&state.project_root, &entry).await;
+        super::curate_preview_store::save(&state.dashboard_root, &entry).await;
         *state.curate_preview.write().await = Some(entry);
         return Ok(report);
     }
@@ -725,7 +730,7 @@ pub(crate) async fn curate_payload(state: &DashboardState, dry_run: bool) -> Res
     }
 
     *state.curate_preview.write().await = None;
-    super::curate_preview_store::clear(&state.project_root).await;
+    super::curate_preview_store::clear(&state.dashboard_root).await;
 
     let _ = MemoryStore::new(&state.mem_conn)
         .record_oplog(
@@ -893,7 +898,7 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
 
     if deleted > 0 || merged > 0 {
         *state.curate_preview.write().await = None;
-        super::curate_preview_store::clear(&state.project_root).await;
+        super::curate_preview_store::clear(&state.dashboard_root).await;
         let _ = MemoryStore::new(&state.mem_conn)
             .record_oplog(
                 "curate_apply",
