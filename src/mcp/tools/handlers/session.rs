@@ -114,19 +114,6 @@ fn compact_lcm_preflight_payload(
     Value::Object(object)
 }
 
-fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
-    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
-        formatted
-    } else {
-        truncated_json_envelope_with_handle(project_root, &formatted)
-    };
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: Vec::new(),
-    }
-}
-
 fn compact_messages_for_mcp(
     value: Option<&Value>,
     limit: usize,
@@ -1823,7 +1810,7 @@ pub(super) async fn handle_lcm_compress(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(lcm_compress_tool_json(
+    Ok(tool_json(
         response_handle_root.as_deref(),
         &json!({
             "status": response.status,

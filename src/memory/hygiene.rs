@@ -11,10 +11,19 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+fn compile_patterns(patterns: &[(&'static str, &'static str)]) -> Vec<(Regex, &'static str)> {
+    patterns
+        .iter()
+        // Patterns are compile-time literals; a failed compile would only
+        // drop that rule (and is covered by the unit tests).
+        .filter_map(|(pattern, reason)| Regex::new(pattern).ok().map(|regex| (regex, *reason)))
+        .collect()
+}
+
 fn regex_set() -> &'static Vec<(Regex, &'static str)> {
     static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        [
+        compile_patterns(&[
             (
                 // PEM-encoded private key blocks.
                 r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
@@ -39,12 +48,7 @@ fn regex_set() -> &'static Vec<(Regex, &'static str)> {
                 r#"(?i)\b(api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)\b\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{16,}"#,
                 "credential-like key=value assignment",
             ),
-        ]
-        .into_iter()
-        // Patterns are compile-time literals; a failed compile would only
-        // drop that rule (and is covered by the unit tests).
-        .filter_map(|(pattern, reason)| Regex::new(pattern).ok().map(|regex| (regex, reason)))
-        .collect()
+        ])
     })
 }
 
@@ -115,7 +119,7 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
 fn transient_regexes() -> &'static Vec<(Regex, &'static str)> {
     static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        [
+        compile_patterns(&[
             (
                 r"(?i)\b(localhost|127\.0\.0\.1|0\.0\.0\.0):\d{2,5}\b",
                 "ephemeral local port",
@@ -126,12 +130,7 @@ fn transient_regexes() -> &'static Vec<(Regex, &'static str)> {
                 r"(?i)\b(listening on|started in \d+\s*ms|exit code \d+|finished in \d+(\.\d+)?s)\b",
                 "run-log output",
             ),
-        ]
-        .into_iter()
-        // Patterns are compile-time literals; a failed compile would only
-        // drop that rule (and is covered by the unit tests).
-        .filter_map(|(pattern, reason)| Regex::new(pattern).ok().map(|regex| (regex, reason)))
-        .collect()
+        ])
     })
 }
 

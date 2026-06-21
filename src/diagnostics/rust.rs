@@ -20,7 +20,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope};
+use crate::diagnostics::{canonicalise_file, Diagnostic, Driver, Scope};
 use crate::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
@@ -119,22 +119,6 @@ fn target_dir_for(project_root: &Path) -> PathBuf {
         .join("tracedecay-target")
         .join(crate::storage::default_profile_project_id(project_root))
         .join("diagnostics")
-}
-
-/// Convert cargo's reported `file_name` (project-relative or absolute) into
-/// the project-relative form the rest of tracedecay uses. Cargo emits paths
-/// relative to the manifest dir; we strip a leading `project_root` prefix
-/// when present in case the path is absolute.
-fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
-    let abs = if Path::new(file_name).is_absolute() {
-        PathBuf::from(file_name)
-    } else {
-        project_root.join(file_name)
-    };
-    if let Ok(rel) = abs.strip_prefix(project_root) {
-        return rel.to_string_lossy().to_string();
-    }
-    file_name.to_string()
 }
 
 /// Cargo emits messages of many levels — "warning" and "error" produce

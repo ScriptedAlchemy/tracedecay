@@ -20,7 +20,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope};
+use crate::diagnostics::{canonicalise_file, Diagnostic, Driver, Scope};
 use crate::errors::Result;
 
 pub struct PyrightDriver;
@@ -96,18 +96,6 @@ pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic
 
 fn matches_severity(severity: &str) -> bool {
     matches!(severity, "error" | "warning")
-}
-
-fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
-    let abs = if Path::new(file_name).is_absolute() {
-        std::path::PathBuf::from(file_name)
-    } else {
-        project_root.join(file_name)
-    };
-    if let Ok(rel) = abs.strip_prefix(project_root) {
-        return rel.to_string_lossy().to_string();
-    }
-    file_name.to_string()
 }
 
 #[derive(Debug, Deserialize)]
