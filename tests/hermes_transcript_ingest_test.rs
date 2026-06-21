@@ -496,9 +496,8 @@ async fn unpinned_profile_maps_to_its_own_home_store() {
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &unrelated_project).await;
     assert_eq!(stats.messages_upserted, 0);
 
-    // Sweeping the profile home itself ingests into the profile-scoped store
-    // (`<profile>/.tracedecay/sessions.db`) — the store the generated
-    // plugin's hermes_profile storage scope serves.
+    // Sweeping the profile home itself ingests into the user-level tracedecay
+    // store for that profile-home project identity.
     let profile_db = open_project_session_db(&profile_dir).await.unwrap();
     let stats = ingest_homes(
         &profile_db,

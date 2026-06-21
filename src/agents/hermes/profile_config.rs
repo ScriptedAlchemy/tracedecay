@@ -12,7 +12,6 @@ use crate::agents::backup_config_file;
 use crate::errors::{Result, TraceDecayError};
 
 /// Reads `plugins.tracedecay.project_root` from a Hermes profile config.yaml.
-/// Falls back to legacy `plugins.tokensave.project_root` when present.
 ///
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
@@ -21,9 +20,7 @@ pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<Stri
     let config = std::fs::read_to_string(config_path).ok()?;
     let lines: Vec<&str> = config.lines().collect();
     let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;
-    read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay").or_else(
-        || read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tokensave"),
-    )
+    read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay")
 }
 
 fn read_pinned_project_root_from_block(
@@ -65,8 +62,7 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
 /// `plugins.tracedecay.project_root` key of the profile config.yaml.
 ///
 /// A pin pointing at the profile home itself is the legacy storage-home
-/// conflation (storage is profile-scoped now and code tools resolve per
-/// cwd), so it is treated — and re-propagated on reinstall — as no pin.
+/// conflation, so it is treated — and re-propagated on reinstall — as no pin.
 pub(super) fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
     let profile_dir = plugin_dir.parent()?.parent()?;
     let pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))?;
@@ -147,7 +143,6 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
     {
         ChildSection::Block { start, end } => {
             lines = remove_list_item(lines, start, end, "tracedecay");
-            lines = remove_list_item(lines, start, end, "tokensave");
         }
         ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
     }
@@ -158,16 +153,6 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
         .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
     {
         ChildSection::Block { start, end } => {
-            lines = remove_list_item(lines, start, end, "tokensave");
-            let (plugins_start, plugins_end) =
-                find_top_level_section_from_strings(&lines, "plugins")
-                    .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-            let ChildSection::Block { start, end } =
-                find_child_section_from_strings(&lines, plugins_start, plugins_end, "enabled")
-                    .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-            else {
-                return Err("unsupported Hermes plugins config".to_string());
-            };
             if !list_contains_item_strings(&lines, start, end, "tracedecay") {
                 // Match the existing list's item indentation (Hermes writes
                 // 2-space items); only default to 4 when the list is empty.
@@ -186,8 +171,7 @@ fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, Stri
         }
     }
 
-    let updated = join_lines(&lines, had_trailing_newline);
-    remove_pinned_project_root_from_block(&updated, "tokensave")
+    Ok(join_lines(&lines, had_trailing_newline))
 }
 
 fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> {
@@ -205,7 +189,6 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
     {
         ChildSection::Block { start, end } => {
             lines = remove_list_item(lines, start, end, "tracedecay");
-            lines = remove_list_item(lines, start, end, "tokensave");
         }
         ChildSection::Missing | ChildSection::EmptyFlow { .. } => {}
     }
@@ -235,10 +218,9 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     let provider_line = find_memory_provider_line(&lines, memory_start, memory_end)
         .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
     if let Some(provider_line) = provider_line {
-        let provider = lines[provider_line].trim();
-        if provider == "provider: tokensave" {
-            lines[provider_line] = "  provider: tracedecay".to_string();
-        } else if provider != "provider: tracedecay" {
+        let provider = memory_provider_value(&lines[provider_line])
+            .ok_or_else(|| "unsupported Hermes memory config".to_string())?;
+        if provider != "tracedecay" {
             return Err(
                 "Hermes memory provider already configured; refusing to overwrite it".to_string(),
             );
@@ -248,6 +230,11 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     }
 
     Ok(join_lines(&lines, had_trailing_newline))
+}
+
+fn memory_provider_value(line: &str) -> Option<&str> {
+    let value = line.trim().strip_prefix("provider:")?.trim();
+    Some(value.trim_matches(['"', '\'']))
 }
 
 fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
@@ -266,7 +253,7 @@ fn disable_memory_provider_config(existing: &str) -> std::result::Result<String,
     let mut removed_provider = false;
     if let Some(provider_line) = provider_line {
         let provider = lines[provider_line].trim();
-        if provider == "provider: tracedecay" || provider == "provider: tokensave" {
+        if provider == "provider: tracedecay" {
             lines.remove(provider_line);
             removed_provider = true;
         }
@@ -310,7 +297,7 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             .map(str::trim)
             .unwrap_or_default();
         match parse_yaml_scalar(current).as_deref() {
-            None | Some("compressor" | "tokensave") => {
+            None | Some("compressor") => {
                 lines[engine_line] = "  engine: tracedecay".to_string();
             }
             Some("tracedecay") => {}
@@ -344,7 +331,7 @@ fn disable_context_engine_config(existing: &str) -> std::result::Result<String, 
     let mut removed_engine = false;
     if let Some(engine_line) = engine_line {
         let engine = lines[engine_line].trim();
-        if engine == "engine: tracedecay" || engine == "engine: tokensave" {
+        if engine == "engine: tracedecay" {
             lines.remove(engine_line);
             removed_engine = true;
         }
@@ -469,8 +456,7 @@ fn set_pinned_project_root_config(
 /// Removes `plugins.tracedecay.project_root`, then the `tracedecay:` block when
 /// nothing else (user-added keys) remains in it.
 fn remove_pinned_project_root_config(existing: &str) -> std::result::Result<String, String> {
-    let without_new = remove_pinned_project_root_from_block(existing, "tracedecay")?;
-    remove_pinned_project_root_from_block(&without_new, "tokensave")
+    remove_pinned_project_root_from_block(existing, "tracedecay")
 }
 
 fn remove_pinned_project_root_from_block(
@@ -873,6 +859,19 @@ mod tests {
 
         assert_eq!(second, first);
         assert_eq!(second.matches("- tracedecay").count(), 1);
+    }
+
+    #[test]
+    fn enable_plugin_still_rejects_unrelated_memory_provider() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        let original = "memory:\n  provider: other\n";
+        std::fs::write(&config, original).unwrap();
+
+        let err = enable_plugin(&config, None).unwrap_err().to_string();
+
+        assert!(err.contains("Hermes memory provider already configured"));
+        assert_eq!(read(&config), original);
     }
 
     #[test]

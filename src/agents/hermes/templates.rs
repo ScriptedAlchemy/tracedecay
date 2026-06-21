@@ -92,10 +92,9 @@ MAX_CAPTURE_CHARS = 4000
 # E2BIG/EFAULT at exec time.
 ARGS_FILE_THRESHOLD_BYTES = 100000
 
-# Profile-global state tools: memory facts and transcript search are owned by
-# the Hermes profile, not by whichever code project the agent's cwd happens
-# to resolve. Without an explicit project pin these anchor at the Hermes
-# home so results never shard per working directory.
+# Profile-state tools: memory facts and transcript search use the active
+# pinned/resolved project when available, falling back to the Hermes profile
+# home only for unpinned profiles.
 PROFILE_STORE_TOOLS = frozenset((
     "tracedecay_fact_store",
     "tracedecay_fact_feedback",
@@ -159,8 +158,7 @@ def config_pinned_project_root(hermes_home=None):
         return None
     pin = value.strip()
     # Legacy installs pinned the Hermes home itself as the "project" — that
-    # was a storage-home conflation, not a code project. Storage is
-    # profile-scoped now and code tools resolve per cwd, so a home-equal pin
+    # was a storage-home conflation, not a code project, so a home-equal pin
     # is treated as no pin at all.
     try:
         if os.path.realpath(pin) == os.path.realpath(hermes_home_dir(hermes_home)):
@@ -231,25 +229,25 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
-        payload = json.dumps(tool_args)
         # Project routing:
         #   1. An explicit per-call project_root (call kwarg / tool arg)
         #      wins for every tool.
-        #   2. Profile-global state tools (facts, transcript search) ALWAYS
-        #      anchor at the Hermes home: an install-time pin is a
-        #      code-project anchor for code-graph tools and must never
-        #      reroute memory/transcript state away from the profile store.
-        #   3. Code-graph tools fall back to the install-time pin when one
-        #      exists, else resolve per cwd: `tracedecay tool` walks up from
-        #      the working directory to the nearest initialised project.
+        #   2. Hermes state tools use the active code project when one is
+        #      pinned/resolved, so LCM and memory share the unified
+        #      user-level tracedecay store for that project.
+        #   3. Unpinned Hermes profile-store calls use the hermes_profile
+        #      storage scope instead of synthesizing a project root.
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
         if not project_root and tool_args.get("storage_scope") == "hermes_profile":
             project_root = None
         if not project_root and tool_args.get("storage_scope") != "hermes_profile":
-            if name in PROFILE_STORE_TOOLS:
-                project_root = hermes_home_dir()
-            else:
-                project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
+            project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
+            if not project_root and name in PROFILE_STORE_TOOLS:
+                tool_args = dict(tool_args)
+                tool_args.setdefault("storage_scope", "hermes_profile")
+                tool_args.setdefault("hermes_home", hermes_home_dir())
+                project_root = None
+        payload = json.dumps(tool_args)
         argv = [TRACEDECAY_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
@@ -928,29 +926,13 @@ def _tracedecay_binary_available() -> bool:
     return shutil.which(tools.TRACEDECAY_BIN) is not None
 
 def _storage_args(project_root=None, hermes_home=None):
-    """Storage args for LCM/session state: always the Hermes profile store.
-
-    Conversation state (LCM raw store, summary DAG) belongs to the profile,
-    not to whichever code project the agent happens to be exploring. The
-    legacy behavior — a ``project_root`` pin forcing ``project_local`` scope
-    for everything — conflated the storage home with the code project and
-    pointed code-graph tools at an index of the Hermes home itself, so the
-    pin no longer influences storage scope (``project_root`` is accepted for
-    call-site compatibility and ignored).
-    """
-    del project_root
-    # _resolve_hermes_home() always yields a path (expanduser fallback), so
-    # hermes_profile scope is never emitted without its required home.
+    """Storage args for LCM/session state in the unified tracedecay store."""
+    if project_root:
+        return {"project_root": str(project_root)}
     home = hermes_home or _resolve_hermes_home()
-    return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
-
-def _hermes_profile_session_db_path(hermes_home):
-    if not hermes_home:
-        return None
-    primary = Path(hermes_home) / ".tracedecay"
-    legacy = Path(hermes_home) / ".tokensave"
-    base = legacy if not primary.is_dir() and legacy.is_dir() else primary
-    return (base / "sessions.db").as_posix()
+    if home:
+        return {"storage_scope": "hermes_profile", "hermes_home": str(home)}
+    return {}
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
@@ -2671,7 +2653,7 @@ class TraceDecayContextEngine(ContextEngine):
 
     def get_status(self):
         storage = _storage_args(self.project_root, self.hermes_home)
-        hermes_home = storage.get("hermes_home")
+        project_root = storage.get("project_root")
         last_result = self.last_compress_result
         if not isinstance(last_result, dict):
             last_result = {"status": "never_ran"}
@@ -2685,13 +2667,13 @@ class TraceDecayContextEngine(ContextEngine):
             "engine": self.name,
             "session_id": self.active_session_id,
             "active_session_id": self.active_session_id,
-            "storage_scope": storage.get("storage_scope"),
-            "hermes_home": hermes_home,
-            "lcm_session_db_path": _hermes_profile_session_db_path(hermes_home),
+            "storage_scope": "profile_sharded",
+            "hermes_home": self.hermes_home,
+            "lcm_project_root": project_root,
+            "lcm_session_db_path": None,
             "storage_note": (
-                "Hermes LCM conversation state is stored in the Hermes profile "
-                ".tracedecay/sessions.db, or legacy .tokensave/sessions.db when "
-                "that is the existing profile store."
+                "Hermes LCM conversation state is stored in the unified "
+                "user-level tracedecay store; unpinned profiles use hermes_profile storage."
             ),
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
@@ -3344,6 +3326,7 @@ class TracedecayMemoryProvider(MemoryProvider):
 
     def __init__(self):
         self.hermes_home = None
+        self.project_root = None
         self.session_id = None
         self.agent_context = ""
         self._prefetch_lock = threading.Lock()
@@ -3359,6 +3342,12 @@ class TracedecayMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
+        config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
+        self.project_root = _code_project_root(
+            explicit=kwargs.get("project_root"),
+            cwd=kwargs.get("cwd"),
+            configured=_configured_project_root(config),
+        )
         self.session_id = session_id
         # Execution context ("", "cron", "flush", ...): cron/flush runs are
         # not primary conversations and must not write turn state (cron
@@ -3370,10 +3359,9 @@ class TracedecayMemoryProvider(MemoryProvider):
         """`hermes memory setup` hand-off: verify the binary and warm the store.
 
         tracedecay_memory_status repairs derived holographic vectors/banks
-        and creates the profile store on first touch, so one call doubles
+        and creates the resolved user-level store on first touch, so one call doubles
         as install repair + initialization.
         """
-        del config
         if not _tracedecay_binary_available():
             print(
                 f"  tracedecay binary not found at {tools.TRACEDECAY_BIN} — "
@@ -3381,11 +3369,15 @@ class TracedecayMemoryProvider(MemoryProvider):
             )
             return
         home = str(hermes_home or self.hermes_home or _resolve_hermes_home())
-        status = call_tracedecay_json("tracedecay_memory_status", {}, project_root=home)
+        resolved_config = _with_plugin_block(config, home)
+        project_root = _code_project_root(configured=_configured_project_root(resolved_config))
+        storage = _storage_args(project_root, home)
+        status = call_tracedecay_json("tracedecay_memory_status", storage, **storage)
         if isinstance(status, dict) and not status.get("error"):
             facts = status.get("fact_count", status.get("facts"))
             suffix = f" ({facts} facts)" if facts is not None else ""
-            print(f"  tracedecay memory store ready at {home}{suffix}.")
+            label = project_root or home
+            print(f"  tracedecay memory store ready at {label}{suffix}.")
         else:
             detail = status.get("error") if isinstance(status, dict) else status
             print(f"  tracedecay memory store check failed: {detail}")
@@ -3452,10 +3444,9 @@ class TracedecayMemoryProvider(MemoryProvider):
         if not text:
             return ""
         try:
-            payload = call_tracedecay_json(
-                "tracedecay_fact_store",
-                {"action": "search", "query": text[:512], "limit": 3},
-            )
+            args = _storage_args(self.project_root, self.hermes_home)
+            args.update({"action": "search", "query": text[:512], "limit": 3})
+            payload = call_tracedecay_json("tracedecay_fact_store", args, **args)
         except Exception as exc:
             logger.debug("tracedecay memory prefetch failed: %s", exc)
             return ""
@@ -3511,10 +3502,14 @@ class TracedecayMemoryProvider(MemoryProvider):
             for idx, entry in enumerate(turn_messages):
                 role = str(entry.get("role") or "user")
                 entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
-        args = _storage_args(None, self.hermes_home)
+        args = _storage_args(self.project_root, self.hermes_home)
         args.update({"session_id": sid, "messages": turn_messages})
         try:
-            tools.call_tracedecay_tool("tracedecay_lcm_preflight", args)
+            tools.call_tracedecay_tool(
+                "tracedecay_lcm_preflight",
+                args,
+                **args,
+            )
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)
 
@@ -3538,7 +3533,9 @@ class TracedecayMemoryProvider(MemoryProvider):
             "metadata": fact_metadata,
         }
         try:
-            tools.call_tracedecay_tool("tracedecay_fact_store", fact_args)
+            args = _storage_args(self.project_root, self.hermes_home)
+            args.update(fact_args)
+            tools.call_tracedecay_tool("tracedecay_fact_store", args, **args)
         except Exception as exc:
             logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
 

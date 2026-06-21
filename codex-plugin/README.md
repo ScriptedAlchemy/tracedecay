@@ -15,9 +15,11 @@ Codex.
   only when the workflow matches. These mirror the model-invocable Cursor skills
   so both hosts steer agents toward the same tracedecay tools.
 - **Lifecycle hooks** (`hooks/hooks.json`, referenced from the manifest's
-  `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`, and
-  `PostToolUse` handlers that inject index status and tool-routing steering and
-  keep the graph and session store warm.
+  `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
+  `PostToolUse`, and `PostCompact` handlers that inject index status and
+  tool-routing steering, keep the graph/session store warm, and replace
+  encrypted Codex compaction placeholders with auxiliary app-server summaries
+  backed by the visible source messages in TraceDecay's LCM DAG.
 
 Codex skips newly installed or changed command hooks until they are trusted —
 run `/hooks` in Codex to review and trust the tracedecay hooks.
@@ -25,3 +27,9 @@ run `/hooks` in Codex to review and trust the tracedecay hooks.
 Codex has no always-applied rule surface (unlike Cursor's `rules/`), so the
 tool-routing steering Cursor places in a rule is injected through the
 `SessionStart`/`UserPromptSubmit` hooks instead.
+
+The `PostCompact` hook starts `codex app-server` as a short-lived child process
+and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.
+Set `TRACEDECAY_CODEX_BIN` to use a different Codex binary,
+`TRACEDECAY_CODEX_SUMMARY_MODEL` to pin a model, or
+`TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS` to adjust the child timeout.

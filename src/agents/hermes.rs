@@ -6,7 +6,6 @@
 mod dashboard_wrapper;
 mod lifecycle;
 mod profile_config;
-mod tokensave_migration;
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -70,9 +69,9 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let locations = tokensave_migration::profile_locations(home, None);
-        locations.plugin_dir.join("plugin.yaml").exists()
-            || locations.legacy_plugin_dir.join("plugin.yaml").exists()
+        hermes_profile_dir(home, None)
+            .join("plugins/tracedecay/plugin.yaml")
+            .exists()
     }
 }
 
@@ -283,8 +282,6 @@ pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Res
 /// Plugin directories with a detected generated install (a `plugin.yaml`
 /// manifest), deduplicated across the default profile, named profiles,
 /// `HERMES_HOME`, and the current directory's project-local `.hermes`.
-/// Legacy `TokenSave` manifests are mapped to their steady-state tracedecay
-/// plugin directory so refreshes write current artifacts in-place.
 pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
     let mut roots = vec![hermes_home(home)];
     if let Some(env_home) = std::env::var_os("HERMES_HOME") {
@@ -301,8 +298,12 @@ pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
     roots
         .into_iter()
         .filter_map(|root| {
-            let plugin_dir = tokensave_migration::detected_plugin_dir(&root)?;
-            seen.insert(plugin_dir.clone()).then_some(plugin_dir)
+            let plugin_dir = root.join("plugins/tracedecay");
+            plugin_dir
+                .join("plugin.yaml")
+                .is_file()
+                .then_some(plugin_dir)
+                .filter(|plugin_dir| seen.insert(plugin_dir.clone()))
         })
         .collect()
 }
@@ -327,9 +328,7 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("__init__.py"))?;
     remove_generated_file(&plugin_dir.join("cli.py"))?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
-    remove_generated_file(&plugin_dir.join("skills/tokensave/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
-    remove_empty_dir(&plugin_dir.join("skills/tokensave"))?;
     remove_empty_dir(&plugin_dir.join("skills"))?;
     dashboard_wrapper::uninstall(plugin_dir)?;
 
