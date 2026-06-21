@@ -33,6 +33,7 @@ struct Fixture {
     _env_guards: Vec<EnvVarGuard>,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
+    global_db_path: PathBuf,
     session_db_path: PathBuf,
     project_root: PathBuf,
     /// Start of the current UTC day; seeded timestamps hang off this.
@@ -321,8 +322,15 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
     );
 }
 
-async fn seed_daily_limit_regression(db_path: &Path, project: &Path, latest_day: i64) {
-    let gdb = GlobalDb::open_at(db_path).await.expect("open session db");
+async fn seed_daily_limit_regression(
+    session_db_path: &Path,
+    global_db_path: &Path,
+    project: &Path,
+    latest_day: i64,
+) {
+    let gdb = GlobalDb::open_at(session_db_path)
+        .await
+        .expect("open session db");
     assert!(
         gdb.upsert_session(&session(
             "sess-daily-limit",
@@ -363,6 +371,30 @@ async fn seed_daily_limit_regression(db_path: &Path, project: &Path, latest_day:
         ))
         .await
     );
+
+    let accounting = GlobalDb::open_at(global_db_path)
+        .await
+        .expect("open accounting db");
+    for offset in 0..=366 {
+        assert!(
+            accounting
+                .insert_turn(&CostTurn {
+                    message_id: format!("turn-daily-limit-{offset}"),
+                    project_hash: "fixture".to_string(),
+                    session_id: "turns-daily-limit".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    timestamp: (latest_day - (offset * 86_400) + 120) as u64,
+                    input_tokens: 100 + offset as u64,
+                    output_tokens: 50,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    cost_usd: 0.01,
+                    category: "code".to_string(),
+                    tool_names: String::new(),
+                })
+                .await
+        );
+    }
 }
 
 async fn start_fixture() -> Fixture {
@@ -412,6 +444,7 @@ async fn start_fixture() -> Fixture {
         _env_guards: env_guards,
         base_url,
         server,
+        global_db_path,
         session_db_path,
         project_root,
         day_start,
@@ -538,6 +571,7 @@ fn daily_model_series_limits_days_not_model_rows() {
         let fixture = start_fixture().await;
         seed_daily_limit_regression(
             &fixture.session_db_path,
+            &fixture.global_db_path,
             &fixture.project_root,
             fixture.day_start,
         )
@@ -570,6 +604,22 @@ fn daily_model_series_limits_days_not_model_rows() {
         assert!(
             daily.iter().all(|row| row["day"] != excluded_day),
             "row limit included an older day outside the 366-day window: {daily:?}"
+        );
+
+        let turns_daily = models["turns"]["by_day"].as_array().expect("turn daily rows");
+        assert!(
+            turns_daily
+                .iter()
+                .any(|row| row["day"] == fixture.day_start),
+            "latest actual-cost day was truncated: {turns_daily:?}"
+        );
+        assert!(
+            turns_daily.iter().any(|row| row["day"] == oldest_included_day),
+            "expected the 366th latest actual-cost day to remain: {turns_daily:?}"
+        );
+        assert!(
+            turns_daily.iter().all(|row| row["day"] != excluded_day),
+            "actual-cost day limit included an older day outside the 366-day window: {turns_daily:?}"
         );
     });
 }

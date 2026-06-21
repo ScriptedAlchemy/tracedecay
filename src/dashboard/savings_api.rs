@@ -702,11 +702,19 @@ pub(crate) async fn models(
         let conn = gdb.dashboard_connection();
         let by_day = query_rows(
             &conn,
-            "SELECT (timestamp / 86400) * 86400 AS day,
-                    SUM(cost_usd) AS cost_usd,
-                    SUM(input_tokens + output_tokens) AS total_tokens
-             FROM turns WHERE timestamp >= ?1
-             GROUP BY day ORDER BY day ASC LIMIT 366",
+            "WITH daily AS (
+                SELECT (timestamp / 86400) * 86400 AS day,
+                       SUM(cost_usd) AS cost_usd,
+                       SUM(input_tokens + output_tokens) AS total_tokens
+                FROM turns WHERE timestamp >= ?1
+                GROUP BY day
+             ),
+             latest_days AS (
+                SELECT day FROM daily ORDER BY day DESC LIMIT 366
+             )
+             SELECT daily.*
+             FROM daily JOIN latest_days ON latest_days.day = daily.day
+             ORDER BY daily.day ASC",
             libsql::params![since],
         )
         .await

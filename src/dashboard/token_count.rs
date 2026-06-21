@@ -20,6 +20,7 @@
 //! the Savings tab doesn't pay the initial counting cost.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -153,7 +154,7 @@ struct OverlayCache {
     overlay: Arc<Vec<MessageTokens>>,
 }
 
-type OverlayFingerprint = (i64, i64, i64, i64, i64);
+type OverlayFingerprint = (i64, i64, u64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub(crate) struct TokenCountCache {
@@ -231,24 +232,28 @@ pub(crate) async fn non_usage_message_tokens(
 async fn overlay_fingerprint(conn: &libsql::Connection) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT COUNT(*) AS count,
-                COALESCE(MAX(rowid), 0) AS max_rowid,
-                COALESCE(SUM(LENGTH(COALESCE(metadata_json, ''))), 0) AS metadata_len,
-                COALESCE(SUM(LENGTH(COALESCE(text, ''))), 0) AS text_len,
-                COALESCE(SUM(LENGTH(COALESCE(model, ''))), 0) AS model_len
-         FROM session_messages",
+        "SELECT rowid, provider, message_id, model, metadata_json, LENGTH(text) AS text_len
+         FROM session_messages ORDER BY rowid",
         (),
     )
     .await
     .ok()?;
-    let row = rows.first()?;
-    Some((
-        row.get("count").and_then(Value::as_i64).unwrap_or(0),
-        row.get("max_rowid").and_then(Value::as_i64).unwrap_or(0),
-        row.get("metadata_len").and_then(Value::as_i64).unwrap_or(0),
-        row.get("text_len").and_then(Value::as_i64).unwrap_or(0),
-        row.get("model_len").and_then(Value::as_i64).unwrap_or(0),
-    ))
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut max_rowid = 0_i64;
+    for row in &rows {
+        let rowid = row.get("rowid").and_then(Value::as_i64).unwrap_or(0);
+        max_rowid = max_rowid.max(rowid);
+        rowid.hash(&mut hasher);
+        row_str(row, "provider").hash(&mut hasher);
+        row_str(row, "message_id").hash(&mut hasher);
+        row_str(row, "model").hash(&mut hasher);
+        row_str(row, "metadata_json").hash(&mut hasher);
+        row.get("text_len")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .hash(&mut hasher);
+    }
+    Some((rows.len() as i64, max_rowid, hasher.finish()))
 }
 
 async fn build_overlay(
@@ -568,5 +573,41 @@ mod tests {
         assert_eq!(before.0, after.0, "row count should be unchanged");
         assert_eq!(before.1, after.1, "max rowid should be unchanged");
         assert_ne!(before, after, "metadata backfill must invalidate overlay");
+
+        let Some(first_backfill) = overlay_fingerprint(&conn).await else {
+            panic!("overlay fingerprint should exist after first backfill");
+        };
+        if let Err(err) = conn
+            .execute(
+                "UPDATE session_messages
+             SET metadata_json = '{\"usage\":{\"input_tokens\":9,\"output_tokens\":8}}'
+             WHERE provider = 'codex' AND message_id = 'm1'",
+                (),
+            )
+            .await
+        {
+            panic!("failed to replace metadata usage: {err}");
+        }
+        let Some(second_backfill) = overlay_fingerprint(&conn).await else {
+            panic!("overlay fingerprint should exist after second backfill");
+        };
+
+        assert_eq!(
+            first_backfill.0, second_backfill.0,
+            "row count should be unchanged"
+        );
+        assert_eq!(
+            first_backfill.1, second_backfill.1,
+            "max rowid should be unchanged"
+        );
+        assert_eq!(
+            "{\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}".len(),
+            "{\"usage\":{\"input_tokens\":9,\"output_tokens\":8}}".len(),
+            "regression fixture must keep metadata string length stable"
+        );
+        assert_ne!(
+            first_backfill, second_backfill,
+            "same-length metadata edits must invalidate overlay"
+        );
     }
 }

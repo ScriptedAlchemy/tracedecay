@@ -49,6 +49,7 @@ use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::storage::StorageMode;
@@ -155,8 +156,8 @@ pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
 }
 
 async fn open_dashboard_connection(path: &Path) -> Option<libsql::Connection> {
-    let db = libsql::Builder::new_local(path).build().await.ok()?;
-    db.connect().ok()
+    let (db, _) = Database::open(path).await.ok()?;
+    Some(db.conn().clone())
 }
 
 async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
@@ -168,12 +169,11 @@ async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
 }
 
 pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Connection, String) {
-    let candidates = [cg.store_layout().graph_db_path.clone()];
     let graph_path = cg.dashboard_db_path();
     let mut first_open: Option<(libsql::Connection, String)> = None;
     let mut seen = std::collections::BTreeSet::new();
 
-    for path in candidates {
+    for path in [cg.store_layout().graph_db_path.clone()] {
         if !seen.insert(path.clone()) || !path.is_file() {
             continue;
         }

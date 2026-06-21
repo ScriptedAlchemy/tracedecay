@@ -73,17 +73,10 @@ export default function ModelsPanel({
     (row) => row.value,
   );
   const dailyCost = fillDailySeries(
-    data.daily
-      .map((row) => {
-        const cost = rowCost(row, prices);
-        return { day: row.day, value: cost.usd ?? 0 };
-      })
-      .concat(
-        (data.turns.by_day || []).map((row) => ({
-          day: row.day,
-          value: row.cost_usd || 0,
-        })),
-      ),
+    data.daily.map((row) => {
+      const cost = rowCost(row, prices);
+      return { day: row.day, value: cost.usd ?? 0 };
+    }),
     (row) => row.value,
   );
 
