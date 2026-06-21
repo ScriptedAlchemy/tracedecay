@@ -27,6 +27,7 @@ fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .current_dir(cwd)
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
         .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"))
         .arg("tool")
         .args(args)

@@ -703,6 +703,10 @@ impl TraceDecay {
         else {
             return;
         };
+
+        static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _registry_write = REGISTRY_WRITE_LOCK.lock().await;
+
         let Some(global_db) = GlobalDb::open().await else {
             return;
         };
