@@ -29,6 +29,7 @@ const PRESERVED_TODO_CONTEXT_PREFIX: &str =
     "[Your active task list was preserved across context compression]";
 const PRESERVED_OBJECTIVE_CONTEXT_PREFIX: &str =
     "[Current user objective preserved from compacted history]";
+const CONTEXT_RECOVERY_HINT_SUFFIX: &str = "If the replay after compression is missing context, query TraceDecay LCM before assuming the compacted summary is complete. Start with tracedecay_message_search or tracedecay_lcm_expand_query; use tracedecay_lcm_describe and tracedecay_lcm_expand when you need summary DAG sources.";
 
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
@@ -1522,6 +1523,7 @@ fn compression_response_with_attempt_state(
         retry_status,
     } = attempt_state;
     let replay_token_estimate = replay_token_estimate(&replay_messages);
+    let context_recovery_hint = context_recovery_hint(&summary_nodes);
     LcmCompressionResponse {
         status: status.to_string(),
         reason: reason.to_string(),
@@ -1532,10 +1534,19 @@ fn compression_response_with_attempt_state(
         replay_over_budget: replay_exceeds_budget(replay_token_estimate, max_assembly_tokens),
         compression_attempts,
         fallback_used,
+        context_recovery_hint,
         retry_status: retry_status.map(str::to_string),
         frontier,
         summary_request,
     }
+}
+
+fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
+    let summary = summary_nodes.first()?;
+    Some(format!(
+        "Compacted context is stored in TraceDecay LCM for provider '{}' session '{}'. {CONTEXT_RECOVERY_HINT_SUFFIX}",
+        summary.provider, summary.session_id
+    ))
 }
 
 fn replay_token_estimate(messages: &[Value]) -> i64 {

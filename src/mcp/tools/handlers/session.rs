@@ -1824,6 +1824,7 @@ pub(super) async fn handle_lcm_compress(
             "replay_over_budget": response.replay_over_budget,
             "compression_attempts": response.compression_attempts,
             "fallback_used": response.fallback_used,
+            "context_recovery_hint": response.context_recovery_hint,
             "retry_status": response.retry_status,
             "frontier": response.frontier,
             "summary_request": response.summary_request,

@@ -10544,6 +10544,10 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     assert_eq!(payload["reason"], "condensed_summary_nodes");
     assert_eq!(payload["summary_nodes_created"], 1);
     assert_eq!(payload["summary_nodes"][0]["depth"], 2);
+    assert!(payload["context_recovery_hint"]
+        .as_str()
+        .unwrap()
+        .contains("tracedecay_lcm_expand_query"));
 }
 
 #[tokio::test]
