@@ -253,19 +253,11 @@ The config field renames accordingly: `daemon_debounce` becomes `watcher_debounc
 
 ### Migration
 
-Users who previously enabled daemon autostart need to remove the orphaned service. The command depends on platform:
-
-- **macOS:** `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist`, then `rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`.
-- **Linux:** `systemctl --user disable --now tokensave-daemon`, then remove the unit file from `~/.config/systemd/user/`.
-- **Windows:** `sc.exe delete tokensave-daemon` from an elevated terminal.
-
-If you don't remember whether you registered autostart, these discovery commands will tell you:
-
-- **macOS:** `launchctl list | grep -i tokensave`
-- **Linux:** `systemctl --user list-units | grep -i tokensave`
-- **Windows:** `sc.exe query state= all | findstr -i tokensave`
-
-CLI-only users (anyone who runs `tracedecay` commands without an attached agent) lose automatic background syncing. The recommended replacement is a git post-commit hook -- a starter script lives at `scripts/post-commit` in the TraceDecay repo. Drop it into `.git/hooks/post-commit` in each project where you want the index to update on commit.
+CLI-only users (anyone who runs `tracedecay` commands without an attached agent)
+lose automatic background syncing. The recommended replacement is a git
+post-commit hook -- a starter script lives at `scripts/post-commit` in the
+TraceDecay repo. Drop it into `.git/hooks/post-commit` in each project where you
+want the index to update on commit.
 
 ### What this means for you
 

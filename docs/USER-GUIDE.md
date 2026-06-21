@@ -471,29 +471,6 @@ chmod +x .git/hooks/post-commit
 
 Or run `tracedecay sync` manually when you need a fresh index.
 
-### Upgrading from 5.x
-
-The standalone `tracedecay daemon` command and its system-service autostart
-were removed in 6.0.0 (when the project was still named TraceDecay). If you had
-a daemon autostart installed under 5.x, remove it manually. Note the service
-names below use the old `tracedecay` branding because that is what 5.x installed.
-
-If you don't remember the exact service/plist name, list them first:
-
-- macOS: `launchctl list | grep -i tokensave`
-- Linux: `systemctl --user list-units | grep -i tokensave`
-- Windows: `sc.exe query state= all | findstr -i tokensave`
-
-Then remove the entry matching your install:
-
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
-- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
-- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
-
-Once your agent is attached, MCP tool calls keep the index fresh on demand.
-
----
-
 ## Checking Your Setup with Doctor
 
 The `doctor` command runs a comprehensive health check:

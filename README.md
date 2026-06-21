@@ -664,15 +664,11 @@ chmod +x .git/hooks/post-commit
 
 ### Upgrading from 5.x
 
-The standalone daemon command from 5.x-era, pre-rename installs and its launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The on-demand staleness model above is the current design.
-
-If you still have a daemon autostart from 5.x, remove it. Those artifacts use the historical pre-rename service name:
-
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
-- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
-- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
-
-If you don't recall the exact name: `launchctl list | grep -i tokensave` / `systemctl --user list-units | grep -i tokensave` / `sc.exe query state= all | findstr -i tokensave`.
+The standalone daemon command from 5.x-era installs and its
+launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded
+OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it
+caused runaway CPU and memory on large monorepos with deep `node_modules` or
+`target` trees). The on-demand staleness model above is the current design.
 
 ---
 
