@@ -208,8 +208,7 @@ fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 }
 
 fn codex_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
-    home.join(".codex/plugins/cache/personal/tracedecay")
-        .join(env!("CARGO_PKG_VERSION"))
+    home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
 }
 
 fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {

@@ -314,6 +314,32 @@ fn codex_update_plugin_refreshes_cache_and_removes_bootstrap_source() {
 }
 
 #[test]
+fn codex_update_plugin_refreshes_existing_cache_version() {
+    let home = TempDir::new().unwrap();
+    let cached_plugin_dir = home
+        .path()
+        .join(".codex/plugins/cache/personal/tracedecay/0.0.4");
+    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.4"}"#,
+    )
+    .unwrap();
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+
+    assert_eq!(paths, vec![cached_plugin_dir.clone()]);
+    assert!(text(&cached_plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&cached_plugin_dir.join(".codex-plugin/plugin.json"))
+        .contains(env!("CARGO_PKG_VERSION")));
+    assert!(!home.path().join("plugins/tracedecay").exists());
+}
+
+#[test]
 fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
     let home = TempDir::new().unwrap();
     let codex_dir = home.path().join(".codex");
