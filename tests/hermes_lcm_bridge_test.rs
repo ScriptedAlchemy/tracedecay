@@ -299,7 +299,7 @@ assert status["storage_scope"] == "profile_sharded"
 assert status["hermes_home"] == os.environ["HERMES_HOME"]
 assert status["lcm_project_root"] == "/tmp/project"
 assert status["lcm_session_db_path"] is None
-assert "user-level tracedecay project store" in status["storage_note"]
+assert "user-level tracedecay store" in status["storage_note"]
 assert status["project_root"] == "/tmp/project"
 assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
 assert isinstance(status["tracedecay_binary_available"], bool)
@@ -824,7 +824,7 @@ with tempfile.TemporaryDirectory() as tmp:
     status = engine.get_status()
     assert status["storage_scope"] == "profile_sharded"
     assert normalized(status["hermes_home"]) == normalized(expected), status
-    assert normalized(status["lcm_project_root"]) == normalized(expected), status
+    assert status["lcm_project_root"] is None, status
 "#,
         "generated context engine should default to ~/.hermes even if missing",
     );
@@ -2351,9 +2351,11 @@ assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
 fallback = plugin.TracedecayMemoryProvider()
 fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
-assert fallback.project_root == "/tmp/hermes"
-assert calls[-1][1]["project_root"] == "/tmp/hermes"
-assert calls[-1][2]["project_root"] == "/tmp/hermes"
+assert fallback.project_root is None
+assert calls[-1][1]["storage_scope"] == "hermes_profile"
+assert calls[-1][1]["hermes_home"] == "/tmp/hermes"
+assert calls[-1][2]["storage_scope"] == "hermes_profile"
+assert calls[-1][2]["hermes_home"] == "/tmp/hermes"
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
     );

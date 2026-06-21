@@ -1170,13 +1170,13 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
-assert not hasattr(provider, "project_root")
+assert provider.project_root is None
 assert provider.session_id == "session-123"
 # Without an explicit hermes_home the provider resolves the active profile
 # home itself (sync_turn/prefetch need a storage anchor).
 provider.initialize("session-only")
 assert provider.hermes_home == os.environ["HERMES_HOME"]
-assert not hasattr(provider, "project_root")
+assert provider.project_root is None
 assert provider.session_id == "session-only"
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy

@@ -357,7 +357,8 @@ def run_checks(work: Path):
     storage = plugin._storage_args("/some/pin", str(hermes_home))
     assert storage["project_root"] == "/some/pin", storage
     fallback_storage = plugin._storage_args(None, str(hermes_home))
-    assert fallback_storage["project_root"] == str(hermes_home), fallback_storage
+    assert fallback_storage["storage_scope"] == "hermes_profile", fallback_storage
+    assert fallback_storage["hermes_home"] == str(hermes_home), fallback_storage
     ok("LCM/memory storage routes through resolved project roots")
 
     # ── 4. provider hooks call the right verbs ───────────────────────────
@@ -379,8 +380,10 @@ def run_checks(work: Path):
         assert name == "tracedecay_lcm_preflight", calls
         assert args["session_id"] == "other-session"
         assert args["messages"] == messages
-        assert args["project_root"] == str(hermes_home), args
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert args["storage_scope"] == "hermes_profile", args
+        assert args["hermes_home"] == str(hermes_home), args
+        assert kwargs["storage_scope"] == "hermes_profile", kwargs
+        assert kwargs["hermes_home"] == str(hermes_home), kwargs
         ok("sync_turn ingests via tracedecay_lcm_preflight")
 
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
@@ -388,8 +391,10 @@ def run_checks(work: Path):
         assert name == "tracedecay_lcm_preflight", calls
         assert args["messages"][0]["content"] == "only user"
         assert args["messages"][1]["content"] == "and assistant"
-        assert args["project_root"] == str(hermes_home), args
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert args["storage_scope"] == "hermes_profile", args
+        assert args["hermes_home"] == str(hermes_home), args
+        assert kwargs["storage_scope"] == "hermes_profile", kwargs
+        assert kwargs["hermes_home"] == str(hermes_home), kwargs
         ok("sync_turn synthesizes a turn when messages are missing")
 
         provider.on_memory_write("add", "user", "likes rust", {"session_id": "s"})
@@ -397,7 +402,10 @@ def run_checks(work: Path):
         assert name == "tracedecay_fact_store", calls
         assert args["action"] == "add" and args["category"] == "user_pref"
         assert args["metadata"]["hermes_action"] == "add"
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert args["storage_scope"] == "hermes_profile", args
+        assert args["hermes_home"] == str(hermes_home), args
+        assert kwargs["storage_scope"] == "hermes_profile", kwargs
+        assert kwargs["hermes_home"] == str(hermes_home), kwargs
         before = len(calls)
         provider.on_memory_write("remove", "memory", "anything")
         assert len(calls) == before

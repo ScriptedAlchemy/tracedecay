@@ -229,23 +229,25 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
-        payload = json.dumps(tool_args)
         # Project routing:
         #   1. An explicit per-call project_root (call kwarg / tool arg)
         #      wins for every tool.
         #   2. Hermes state tools use the active code project when one is
         #      pinned/resolved, so LCM and memory share the unified
         #      user-level tracedecay store for that project.
-        #   3. Unpinned Hermes profiles fall back to the profile home as
-        #      their project identity; storage still lives in the user-level
-        #      tracedecay registry, not under the Hermes profile directory.
+        #   3. Unpinned Hermes profile-store calls use the hermes_profile
+        #      storage scope instead of synthesizing a project root.
         project_root = kwargs.get("project_root") or tool_args.get("project_root")
         if not project_root and tool_args.get("storage_scope") == "hermes_profile":
             project_root = None
         if not project_root and tool_args.get("storage_scope") != "hermes_profile":
             project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
             if not project_root and name in PROFILE_STORE_TOOLS:
-                project_root = hermes_home_dir()
+                tool_args = dict(tool_args)
+                tool_args.setdefault("storage_scope", "hermes_profile")
+                tool_args.setdefault("hermes_home", hermes_home_dir())
+                project_root = None
+        payload = json.dumps(tool_args)
         argv = [TRACEDECAY_BIN, "tool"]
         if project_root:
             argv.extend(["--project", str(project_root)])
@@ -2671,7 +2673,7 @@ class TraceDecayContextEngine(ContextEngine):
             "lcm_session_db_path": None,
             "storage_note": (
                 "Hermes LCM conversation state is stored in the unified "
-                "user-level tracedecay project store resolved from lcm_project_root."
+                "user-level tracedecay store; unpinned profiles use hermes_profile storage."
             ),
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
@@ -3341,13 +3343,10 @@ class TracedecayMemoryProvider(MemoryProvider):
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
         config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
-        self.project_root = (
-            _code_project_root(
-                explicit=kwargs.get("project_root"),
-                cwd=kwargs.get("cwd"),
-                configured=_configured_project_root(config),
-            )
-            or self.hermes_home
+        self.project_root = _code_project_root(
+            explicit=kwargs.get("project_root"),
+            cwd=kwargs.get("cwd"),
+            configured=_configured_project_root(config),
         )
         self.session_id = session_id
         # Execution context ("", "cron", "flush", ...): cron/flush runs are
@@ -3371,15 +3370,14 @@ class TracedecayMemoryProvider(MemoryProvider):
             return
         home = str(hermes_home or self.hermes_home or _resolve_hermes_home())
         resolved_config = _with_plugin_block(config, home)
-        project_root = (
-            _code_project_root(configured=_configured_project_root(resolved_config))
-            or home
-        )
-        status = call_tracedecay_json("tracedecay_memory_status", {}, project_root=project_root)
+        project_root = _code_project_root(configured=_configured_project_root(resolved_config))
+        storage = _storage_args(project_root, home)
+        status = call_tracedecay_json("tracedecay_memory_status", storage, **storage)
         if isinstance(status, dict) and not status.get("error"):
             facts = status.get("fact_count", status.get("facts"))
             suffix = f" ({facts} facts)" if facts is not None else ""
-            print(f"  tracedecay memory store ready at {project_root}{suffix}.")
+            label = project_root or home
+            print(f"  tracedecay memory store ready at {label}{suffix}.")
         else:
             detail = status.get("error") if isinstance(status, dict) else status
             print(f"  tracedecay memory store check failed: {detail}")
@@ -3446,11 +3444,9 @@ class TracedecayMemoryProvider(MemoryProvider):
         if not text:
             return ""
         try:
-            payload = call_tracedecay_json(
-                "tracedecay_fact_store",
-                {"action": "search", "query": text[:512], "limit": 3},
-                project_root=self.project_root,
-            )
+            args = _storage_args(self.project_root, self.hermes_home)
+            args.update({"action": "search", "query": text[:512], "limit": 3})
+            payload = call_tracedecay_json("tracedecay_fact_store", args, **args)
         except Exception as exc:
             logger.debug("tracedecay memory prefetch failed: %s", exc)
             return ""
@@ -3512,7 +3508,7 @@ class TracedecayMemoryProvider(MemoryProvider):
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
                 args,
-                project_root=self.project_root,
+                **args,
             )
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)
@@ -3537,11 +3533,9 @@ class TracedecayMemoryProvider(MemoryProvider):
             "metadata": fact_metadata,
         }
         try:
-            tools.call_tracedecay_tool(
-                "tracedecay_fact_store",
-                fact_args,
-                project_root=self.project_root,
-            )
+            args = _storage_args(self.project_root, self.hermes_home)
+            args.update(fact_args)
+            tools.call_tracedecay_tool("tracedecay_fact_store", args, **args)
         except Exception as exc:
             logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
 
