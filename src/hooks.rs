@@ -433,7 +433,10 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let root = cursor_project_root_from_event(&event);
-    let context = cursor_session_context_for_root(root.as_deref()).await;
+    let mut context = cursor_session_context_for_root(root.as_deref()).await;
+    if session_start_from_compaction(&event) {
+        append_context_recovery_hint(&mut context);
+    }
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
     0
 }
@@ -1198,6 +1201,36 @@ pub fn build_codex_session_context(initialized: bool, staleness_hint: Option<&st
     s
 }
 
+fn append_context_recovery_hint(context: &mut String) {
+    if !context.ends_with('\n') {
+        context.push('\n');
+    }
+    context.push_str(COMPACTION_CONTEXT_RECOVERY_HINT);
+    context.push('\n');
+}
+
+fn session_start_from_compaction(event_json: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return false;
+    };
+    ["source", "trigger", "reason", "boundary_reason"]
+        .iter()
+        .filter_map(|key| parsed.get(*key).and_then(Value::as_str))
+        .any(matches_compaction_source)
+}
+
+fn matches_compaction_source(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "compact" | "compaction" | "contextcompacted" | "compression"
+    )
+}
+
 /// Formats a short relative-age staleness hint from a sync age in seconds.
 pub fn cursor_staleness_hint(age_secs: i64) -> String {
     let age = age_secs.max(0);
@@ -1393,7 +1426,10 @@ fn now_unix_secs() -> i64 {
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    let context = codex_session_context_for_root(root.as_deref()).await;
+    let mut context = codex_session_context_for_root(root.as_deref()).await;
+    if session_start_from_compaction(&event) {
+        append_context_recovery_hint(&mut context);
+    }
     println!(
         "{}",
         codex_additional_context_json("SessionStart", &context)
@@ -1887,6 +1923,7 @@ const CURSOR_PRE_COMPACT_INGEST_BUDGET: Duration = Duration::from_secs(20);
 const CURSOR_PRE_COMPACT_SUMMARY_BUDGET: Duration = Duration::from_secs(85);
 /// Overall budget for the `preCompact` hook (registered with a 120s timeout).
 const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
 fn cursor_pre_compact_lcm_request(
     session_id: &str,
@@ -2239,5 +2276,23 @@ mod tests {
             codex_prompt_hint(&event).is_none(),
             "Codex should use shared per-session hint dedupe for prompt hints"
         );
+    }
+
+    #[test]
+    fn compact_session_start_events_get_recovery_hint() {
+        let event = serde_json::json!({ "source": "compact" }).to_string();
+        assert!(session_start_from_compaction(&event));
+
+        let mut context = build_codex_session_context(true, None);
+        append_context_recovery_hint(&mut context);
+        assert!(context.contains("Context was just compacted"));
+        assert!(context.contains("tracedecay_lcm_expand_query"));
+        assert!(context.contains("tracedecay_lcm_describe"));
+    }
+
+    #[test]
+    fn non_compact_session_start_events_do_not_get_recovery_hint() {
+        let event = serde_json::json!({ "source": "resume" }).to_string();
+        assert!(!session_start_from_compaction(&event));
     }
 }

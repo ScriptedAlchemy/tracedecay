@@ -33,3 +33,8 @@ and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.
 Set `TRACEDECAY_CODEX_BIN` to use a different Codex binary,
 `TRACEDECAY_CODEX_SUMMARY_MODEL` to pin a model, or
 `TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS` to adjust the child timeout.
+
+When Codex starts a thread from compacted context (`SessionStart` source
+`compact`), the plugin injects a short recovery hint through
+`additionalContext` telling the new session to query TraceDecay LCM/session
+recall if the compacted summary is missing prior context.

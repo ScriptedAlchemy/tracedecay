@@ -316,6 +316,7 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
             assert_eq!(response.status, "ok", "{case_name}");
             assert_eq!(response.reason, "frontier_changed", "{case_name}");
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            assert!(response.context_recovery_hint.is_none(), "{case_name}");
             assert!(response.summary_request.is_none(), "{case_name}");
             assert_eq!(
                 response.frontier.current_frontier_store_id,
@@ -368,6 +369,7 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
                 "{case_name}"
             );
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            assert!(response.context_recovery_hint.is_none(), "{case_name}");
             assert_eq!(
                 response
                     .replay_messages
@@ -410,6 +412,7 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
                 "{case_name}"
             );
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");
+            assert!(response.context_recovery_hint.is_none(), "{case_name}");
             let summary_request = response
                 .summary_request
                 .as_ref()
@@ -448,6 +451,19 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
             assert_eq!(response.status, "ok", "{case_name}");
             assert_eq!(response.reason, "compressed_backlog", "{case_name}");
             assert_eq!(response.summary_nodes_created, 1, "{case_name}");
+            let recovery_hint = response
+                .context_recovery_hint
+                .as_deref()
+                .expect("compression should include a recovery hint");
+            assert!(recovery_hint.contains("provider 'cursor'"), "{case_name}");
+            assert!(
+                recovery_hint.contains(&format!("session '{session_id}'")),
+                "{case_name}"
+            );
+            assert!(
+                recovery_hint.contains("tracedecay_lcm_expand_query"),
+                "{case_name}"
+            );
             assert_eq!(
                 response.frontier.current_frontier_store_id,
                 Some(store_ids[1]),

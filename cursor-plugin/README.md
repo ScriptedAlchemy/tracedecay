@@ -26,6 +26,11 @@ build does not expand it, reinstall with the latest Cursor and run
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory.
 
+For sessions resumed from compacted context, the `sessionStart` hook adds a
+short recovery hint through Cursor's `additional_context` channel so the agent
+knows to query TraceDecay LCM/session recall before assuming the compacted
+summary is complete.
+
 Slash workflows ship as skills with `disable-model-invocation: true`
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
 `/tracedecay-curate-memory`, `/tracedecay-review-diff`, …) — Cursor's Commands surface was absorbed into

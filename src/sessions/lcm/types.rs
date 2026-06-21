@@ -816,6 +816,8 @@ pub struct LcmCompressionResponse {
     pub compression_attempts: usize,
     pub fallback_used: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_recovery_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_status: Option<String>,
     pub frontier: LcmLifecycleState,
     pub summary_request: Option<LcmSummaryRequest>,

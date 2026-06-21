@@ -724,6 +724,7 @@ _LCM_CONTRACT_KEYS = frozenset((
     "matches",
     "needs_synthesis",
     "replay_messages",
+    "context_recovery_hint",
     "should_compress",
     "status",
     "summary_request",
@@ -1994,6 +1995,7 @@ def _auxiliary_error_result(first, *, attempts, retry_status, error_classificati
             "replay_messages",
             "replay_token_estimate",
             "replay_over_budget",
+            "context_recovery_hint",
             "frontier",
             "summary_request",
         ):
