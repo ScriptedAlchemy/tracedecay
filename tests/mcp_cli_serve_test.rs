@@ -55,6 +55,7 @@ fn tracedecay_command_with_home(home: &Path) -> Command {
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
         .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"));
     command
 }
