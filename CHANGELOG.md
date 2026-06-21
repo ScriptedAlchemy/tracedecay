@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.5...v0.0.6) - 2026-06-21
+
+### Added
+
+- add compression context recovery hints
+
+### Fixed
+
+- fix Windows global registry test races
+- fix registry repo identity matching
+- fix cleanup policy docs
+- fix Hermes profile storage routing
+- fix Hermes profile storage routing
+- fix dashboard store and savings calculations
+- fix plugin contract tests
+- fix storage registry and session routing
+
+### Other
+
+- remove legacy daemon names
+- Clean up CI docs and legacy naming
+- remove legacy Hermes provider alias
+- Update Hermes and plugins for unified stores
+- Update dashboard for unified stores
+- Add unified storage session backends
+
 ## [0.0.5](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.4...v0.0.5) - 2026-06-20
 
 ### Fixed
