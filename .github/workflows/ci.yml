@@ -16,6 +16,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   test:
@@ -35,18 +37,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -71,18 +61,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -241,18 +219,6 @@ jobs:
       HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
 
       - uses: dtolnay/rust-toolchain@stable
 
