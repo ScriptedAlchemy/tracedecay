@@ -56,16 +56,17 @@ and compatible caches. New users should default to `~/.tracedecay/`. If both exi
 ### A3. Legacy project discovery for maintenance commands
 
 Commands that discover local project roots for listing, status, global accounting,
-wipe/cleanup previews, or similar maintenance must continue recognizing both
-`.tracedecay/tracedecay.db` and `.tracedecay/tracedecay.db`. Destructive commands must
-show the resolved legacy path clearly before deleting anything.
+wipe/cleanup previews, or similar maintenance must recognize the canonical
+`.tracedecay/tracedecay.db` layout and any explicitly enumerated pre-rename stores
+during migration. Destructive commands must show the resolved legacy path clearly
+before deleting anything.
 
 ### A4. Historical docs, changelog entries, benchmark outputs, and old daemon cleanup docs
 
-Historical TraceDecay wording in `CHANGELOG.md`, `docs/TRACEDECAY-WHATSNEW.md`, old
-plans/specs, benchmark reports, and daemon-removal instructions should remain unless
-it is factually wrong. These references should be labeled as historical when helpful,
-not mechanically rewritten.
+Historical wording in `CHANGELOG.md`, `docs/TRACEDECAY-WHATSNEW.md`, old plans/specs,
+benchmark reports, and daemon-removal instructions should remain unless it is
+factually wrong. These references should be labeled as historical when helpful, not
+mechanically rewritten.
 
 ### A5. Worldwide counter endpoint
 
@@ -111,9 +112,9 @@ move them to canonical TraceDecay configuration:
 ### B3. Legacy release archive extraction for explicit versions
 
 When a user explicitly requests an old version, upgrade/install code must probe
-current `tracedecay-*` assets first and then legacy `tracedecay-*` / `tracedecay-beta-*`
-assets. Archive extraction must prefer `tracedecay` / `tracedecay.exe` and then accept
-legacy `tracedecay` / `tracedecay.exe` binaries for those old archives.
+current `tracedecay-*` assets first and then pre-rename release assets. Archive
+extraction must prefer `tracedecay` / `tracedecay.exe` and then accept pre-rename
+binaries for those old archives.
 
 This is compatibility for explicit old-version requests only; it is not permission
 to present old TraceDecay-only releases as the latest version.
@@ -187,8 +188,7 @@ guarantee.
 ### C4. Homebrew/Scoop legacy package names
 
 Docs may warn that external taps/buckets can lag behind the rename and still expose a
-legacy `tracedecay` package. This is a user-support warning, not a new canonical
-install path.
+legacy package name. This is a user-support warning, not a new canonical install path.
 
 ## Category D — reject, fail, or do not silently accept
 
@@ -204,24 +204,23 @@ must not advertise legacy-only releases as current.
 
 ### D2. Silent storage renames or implicit data moves
 
-Code must reject any implicit migration that renames `.tracedecay/` to `.tracedecay/`,
-renames `tracedecay.db` to `tracedecay.db`, or moves `~/.tracedecay/` to
-`~/.tracedecay/` without an explicit migration command. A future migration command
-must require clear user intent and must handle backups, branch metadata, session
-payloads, curation sidecars, monitor files, caches, rollback, and both project and
-user data roots.
+Code must reject any implicit migration that renames pre-rename data directories or
+databases, or moves user-level data roots without an explicit migration command. A
+future migration command must require clear user intent and must handle backups,
+branch metadata, session payloads, curation sidecars, monitor files, caches,
+rollback, and both project and user data roots.
 
 ### D3. New public TraceDecay-branded product surface
 
-New features must not introduce new public `tracedecay` names for commands,
-configuration, API fields, docs examples, package names, release assets, service
-identifiers, or generated plugin artifacts unless the name is categorized here as
-legacy retention or an external constraint.
+New features must not introduce public pre-rename names for commands, configuration,
+API fields, docs examples, package names, release assets, service identifiers, or
+generated plugin artifacts unless the name is categorized here as legacy retention or
+an external constraint.
 
 ### D4. Unowned cleanup
 
 Installers and uninstallers must not delete unknown user-authored files merely
-because they live under an old `tracedecay` path. Generated files can be migrated or
+because they live under an old path. Generated files can be migrated or
 removed; unrecognized files require preservation or explicit user confirmation.
 
 ## Category E — externally constrained names that must not change yet

@@ -1325,7 +1325,7 @@ mod tests {
         let mcp = load_json_file(&cursor_dir.join("mcp.json"));
         assert!(
             mcp["mcpServers"].get("tracedecay").is_none(),
-            "legacy tracedecay MCP entry must be removed"
+            "project-local MCP entry must be removed"
         );
         assert!(
             mcp["mcpServers"].get("other").is_some(),

@@ -247,23 +247,23 @@ The config field renames accordingly: `daemon_debounce` becomes `watcher_debounc
 
 ### Breaking
 
-- The `tracedecay daemon` subcommand is removed. The autostart flags (`--enable-autostart`, `--disable-autostart`), the foreground mode, and all `daemon-kit`-backed service registration are gone.
+- The pre-rename daemon subcommand is removed. The autostart flags (`--enable-autostart`, `--disable-autostart`), the foreground mode, and all `daemon-kit`-backed service registration are gone.
 - `UserConfig::daemon_debounce` is now `UserConfig::watcher_debounce`. This is a programmatic-API break. The `user_config` module is `pub`, so any external crate that constructs a `UserConfig` literal referencing the old field name will fail to compile. The serde alias only covers deserialization from TOML, not Rust struct literals.
 - `McpServer::new` now returns `Arc<Self>` instead of `Self`. The embedded watcher task captures a `Weak<Self>` so it cannot extend the server's lifetime, which forces the constructor to own the strong `Arc`. External embedders that previously bound the return value (e.g. `let server = McpServer::new(cg, None).await;`) keep compiling, but anything that destructured by value or stored the server in a non-`Arc` field needs to adapt.
 
 ### Migration
 
-Users who previously ran `tracedecay daemon --enable-autostart` need to remove the orphaned service. The command depends on platform:
+Users who previously enabled daemon autostart need to remove the orphaned service. The command depends on platform:
 
-- **macOS:** `launchctl unload ~/Library/LaunchAgents/com.tracedecay.daemon.plist`, then `rm ~/Library/LaunchAgents/com.tracedecay.daemon.plist`.
-- **Linux:** `systemctl --user disable --now tracedecay-daemon`, then remove the unit file from `~/.config/systemd/user/`.
-- **Windows:** `sc.exe delete tracedecay-daemon` from an elevated terminal.
+- **macOS:** `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist`, then `rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`.
+- **Linux:** `systemctl --user disable --now tokensave-daemon`, then remove the unit file from `~/.config/systemd/user/`.
+- **Windows:** `sc.exe delete tokensave-daemon` from an elevated terminal.
 
 If you don't remember whether you registered autostart, these discovery commands will tell you:
 
-- **macOS:** `launchctl list | grep tracedecay`
-- **Linux:** `systemctl --user list-units | grep tracedecay`
-- **Windows:** `sc.exe query state= all | findstr -i tracedecay`
+- **macOS:** `launchctl list | grep -i tokensave`
+- **Linux:** `systemctl --user list-units | grep -i tokensave`
+- **Windows:** `sc.exe query state= all | findstr -i tokensave`
 
 CLI-only users (anyone who runs `tracedecay` commands without an attached agent) lose automatic background syncing. The recommended replacement is a git post-commit hook -- a starter script lives at `scripts/post-commit` in the TraceDecay repo. Drop it into `.git/hooks/post-commit` in each project where you want the index to update on commit.
 

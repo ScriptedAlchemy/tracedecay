@@ -480,15 +480,15 @@ names below use the old `tracedecay` branding because that is what 5.x installed
 
 If you don't remember the exact service/plist name, list them first:
 
-- macOS: `launchctl list | grep tracedecay`
-- Linux: `systemctl --user list-units | grep tracedecay`
-- Windows: `sc.exe query state= all | findstr -i tracedecay`
+- macOS: `launchctl list | grep -i tokensave`
+- Linux: `systemctl --user list-units | grep -i tokensave`
+- Windows: `sc.exe query state= all | findstr -i tokensave`
 
 Then remove the entry matching your install:
 
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tracedecay.daemon.plist && rm ~/Library/LaunchAgents/com.tracedecay.daemon.plist`
-- Linux: `systemctl --user disable --now tracedecay-daemon && rm ~/.config/systemd/user/tracedecay-daemon.service`
-- Windows: `sc.exe delete tracedecay-daemon` (from an elevated terminal)
+- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
+- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
+- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
 
 Once your agent is attached, MCP tool calls keep the index fresh on demand.
 

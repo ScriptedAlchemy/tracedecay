@@ -98,7 +98,7 @@ scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
 scoop install tracedecay
 ```
 
-> **Note:** The Homebrew tap and Scoop bucket are external repositories updated separately from this one — until they pick up the rename, the package may still be published under the legacy `tracedecay` name.
+> **Note:** The Homebrew tap and Scoop bucket are external repositories updated separately from this one — until they pick up the rename, the package may still be published under the legacy package name.
 
 **Cargo (any platform):**
 
@@ -664,15 +664,15 @@ chmod +x .git/hooks/post-commit
 
 ### Upgrading from 5.x
 
-The standalone `tracedecay daemon` command (5.x-era, pre-rename) and its launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The on-demand staleness model above is the current design.
+The standalone daemon command from 5.x-era, pre-rename installs and its launchd/systemd/Windows Service autostart were removed in 6.0.0. The embedded OS-level file watcher that replaced the daemon was itself removed in 6.1.0 (it caused runaway CPU and memory on large monorepos with deep `node_modules` or `target` trees). The on-demand staleness model above is the current design.
 
-If you still have a daemon autostart from 5.x, remove it (the artifacts use the historical `tracedecay` name):
+If you still have a daemon autostart from 5.x, remove it. Those artifacts use the historical pre-rename service name:
 
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.tracedecay.daemon.plist && rm ~/Library/LaunchAgents/com.tracedecay.daemon.plist`
-- Linux: `systemctl --user disable --now tracedecay-daemon && rm ~/.config/systemd/user/tracedecay-daemon.service`
-- Windows: `sc.exe delete tracedecay-daemon` (from an elevated terminal)
+- macOS: `launchctl unload ~/Library/LaunchAgents/com.tokensave.daemon.plist && rm ~/Library/LaunchAgents/com.tokensave.daemon.plist`
+- Linux: `systemctl --user disable --now tokensave-daemon && rm ~/.config/systemd/user/tokensave-daemon.service`
+- Windows: `sc.exe delete tokensave-daemon` (from an elevated terminal)
 
-If you don't recall the exact name: `launchctl list | grep tracedecay` / `systemctl --user list-units | grep tracedecay` / `sc.exe query state= all | findstr -i tracedecay`.
+If you don't recall the exact name: `launchctl list | grep -i tokensave` / `systemctl --user list-units | grep -i tokensave` / `sc.exe query state= all | findstr -i tokensave`.
 
 ---
 
@@ -982,7 +982,7 @@ Large projects take longer on the first full index.
 | `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback). |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing). |
 
-Use `TRACEDECAY_*` environment variables for TraceDecay configuration. Pre-rename `TRACEDECAY_*` variables are not runtime fallbacks.
+Use `TRACEDECAY_*` environment variables for TraceDecay configuration. Pre-rename environment variable names are not runtime fallbacks.
 
 ### Disabling tracedecay for specific projects
 

@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.0.2] - 2026-06-18
 
 ### Changed
-- **Project renamed: TraceDecay → TraceDecay.** The crate, binary, CLI command, and MCP server are now `tracedecay`, and the MCP tools are prefixed `tracedecay_*`. The data directory is now `.tracedecay/` (an existing `.tracedecay/` directory is still honored as a fallback), and environment variables use the `TRACEDECAY_*` prefix (legacy `TRACEDECAY_*` variables are still honored as a fallback). All entries below predate the rename and intentionally retain the historical `tracedecay`/`TraceDecay` names.
+- **Project renamed to TraceDecay.** The crate, binary, CLI command, and MCP server are now `tracedecay`, and the MCP tools are prefixed `tracedecay_*`. The data directory is now `.tracedecay/`, and environment variables use the `TRACEDECAY_*` prefix. All entries below predate the rename and intentionally retain their historical names.
 - **Version reset for the rebranded crate.** `tracedecay` now restarts at `0.0.2` as a fresh crate line; `0.0.1` is already occupied on crates.io by the name-reservation placeholder, so `0.0.2` is the first publishable release number.
 
 ### Added
