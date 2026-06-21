@@ -3,6 +3,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
 
 use common::{
     create_runtime, get_json, http_agent, pick_free_port, response_to_json, tempdir_or_panic,
@@ -36,12 +37,51 @@ struct DashboardFixture {
     base_url: String,
     project_root: std::path::PathBuf,
     project_db_path: std::path::PathBuf,
-    server: tokio::task::JoinHandle<()>,
+    server: DashboardServer,
 }
 
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
-        self.server.abort();
+        self.server.stop();
+    }
+}
+
+struct DashboardServer {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl DashboardServer {
+    fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for DashboardServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let thread = thread::spawn(move || {
+        let runtime = create_runtime();
+        runtime.block_on(async move {
+            let _ = dashboard::run_until_shutdown(&cg, "127.0.0.1", port, false, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+        });
+    });
+    DashboardServer {
+        shutdown: Some(shutdown),
+        thread: Some(thread),
     }
 }
 
@@ -402,9 +442,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let project_db_path = cg.store_layout().graph_db_path.clone();
-    let server = tokio::spawn(async move {
-        let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-    });
+    let server = spawn_dashboard_server(cg, port);
 
     let agent = http_agent();
     wait_for_dashboard(&agent, &base_url).await;
@@ -659,12 +697,10 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
             Ok(cg) => cg,
             Err(err) => panic!("failed to reopen fixture project: {err}"),
         };
-        let server = tokio::spawn(async move {
-            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-        });
+        let mut server = spawn_dashboard_server(cg, port);
         wait_for_dashboard(&agent, &base_url).await;
         let (status, _capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
-        server.abort();
+        server.stop();
         assert_eq!(status, 200);
         let repaired = count_in_project_db(
             &fixture,
@@ -730,14 +766,12 @@ fn dashboard_reports_resolved_branch_db_path() {
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let server = tokio::spawn(async move {
-            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-        });
+        let mut server = spawn_dashboard_server(cg, port);
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
 
         let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
-        server.abort();
+        server.stop();
         assert_eq!(status, 200);
         assert_eq!(capabilities["graph_db"], expected);
     });
@@ -828,9 +862,7 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let server = tokio::spawn(async move {
-            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-        });
+        let mut server = spawn_dashboard_server(cg, port);
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
 
@@ -856,7 +888,7 @@ fn dashboard_uses_project_memory_db_and_branch_graph_db() {
             &agent,
             &format!("{base_url}/api/plugins/graph/search?q=feature_branch_symbol"),
         );
-        server.abort();
+        server.stop();
         assert_eq!(status, 200);
         assert!(
             graph_search["total"].as_i64().unwrap_or_default() > 0,
@@ -2115,9 +2147,7 @@ fn lcm_serves_project_session_store_without_global_override() {
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let server = tokio::spawn(async move {
-            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-        });
+        let mut server = spawn_dashboard_server(cg, port);
 
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
@@ -2166,7 +2196,7 @@ fn lcm_serves_project_session_store_without_global_override() {
             "project-store search should match seeded messages"
         );
 
-        server.abort();
+        server.stop();
     });
 }
 
@@ -2200,9 +2230,7 @@ fn lcm_project_store_wins_over_global_accounting_override() {
 
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let server = tokio::spawn(async move {
-            let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-        });
+        let mut server = spawn_dashboard_server(cg, port);
 
         let agent = http_agent();
         wait_for_dashboard(&agent, &base_url).await;
@@ -2230,7 +2258,7 @@ fn lcm_project_store_wins_over_global_accounting_override() {
             "expected resolved project session DB path, got {path}"
         );
 
-        server.abort();
+        server.stop();
     });
 }
 
@@ -2264,18 +2292,15 @@ fn curation_preview_persists_across_dashboard_restarts() {
             .dashboard_root
             .join("curation_preview.json");
 
-        async fn start_server(cg: TraceDecay) -> (String, tokio::task::JoinHandle<()>) {
+        async fn start_server(cg: TraceDecay) -> (String, DashboardServer) {
             let port = pick_free_port();
             let base_url = format!("http://127.0.0.1:{port}");
-            let server = tokio::spawn(async move {
-                let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
-            });
+            let server = spawn_dashboard_server(cg, port);
             (base_url, server)
         }
 
-        async fn stop_server(server: tokio::task::JoinHandle<()>) {
-            server.abort();
-            let _ = server.await;
+        fn stop_server(mut server: DashboardServer) {
+            server.stop();
         }
 
         async fn reopen_project(project_root: &Path) -> TraceDecay {
@@ -2303,7 +2328,7 @@ fn curation_preview_persists_across_dashboard_restarts() {
         assert!(!preview["report"].is_null(), "dry-run must save a preview");
         let saved_at = preview["saved_at"].clone();
         assert!(saved_at.is_string(), "preview must carry saved_at");
-        stop_server(server).await;
+        stop_server(server);
         assert!(
             sidecar.exists(),
             "dry-run must persist the preview sidecar at {}",
@@ -2359,7 +2384,7 @@ fn curation_preview_persists_across_dashboard_restarts() {
             !sidecar.exists(),
             "apply must remove the persisted preview sidecar"
         );
-        stop_server(server).await;
+        stop_server(server);
 
         // Server 3: nothing is restored after the apply cleared the sidecar.
         let cg = reopen_project(&project_root).await;
@@ -2374,6 +2399,6 @@ fn curation_preview_persists_across_dashboard_restarts() {
             preview["report"].is_null(),
             "no preview may reappear after curation was applied"
         );
-        stop_server(server).await;
+        stop_server(server);
     });
 }

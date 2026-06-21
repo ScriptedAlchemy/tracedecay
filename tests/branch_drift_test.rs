@@ -4,13 +4,68 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+
+static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct HomeEnvGuard {
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+    previous_data_dir: Option<OsString>,
+}
+
+impl HomeEnvGuard {
+    fn set(home: &Path) -> Self {
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
+        let home = canonical_temp_path(home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
+        Self {
+            previous_home,
+            previous_userprofile,
+            previous_data_dir,
+        }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match self.previous_data_dir.take() {
+            Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
+            None => std::env::remove_var(USER_DATA_DIR_ENV),
+        }
+    }
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+}
 
 fn git(project: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -47,6 +102,9 @@ fn project_data_dir(project: &Path) -> PathBuf {
 
 #[tokio::test]
 async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -94,6 +152,9 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
 
 #[tokio::test]
 async fn no_drift_and_sync_allowed_while_on_opened_branch() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -115,6 +176,9 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
 
 #[tokio::test]
 async fn sync_allowed_in_single_db_mode_without_git() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     // No git repo => no default branch detected => no branch metadata =>
     // single-DB mode (serving_branch == None), exempt from the drift guard.
     let dir = TempDir::new().unwrap();
@@ -139,6 +203,9 @@ async fn sync_allowed_in_single_db_mode_without_git() {
 
 #[tokio::test]
 async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -172,6 +239,9 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
 
 #[tokio::test]
 async fn branch_diagnostics_reports_auto_tracked_live_branch() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
@@ -206,6 +276,9 @@ async fn branch_diagnostics_reports_auto_tracked_live_branch() {
 
 #[tokio::test]
 async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     init_repo_on_main(project);
