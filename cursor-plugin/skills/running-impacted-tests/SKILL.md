@@ -20,7 +20,7 @@ Use this when impacted-test verification is relevant to the task. Respect Cursor
 
 ## Guardrails
 
-- `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks, and the first `diagnostics` build can take minutes (forced target dir `.tracedecay/target/`). Respect Cursor approval/run-mode and avoid duplicate runs.
+- `tracedecay_run_affected_tests` and `tracedecay_diagnostics` run cargo-backed checks, and the first `diagnostics` build can take minutes (forced target dir `/tmp/tracedecay-target/<project_id>/diagnostics`). Respect Cursor approval/run-mode and avoid duplicate runs.
 - `tracedecay_run_affected_tests` is cargo-only. For non-Rust repos use `tracedecay_diagnostics` (tsc/pyright) and the project's own test runner.
 - Steps 1–2 and 5 are read-only and safe to run first to preview scope before the user commits to a run.
 - Pure coverage questions ("which tests cover X", "is this tested", "where should the next test go") that don't need a run → `tracedecay:assessing-test-coverage`.

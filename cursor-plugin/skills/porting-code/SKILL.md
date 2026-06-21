@@ -21,7 +21,7 @@ description: Use when porting, migrating, or rewriting code between directories,
 
 - Never port a symbol before its dependencies (respect `tracedecay_port_order`).
 - `tracedecay_port_status` / `tracedecay_port_order` and the lookups are read-only; the editing tools and `tracedecay_diagnostics` mutate the working tree / run the toolchain. Use them when porting/verification is relevant and respect Cursor approval/run-mode.
-- `tracedecay_diagnostics` forces target dir `.tracedecay/target/`; the first run can take minutes.
+- `tracedecay_diagnostics` forces target dir `/tmp/tracedecay-target/<project_id>/diagnostics`; the first run can take minutes.
 
 ## Output
 
