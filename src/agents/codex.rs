@@ -344,6 +344,29 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
+/// Print the Codex-native automation request that should be run inside Codex.
+///
+/// Codex App automations are owned by Codex itself; the documented write path
+/// is asking Codex in a normal thread to create or update the automation. This
+/// helper intentionally writes no scheduler files.
+pub fn print_codex_native_automation_guidance(project_path: &Path) {
+    eprintln!();
+    eprintln!("\x1b[1mCodex-native TraceDecay automation\x1b[0m");
+    eprintln!("Open Codex in this project and send this prompt:");
+    eprintln!();
+    eprintln!("{}", codex_native_automation_prompt(project_path));
+}
+
+pub fn codex_native_automation_prompt(project_path: &Path) -> String {
+    format!(
+        "Create or update a native Codex standalone automation named `TraceDecay memory sweep` for project `{}`.\n\n\
+         Run it every 15 minutes in the local project checkout, not a separate TraceDecay-owned scheduler.\n\n\
+         Automation prompt:\n\
+         Use the installed TraceDecay plugin and user/profile-level TraceDecay store scoped to this project. Do not create repo-local TraceDecay storage or automation files. Review project memory and session context for stale, duplicate, or useful durable facts. Use TraceDecay memory/status/curation tools where appropriate. If there is nothing important, archive or report briefly; if there is a useful maintenance action, explain what changed or what needs review.",
+        project_path.display()
+    )
+}
+
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
@@ -1392,5 +1415,15 @@ mod tests {
             dangling.is_empty(),
             "Codex skill bodies reference skills absent from the bundle: {dangling:?}"
         );
+    }
+
+    #[test]
+    fn codex_native_automation_prompt_uses_codex_owned_scheduler() {
+        let prompt = codex_native_automation_prompt(Path::new("/work/project"));
+
+        assert!(prompt.contains("native Codex standalone automation"));
+        assert!(prompt.contains("project `/work/project`"));
+        assert!(prompt.contains("user/profile-level TraceDecay store"));
+        assert!(prompt.contains("Do not create repo-local TraceDecay storage or automation files"));
     }
 }

@@ -195,6 +195,34 @@ fn validate_hermes_project_root_flag(
     Ok(Some(path))
 }
 
+fn validate_codex_automation_flags(
+    agent: Option<&str>,
+    automation: bool,
+) -> tracedecay::errors::Result<()> {
+    if !automation {
+        return Ok(());
+    }
+    if agent != Some("codex") {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "`--automation` is only supported with `--agent codex`".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_codex_automation_project_path() -> tracedecay::errors::Result<std::path::PathBuf> {
+    let project_path =
+        std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not determine current project directory: {e}"),
+        })?;
+    std::fs::canonicalize(&project_path).map_err(|e| tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "could not canonicalize project directory {}: {e}",
+            project_path.display()
+        ),
+    })
+}
+
 fn hermes_selected_profile_targets(
     home: &std::path::Path,
     profile: &Option<String>,
@@ -639,10 +667,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             all_profiles,
             project_root,
             no_dashboard,
+            automation,
         } => {
             validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
             let pinned_project_root =
                 validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
+            validate_codex_automation_flags(agent.as_deref(), automation)?;
             let home = tracedecay::agents::home_dir().ok_or_else(|| {
                 tracedecay::errors::TraceDecayError::Config {
                     message: "could not determine home directory".to_string(),
@@ -687,6 +717,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                         };
                         ag.install_local(&ctx, &project_path)?;
                         ag.post_install(Some(&project_path)).await;
+                        if automation && id == "codex" {
+                            let scoped_project_path = validate_codex_automation_project_path()?;
+                            tracedecay::agents::codex::print_codex_native_automation_guidance(
+                                &scoped_project_path,
+                            );
+                        }
                     }
                     installed_names.push(ag.name().to_string());
                 } else {
@@ -741,6 +777,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     };
                     ag.install(&ctx)?;
                     ag.post_install(project_path.as_deref()).await;
+                    if automation && id == "codex" {
+                        let scoped_project_path = validate_codex_automation_project_path()?;
+                        tracedecay::agents::codex::print_codex_native_automation_guidance(
+                            &scoped_project_path,
+                        );
+                    }
                 }
                 if !user_cfg.installed_agents.contains(&id) {
                     user_cfg.installed_agents.push(id);
@@ -1629,6 +1671,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         }));
         assert!(should_skip_startup_maintenance(&Commands::Reinstall));
         assert!(should_skip_startup_maintenance(&Commands::UpdatePlugin));
@@ -1666,6 +1709,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
         // `update-plugin` promises byte-identical configs; the implicit
@@ -1749,6 +1793,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         };
         let global = Commands::Install {
             agent: Some("hermes".to_string()),
@@ -1757,6 +1802,7 @@ mod startup_tests {
             all_profiles: false,
             project_root: None,
             no_dashboard: false,
+            automation: false,
         };
 
         assert!(is_local_install_command(&local));
