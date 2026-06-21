@@ -3,6 +3,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::config::{load_config, save_config};
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::EdgeKind;
 
@@ -905,7 +906,10 @@ async fn test_concurrent_sync_is_rejected() {
     let cg = TraceDecay::init(project).await.unwrap();
 
     // Simulate an in-progress sync by placing a lockfile with our own PID.
-    let lock_path = project.join(".tracedecay/sync.lock");
+    let lock_path = resolve_layout_for_current_profile(project)
+        .unwrap()
+        .data_root
+        .join("sync.lock");
     fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
 
     let err = cg.sync().await.unwrap_err();

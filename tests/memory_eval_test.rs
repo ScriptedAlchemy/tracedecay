@@ -3,7 +3,7 @@
 //! Each scenario in `eval/scenarios/*.json` seeds a throwaway fixture project,
 //! replays a scripted tool-call sequence through the real `tracedecay` binary
 //! (the same write/curation paths an agent hits over MCP), then asserts on
-//! end-state with plain SQL against the fixture's `.tracedecay/tracedecay.db`.
+//! end-state with plain SQL against the fixture's resolved project graph DB.
 //! No LLM is involved; the cost-gated real-model layer lives in
 //! `eval/run_real_model.py`.
 //!
@@ -208,25 +208,33 @@ fn load_scenario(id: &str) -> Scenario {
 }
 
 struct Fixture {
-    home: TempDir,
-    project: TempDir,
+    _home: TempDir,
+    home_path: PathBuf,
+    _project: TempDir,
+    project_path: PathBuf,
 }
 
 impl Fixture {
     fn db_path(&self) -> PathBuf {
-        self.project.path().join(".tracedecay/tracedecay.db")
+        tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
+            .expect("resolve fixture storage layout")
+            .graph_db_path
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
         command
-            .current_dir(self.project.path())
-            .env("HOME", self.home.path())
-            .env("USERPROFILE", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .current_dir(&self.project_path)
+            .env("HOME", &self.home_path)
+            .env("USERPROFILE", &self.home_path)
+            .env("XDG_CONFIG_HOME", self.home_path.join(".config"))
+            .env(
+                tracedecay::config::USER_DATA_DIR_ENV,
+                self.home_path.join(".tracedecay"),
+            )
             .env(
                 "TRACEDECAY_GLOBAL_DB",
-                self.home.path().join(".tracedecay/global.db"),
+                self.home_path.join(".tracedecay/global.db"),
             )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -353,16 +361,29 @@ fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     })
 }
 
+fn canonical_test_dir(path: &Path) -> PathBuf {
+    std::fs::create_dir_all(path)
+        .unwrap_or_else(|e| panic!("failed to create test dir {}: {e}", path.display()));
+    path.canonicalize()
+        .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
+}
+
 fn build_fixture(setup: &Setup) -> Fixture {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    let home_path = canonical_test_dir(home.path());
+    let project_path = canonical_test_dir(project.path());
     let fixture = Fixture {
-        home: TempDir::new().expect("home tempdir"),
-        project: TempDir::new().expect("project tempdir"),
+        _home: home,
+        home_path,
+        _project: project,
+        project_path,
     };
-    let src = fixture.project.path().join("src");
+    let src = fixture.project_path.join("src");
     std::fs::create_dir_all(&src).expect("create src dir");
     std::fs::write(src.join("lib.rs"), "pub fn eval_fixture_marker() {}\n").expect("write lib.rs");
     for (name, contents) in &setup.files {
-        std::fs::write(fixture.project.path().join(name), contents)
+        std::fs::write(fixture.project_path.join(name), contents)
             .unwrap_or_else(|e| panic!("write fixture file {name}: {e}"));
     }
     run_ok(&fixture, &["init"]);

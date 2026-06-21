@@ -5,12 +5,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{save_branch_meta, BranchMeta};
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
-fn git(project: &std::path::Path, args: &[&str]) {
+fn git(project: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
         .args(args)
@@ -25,7 +27,7 @@ fn git(project: &std::path::Path, args: &[&str]) {
 }
 
 /// Initialize a git repo on branch `main` with one committed source file.
-fn init_repo_on_main(project: &std::path::Path) {
+fn init_repo_on_main(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
     git(project, &["init"]);
@@ -35,6 +37,12 @@ fn init_repo_on_main(project: &std::path::Path) {
     git(project, &["commit", "-m", "initial"]);
     // Guarantee the branch is named `main` regardless of git's init default.
     git(project, &["branch", "-M", "main"]);
+}
+
+fn project_data_dir(project: &Path) -> PathBuf {
+    resolve_layout_for_current_profile(project)
+        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
+        .data_root
 }
 
 #[tokio::test]
@@ -48,7 +56,7 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
 
     // Track `main` so the project is in branch-aware mode (serving_branch=Some).
     let meta = BranchMeta::new("main");
-    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    save_branch_meta(&project_data_dir(project), &meta).unwrap();
     drop(cg);
 
     // Reopen so the instance resolves and pins `main`.
@@ -139,7 +147,7 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
     cg.index_all().await.unwrap();
 
     let meta = BranchMeta::new("main");
-    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    save_branch_meta(&project_data_dir(project), &meta).unwrap();
     drop(cg);
 
     let cg = TraceDecay::open(project).await.unwrap();
@@ -172,7 +180,7 @@ async fn branch_diagnostics_reports_auto_tracked_live_branch() {
     cg.index_all().await.unwrap();
 
     let meta = BranchMeta::new("main");
-    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    save_branch_meta(&project_data_dir(project), &meta).unwrap();
     drop(cg);
 
     git(project, &["checkout", "-b", "feature/untracked"]);
@@ -206,7 +214,7 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     cg.index_all().await.unwrap();
 
     let meta = BranchMeta::new("main");
-    save_branch_meta(&project.join(".tracedecay"), &meta).unwrap();
+    save_branch_meta(&project_data_dir(project), &meta).unwrap();
     drop(cg);
 
     git(project, &["checkout", "-b", "feature/tracked"]);
@@ -223,7 +231,7 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
         .await
         .unwrap();
 
-    let tracedecay_dir = project.join(".tracedecay");
+    let tracedecay_dir = project_data_dir(project);
     let meta = tracedecay::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     let feature_db =
         tracedecay::branch::resolve_branch_db_path(&tracedecay_dir, "feature/tracked", &meta)

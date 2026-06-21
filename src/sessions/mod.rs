@@ -9,7 +9,9 @@ use crate::sessions::source::{ingest_source, TranscriptSource};
 pub mod claude;
 pub mod cline_like;
 pub mod codex;
+pub mod codex_app_server;
 pub mod cursor;
+pub mod cursor_agent;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;
@@ -19,7 +21,7 @@ pub(crate) mod transcript_backfill;
 pub mod vibe;
 
 /// Ingest transcripts from every path-discoverable agent whose sessions
-/// belong to `project_root`, into the project-local `sessions.db` (`db`).
+/// belong to `project_root`, into the active project session store (`db`).
 /// Hookless agents (Claude, Codex, ...) are reconciled exclusively by this
 /// startup catch-up sweep; Cursor additionally has live end-of-turn hooks,
 /// and its sweep entry shares the hooks' parse offsets so neither path ever

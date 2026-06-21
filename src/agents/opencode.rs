@@ -19,7 +19,6 @@ use super::{
 };
 
 const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
-const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 /// `OpenCode` agent.
 pub struct OpenCodeIntegration;
@@ -92,7 +91,6 @@ impl AgentIntegration for OpenCodeIntegration {
         let json = super::load_json_file(&config_path);
         let mcp = json.get("mcp");
         mcp.and_then(|v| v.get("tracedecay")).is_some()
-            || mcp.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -238,11 +236,9 @@ fn uninstall_mcp_server(config_path: &Path) {
     let Some(mcp) = config.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
         return;
     };
-    let removed_new = mcp.remove("tracedecay").is_some();
-    let removed_legacy = mcp.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    if mcp.remove("tracedecay").is_none() {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             config_path.display()
         );
         return;
@@ -259,7 +255,7 @@ fn uninstall_mcp_server(config_path: &Path) {
         );
     } else if backup_and_write_json(config_path, &config) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             config_path.display()
         );
     }
@@ -273,15 +269,11 @@ fn uninstall_prompt_rules(prompt_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(prompt_path) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
-        eprintln!("  AGENTS.md does not contain tracedecay/tokensave rules, skipping");
+    if !contents.contains("tracedecay") {
+        eprintln!("  AGENTS.md does not contain tracedecay rules, skipping");
         return;
     }
-    let marker = if contents.contains(PROMPT_RULE_MARKER) {
-        PROMPT_RULE_MARKER
-    } else {
-        LEGACY_PROMPT_RULE_MARKER
-    };
+    let marker = PROMPT_RULE_MARKER;
     let Some(start) = contents.find(marker) else {
         return;
     };

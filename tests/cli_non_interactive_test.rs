@@ -222,8 +222,10 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        project.path().join(".tracedecay").is_dir(),
-        "init should still create the index"
+        std::fs::read_dir(profile_root(home.path()).join("projects"))
+            .unwrap()
+            .any(|entry| entry.unwrap().path().join("tracedecay.db").is_file()),
+        "init should still create the project index in the profile store"
     );
     let gitignore = project.path().join(".gitignore");
     assert!(
@@ -299,7 +301,16 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
 async fn status_json_reads_readonly_project_database() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let db_path = project.path().join(".tracedecay/tracedecay.db");
+    let project_root = canonical_temp_path(project.path());
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_cli".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let db_path = profile_shard_root(home.path()).join("tracedecay.db");
     let (db, _) = Database::initialize(&db_path).await.unwrap();
     db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await

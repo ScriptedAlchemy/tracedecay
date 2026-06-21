@@ -16,15 +16,8 @@ pub const TRACEDECAY_DIR: &str = ".tracedecay";
 /// Environment variable that pins the user-level `TraceDecay` data directory.
 pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 
-/// Legacy (pre-rebrand) data directory name. Projects that already have a
-/// `.tokensave/` dir keep using it as-is — read and write, no auto-migration.
-pub const LEGACY_TOKENSAVE_DIR: &str = ".tokensave";
-
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
-
-/// Project graph database filename inside a legacy `.tokensave/` data dir.
-pub const LEGACY_DB_FILENAME: &str = "tokensave.db";
 
 /// Configuration for a `TraceDecay` project.
 ///
@@ -81,99 +74,53 @@ impl Default for TraceDecayConfig {
     }
 }
 
-/// Returns the data directory for the given project root.
+/// Returns the project marker directory for the given project root.
 ///
-/// This is the single point of brand-dir resolution: prefer `.tracedecay/`;
-/// when it does not exist but a legacy `.tokensave/` dir does, use the legacy
-/// dir as-is (read and write — existing user data is never migrated or
-/// renamed). New installs (neither dir present) get `.tracedecay/`.
+/// New runtime storage lives in the user-level profile shard. The project root
+/// only carries lightweight marker/config files under `.tracedecay/`.
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
-    let primary = project_root.join(TRACEDECAY_DIR);
-    if primary.is_dir() {
-        return primary;
-    }
-    let legacy = project_root.join(LEGACY_TOKENSAVE_DIR);
-    if legacy.is_dir() {
-        return legacy;
-    }
-    primary
+    project_root.join(TRACEDECAY_DIR)
 }
 
-/// Name of the active data directory for this project root: `.tracedecay`,
-/// or `.tokensave` when the project still uses a legacy dir.
+/// Name of the project marker directory for this project root.
 pub fn active_data_dir_name(project_root: &Path) -> &'static str {
-    if get_tracedecay_dir(project_root)
-        .file_name()
-        .is_some_and(|n| n == LEGACY_TOKENSAVE_DIR)
-    {
-        LEGACY_TOKENSAVE_DIR
-    } else {
-        TRACEDECAY_DIR
-    }
+    let _ = project_root;
+    TRACEDECAY_DIR
 }
 
-/// Database filename appropriate for the given data directory: legacy
-/// `.tokensave/` dirs keep `tokensave.db`, everything else uses
-/// `tracedecay.db`.
+/// Database filename appropriate for the given data directory.
 pub fn db_filename(data_dir: &Path) -> &'static str {
-    if data_dir
-        .file_name()
-        .is_some_and(|n| n == LEGACY_TOKENSAVE_DIR)
-    {
-        LEGACY_DB_FILENAME
-    } else {
-        DB_FILENAME
-    }
+    let _ = data_dir;
+    DB_FILENAME
 }
 
-/// Full path to the project graph database, brand-fallback aware:
-/// `.tracedecay/tracedecay.db`, or `.tokensave/tokensave.db` for legacy
-/// projects.
-pub fn get_project_db_path(project_root: &Path) -> PathBuf {
-    let dir = get_tracedecay_dir(project_root);
-    let file = db_filename(&dir);
-    dir.join(file)
-}
-
-/// Returns true when either supported project DB filename exists at this root.
+/// Full path to the repo-local graph database marker path.
 ///
-/// This intentionally checks the legacy path independently of
-/// [`get_tracedecay_dir`], because a profile-storage enrollment marker creates
-/// `.tracedecay/` even when the graph DB still lives in a legacy `.tokensave/`
-/// directory.
+/// Normal runtime graph storage resolves through `crate::storage::StoreLayout`
+/// into the user profile shard; this helper is only for explicit marker checks
+/// and migration cleanup.
+pub fn get_project_db_path(project_root: &Path) -> PathBuf {
+    get_tracedecay_dir(project_root).join(DB_FILENAME)
+}
+
+/// Returns true when the old repo-local `TraceDecay` graph DB exists at this root.
 pub fn has_project_database(project_root: &Path) -> bool {
     project_root.join(TRACEDECAY_DIR).join(DB_FILENAME).exists()
-        || project_root
-            .join(LEGACY_TOKENSAVE_DIR)
-            .join(LEGACY_DB_FILENAME)
-            .exists()
 }
 
-/// User-level data directory: `~/.tracedecay`, falling back to an existing
-/// legacy `~/.tokensave` (used as-is), defaulting to `~/.tracedecay` when
-/// neither exists yet.
+/// User-level data directory. Runtime storage is always rooted at
+/// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
 pub fn user_data_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
     let home = dirs::home_dir()?;
-    let primary = home.join(TRACEDECAY_DIR);
-    if primary.is_dir() {
-        return Some(primary);
-    }
-    let legacy = home.join(LEGACY_TOKENSAVE_DIR);
-    if legacy.is_dir() {
-        return Some(legacy);
-    }
-    Some(primary)
+    Some(home.join(TRACEDECAY_DIR))
 }
 
-/// Reads the `TRACEDECAY_<suffix>` environment variable, falling back to the
-/// legacy `TOKENSAVE_<suffix>` name so pre-rebrand setups keep working.
+/// Reads the `TRACEDECAY_<suffix>` environment variable.
 pub fn brand_env(suffix: &str) -> Option<String> {
-    std::env::var(format!("TRACEDECAY_{suffix}"))
-        .or_else(|_| std::env::var(format!("TOKENSAVE_{suffix}")))
-        .ok()
+    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
 
 /// Returns the path to the configuration file (`config.json`) within the
@@ -272,8 +219,8 @@ pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()>
     Ok(())
 }
 
-/// Returns `true` if the active data dir (`.tracedecay`, or legacy
-/// `.tokensave`) is ignored by Git for this project.
+/// Returns `true` if the project marker dir (`.tracedecay`) is ignored by Git
+/// for this project.
 ///
 /// This respects the repository `.gitignore`, `.git/info/exclude`, and the
 /// user's global excludes file via `git check-ignore`. If Git cannot answer
@@ -326,10 +273,9 @@ fn is_in_local_gitignore(project_path: &Path) -> bool {
     }
 }
 
-/// Appends the active data-dir name (`.tracedecay`, or legacy `.tokensave`)
-/// to the project's `.gitignore`, creating the file if needed. Ensures the
-/// entry starts on its own line (adds a trailing newline to existing content
-/// if missing).
+/// Appends the project marker dir name (`.tracedecay`) to the project's
+/// `.gitignore`, creating the file if needed. Ensures the entry starts on its
+/// own line (adds a trailing newline to existing content if missing).
 pub fn add_to_gitignore(project_path: &Path) {
     let dir_name = active_data_dir_name(project_path);
     let gitignore = project_path.join(".gitignore");
@@ -355,9 +301,9 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
     }
 }
 
-/// Walks from `start` upward looking for an initialised project database
-/// (`.tracedecay/tracedecay.db`, or legacy `.tokensave/tokensave.db`) or a
-/// profile-storage enrollment marker (`.tracedecay/enrollment.json`).
+/// Walks from `start` upward looking for an initialised repo marker
+/// (`.tracedecay/tracedecay.db`) or a profile-storage enrollment marker
+/// (`.tracedecay/enrollment.json`).
 ///
 /// Returns the first ancestor directory (inclusive) that contains an
 /// initialised `TraceDecay` project, or `None` if the filesystem root is
@@ -386,7 +332,13 @@ pub fn resolve_path(path: Option<String>) -> PathBuf {
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
-        if has_project_database(&dir) || crate::storage::has_enrollment_marker(&dir) {
+        if has_project_database(&dir)
+            || crate::storage::has_enrollment_marker(&dir)
+            || crate::storage::resolve_layout_for_current_profile(&dir).is_ok_and(|layout| {
+                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
+                    && layout.graph_db_path.exists()
+            })
+        {
             return Some(dir);
         }
         if !dir.pop() {
@@ -504,23 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn test_data_dir_falls_back_to_existing_legacy_dir() {
+    fn test_data_dir_uses_tracedecay_when_present() {
         let root = TempDir::new().unwrap();
-        fs::create_dir(root.path().join(".tokensave")).unwrap();
-        assert_eq!(
-            get_tracedecay_dir(root.path()),
-            root.path().join(".tokensave")
-        );
-        assert_eq!(
-            get_project_db_path(root.path()),
-            root.path().join(".tokensave/tokensave.db")
-        );
-    }
-
-    #[test]
-    fn test_data_dir_prefers_tracedecay_when_both_exist() {
-        let root = TempDir::new().unwrap();
-        fs::create_dir(root.path().join(".tokensave")).unwrap();
         fs::create_dir(root.path().join(".tracedecay")).unwrap();
         assert_eq!(
             get_tracedecay_dir(root.path()),
@@ -533,10 +470,6 @@ mod tests {
         assert_eq!(
             db_filename(std::path::Path::new("/p/.tracedecay")),
             "tracedecay.db"
-        );
-        assert_eq!(
-            db_filename(std::path::Path::new("/p/.tokensave")),
-            "tokensave.db"
         );
     }
 

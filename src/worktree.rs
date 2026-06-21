@@ -1,9 +1,7 @@
 //! Borrowed-index detection for git worktrees.
 //!
-//! A tracedecay index lives in a `.tracedecay/` (or legacy `.tokensave/`)
-//! directory and is resolved by
-//! walking up parent directories to the nearest one (see
-//! [`config::discover_project_root`](crate::config::discover_project_root)).
+//! A tracedecay index resolves through the active project root or user profile
+//! store (see [`config::discover_project_root`](crate::config::discover_project_root)).
 //! That walk is unaware of git worktrees: when a worktree is created *inside*
 //! the main checkout (e.g. agent tooling that puts worktrees under
 //! `.claude/worktrees/<name>/` or `.worktrees/<name>/`), a command run from

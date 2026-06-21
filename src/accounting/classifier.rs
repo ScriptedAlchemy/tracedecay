@@ -30,40 +30,30 @@ impl fmt::Display for TaskCategory {
 }
 
 impl TaskCategory {
-    pub fn as_str(&self) -> &'static str {
+    fn strings(self) -> (&'static str, &'static str) {
         match self {
-            Self::Coding => "coding",
-            Self::Debugging => "debugging",
-            Self::FeatureDev => "feature_dev",
-            Self::Refactoring => "refactoring",
-            Self::Testing => "testing",
-            Self::Exploration => "exploration",
-            Self::Planning => "planning",
-            Self::Delegation => "delegation",
-            Self::GitOps => "git_ops",
-            Self::BuildDeploy => "build_deploy",
-            Self::Brainstorming => "brainstorming",
-            Self::Conversation => "conversation",
-            Self::General => "general",
+            Self::Coding => ("coding", "Coding"),
+            Self::Debugging => ("debugging", "Debugging"),
+            Self::FeatureDev => ("feature_dev", "Feature Dev"),
+            Self::Refactoring => ("refactoring", "Refactoring"),
+            Self::Testing => ("testing", "Testing"),
+            Self::Exploration => ("exploration", "Exploration"),
+            Self::Planning => ("planning", "Planning"),
+            Self::Delegation => ("delegation", "Delegation"),
+            Self::GitOps => ("git_ops", "Git Ops"),
+            Self::BuildDeploy => ("build_deploy", "Build/Deploy"),
+            Self::Brainstorming => ("brainstorming", "Brainstorming"),
+            Self::Conversation => ("conversation", "Conversation"),
+            Self::General => ("general", "General"),
         }
     }
 
+    pub fn as_str(&self) -> &'static str {
+        (*self).strings().0
+    }
+
     pub fn label(&self) -> &'static str {
-        match self {
-            Self::Coding => "Coding",
-            Self::Debugging => "Debugging",
-            Self::FeatureDev => "Feature Dev",
-            Self::Refactoring => "Refactoring",
-            Self::Testing => "Testing",
-            Self::Exploration => "Exploration",
-            Self::Planning => "Planning",
-            Self::Delegation => "Delegation",
-            Self::GitOps => "Git Ops",
-            Self::BuildDeploy => "Build/Deploy",
-            Self::Brainstorming => "Brainstorming",
-            Self::Conversation => "Conversation",
-            Self::General => "General",
-        }
+        (*self).strings().1
     }
 }
 

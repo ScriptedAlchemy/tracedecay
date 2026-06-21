@@ -1292,9 +1292,7 @@ pub async fn handle_gain(
     let gdb = match tracedecay::global_db::GlobalDb::open().await {
         Some(db) => db,
         None => {
-            eprintln!(
-                "Could not open the global database (~/.tracedecay/global.db, or legacy ~/.tokensave/global.db)."
-            );
+            eprintln!("Could not open the global database (~/.tracedecay/global.db).");
             return Ok(());
         }
     };

@@ -1,8 +1,8 @@
 //! Global memory-mapped ring buffer for live token-savings monitoring.
 //!
 //! The mmap lives at `monitor.mmap` inside the user-level data dir
-//! (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present) so a single
-//! TUI can show activity from every project on the machine. Multiple MCP
+//! (`~/.tracedecay/` by default) so a single TUI can show activity from every
+//! project on the machine. Multiple MCP
 //! server instances (one per project) write concurrently using file locking.
 //!
 //! Entry format is generic: each entry carries a **prefix** (tool suite
@@ -37,8 +37,7 @@ const EOFF_TIMESTAMP: usize = 112;
 const MMAP_FILENAME: &str = "monitor.mmap";
 const LOCK_FILENAME: &str = "monitor.lock";
 
-/// Resolve the user-level data directory (`~/.tracedecay/`, falling back to
-/// a legacy `~/.tokensave/` when present).
+/// Resolve the user-level data directory (`~/.tracedecay/` by default).
 fn global_tracedecay_dir() -> Option<PathBuf> {
     crate::config::user_data_dir()
 }

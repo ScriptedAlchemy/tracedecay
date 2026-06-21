@@ -12,9 +12,12 @@ use crate::sessions::source::{
     TranscriptSource,
 };
 use crate::sessions::SessionMessageRecord;
-use crate::storage::{project_local_layout, resolve_layout_for_current_profile, StorageMode};
+use crate::storage::{
+    default_profile_project_id, default_profile_root, profile_sharded_data_root,
+    resolve_layout_for_current_profile, SESSIONS_DB_FILENAME,
+};
 
-const PROJECT_SESSION_DB_FILENAME: &str = "sessions.db";
+const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -24,25 +27,29 @@ pub struct CursorTranscriptIngestStats {
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
     resolve_layout_for_current_profile(project_root).map_or_else(
-        |_| project_local_layout(project_root).sessions_db_path,
+        |_| {
+            let profile_root = default_profile_root()
+                .unwrap_or_else(|_| PathBuf::from(crate::config::TRACEDECAY_DIR));
+            profile_sharded_data_root(&profile_root, &default_profile_project_id(project_root))
+                .join(PROJECT_SESSION_DB_FILENAME)
+        },
         |layout| layout.sessions_db_path,
     )
 }
 
 pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
-    if is_hermes_profile_home(project_root) {
-        return GlobalDb::open_at(&hermes_profile_session_db_path(project_root)).await;
-    }
-    let layout = resolve_layout_for_current_profile(project_root).ok()?;
-    if layout.storage_mode == StorageMode::ProfileSharded || layout.data_root.is_dir() {
-        return GlobalDb::open_at(&layout.sessions_db_path).await;
-    }
-    let db_path = registry_profile_session_db_path(project_root).await?;
+    let db_path = resolved_project_session_db_path(project_root).await?;
     GlobalDb::open_at(&db_path).await
 }
 
-fn is_hermes_profile_home(project_root: &Path) -> bool {
-    project_root.join("state.db").is_file()
+pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
+    if let Ok(layout) = resolve_layout_for_current_profile(project_root) {
+        return Some(layout.sessions_db_path);
+    }
+    if let Some(db_path) = registry_profile_session_db_path(project_root).await {
+        return Some(db_path);
+    }
+    None
 }
 
 async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf> {
@@ -60,20 +67,9 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
-    // Prefer .tracedecay; fall back to an existing legacy .tokensave; default
-    // to .tracedecay for fresh profiles.
-    let primary = hermes_home.join(".tracedecay");
-    let base = if primary.is_dir() {
-        primary
-    } else {
-        let legacy = hermes_home.join(".tokensave");
-        if legacy.is_dir() {
-            legacy
-        } else {
-            primary
-        }
-    };
-    base.join(PROJECT_SESSION_DB_FILENAME)
+    hermes_home
+        .join(crate::config::TRACEDECAY_DIR)
+        .join(PROJECT_SESSION_DB_FILENAME)
 }
 
 pub fn resolve_hermes_profile_session_db_path(
@@ -111,31 +107,12 @@ pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesP
     }
 }
 
-/// Resolves the brand data directory within a Hermes profile home.
-///
-/// Prefers `.tracedecay` when it already exists; falls back to the legacy
-/// `.tokensave` directory for existing installs (backward-compat dual-accept
-/// site — see rebrand notes). New directories are always created as
-/// `.tracedecay`.
-///
-/// LEGACY-COMPAT: `hermes_home/.tokensave` accepted alongside `.tracedecay`.
+/// Resolves the `TraceDecay` data directory within a Hermes profile home.
 fn resolve_hermes_profile_tracedecay_dir(
     hermes_home: &Path,
     create_missing: bool,
 ) -> std::result::Result<PathBuf, String> {
-    let tracedecay_dir = hermes_home.join(".tracedecay");
-    let legacy_dir = hermes_home.join(".tokensave");
-
-    // Pick which directory to use: prefer .tracedecay if it already exists;
-    // accept legacy .tokensave for existing installs; default to .tracedecay
-    // for new ones so create_missing writes the new name.
-    let brand_dir = match (
-        std::fs::symlink_metadata(&tracedecay_dir),
-        std::fs::symlink_metadata(&legacy_dir),
-    ) {
-        (Err(e1), Ok(_)) if e1.kind() == std::io::ErrorKind::NotFound => legacy_dir.clone(),
-        _ => tracedecay_dir.clone(),
-    };
+    let brand_dir = hermes_home.join(crate::config::TRACEDECAY_DIR);
 
     match std::fs::symlink_metadata(&brand_dir) {
         Ok(metadata) => {
@@ -244,30 +221,30 @@ fn parse_cursor_jsonl(
         || parent_session_id.to_string(),
         |(session_id, _agent_id)| session_id.clone(),
     );
+    let subagent_model = subagent.as_ref().and_then(|(_, agent_id)| {
+        parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
+    });
     let mut carry = TimestampCarry::new(i64::try_from(new.new_cursor.mtime).ok());
     let mut messages = Vec::new();
     for line in &new.lines {
         let derived_timestamp = carry.observe(&line.value);
+        let context = CursorMessageContext {
+            transcript_path: path,
+            source_offset: line.offset,
+            derived_timestamp,
+            model_fallback: subagent_model.as_deref(),
+        };
         // The byte offset doubles as the message ordinal and source_offset,
         // matching the original Cursor ingestion.
-        if let Some(message) = event_message(
-            &line.value,
-            event,
-            &session_id,
-            path,
-            line.offset,
-            line.offset,
-            derived_timestamp,
-        ) {
+        if let Some(message) = event_message(&line.value, event, &session_id, line.offset, context)
+        {
             messages.push(message);
         }
         messages.extend(event_dispatch_messages(
             &line.value,
             event,
             &session_id,
-            path,
-            line.offset,
-            derived_timestamp,
+            context,
         ));
     }
 
@@ -314,7 +291,7 @@ fn parse_cursor_jsonl(
 
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
-/// hooks should pass the project-local DB from [`open_project_session_db`].
+/// hooks should pass the resolved project DB from [`open_project_session_db`].
 ///
 /// Ingestion is **incremental**: it resumes from the byte offset recorded in the
 /// DB's `parse_offsets` table (via the shared [`crate::sessions::source`]
@@ -410,11 +387,6 @@ impl TranscriptSource for CursorSweepSource {
     }
 
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        // Only indexed projects keep a project-local session store; roots
-        // without a tracedecay data dir are skipped outright.
-        if !crate::config::get_tracedecay_dir(project_root).is_dir() {
-            return Vec::new();
-        }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
         };
@@ -489,8 +461,7 @@ impl TranscriptSource for CursorSweepSource {
 
 /// Compute the `~/.cursor/projects` directory slug Cursor derives from a
 /// workspace path: every normal path component joined with `-`, case
-/// preserved (verified against real `~/.cursor/projects` entries, e.g.
-/// `/home/zack/projects/tokensave` → `home-zack-projects-tokensave`).
+/// preserved (verified against real `~/.cursor/projects` entries).
 /// Returns `None` for non-UTF-8, relative, or traversal-containing paths.
 pub fn cursor_project_slug(project_root: &Path) -> Option<String> {
     let mut parts = Vec::new();
@@ -624,6 +595,70 @@ fn cursor_subagent_identity(path: &Path, parent_session_id: &str) -> Option<(Str
     Some((session_id.clone(), session_id))
 }
 
+fn parent_dispatch_model_for_subagent(
+    path: &Path,
+    parent_session_id: &str,
+    agent_id: &str,
+) -> Option<String> {
+    let parent_dir = path.parent()?.parent()?;
+    let candidates = [
+        parent_dir.join(format!("{parent_session_id}.jsonl")),
+        parent_dir.with_extension("jsonl"),
+    ];
+    for candidate in candidates {
+        if let Some(model) = dispatch_model_for_agent(&candidate, agent_id) {
+            return Some(model);
+        }
+    }
+    None
+}
+
+fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let message = record.get("message").unwrap_or(&record);
+        let content = message.get("content").unwrap_or(message);
+        let Some(items) = content.as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if is_subagent_dispatch_tool(name) && dispatch_targets_agent(item, agent_id) {
+                if let Some(model) = cursor_dispatch_model(item) {
+                    return Some(model);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
+    let input = item.get("input").unwrap_or(item);
+    [
+        "agent_id",
+        "agentId",
+        "subagent_id",
+        "subagentId",
+        "session_id",
+        "sessionId",
+        "id",
+    ]
+    .into_iter()
+    .any(|key| {
+        input
+            .get(key)
+            .or_else(|| item.get(key))
+            .and_then(Value::as_str)
+            == Some(agent_id)
+    })
+}
+
 /// Per-line timestamp derivation for Cursor transcripts, which carry no
 /// structured per-message timestamps. The injected `<timestamp>…</timestamp>`
 /// tag in user prompts is parsed and carried forward across subsequent lines
@@ -674,14 +709,20 @@ fn timestamp_tag_from_text(text: &str) -> Option<i64> {
     crate::timeutil::parse_cursor_human_timestamp(text[start..end].trim())
 }
 
+#[derive(Clone, Copy)]
+struct CursorMessageContext<'a> {
+    transcript_path: &'a Path,
+    source_offset: i64,
+    derived_timestamp: Option<i64>,
+    model_fallback: Option<&'a str>,
+}
+
 fn event_message(
     record: &Value,
     event: &Value,
     session_id: &str,
-    transcript_path: &Path,
     ordinal: i64,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
+    context: CursorMessageContext<'_>,
 ) -> Option<SessionMessageRecord> {
     let role = record
         .get("role")
@@ -711,12 +752,9 @@ fn event_message(
             || format!("{session_id}:{ordinal}"),
             std::string::ToString::to_string,
         );
-    let model = record
-        .get("model")
-        .or_else(|| message.get("model"))
-        .or_else(|| event.get("model"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let model = cursor_record_message_model(record, message)
+        .or_else(|| context.model_fallback.map(str::to_string))
+        .or_else(|| cursor_model_string(event));
 
     Some(SessionMessageRecord {
         provider: "cursor".to_string(),
@@ -725,14 +763,14 @@ fn event_message(
         role: role.to_string(),
         timestamp: record_timestamp(record)
             .or_else(|| record_timestamp(event))
-            .or(derived_timestamp),
+            .or(context.derived_timestamp),
         ordinal,
         text,
         kind: content_kind(content).map(str::to_string),
         model,
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(transcript_path.to_string_lossy().to_string()),
-        source_offset: Some(source_offset),
+        source_path: Some(context.transcript_path.to_string_lossy().to_string()),
+        source_offset: Some(context.source_offset),
         metadata_json: serde_json::to_string(&message_metadata(record, message)).ok(),
     })
 }
@@ -741,9 +779,7 @@ fn event_dispatch_messages(
     record: &Value,
     event: &Value,
     session_id: &str,
-    transcript_path: &Path,
-    source_offset: i64,
-    derived_timestamp: Option<i64>,
+    context: CursorMessageContext<'_>,
 ) -> Vec<SessionMessageRecord> {
     let Some(role) = record
         .get("role")
@@ -774,7 +810,12 @@ fn event_dispatch_messages(
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty());
         let message_id = tool_use_id.map_or_else(
-            || format!("{session_id}:tool_dispatch:{source_offset}:{index}"),
+            || {
+                format!(
+                    "{}:tool_dispatch:{}:{index}",
+                    session_id, context.source_offset
+                )
+            },
             |id| format!("{session_id}:tool_dispatch:{id}"),
         );
         out.push(SessionMessageRecord {
@@ -784,19 +825,17 @@ fn event_dispatch_messages(
             role: role.to_string(),
             timestamp: record_timestamp(record)
                 .or_else(|| record_timestamp(event))
-                .or(derived_timestamp),
-            ordinal: source_offset.saturating_add(index as i64),
+                .or(context.derived_timestamp),
+            ordinal: context.source_offset.saturating_add(index as i64),
             text,
             kind: Some("tool_dispatch".to_string()),
-            model: record
-                .get("model")
-                .or_else(|| message.get("model"))
-                .or_else(|| event.get("model"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            model: cursor_dispatch_model(item)
+                .or_else(|| cursor_record_message_model(record, message))
+                .or_else(|| context.model_fallback.map(str::to_string))
+                .or_else(|| cursor_model_string(event)),
             tool_names: Some(name.to_string()),
-            source_path: Some(transcript_path.to_string_lossy().to_string()),
-            source_offset: Some(source_offset),
+            source_path: Some(context.transcript_path.to_string_lossy().to_string()),
+            source_offset: Some(context.source_offset),
             metadata_json: serde_json::to_string(&serde_json::json!({
                 "source": "cursor_transcript",
                 "raw_type": record.get("type").cloned(),
@@ -806,6 +845,42 @@ fn event_dispatch_messages(
         });
     }
     out
+}
+
+fn cursor_model_string(value: &Value) -> Option<String> {
+    [
+        "model",
+        "model_id",
+        "modelId",
+        "model_name",
+        "modelName",
+        "model_slug",
+        "modelSlug",
+        "model_display_name",
+        "modelDisplayName",
+        "display_model",
+        "displayModel",
+        "display_model_name",
+        "displayModelName",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
+    cursor_model_string(record).or_else(|| cursor_model_string(message))
+}
+
+fn cursor_dispatch_model(item: &Value) -> Option<String> {
+    item.get("input")
+        .and_then(cursor_model_string)
+        .or_else(|| cursor_model_string(item))
 }
 
 fn is_subagent_dispatch_tool(name: &str) -> bool {

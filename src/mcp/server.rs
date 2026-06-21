@@ -52,10 +52,11 @@ const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 /// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
 
-The on-disk database lives at `.tracedecay/tracedecay.db` (legacy projects
-fall back to `.tokensave/tokensave.db`; per-branch variants under multi-branch
-mode). All tables are plain SQLite; safe to query with any
-client. WAL mode is used, so readers do not block writers.
+The active project database lives in the user-level TraceDecay profile store
+(`~/.tracedecay/projects/<project_id>/tracedecay.db` by default), scoped to the
+current project. Per-branch variants live beside it under the same store. All
+tables are plain SQLite; safe to query with any client. WAL mode is used, so
+readers do not block writers.
 
 ## Tables
 
@@ -1440,10 +1441,10 @@ impl McpServer {
 
     async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
-        let tracedecay_dir = crate::config::get_tracedecay_dir(cg.project_root());
+        let tracedecay_dir = &cg.store_layout().data_root;
         let current = cg.active_branch();
 
-        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tracedecay_dir) {
+        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(tracedecay_dir) {
             Some(meta) => meta
                 .branches
                 .iter()

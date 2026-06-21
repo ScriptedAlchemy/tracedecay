@@ -18,7 +18,6 @@ use super::{
 };
 
 const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
-const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 /// Gemini CLI agent.
 pub struct GeminiIntegration;
@@ -97,7 +96,6 @@ impl AgentIntegration for GeminiIntegration {
         let json = super::load_json_file(&settings);
         let servers = json.get("mcpServers");
         servers.and_then(|v| v.get("tracedecay")).is_some()
-            || servers.and_then(|v| v.get("tokensave")).is_some()
     }
 }
 
@@ -159,16 +157,16 @@ fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
         They provide instant semantic results from a pre-built knowledge graph and are \
         faster than file reads.\n\n\
         For project/storage identity questions, use `tracedecay_active_project` \
-        or `tracedecay_storage_status` instead of inferring from repo-local marker \
+        or `tracedecay_storage_status` instead of inferring from marker \
         files or direct DB paths.\n\n\
         If a code analysis question cannot be fully answered by tracedecay MCP tools, \
         prefer built-in MCP tools first. If the user explicitly needs raw store \
         inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
-        rather than a hardcoded repo-local path. Use SQL to answer complex structural \
+        rather than a hardcoded repo path. Use SQL to answer complex structural \
         queries that go beyond what the built-in tools expose.\n\n\
         For durable project/user facts, prefer `tracedecay_fact_store`, \
         `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
-        Use `tracedecay_message_search` for project-local Cursor transcript recall when \
+        Use `tracedecay_message_search` for active-project transcript recall when \
         prior conversation context matters. Do not store secrets, credentials, or \
         unnecessary PII in persistent facts.\n\n\
         If you discover a gap where an extractor, schema, or tracedecay tool could be \
@@ -206,11 +204,10 @@ fn uninstall_mcp_server(settings_path: &Path) {
     else {
         return;
     };
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -227,7 +224,7 @@ fn uninstall_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             settings_path.display()
         );
     }
@@ -241,15 +238,11 @@ fn uninstall_prompt_rules(gemini_md: &Path) {
     let Ok(contents) = std::fs::read_to_string(gemini_md) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
-        eprintln!("  GEMINI.md does not contain tracedecay/tokensave rules, skipping");
+    if !contents.contains("tracedecay") {
+        eprintln!("  GEMINI.md does not contain tracedecay rules, skipping");
         return;
     }
-    let marker = if contents.contains(PROMPT_RULE_MARKER) {
-        PROMPT_RULE_MARKER
-    } else {
-        LEGACY_PROMPT_RULE_MARKER
-    };
+    let marker = PROMPT_RULE_MARKER;
     let Some(start) = contents.find(marker) else {
         return;
     };

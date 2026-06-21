@@ -154,7 +154,7 @@ impl Database {
         }
         if let Some(prefix) = path_prefix {
             conditions.push(format!("n.file_path LIKE ?{param_idx}"));
-            param_values.push(libsql::Value::Text(format!("{prefix}%")));
+            param_values.push(path_prefix_like_value(prefix));
             param_idx += 1;
         }
 
@@ -221,7 +221,7 @@ impl Database {
         }
         if let Some(prefix) = path_prefix {
             conditions.push(format!("file_path LIKE ?{param_idx}"));
-            param_values.push(libsql::Value::Text(format!("{prefix}%")));
+            param_values.push(path_prefix_like_value(prefix));
             param_idx += 1;
         }
 
@@ -451,7 +451,7 @@ impl Database {
                  WHERE file_path LIKE ?1
                  GROUP BY file_path, kind
                  ORDER BY file_path, cnt DESC",
-                vec![libsql::Value::Text(format!("{prefix}%"))],
+                vec![path_prefix_like_value(prefix)],
             ),
             None => (
                 "SELECT file_path, kind, COUNT(*) AS cnt
@@ -510,7 +510,7 @@ impl Database {
                  JOIN nodes n ON e.source = n.id
                  WHERE e.kind = 'calls' AND n.file_path LIKE ?1"
                     .to_string(),
-                vec![libsql::Value::Text(format!("{prefix}%"))],
+                vec![path_prefix_like_value(prefix)],
             ),
             None => (
                 "SELECT source, target FROM edges WHERE kind = 'calls'".to_string(),
@@ -563,7 +563,7 @@ impl Database {
                  JOIN nodes n ON e.source = n.id
                  WHERE e.kind = 'calls' AND n.file_path LIKE ?1"
                     .to_string(),
-                vec![libsql::Value::Text(format!("{prefix}%"))],
+                vec![path_prefix_like_value(prefix)],
             ),
             None => (
                 "SELECT source, target, line FROM edges WHERE kind = 'calls'".to_string(),
@@ -631,7 +631,7 @@ impl Database {
         }
         if let Some(prefix) = path_prefix {
             conditions.push(format!("n.file_path LIKE ?{param_idx}"));
-            param_values.push(libsql::Value::Text(format!("{prefix}%")));
+            param_values.push(path_prefix_like_value(prefix));
             param_idx += 1;
         }
 
@@ -727,7 +727,7 @@ impl Database {
                      LIMIT ?2"
                 ),
                 vec![
-                    libsql::Value::Text(format!("{prefix}%")),
+                    path_prefix_like_value(prefix),
                     libsql::Value::Integer(limit as i64),
                 ],
             ),

@@ -1,11 +1,17 @@
 use std::io::Write;
 
+mod common;
+
+use common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
 use tracedecay::sessions::cursor::{
     cursor_project_slug, ingest_cursor_transcript_event, ingest_cursor_transcript_event_capped,
     open_project_session_db, project_session_db_path, CursorSweepSource,
 };
+use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
+use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::SessionSearchScope;
 
@@ -51,8 +57,121 @@ fn write_cursor_parent_with_subagent(tmp: &TempDir) -> (std::path::PathBuf, std:
 }
 
 #[tokio::test]
+// Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
+// hook resolves its storage paths.
+#[allow(clippy::await_holding_lock)]
+async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
+    let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let _env_guards = [
+        EnvVarGuard::set(GLOBAL_DB_ENV, tmp.path().join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: keep Cursor compaction summaries in LCM."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Implementation plan: use cursor-agent as an auxiliary summarizer when Cursor exposes no summary."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Fresh tail should remain replayable."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Acknowledged fresh tail."}]}}
+"#,
+    )
+    .unwrap();
+
+    let fake_bin = tmp.path().join(if cfg!(windows) {
+        "cursor-agent-fake.cmd"
+    } else {
+        "cursor-agent-fake"
+    });
+    let fake_body = if cfg!(windows) {
+        "@echo off\r\necho Cursor auxiliary summary: keep compaction summaries in LCM.\r\n"
+    } else {
+        "#!/bin/sh\nprintf '%s\\n' 'Cursor auxiliary summary: keep compaction summaries in LCM.'\n"
+    };
+    std::fs::write(&fake_bin, fake_body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let event = serde_json::json!({
+        "hook_event_name": "preCompact",
+        "session_id": "cursor-session",
+        "conversation_id": "conversation-1",
+        "transcript_path": transcript,
+        "workspace_roots": [project],
+        "message_count": 4,
+        "messages_to_compact": 2,
+        "context_tokens": 124000,
+        "context_window_size": 128000
+    });
+    let config = CursorAgentSummaryConfig {
+        cursor_agent_bin: fake_bin.to_string_lossy().to_string(),
+        model: Some("fake-cursor-model".to_string()),
+        timeout: std::time::Duration::from_secs(5),
+        workspace: Some(tmp.path().join("summary-workspace")),
+    };
+
+    let outcome = cursor_pre_compact_for_event_with_config(&event.to_string(), &config).await;
+    assert_eq!(outcome.status, "ok", "{}", outcome.reason);
+    assert_eq!(outcome.summary_nodes_created, 1);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let node_id = outcome
+        .summary_node_ids
+        .first()
+        .expect("summary node id should be returned");
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "cursor-session", node_id)
+        .await
+        .expect("summary node should expand");
+    assert!(expanded
+        .summary
+        .summary_text
+        .contains("Cursor auxiliary summary: keep compaction summaries in LCM."));
+    let described = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "cursor".to_string(),
+            session_id: "cursor-session".to_string(),
+            target: LcmDescribeTarget::SummaryNode {
+                node_id: node_id.clone(),
+            },
+        })
+        .await
+        .expect("summary node should describe");
+    let summary = described
+        .summary_node
+        .expect("summary node details should exist");
+    assert_eq!(summary.source_count, 2);
+    assert!(summary
+        .metadata_json
+        .as_deref()
+        .unwrap_or_default()
+        .contains("cursor_agent"));
+}
+
+#[tokio::test]
+// Intentional: this test asserts the resolved profile session DB path, so it
+// pins process-wide profile env while opening and checking that path.
+#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile = tmp.path().join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir(project.join(".tracedecay")).unwrap();
@@ -98,6 +217,86 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     assert!(results
         .iter()
         .any(|hit| hit.message.tool_names.as_deref() == Some("tracedecay_context")));
+}
+
+#[tokio::test]
+async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Launching model-specific reviewers."},{"type":"tool_use","id":"call-a","name":"Subagent","input":{"model":"gpt-5.5-high","prompt":"Review the storage routing."}},{"type":"tool_use","id":"call-b","name":"Subagent","input":{"model":"claude-opus-4-8-thinking-max","prompt":"Review the memory routing."}}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 3);
+
+    let results = db
+        .search_session_messages("cursor", None, "routing", 10)
+        .await;
+    let dispatch_models: std::collections::BTreeMap<_, _> = results
+        .iter()
+        .filter(|hit| hit.message.kind.as_deref() == Some("tool_dispatch"))
+        .map(|hit| {
+            (
+                hit.message.message_id.clone(),
+                hit.message.model.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(dispatch_models.len(), 2);
+    assert_eq!(
+        dispatch_models.get("cursor-session:tool_dispatch:call-a"),
+        Some(&"gpt-5.5-high".to_string())
+    );
+    assert_eq!(
+        dispatch_models.get("cursor-session:tool_dispatch:call-b"),
+        Some(&"claude-opus-4-8-thinking-max".to_string())
+    );
+}
+
+#[tokio::test]
+async fn cursor_transcript_ingest_reads_display_model_fields() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+
+    let transcript = tmp.path().join("cursor-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"role":"assistant","message":{"modelDisplayName":"gpt-5.5-cursor-display","content":[{"type":"text","text":"Display model field should price correctly."}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-session",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let results = db
+        .search_session_messages("cursor", None, "price correctly", 10)
+        .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].message.model.as_deref(),
+        Some("gpt-5.5-cursor-display")
+    );
 }
 
 #[tokio::test]
@@ -415,6 +614,48 @@ async fn cursor_subagent_transcript_ingests_as_child_session() {
         hit.session.session_id == "worker-1"
             && hit.session.parent_session_id.as_deref() == Some("parent-session")
     }));
+}
+
+#[tokio::test]
+async fn cursor_subagent_child_messages_inherit_parent_dispatch_model() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcripts_dir = tmp.path().join("agent-transcripts");
+    std::fs::create_dir_all(&transcripts_dir).unwrap();
+    let parent = transcripts_dir.join("parent-session.jsonl");
+    std::fs::write(
+        &parent,
+        r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-worker-1","name":"Subagent","input":{"agent_id":"worker-1","model":"claude-opus-4-8-thinking-max","prompt":"Review child pricing."}}]}}
+"#,
+    )
+    .unwrap();
+    let subagent_dir = transcripts_dir.join("parent-session").join("subagents");
+    std::fs::create_dir_all(&subagent_dir).unwrap();
+    std::fs::write(
+        subagent_dir.join("worker-1.jsonl"),
+        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"priced child transcript model evidence"}]}}
+"#,
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let event = cursor_event(&project, &parent);
+
+    let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+
+    let results = db
+        .search_session_messages("cursor", None, "priced child transcript", 10)
+        .await;
+    let child_hit = results
+        .iter()
+        .find(|hit| hit.session.session_id == "worker-1")
+        .expect("expected child transcript hit");
+    assert_eq!(
+        child_hit.message.model.as_deref(),
+        Some("claude-opus-4-8-thinking-max")
+    );
 }
 
 #[tokio::test]
@@ -862,26 +1103,32 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 }
 
 #[tokio::test]
-async fn cursor_sweep_skips_projects_without_tracedecay() {
+// Intentional: this test pins process-wide profile storage while the Cursor
+// sweep resolves its project session DB.
+#[allow(clippy::await_holding_lock)]
+async fn cursor_sweep_ingests_profile_stored_project_without_local_marker() {
     let tmp = TempDir::new().unwrap();
-    let scratch = init_project(&tmp);
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile = tmp.path().join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
     let home = tmp.path().join("home");
-    let unindexed = tmp.path().join("unindexed");
-    std::fs::create_dir_all(&unindexed).unwrap();
-    write_sweep_fixture(&home, &unindexed);
+    let project = tmp.path().join("unindexed");
+    std::fs::create_dir_all(&project).unwrap();
+    write_sweep_fixture(&home, &project);
 
-    let db = open_project_session_db(&scratch).await.unwrap();
+    let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let skipped = ingest_source(&db, &sweep, &unindexed, None).await;
-    assert_eq!(skipped.sessions_upserted, 0);
-    assert_eq!(skipped.messages_upserted, 0);
-
-    // Once the project is indexed, the same sweep picks its transcripts up.
-    std::fs::create_dir_all(unindexed.join(".tracedecay")).unwrap();
-    std::fs::write(unindexed.join(".tracedecay/tracedecay.db"), "").unwrap();
-    let indexed = ingest_source(&db, &sweep, &unindexed, None).await;
+    let indexed = ingest_source(&db, &sweep, &project, None).await;
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
+    assert!(!project.join(".tracedecay").exists());
 }
 
 #[tokio::test]

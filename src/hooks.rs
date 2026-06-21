@@ -236,6 +236,172 @@ pub async fn hook_cursor_stop() -> i32 {
     0
 }
 
+/// Cursor `preCompact` hook handler.
+///
+/// Cursor's compaction event exposes pressure metadata but not Cursor's own
+/// generated summary text. At the boundary, `TraceDecay` ingests the current
+/// transcript tail, asks LCM for the compactable raw-message backlog, generates
+/// a summary through `cursor-agent -p`, and stores that summary as a normal LCM
+/// summary node. The hook is fail-open and emits Cursor's empty object shape.
+pub async fn hook_cursor_pre_compact() -> i32 {
+    let event = read_hook_event!();
+    if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
+        let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
+        config.timeout = config.timeout.min(CURSOR_PRE_COMPACT_SUMMARY_BUDGET);
+        let outcome = cursor_pre_compact_for_event_with_config(&event, &config).await;
+        if outcome.status == "error" {
+            eprintln!(
+                "tracedecay Cursor preCompact summary failed: {}",
+                outcome.reason
+            );
+        }
+    }
+    println!("{}", serde_json::json!({}));
+    0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPreCompactOutcome {
+    pub status: String,
+    pub reason: String,
+    pub summary_nodes_created: usize,
+    pub summary_node_ids: Vec<String>,
+}
+
+impl CursorPreCompactOutcome {
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            status: "skipped".to_string(),
+            reason: reason.into(),
+            summary_nodes_created: 0,
+            summary_node_ids: Vec::new(),
+        }
+    }
+
+    fn error(reason: impl Into<String>) -> Self {
+        Self {
+            status: "error".to_string(),
+            reason: reason.into(),
+            summary_nodes_created: 0,
+            summary_node_ids: Vec::new(),
+        }
+    }
+}
+
+pub async fn cursor_pre_compact_for_event_with_config(
+    event_json: &str,
+    config: &crate::sessions::cursor_agent::CursorAgentSummaryConfig,
+) -> CursorPreCompactOutcome {
+    match tokio::time::timeout(
+        CURSOR_PRE_COMPACT_BUDGET,
+        cursor_pre_compact_for_event_inner(event_json, config),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => CursorPreCompactOutcome::error("timed out"),
+    }
+}
+
+async fn cursor_pre_compact_for_event_inner(
+    event_json: &str,
+    config: &crate::sessions::cursor_agent::CursorAgentSummaryConfig,
+) -> CursorPreCompactOutcome {
+    if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_ok() {
+        return CursorPreCompactOutcome::skipped("cursor summary child");
+    }
+    let parsed = match serde_json::from_str::<Value>(event_json) {
+        Ok(parsed) => parsed,
+        Err(err) => return CursorPreCompactOutcome::error(format!("invalid event JSON: {err}")),
+    };
+    let Some(project_root) = cursor_project_root_from_parsed_event(&parsed) else {
+        return CursorPreCompactOutcome::skipped("no project root");
+    };
+    if !cursor_event_transcript_path_exists(&parsed) {
+        return CursorPreCompactOutcome::skipped("no transcript path");
+    }
+
+    let caught_up =
+        ingest_cursor_transcript_for_event(event_json, None, CURSOR_PRE_COMPACT_INGEST_BUDGET)
+            .await;
+    if !caught_up {
+        return CursorPreCompactOutcome::skipped("transcript ingest did not complete");
+    }
+
+    let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+        return CursorPreCompactOutcome::skipped("session database unavailable");
+    };
+    let Some(session_id) = event_session_id(&parsed) else {
+        return CursorPreCompactOutcome::skipped("no session id");
+    };
+
+    let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
+    if messages_to_compact == Some(0) {
+        return CursorPreCompactOutcome::skipped("no messages to compact");
+    }
+    let fresh_tail_count = cursor_pre_compact_fresh_tail_count(&parsed, messages_to_compact);
+    let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
+    let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
+
+    let first = match db
+        .lcm_compress(cursor_pre_compact_lcm_request(
+            &session_id,
+            current_tokens,
+            context_length,
+            messages_to_compact,
+            fresh_tail_count,
+            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
+            None,
+        ))
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => return CursorPreCompactOutcome::error(format!("LCM prepare failed: {err}")),
+    };
+    let Some(summary_request) = first.summary_request else {
+        return CursorPreCompactOutcome::skipped(first.reason);
+    };
+
+    let summary = match crate::sessions::cursor_agent::summarize_with_cursor_agent(
+        &summary_request,
+        config,
+    ) {
+        Ok(summary) => summary,
+        Err(err) => {
+            return CursorPreCompactOutcome::error(format!("cursor-agent summary failed: {err}"))
+        }
+    };
+
+    let second = match db
+        .lcm_compress(cursor_pre_compact_lcm_request(
+            &session_id,
+            current_tokens,
+            context_length,
+            messages_to_compact,
+            fresh_tail_count,
+            crate::sessions::lcm::LcmSummarizerMode::Provided {
+                summary_text: summary,
+                route: Some("cursor_agent".to_string()),
+            },
+            first.frontier.current_frontier_store_id.or(Some(0)),
+        ))
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => return CursorPreCompactOutcome::error(format!("LCM persist failed: {err}")),
+    };
+    CursorPreCompactOutcome {
+        status: second.status,
+        reason: second.reason,
+        summary_nodes_created: second.summary_nodes_created,
+        summary_node_ids: second
+            .summary_nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect(),
+    }
+}
+
 /// Cursor `afterFileEdit` hook handler.
 ///
 /// Keeps the graph fresh after Cursor Agent writes files. This uses a
@@ -1280,6 +1446,21 @@ pub async fn hook_codex_post_tool_use() -> i32 {
     0
 }
 
+/// Codex `PostCompact` hook handler.
+///
+/// Codex stores compacted context bodies encrypted in the transcript. This hook
+/// uses the visible source messages already ingested into the LCM store, asks a
+/// child Codex app-server turn to summarize them, and replaces the temporary
+/// deterministic summary node. Fail-open: compaction must never block Codex.
+pub async fn hook_codex_post_compact() -> i32 {
+    let event = read_hook_event!();
+    if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
+        codex_post_compact(&event).await;
+    }
+    println!("{}", serde_json::json!({}));
+    0
+}
+
 /// Builds a Codex hook stdout payload that injects model-visible context via
 /// `hookSpecificOutput.additionalContext`. Used by `SessionStart`,
 /// `UserPromptSubmit`, and `SubagentStart`.
@@ -1443,6 +1624,60 @@ async fn codex_post_tool_use(event_json: &str) {
             CursorShellSyncPlan::Noop => {}
         }
     }
+}
+
+const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+
+async fn codex_post_compact(event_json: &str) {
+    let work = async {
+        let Some(project_root) = codex_project_root_from_event(event_json) else {
+            return;
+        };
+        if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
+            return;
+        }
+        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
+            return;
+        };
+        if let Some(source) = crate::sessions::codex::CodexSource::new() {
+            let _ = crate::sessions::source::ingest_source(&db, &source, &project_root, None).await;
+        }
+        let session_id = serde_json::from_str::<Value>(event_json)
+            .ok()
+            .and_then(|parsed| event_session_id(&parsed));
+        let Ok(mut pending) = db
+            .pending_codex_compaction_summary_requests(session_id.as_deref(), 1)
+            .await
+        else {
+            return;
+        };
+        let Some(pending) = pending.pop() else {
+            return;
+        };
+        let config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
+        let summary = match crate::sessions::codex_app_server::summarize_with_codex_app_server(
+            &pending.request,
+            &config,
+        ) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("tracedecay Codex PostCompact summary failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = db
+            .replace_codex_compaction_summary(
+                &pending.node_id,
+                &summary.text,
+                "codex_app_server",
+                summary.model.as_deref().or(config.model.as_deref()),
+            )
+            .await
+        {
+            eprintln!("tracedecay Codex PostCompact summary replacement failed: {err}");
+        }
+    };
+    let _ = tokio::time::timeout(CODEX_POST_COMPACT_BUDGET, work).await;
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {
@@ -1644,33 +1879,106 @@ const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
 const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
+/// Budget for the transcript catch-up portion of the `preCompact` hook.
+const CURSOR_PRE_COMPACT_INGEST_BUDGET: Duration = Duration::from_secs(20);
+/// Budget for the auxiliary `cursor-agent` summary call inside the hook. Kept
+/// below the registered Cursor hook timeout so the child can be killed/reaped
+/// by `TraceDecay` rather than by Cursor killing the hook process.
+const CURSOR_PRE_COMPACT_SUMMARY_BUDGET: Duration = Duration::from_secs(85);
+/// Overall budget for the `preCompact` hook (registered with a 120s timeout).
+const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+
+fn cursor_pre_compact_lcm_request(
+    session_id: &str,
+    current_tokens: Option<i64>,
+    context_length: Option<i64>,
+    max_source_messages: Option<usize>,
+    fresh_tail_count: Option<usize>,
+    summarizer: crate::sessions::lcm::LcmSummarizerMode,
+    expected_current_frontier_store_id: Option<i64>,
+) -> crate::sessions::lcm::LcmCompressionRequest {
+    crate::sessions::lcm::LcmCompressionRequest {
+        provider: "cursor".to_string(),
+        session_id: session_id.to_string(),
+        messages: Vec::new(),
+        current_tokens,
+        focus_topic: Some("Cursor context compaction".to_string()),
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id,
+        threshold_tokens: None,
+        max_assembly_tokens: None,
+        leaf_chunk_tokens: None,
+        max_source_messages,
+        summary_fan_in: None,
+        incremental_max_depth: None,
+        fresh_tail_count,
+        dynamic_leaf_chunk_enabled: None,
+        dynamic_leaf_chunk_max: None,
+        context_length,
+        reserve_tokens_floor: None,
+        summarizer,
+    }
+}
+
+fn cursor_pre_compact_fresh_tail_count(
+    parsed: &Value,
+    messages_to_compact: Option<usize>,
+) -> Option<usize> {
+    let message_count = event_usize(parsed, &["message_count", "messages_count"])?;
+    let messages_to_compact = messages_to_compact?;
+    Some(message_count.saturating_sub(messages_to_compact))
+}
+
+fn event_i64(parsed: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        let value = parsed.get(*key)?;
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| value.as_str()?.parse::<i64>().ok())
+    })
+}
+
+fn event_usize(parsed: &Value, keys: &[&str]) -> Option<usize> {
+    event_i64(parsed, keys).and_then(|value| usize::try_from(value).ok())
+}
+
+fn cursor_event_transcript_path_exists(parsed: &Value) -> bool {
+    parsed
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .is_some_and(|path| Path::new(path).exists())
+}
 
 /// Incrementally ingests the Cursor transcript referenced by `event_json` into
-/// the project-local session DB, bounded by `max_new_bytes` (the hot-path cap)
+/// the resolved project session DB, bounded by `max_new_bytes` (the hot-path cap)
 /// and an overall `budget`. Always fails open: a timeout, missing transcript, or
 /// any error is swallowed so the calling hook never blocks the agent.
 async fn ingest_cursor_transcript_for_event(
     event_json: &str,
     max_new_bytes: Option<u64>,
     budget: Duration,
-) {
+) -> bool {
     let work = async {
         let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-            return;
+            return false;
         };
         let Some(project_root) = cursor_project_root_from_parsed_event(&parsed) else {
-            return;
+            return false;
         };
         if let Some(cwd_root) = cursor_event_cwd(&parsed)
             .as_deref()
             .and_then(crate::config::discover_project_root)
         {
             if !paths_same(&cwd_root, &project_root) {
-                return;
+                return false;
             }
         }
         let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-            return;
+            return false;
         };
         let _ = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
             event_json,
@@ -1678,10 +1986,11 @@ async fn ingest_cursor_transcript_for_event(
             max_new_bytes,
         )
         .await;
+        true
     };
     // Short-lived CLI hook processes exit immediately, so the ingest must run
     // inline (not on a detached task); the timeout keeps it inside budget.
-    let _ = tokio::time::timeout(budget, work).await;
+    tokio::time::timeout(budget, work).await.unwrap_or(false)
 }
 
 async fn sync_for_kiro_event(event_json: &str) -> crate::errors::Result<()> {
@@ -1864,16 +2173,61 @@ pub async fn hook_stop() {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::config::USER_DATA_DIR_ENV;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
+        let _lock = env_lock().lock().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let data_dir = project.path().join(".tracedecay");
-        std::fs::create_dir(&data_dir).unwrap();
-        std::fs::write(data_dir.join("tracedecay.db"), "").unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_hook_codex_prompt".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
         let event = serde_json::json!({
             "session_id": "codex-session-1",
-            "cwd": project.path(),
+            "cwd": project_root,
             "prompt": "Please explain the impact of changing parse_user"
         })
         .to_string();

@@ -530,7 +530,7 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
 
 fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
     let mut hasher = Sha256::new();
-    hasher.update(b"tokensave-jsonl-file-id-v1");
+    hasher.update(b"tracedecay-jsonl-file-id-v1");
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -555,7 +555,7 @@ fn jsonl_head_fingerprint(path: &Path) -> Option<u64> {
         buf.truncate(JSONL_HEAD_FINGERPRINT_BYTES);
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"tokensave-jsonl-head-v1");
+    hasher.update(b"tracedecay-jsonl-head-v1");
     hasher.update(&buf);
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];

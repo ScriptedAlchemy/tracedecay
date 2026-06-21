@@ -165,6 +165,9 @@ pub enum Commands {
     /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
     HookCursorBeforeSubmitPrompt,
+    /// Cursor preCompact hook handler (called by Cursor, not by users directly)
+    #[command(name = "hook-cursor-pre-compact", hide = true)]
+    HookCursorPreCompact,
     /// Cursor afterFileEdit hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-after-file-edit", hide = true)]
     HookCursorAfterFileEdit,
@@ -195,6 +198,9 @@ pub enum Commands {
     /// Codex PostToolUse hook handler for incremental sync (called by Codex)
     #[command(name = "hook-codex-post-tool-use", hide = true)]
     HookCodexPostToolUse,
+    /// Codex PostCompact hook handler for app-server LCM summaries (called by Codex)
+    #[command(name = "hook-codex-post-compact", hide = true)]
+    HookCodexPostCompact,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     Dashboard {
         /// Project path (default: current directory, with discovery)

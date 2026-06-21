@@ -6,6 +6,7 @@
 
 use std::fs;
 use tempfile::TempDir;
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 /// Finds the node ID for a symbol by name, panicking if not found.
@@ -374,8 +375,10 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
 async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    let lock_path = project.join(".tracedecay/sync.lock");
+    TraceDecay::init(project).await.unwrap();
+    let lock_path = resolve_layout_for_current_profile(project)
+        .unwrap()
+        .sync_lock_path;
     // A PID well out of range can never be alive -> the lock is stale.
     fs::write(&lock_path, "4294967294").unwrap();
 
@@ -397,8 +400,10 @@ async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
 async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    let lock_path = project.join(".tracedecay/sync.lock");
+    TraceDecay::init(project).await.unwrap();
+    let lock_path = resolve_layout_for_current_profile(project)
+        .unwrap()
+        .sync_lock_path;
     // Our own PID is alive -> the lock must be treated as in-progress.
     fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
 

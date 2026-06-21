@@ -100,7 +100,7 @@ pub(super) async fn handle_dashboard(cg: &TraceDecay, args: Value) -> Result<Too
                 });
             }
 
-            // Shared construction with the CLI path: project-local LCM store
+            // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
             let state = build_state(cg).await;

@@ -17,6 +17,7 @@ use crate::context::ContextBuilder;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
+use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::graph::{GraphQueryManager, GraphTraverser};
 use crate::memory::encoding::HolographicEncoder;
 use crate::memory::retrieval::FactRetriever;
@@ -320,8 +321,8 @@ pub fn current_timestamp() -> i64 {
 impl TraceDecay {
     /// Initializes a new `TraceDecay` project at the given root.
     ///
-    /// Creates the `.tracedecay` directory, writes a default configuration,
-    /// and initializes a fresh `SQLite` database.
+    /// Writes a default configuration to the resolved project store and
+    /// initializes a fresh `SQLite` database.
     pub async fn init(project_root: &Path) -> Result<Self> {
         let store_layout = storage::resolve_layout_for_current_profile(project_root)?;
         let config = TraceDecayConfig {
@@ -344,7 +345,7 @@ impl TraceDecay {
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
-        Ok(Self {
+        let ts = Self {
             db,
             config,
             project_root: project_root.to_path_buf(),
@@ -353,7 +354,9 @@ impl TraceDecay {
             active_branch,
             serving_branch: None,
             fallback_warning: None,
-        })
+        };
+        ts.register_project_store_in_global_registry().await;
+        Ok(ts)
     }
 
     /// Returns a reference to the underlying database.
@@ -424,6 +427,7 @@ impl TraceDecay {
                 })
                 .await?;
                 eprintln!("[tracedecay] re-index complete.");
+                ts.register_project_store_in_global_registry().await;
                 return Ok(ts);
             }
             Err(e) => return Err(e),
@@ -454,6 +458,7 @@ impl TraceDecay {
                 })
                 .await?;
                 eprintln!("[tracedecay] re-index complete.");
+                ts.register_project_store_in_global_registry().await;
                 return Ok(ts);
             }
             // DB is fine — clean up the stale sentinel.
@@ -480,6 +485,7 @@ impl TraceDecay {
             eprintln!("[tracedecay] re-index complete.");
         }
 
+        ts.register_project_store_in_global_registry().await;
         Ok(ts)
     }
 
@@ -643,10 +649,135 @@ impl TraceDecay {
         Some(meta.branches.keys().cloned().collect())
     }
 
+    async fn register_project_store_in_global_registry(&self) {
+        if self.store_layout.storage_mode != storage::StorageMode::ProfileSharded {
+            return;
+        }
+
+        let Some(project_id) = self.store_layout.identity.project_id.as_deref() else {
+            return;
+        };
+        let Some(profile_root) = profile_root_for_layout(&self.store_layout) else {
+            return;
+        };
+        let Some(store_relpath) = profile_relative(&profile_root, &self.store_layout.data_root)
+        else {
+            return;
+        };
+        let Some(global_db) = GlobalDb::open().await else {
+            return;
+        };
+
+        let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
+        let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
+        let Some(project) = global_db
+            .upsert_code_project(project_id, &self.project_root, None, None, default_branch)
+            .await
+        else {
+            return;
+        };
+
+        let store_id = profile_store_id(&project.project_id);
+        let manifest_relpath = self
+            .store_layout
+            .manifest_path
+            .as_ref()
+            .and_then(|path| profile_relative(&profile_root, path));
+        let now = current_timestamp();
+        let Some(store) = global_db
+            .upsert_store_instance(StoreInstanceUpsert {
+                store_id,
+                project_id: project.project_id,
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath,
+                manifest_relpath,
+                last_verified_at: Some(now),
+                last_write_at: Some(now),
+            })
+            .await
+        else {
+            return;
+        };
+
+        if let Some(meta) = meta {
+            for (branch_name, entry) in meta.branches {
+                let db_path = self.store_layout.data_root.join(&entry.db_file);
+                let Some(db_relpath) = profile_relative(&profile_root, &db_path) else {
+                    continue;
+                };
+                let _ = global_db
+                    .upsert_graph_scope(GraphScopeUpsert {
+                        graph_scope_id: profile_graph_scope_id(&store.store_id, &branch_name),
+                        project_id: store.project_id.clone(),
+                        store_id: store.store_id.clone(),
+                        branch_name: branch_name.clone(),
+                        db_relpath,
+                        parent_scope_id: entry
+                            .parent
+                            .as_deref()
+                            .map(|parent| profile_graph_scope_id(&store.store_id, parent)),
+                        last_synced_at: entry.last_synced_at.parse::<i64>().ok(),
+                        writable: true,
+                    })
+                    .await;
+            }
+        }
+
+        let mut artifacts = Vec::new();
+        push_existing_store_artifact(
+            &mut artifacts,
+            &store.store_id,
+            "graph_db",
+            &profile_root,
+            &self.store_layout.graph_db_path,
+            None,
+            now,
+        );
+        push_existing_store_artifact(
+            &mut artifacts,
+            &store.store_id,
+            "sessions_db",
+            &profile_root,
+            &self.store_layout.sessions_db_path,
+            None,
+            now,
+        );
+        push_existing_store_artifact(
+            &mut artifacts,
+            &store.store_id,
+            "branch_meta",
+            &profile_root,
+            &self.store_layout.branch_meta_path,
+            None,
+            now,
+        );
+        if let Some(manifest_path) = &self.store_layout.manifest_path {
+            push_existing_store_artifact(
+                &mut artifacts,
+                &store.store_id,
+                "store_manifest",
+                &profile_root,
+                manifest_path,
+                Some(storage::STORE_MANIFEST_SCHEMA_VERSION.to_string()),
+                now,
+            );
+        }
+        for artifact in artifacts {
+            let _ = global_db.upsert_store_artifact(artifact).await;
+        }
+    }
+
     /// Returns `true` if a `TraceDecay` project has been initialized at the given root.
     pub fn is_initialized(project_root: &Path) -> bool {
         crate::config::has_project_database(project_root)
             || crate::storage::has_enrollment_marker(project_root)
+            || crate::storage::resolve_layout_for_current_profile(project_root).is_ok_and(
+                |layout| {
+                    layout.storage_mode == crate::storage::StorageMode::ProfileSharded
+                        && layout.graph_db_path.exists()
+                },
+            )
     }
 }
 
@@ -681,6 +812,49 @@ fn clear_dirty_sentinel_at(path: &Path) {
 /// interrupted).
 fn has_dirty_sentinel_at(path: &Path) -> bool {
     path.exists()
+}
+
+fn profile_relative(profile_root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(profile_root)
+        .ok()
+        .map(|rel| rel.to_string_lossy().to_string())
+}
+
+fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {
+    layout.data_root.parent()?.parent().map(Path::to_path_buf)
+}
+
+fn profile_store_id(project_id: &str) -> String {
+    format!("store:{project_id}:profile_sharded")
+}
+
+fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {
+    format!("{store_id}:branch:{branch_name}")
+}
+
+fn push_existing_store_artifact(
+    artifacts: &mut Vec<StoreArtifactUpsert>,
+    store_id: &str,
+    artifact_kind: &str,
+    profile_root: &Path,
+    path: &Path,
+    schema_version: Option<String>,
+    updated_at: i64,
+) {
+    let Some(relpath) = profile_relative(profile_root, path) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    artifacts.push(StoreArtifactUpsert {
+        store_id: store_id.to_string(),
+        artifact_kind: artifact_kind.to_string(),
+        relpath,
+        size_bytes: i64::try_from(metadata.len()).ok(),
+        schema_version,
+        updated_at: Some(updated_at),
+    });
 }
 
 /// Deletes the database and its WAL/SHM sidecars.
@@ -3090,6 +3264,11 @@ impl TraceDecay {
         &self.store_layout
     }
 
+    pub async fn open_project_store_db(&self) -> Result<Database> {
+        let (db, _) = Database::open(&self.store_layout.graph_db_path).await?;
+        Ok(db)
+    }
+
     fn build_branch_diagnostics(
         project_root: &Path,
         data_root: &Path,
@@ -3280,7 +3459,25 @@ impl TraceDecay {
 
     pub fn project_branch_diagnostics(project_root: &Path) -> BranchDiagnostics {
         let store_layout = storage::resolve_layout_for_current_profile(project_root)
-            .unwrap_or_else(|_| storage::project_local_layout(project_root));
+            .unwrap_or_else(|_| {
+                let profile_root = storage::default_profile_root()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(crate::config::TRACEDECAY_DIR));
+                storage::default_profile_sharded_layout(project_root, &profile_root).unwrap_or_else(
+                    |_| {
+                        storage::profile_sharded_layout(
+                            project_root,
+                            &profile_root,
+                            &storage::EnrollmentMarker {
+                                project_id: storage::default_profile_project_id(project_root),
+                                storage_mode: storage::StorageMode::ProfileSharded,
+                            },
+                        )
+                        .unwrap_or_else(|err| {
+                            panic!("default profile project id must be valid: {err}")
+                        })
+                    },
+                )
+            });
         let current_branch = branch::current_branch(project_root);
         let (serving_db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
@@ -3707,8 +3904,10 @@ impl TraceDecay {
             .await
     }
 
-    async fn repair_derived_memory(&self) -> Result<MemoryRepairStats> {
-        let store = MemoryStore::new(self.db.conn());
+    async fn repair_derived_memory_for_conn(
+        conn: &libsql::Connection,
+    ) -> Result<MemoryRepairStats> {
+        let store = MemoryStore::new(conn);
         let mut missing_vectors_repaired = 0;
         loop {
             let repaired = store.compute_missing_vectors(500).await?;
@@ -3726,10 +3925,9 @@ impl TraceDecay {
         })
     }
 
-    pub async fn memory_status(&self) -> Result<MemoryStatus> {
+    async fn memory_status_for_conn(conn: &libsql::Connection) -> Result<MemoryStatus> {
         let operation = "memory_status";
-        let conn = self.db.conn();
-        let repair = self.repair_derived_memory().await?;
+        let repair = Self::repair_derived_memory_for_conn(conn).await?;
         let hrr_dim = HolographicEncoder::DIMENSIONS;
         let mut fact_rows = conn
             .query("SELECT trust_score FROM memory_facts", ())
@@ -3831,6 +4029,15 @@ impl TraceDecay {
             legacy_backfill_complete: backfilled_count > 0,
             repair,
         })
+    }
+
+    pub async fn memory_status(&self) -> Result<MemoryStatus> {
+        Self::memory_status_for_conn(self.db.conn()).await
+    }
+
+    pub async fn project_memory_status(&self) -> Result<MemoryStatus> {
+        let db = self.open_project_store_db().await?;
+        Self::memory_status_for_conn(db.conn()).await
     }
 }
 

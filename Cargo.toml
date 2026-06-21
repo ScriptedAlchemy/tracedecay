@@ -54,7 +54,7 @@ lite = []
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 
-# Language features (all grammars provided by tokensave-large-treesitters)
+# Language features backed by the bundled tree-sitter grammar crate.
 lang-dart = []
 lang-pascal = []
 lang-php = []
@@ -106,7 +106,7 @@ axum = "0.8"
 libsql = "0.9.30"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
-tokensave-large-treesitters = { version = "0.5.0", git = "https://github.com/aovestdipaperino/tokensave-large-treesitters" }
+tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", git = "https://github.com/aovestdipaperino/tokensave-large-treesitters" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -154,4 +154,3 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 [[bench]]
 name = "large_repos"
 harness = false
-
