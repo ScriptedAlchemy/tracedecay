@@ -270,11 +270,20 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Builds state and runs the dashboard server until interrupted.
+/// Builds state and runs the dashboard server until `shutdown` resolves.
 /// Binds `host:port` (`port` 0 lets the OS pick) and prints the URL on
 /// stderr; the URL line on stdout is stable output for wrappers to parse.
 /// Pass `open: true` to also open the URL in the default browser (CLI --open).
-pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<()> {
+pub async fn run_until_shutdown<F>(
+    cg: &TraceDecay,
+    host: &str,
+    port: u16,
+    open: bool,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let state = build_state(cg).await;
     if state.lcm_scope != "global" {
         spawn_session_catch_up_ingest(state.project_root.clone());
@@ -297,11 +306,17 @@ pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<(
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| config_error(format!("dashboard server error: {e}")))
+}
+
+/// Runs the dashboard server until interrupted by Ctrl-C.
+pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<()> {
+    run_until_shutdown(cg, host, port, open, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
 }
 
 /// Shared bind logic for both CLI `run` and the MCP `tracedecay_dashboard` tool
