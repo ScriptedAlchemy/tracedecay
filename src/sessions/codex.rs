@@ -122,7 +122,7 @@ impl TranscriptSource for CodexSource {
         // Real session_meta lines carry no model; track the active model from
         // `turn_context` lines instead (it can change mid-session).
         let mut current_model = meta.model.clone();
-        let mut compaction_depth = 0_i64;
+        let mut compaction_depth = prior_compaction_depth(path, prev.position);
         for line in &new.lines {
             if turn_usage.observe(&line.value) {
                 continue;
@@ -261,6 +261,41 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn prior_compaction_depth(path: &Path, before_offset: u64) -> i64 {
+    if before_offset == 0 {
+        return 0;
+    }
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut offset = 0_u64;
+    let mut depth = 0_i64;
+    loop {
+        line.clear();
+        let Ok(n) = reader.read_line(&mut line) else {
+            break;
+        };
+        if n == 0 || offset >= before_offset {
+            break;
+        }
+        let line_offset = offset;
+        offset = offset.saturating_add(n as u64);
+        if line_offset >= before_offset {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("compacted") {
+            depth += 1;
+        }
+    }
+    depth
 }
 
 fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {

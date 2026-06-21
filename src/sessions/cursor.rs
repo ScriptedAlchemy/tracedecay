@@ -26,6 +26,9 @@ pub struct CursorTranscriptIngestStats {
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
+    if is_hermes_profile_home(project_root) {
+        return hermes_profile_session_db_path(project_root);
+    }
     resolve_layout_for_current_profile(project_root).map_or_else(
         |_| {
             let profile_root = default_profile_root()
@@ -43,6 +46,9 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 }
 
 pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
+    if is_hermes_profile_home(project_root) {
+        return Some(hermes_profile_session_db_path(project_root));
+    }
     if let Ok(layout) = resolve_layout_for_current_profile(project_root) {
         return Some(layout.sessions_db_path);
     }
@@ -64,6 +70,10 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
             .join(resolution.store.store_relpath)
             .join(PROJECT_SESSION_DB_FILENAME),
     )
+}
+
+fn is_hermes_profile_home(path: &Path) -> bool {
+    path.join("config.yaml").is_file() || path.join("state.db").is_file()
 }
 
 pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {

@@ -670,8 +670,16 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
+        let git_common_dir = git_common_dir(&self.project_root);
+        let git_remote_url = git_remote_url(&self.project_root);
         let Some(project) = global_db
-            .upsert_code_project(project_id, &self.project_root, None, None, default_branch)
+            .upsert_code_project(
+                project_id,
+                &self.project_root,
+                git_common_dir.as_deref(),
+                git_remote_url.as_deref(),
+                default_branch,
+            )
             .await
         else {
             return;
@@ -826,6 +834,35 @@ fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {
 
 fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
+}
+
+fn git_common_dir(project_root: &Path) -> Option<PathBuf> {
+    git_output(project_root, &["rev-parse", "--git-common-dir"]).map(|path| {
+        let common_dir = PathBuf::from(path);
+        if common_dir.is_absolute() {
+            common_dir
+        } else {
+            project_root.join(common_dir)
+        }
+    })
+}
+
+fn git_remote_url(project_root: &Path) -> Option<String> {
+    git_output(project_root, &["config", "--get", "remote.origin.url"])
+}
+
+fn git_output(project_root: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {

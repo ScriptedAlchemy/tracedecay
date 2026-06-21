@@ -1451,7 +1451,8 @@ impl GlobalDb {
             .conn
             .execute(
                 "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
-                 ON CONFLICT(path) DO UPDATE SET tokens_saved = ?2",
+                 ON CONFLICT(path) DO UPDATE SET
+                    tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
                 params![path_str, tokens_saved as i64],
             )
             .await;

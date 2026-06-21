@@ -63,6 +63,29 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
     command
 }
 
+#[test]
+fn init_accepts_relative_current_directory() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+
+    let mut command = tracedecay_command(home.path(), &project_root);
+    command.args(["init", "."]);
+    let output = run_with_timeout(command, Duration::from_secs(30));
+
+    assert!(
+        output.status.success(),
+        "init . should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !project_root.join(".tracedecay/tracedecay.db").exists(),
+        "default init must use the profile-sharded store, not a repo-local graph DB"
+    );
+}
+
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
     let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);

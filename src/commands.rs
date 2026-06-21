@@ -1197,14 +1197,19 @@ pub(crate) async fn init_and_index(
     skip_folders: &[String],
     verbose: bool,
 ) -> tracedecay::errors::Result<TraceDecay> {
-    debug_assert!(
-        project_path.is_dir(),
-        "init_and_index: project_path is not a directory"
-    );
-    debug_assert!(
-        project_path.is_absolute(),
-        "init_and_index: project_path must be absolute"
-    );
+    if !project_path.is_dir() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "project path is not a directory: {}",
+                project_path.display()
+            ),
+        });
+    }
+    if !project_path.is_absolute() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("project path must be absolute: {}", project_path.display()),
+        });
+    }
     let mut cg = if TraceDecay::is_initialized(project_path) {
         TraceDecay::open(project_path).await?
     } else {

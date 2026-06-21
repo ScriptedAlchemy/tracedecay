@@ -295,9 +295,20 @@ pub fn add_to_gitignore(project_path: &Path) {
 /// If `path` is `Some`, uses that value; otherwise falls back to the current
 /// working directory.
 pub fn resolve_path(path: Option<String>) -> PathBuf {
-    match path {
+    let path = match path {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    absolutize_path(path)
+}
+
+fn absolutize_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 

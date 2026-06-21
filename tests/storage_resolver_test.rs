@@ -579,6 +579,30 @@ async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_path
 }
 
 #[tokio::test]
+async fn hermes_profile_home_session_path_wins_over_default_profile_shard() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let hermes_home = dir.path().join(".hermes");
+    let home = test_home(&dir);
+    fs::create_dir_all(&hermes_home).unwrap();
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "memory:\n  provider: tracedecay\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+
+    let expected = hermes_home.join(".tracedecay/sessions.db");
+    assert_eq!(project_session_db_path(&hermes_home), expected);
+    assert_eq!(
+        tracedecay::sessions::cursor::resolved_project_session_db_path(&hermes_home)
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn trace_decay_init_defaults_to_profile_shard_without_repo_marker() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
