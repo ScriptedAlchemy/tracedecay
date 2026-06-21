@@ -6,27 +6,42 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::tracedecay::TraceDecay;
 
-async fn init_project_with_file(contents: &str) -> TempDir {
+async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), contents).unwrap();
-    let cg = TraceDecay::init(dir.path()).await.unwrap();
-    cg.index_all().await.unwrap();
+    init_project_with_cli(home, dir.path());
     dir
 }
 
-async fn init_project_under(parent: &Path, name: &str, contents: &str) -> PathBuf {
+async fn init_project_under(home: &Path, parent: &Path, name: &str, contents: &str) -> PathBuf {
     let path = parent.join(name);
     fs::create_dir_all(path.join("src")).unwrap();
     fs::write(path.join("src/lib.rs"), contents).unwrap();
-    let cg = TraceDecay::init(&path).await.unwrap();
-    cg.index_all().await.unwrap();
+    init_project_with_cli(home, &path);
     path
 }
 
+fn init_project_with_cli(home: &Path, project: &Path) {
+    let output = tracedecay_command_with_home(home)
+        .arg("init")
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay init should run");
+    assert!(
+        output.status.success(),
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 async fn register_global_project(home: &Path, project: &Path) {
+    let home = canonical_existing_path(home);
     let db_path = home.join(".tracedecay/global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     db.upsert(project, 0).await;
@@ -34,13 +49,18 @@ async fn register_global_project(home: &Path, project: &Path) {
 }
 
 fn tracedecay_command_with_home(home: &Path) -> Command {
+    let home = canonical_existing_path(home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"));
     command
+}
+
+fn canonical_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn runtime_project_root(stdout: &[u8], id: i64) -> String {
@@ -88,7 +108,7 @@ fn file_uri(path: &Path) -> String {
 async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() {
     let home = TempDir::new().unwrap();
     let explicit = TempDir::new().unwrap();
-    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
 
     let output = tracedecay_command_with_home(home.path())
@@ -118,8 +138,8 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
 async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
-    let stale = init_project_with_file("pub fn stale_project_marker() {}\n").await;
-    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+    let stale = init_project_with_file(home.path(), "pub fn stale_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), stale.path()).await;
 
     let mut child = tracedecay_command_with_home(home.path())
@@ -185,9 +205,9 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
 #[tokio::test]
 async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let home = TempDir::new().unwrap();
-    let cwd_project = init_project_with_file("pub fn cwd_project_marker() {}\n").await;
+    let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
     let nested_cwd = cwd_project.path().join("src");
-    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -252,8 +272,9 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
 #[tokio::test]
 async fn explicit_initialized_path_ignores_initialize_roots() {
     let home = TempDir::new().unwrap();
-    let explicit = init_project_with_file("pub fn explicit_project_marker() {}\n").await;
-    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+    let explicit =
+        init_project_with_file(home.path(), "pub fn explicit_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -320,7 +341,7 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
 async fn no_explicit_path_without_roots_still_uses_global_fallback() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
-    let active = init_project_with_file("pub fn active_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
 
     let output = tracedecay_command_with_home(home.path())
@@ -347,12 +368,14 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     let cwd = TempDir::new().unwrap();
     let projects = TempDir::new().unwrap();
     let stale = init_project_under(
+        home.path(),
         projects.path(),
         "stale-project",
         "pub fn stale_project_marker() {}\n",
     )
     .await;
     let active = init_project_under(
+        home.path(),
         projects.path(),
         "active project",
         "pub fn active_project_marker() {}\n",
@@ -424,8 +447,15 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
 async fn same_depth_descendant_global_fallback_is_ambiguous() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
-    let alpha = init_project_under(cwd.path(), "alpha", "pub fn alpha_marker() {}\n").await;
-    let beta = init_project_under(cwd.path(), "beta", "pub fn beta_marker() {}\n").await;
+    let alpha = init_project_under(
+        home.path(),
+        cwd.path(),
+        "alpha",
+        "pub fn alpha_marker() {}\n",
+    )
+    .await;
+    let beta =
+        init_project_under(home.path(), cwd.path(), "beta", "pub fn beta_marker() {}\n").await;
     register_global_project(home.path(), &alpha).await;
     register_global_project(home.path(), &beta).await;
 

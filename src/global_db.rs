@@ -1,8 +1,7 @@
 //! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
-//! Stored at `~/.tracedecay/global.db` (or a legacy `~/.tokensave/global.db`
-//! when that dir already exists — see [`crate::config::user_data_dir`]), this
-//! DB holds one row per project with the project's DB path and its cumulative
+//! Stored at `~/.tracedecay/global.db`, this DB holds one row per project with
+//! the project's DB path and its cumulative
 //! tokens-saved count. All operations are best-effort: failures are silently
 //! ignored so they never block the main MCP server loop.
 
@@ -10,8 +9,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use libsql::{params, Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value};
+use serde_json::Value as JsonValue;
 
 use crate::sessions::{
+    lcm::{
+        LcmSourceRef, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange,
+    },
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchScope,
 };
 
@@ -39,6 +43,12 @@ pub struct TokenCountUpsert {
     pub text_len: i64,
     pub encoder: &'static str,
     pub token_count: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingCodexCompactionSummary {
+    pub node_id: String,
+    pub request: LcmSummaryRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -202,19 +212,35 @@ pub struct GlobalDb {
     _db: LibsqlDatabase,
 }
 
+struct TranscriptSummarySources {
+    refs: Vec<LcmSourceRef>,
+    source_token_count: i64,
+    source_time_start: Option<i64>,
+    source_time_end: Option<i64>,
+    excerpts: Vec<TranscriptSummaryExcerpt>,
+}
+
+struct TranscriptSummaryExcerpt {
+    role: String,
+    text: String,
+}
+
+const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
+    "Summarize the visible transcript messages that Codex compacted. ",
+    "Preserve durable user intent, implementation decisions, file/module names, ",
+    "unresolved tasks, and verification status. Return only the summary text."
+);
+
 const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
-/// Legacy env-var spelling, still honored as a fallback.
-const LEGACY_GLOBAL_DB_PATH_ENV: &str = "TOKENSAVE_GLOBAL_DB";
 
 fn global_db_path_override() -> Option<PathBuf> {
-    [GLOBAL_DB_PATH_ENV, LEGACY_GLOBAL_DB_PATH_ENV]
-        .iter()
-        .find_map(|name| std::env::var_os(name).filter(|path| !path.is_empty()))
+    std::env::var_os(GLOBAL_DB_PATH_ENV)
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
 }
 
 /// Returns the path to the global database: `global.db` inside the user-level
-/// data dir (`~/.tracedecay/`, or a legacy `~/.tokensave/` when present).
+/// data dir (`~/.tracedecay/` by default).
 pub fn global_db_path() -> Option<PathBuf> {
     if let Some(path) = global_db_path_override() {
         return Some(path);
@@ -222,10 +248,9 @@ pub fn global_db_path() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|dir| dir.join("global.db"))
 }
 
-/// True when `TRACEDECAY_GLOBAL_DB` (or the legacy `TOKENSAVE_GLOBAL_DB`)
-/// pins the global DB to an explicit path. Consumers (the dashboard LCM
-/// store selection) treat the override as an operator decision that wins
-/// over project-local store discovery.
+/// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
+/// Consumers treat the override as an operator decision that wins over project
+/// store discovery.
 pub fn global_db_path_is_overridden() -> bool {
     global_db_path_override().is_some()
 }
@@ -236,12 +261,10 @@ pub fn global_db_path_is_overridden() -> bool {
 pub enum AccountingMode {
     /// No env override — global accounting is on by default.
     Default,
-    /// `TRACEDECAY_ENABLE_GLOBAL_DB` (or legacy `TOKENSAVE_ENABLE_GLOBAL_DB`)
-    /// explicitly enabled it.
+    /// `TRACEDECAY_ENABLE_GLOBAL_DB` explicitly enabled it.
     EnabledByEnv,
     /// `TRACEDECAY_ENABLE_GLOBAL_DB` (falsy value) or
-    /// `TRACEDECAY_DISABLE_GLOBAL_DB` (or their legacy `TOKENSAVE_*`
-    /// spellings) explicitly disabled it.
+    /// `TRACEDECAY_DISABLE_GLOBAL_DB` explicitly disabled it.
     DisabledByEnv,
 }
 
@@ -283,12 +306,8 @@ pub fn env_flag(name: &str) -> bool {
 /// Savings dashboard reads the ledger — an opt-in gate here silently left
 /// the ledger empty while lifetime counters kept growing. Precedence:
 ///
-/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set (or legacy
-///    `TOKENSAVE_ENABLE_GLOBAL_DB`) → its truthiness decides (the spelling
-///    existing agent installers already write).
-/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` (or legacy spelling) truthy → disabled
-///    (opt-out; set by `.cargo/config.toml` so `cargo test` runs stay
-///    hermetic).
+/// 1. `TRACEDECAY_ENABLE_GLOBAL_DB` set → its truthiness decides.
+/// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
     if let Some(value) = crate::config::brand_env("ENABLE_GLOBAL_DB") {
@@ -315,6 +334,80 @@ fn opt_text(value: Option<&str>) -> Value {
 
 fn opt_i64(value: Option<i64>) -> Value {
     value.map_or(Value::Null, Value::Integer)
+}
+
+fn estimated_tokens_from_chars(char_count: i64) -> i64 {
+    ((char_count.max(0) + 3) / 4).max(1)
+}
+
+fn estimate_summary_tokens(text: &str) -> i64 {
+    i64::from(crate::context::read_modes::estimate_tokens(text))
+}
+
+fn transcript_summary_text(
+    message: &SessionMessageRecord,
+    metadata: &JsonValue,
+    sources: &TranscriptSummarySources,
+) -> String {
+    if metadata.get("summary_body").and_then(JsonValue::as_str) == Some("plaintext") {
+        return message.text.clone();
+    }
+    let Some(source_summary) = extractive_transcript_summary(&sources.excerpts) else {
+        return message.text.clone();
+    };
+    let codex_body = metadata
+        .get("summary_body")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("unavailable");
+    format!(
+        "TraceDecay-generated Codex compaction summary from visible transcript messages. Codex's own compaction body is {codex_body} in the rollout.\n\n{source_summary}"
+    )
+}
+
+fn extractive_transcript_summary(excerpts: &[TranscriptSummaryExcerpt]) -> Option<String> {
+    let meaningful = excerpts
+        .iter()
+        .filter_map(|excerpt| {
+            let text = normalize_summary_excerpt(&excerpt.text);
+            if text.is_empty() {
+                None
+            } else {
+                Some((&excerpt.role, text))
+            }
+        })
+        .collect::<Vec<_>>();
+    if meaningful.is_empty() {
+        return None;
+    }
+
+    let mut selected = Vec::new();
+    if meaningful.len() <= 12 {
+        selected.extend(meaningful.iter());
+    } else {
+        selected.extend(meaningful.iter().take(4));
+        selected.extend(meaningful.iter().skip(meaningful.len().saturating_sub(8)));
+    }
+
+    let mut summary = String::from("Visible source highlights:");
+    for (role, text) in selected {
+        let role = role.trim();
+        let role = if role.is_empty() { "unknown" } else { role };
+        let line = truncate_summary_excerpt(text, 320);
+        let _ = write!(summary, "\n- {role}: {line}");
+    }
+    Some(summary)
+}
+
+fn normalize_summary_excerpt(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_summary_excerpt(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    format!("{}...", text.chars().take(keep).collect::<String>())
 }
 
 fn row_to_session(row: &libsql::Row) -> Option<SessionRecord> {
@@ -1358,7 +1451,8 @@ impl GlobalDb {
             .conn
             .execute(
                 "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
-                 ON CONFLICT(path) DO UPDATE SET tokens_saved = ?2",
+                 ON CONFLICT(path) DO UPDATE SET
+                    tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
                 params![path_str, tokens_saved as i64],
             )
             .await;
@@ -1696,15 +1790,160 @@ impl GlobalDb {
         .await;
         match raw_result {
             Ok(raw) => {
-                self.upsert_session_message_projection(
-                    message,
-                    &raw.projection_text,
-                    raw.projection_metadata_json.as_deref(),
-                )
-                .await
+                if !self
+                    .upsert_session_message_projection(
+                        message,
+                        &raw.projection_text,
+                        raw.projection_metadata_json.as_deref(),
+                    )
+                    .await
+                {
+                    return false;
+                }
+                self.upsert_lcm_summary_for_transcript_summary(message)
+                    .await
             }
             Err(_) => false,
         }
+    }
+
+    async fn upsert_lcm_summary_for_transcript_summary(
+        &self,
+        message: &SessionMessageRecord,
+    ) -> bool {
+        if message.kind.as_deref() != Some("summary") {
+            return true;
+        }
+        let Some(metadata_json) = message.metadata_json.as_deref() else {
+            return true;
+        };
+        let Ok(metadata) = serde_json::from_str::<JsonValue>(metadata_json) else {
+            return true;
+        };
+        if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
+            return true;
+        }
+        let Ok(sources) = self.transcript_summary_sources(message).await else {
+            return false;
+        };
+        if sources.refs.is_empty() {
+            return true;
+        }
+        let depth = metadata
+            .get("codex_compaction_depth")
+            .and_then(JsonValue::as_i64)
+            .unwrap_or(1)
+            .max(1);
+        let summary_text = transcript_summary_text(message, &metadata, &sources);
+        let mut summary_metadata = metadata.as_object().cloned().unwrap_or_default();
+        if summary_metadata
+            .get("summary_body")
+            .and_then(JsonValue::as_str)
+            == Some("encrypted")
+            && !sources.excerpts.is_empty()
+        {
+            summary_metadata.insert(
+                "tracedecay_summary_source".to_string(),
+                JsonValue::String("visible_transcript_source_messages".to_string()),
+            );
+            summary_metadata.insert(
+                "codex_summary_body".to_string(),
+                JsonValue::String("encrypted".to_string()),
+            );
+        }
+        let summary_metadata_json =
+            serde_json::to_string(&JsonValue::Object(summary_metadata)).ok();
+        let draft = LcmSummaryNodeDraft {
+            provider: message.provider.clone(),
+            conversation_id: message.session_id.clone(),
+            session_id: message.session_id.clone(),
+            depth,
+            summary_text: summary_text.clone(),
+            source_refs: sources.refs,
+            summary_token_count: estimate_summary_tokens(&summary_text),
+            source_token_count: sources.source_token_count,
+            source_time_start: sources.source_time_start,
+            source_time_end: sources.source_time_end.or(message.timestamp),
+            expand_hint: Some("Codex context compaction boundary".to_string()),
+            metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
+        };
+        crate::sessions::lcm::dag::insert_summary_node_in_transaction(&self.conn, draft)
+            .await
+            .is_ok()
+    }
+
+    async fn transcript_summary_sources(
+        &self,
+        message: &SessionMessageRecord,
+    ) -> Result<TranscriptSummarySources, libsql::Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT r.store_id, r.timestamp,
+                        length(COALESCE(r.content, r.snippet_text, '')),
+                        r.role,
+                        substr(COALESCE(r.content, r.snippet_text, ''), 1, 4000)
+                 FROM lcm_raw_messages r
+                 JOIN session_messages m
+                   ON m.provider = r.provider
+                  AND m.message_id = r.message_id
+                 WHERE r.provider = ?1
+                   AND r.session_id = ?2
+                   AND r.ordinal < ?3
+                   AND r.ordinal > COALESCE((
+                       SELECT MAX(prev.ordinal)
+                       FROM session_messages prev
+                       WHERE prev.provider = ?1
+                         AND prev.session_id = ?2
+                         AND prev.ordinal < ?3
+                         AND COALESCE(prev.kind, 'message') = 'summary'
+                   ), -9223372036854775808)
+                   AND COALESCE(m.kind, 'message') <> 'summary'
+                 ORDER BY r.store_id",
+                params![
+                    message.provider.as_str(),
+                    message.session_id.as_str(),
+                    message.ordinal,
+                ],
+            )
+            .await?;
+
+        let mut refs = Vec::new();
+        let mut source_token_count = 0_i64;
+        let mut source_time_start = None;
+        let mut source_time_end = None;
+        let mut excerpts = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            let timestamp: Option<i64> = row.get(1)?;
+            let char_count: i64 = row.get(2)?;
+            let role: String = row.get(3)?;
+            let excerpt_text: String = row.get(4)?;
+            refs.push(LcmSourceRef::RawMessage { store_id });
+            source_token_count =
+                source_token_count.saturating_add(estimated_tokens_from_chars(char_count));
+            if !excerpt_text.trim().is_empty() {
+                excerpts.push(TranscriptSummaryExcerpt {
+                    role,
+                    text: excerpt_text,
+                });
+            }
+            if let Some(timestamp) = timestamp {
+                source_time_start = Some(
+                    source_time_start.map_or(timestamp, |start| std::cmp::min(start, timestamp)),
+                );
+                source_time_end =
+                    Some(source_time_end.map_or(timestamp, |end| std::cmp::max(end, timestamp)));
+            }
+        }
+
+        Ok(TranscriptSummarySources {
+            refs,
+            source_token_count,
+            source_time_start,
+            source_time_end,
+            excerpts,
+        })
     }
 
     /// Atomically upserts one transcript session + all parsed messages and then
@@ -1928,6 +2167,233 @@ impl GlobalDb {
         request: crate::sessions::lcm::LcmDescribeRequest,
     ) -> Result<crate::sessions::lcm::LcmDescribeResponse, crate::sessions::lcm::LcmError> {
         crate::sessions::lcm::query::describe(&self.conn, request).await
+    }
+
+    /// Returns Codex compaction summary nodes that still need an auxiliary
+    /// Codex app-server summary.
+    pub async fn pending_codex_compaction_summary_requests(
+        &self,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingCodexCompactionSummary>, crate::sessions::lcm::LcmError> {
+        let limit = limit.clamp(1, 100) as i64;
+        let mut sql = String::from(
+            "SELECT node_id, session_id
+             FROM lcm_summary_nodes
+             WHERE provider = 'codex'
+               AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+               AND COALESCE(
+                     json_extract(metadata_json, '$.tracedecay_summary_source'),
+                     ''
+                   ) <> 'codex_app_server'",
+        );
+        let mut query_params = vec![Value::Integer(limit)];
+        if let Some(session_id) = session_id {
+            sql.push_str(" AND session_id = ?2 ORDER BY depth DESC, created_at DESC LIMIT ?1");
+            query_params.push(Value::Text(session_id.to_string()));
+        } else {
+            sql.push_str(" ORDER BY created_at DESC, depth DESC LIMIT ?1");
+        }
+
+        let mut rows = self.conn.query(&sql, query_params).await?;
+        let mut pending = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let node_id: String = row.get(0)?;
+            let row_session_id: String = row.get(1)?;
+            if let Some(request) = self
+                .codex_compaction_summary_request_for_node(&node_id, &row_session_id)
+                .await?
+            {
+                pending.push(PendingCodexCompactionSummary { node_id, request });
+            }
+        }
+        Ok(pending)
+    }
+
+    async fn codex_compaction_summary_request_for_node(
+        &self,
+        node_id: &str,
+        session_id: &str,
+    ) -> Result<Option<LcmSummaryRequest>, crate::sessions::lcm::LcmError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT r.store_id, r.role, COALESCE(r.content, r.snippet_text, '')
+                 FROM lcm_summary_sources s
+                 JOIN lcm_raw_messages r
+                   ON s.source_kind = 'raw_message'
+                  AND CAST(s.source_id AS INTEGER) = r.store_id
+                 WHERE s.node_id = ?1
+                   AND r.provider = 'codex'
+                   AND r.session_id = ?2
+                 ORDER BY s.ordinal",
+                params![node_id, session_id],
+            )
+            .await?;
+        let mut source_messages = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            let role: String = row.get(1)?;
+            let content: String = row.get(2)?;
+            source_messages.push(LcmSummarySourceMessage {
+                store_id,
+                role,
+                content,
+            });
+        }
+        let (Some(first), Some(last)) = (source_messages.first(), source_messages.last()) else {
+            return Ok(None);
+        };
+        Ok(Some(LcmSummaryRequest {
+            provider: "codex".to_string(),
+            session_id: session_id.to_string(),
+            focus_topic: Some("Codex context compaction".to_string()),
+            prompt: CODEX_COMPACTION_SUMMARY_PROMPT.to_string(),
+            source_range: LcmSummarySourceRange {
+                from_store_id: first.store_id,
+                to_store_id: last.store_id,
+            },
+            source_messages,
+            extraction_request: None,
+        }))
+    }
+
+    /// Replaces a deterministic Codex compaction placeholder summary with an
+    /// auxiliary summary while preserving the exact source lineage.
+    pub async fn replace_codex_compaction_summary(
+        &self,
+        node_id: &str,
+        summary_text: &str,
+        route: &str,
+        model: Option<&str>,
+    ) -> Result<LcmSummaryNode, crate::sessions::lcm::LcmError> {
+        let mut draft = self.codex_compaction_summary_draft(node_id).await?;
+        if draft.provider != "codex" {
+            return Err(crate::sessions::lcm::LcmError::SummaryNodeNotFound);
+        }
+        let mut metadata: serde_json::Map<String, JsonValue> = draft
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
+            return Err(crate::sessions::lcm::LcmError::SummaryNodeNotFound);
+        }
+        draft.summary_text = summary_text.trim().to_string();
+        draft.summary_token_count = estimate_summary_tokens(&draft.summary_text);
+        metadata.insert(
+            "tracedecay_summary_source".to_string(),
+            JsonValue::String(route.to_string()),
+        );
+        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+            metadata.insert(
+                "codex_auxiliary_model".to_string(),
+                JsonValue::String(model.trim().to_string()),
+            );
+        }
+        draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
+
+        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let result = async {
+            self.conn
+                .execute(
+                    "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
+                    params![node_id],
+                )
+                .await?;
+            self.conn
+                .execute(
+                    "DELETE FROM lcm_summary_nodes WHERE node_id = ?1",
+                    params![node_id],
+                )
+                .await?;
+            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&self.conn, draft).await
+        }
+        .await;
+        match result {
+            Ok(node) => {
+                self.conn.execute("COMMIT", ()).await?;
+                Ok(node)
+            }
+            Err(err) => {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn codex_compaction_summary_draft(
+        &self,
+        node_id: &str,
+    ) -> Result<LcmSummaryNodeDraft, crate::sessions::lcm::LcmError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT provider, conversation_id, session_id, depth, summary_text,
+                        summary_token_count, source_token_count, source_time_start,
+                        source_time_end, expand_hint, metadata_json
+                 FROM lcm_summary_nodes
+                 WHERE node_id = ?1",
+                params![node_id],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(crate::sessions::lcm::LcmError::SummaryNodeNotFound)?;
+        let source_refs = self.summary_source_refs(node_id).await?;
+        Ok(LcmSummaryNodeDraft {
+            provider: row.get(0)?,
+            conversation_id: row.get(1)?,
+            session_id: row.get(2)?,
+            depth: row.get(3)?,
+            summary_text: row.get(4)?,
+            summary_token_count: row.get(5)?,
+            source_token_count: row.get(6)?,
+            source_time_start: row.get(7)?,
+            source_time_end: row.get(8)?,
+            expand_hint: row.get(9)?,
+            metadata_json: row.get(10)?,
+            source_refs,
+        })
+    }
+
+    async fn summary_source_refs(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<LcmSourceRef>, crate::sessions::lcm::LcmError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT source_kind, source_id
+                 FROM lcm_summary_sources
+                 WHERE node_id = ?1
+                 ORDER BY ordinal",
+                params![node_id],
+            )
+            .await?;
+        let mut refs = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let source_kind: String = row.get(0)?;
+            let source_id: String = row.get(1)?;
+            match source_kind.as_str() {
+                "raw_message" => refs.push(LcmSourceRef::RawMessage {
+                    store_id: source_id.parse().map_err(|err| {
+                        crate::sessions::lcm::LcmError::Db(format!(
+                            "invalid raw message source id '{source_id}': {err}"
+                        ))
+                    })?,
+                }),
+                "summary_node" => refs.push(LcmSourceRef::SummaryNode { node_id: source_id }),
+                _ => {
+                    return Err(crate::sessions::lcm::LcmError::Db(format!(
+                        "invalid summary source kind '{source_kind}'"
+                    )));
+                }
+            }
+        }
+        Ok(refs)
     }
 
     /// Reports LCM schema, storage, payload, and currently implemented maintenance counts.

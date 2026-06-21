@@ -3,12 +3,15 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use common::pyyaml_shim_pythonpath;
+use common::{pyyaml_shim_pythonpath, EnvVarGuard};
 use tempfile::TempDir;
 use tracedecay::agents::*;
 use tracedecay::branch_meta;
-use tracedecay::config::get_tracedecay_dir;
+use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+
+static AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests
@@ -142,6 +145,7 @@ fn tracedecay_command(project: &Path, home: &Path) -> Command {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env("KIRO_HOME", home.join(".kiro"))
         .env("VIBE_HOME", home.join(".vibe"));
     command
@@ -201,6 +205,10 @@ fn cursor_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 
 fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join("plugins/tracedecay")
+}
+
+fn codex_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
 }
 
 fn codex_personal_marketplace_path(home: &Path) -> std::path::PathBuf {
@@ -283,6 +291,19 @@ fn assert_codex_marketplace_entry(
     assert_eq!(entry["category"], "Productivity");
 }
 
+fn assert_codex_marketplace_has_no_tracedecay(marketplace_path: &Path) {
+    if !marketplace_path.exists() {
+        return;
+    }
+    let marketplace = read_json(marketplace_path);
+    assert!(
+        marketplace["plugins"]
+            .as_array()
+            .is_none_or(|plugins| plugins.iter().all(|entry| entry["name"] != "tracedecay")),
+        "Codex marketplace should not keep a tracedecay source entry after cache install"
+    );
+}
+
 fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
@@ -338,6 +359,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
         ("sessionEnd", "hook-cursor-session-end"),
         ("subagentStart", "hook-cursor-subagent-start"),
         ("postToolUse", "hook-cursor-post-tool-use"),
+        ("preCompact", "hook-cursor-pre-compact"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
@@ -579,13 +601,23 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
 
 #[tokio::test]
 async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+    let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
+    let home_root = home
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| home.path().to_path_buf());
+    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, home_root.join(".tracedecay"));
     let project = TempDir::new().unwrap();
+    let project_root = project
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| project.path().to_path_buf());
     let git_init = Command::new("git")
         .arg("init")
         .arg("-b")
         .arg("main")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git init should run");
     assert!(
@@ -594,14 +626,43 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&git_init.stdout),
         String::from_utf8_lossy(&git_init.stderr)
     );
-    std::fs::create_dir_all(project.path().join("src")).unwrap();
-    std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
-    TraceDecay::init(project.path()).await.unwrap();
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    let git_add = Command::new("git")
+        .arg("add")
+        .arg("src/lib.rs")
+        .current_dir(&project_root)
+        .output()
+        .expect("git add should run");
+    assert!(
+        git_add.status.success(),
+        "git add should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_add.stdout),
+        String::from_utf8_lossy(&git_add.stderr)
+    );
+    let git_commit = Command::new("git")
+        .arg("-c")
+        .arg("user.name=TraceDecay Test")
+        .arg("-c")
+        .arg("user.email=tracedecay@example.invalid")
+        .arg("commit")
+        .arg("-m")
+        .arg("initial")
+        .current_dir(&project_root)
+        .output()
+        .expect("git commit should run");
+    assert!(
+        git_commit.status.success(),
+        "git commit should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&git_commit.stdout),
+        String::from_utf8_lossy(&git_commit.stderr)
+    );
+    TraceDecay::init(&project_root).await.unwrap();
     let checkout = Command::new("git")
         .arg("checkout")
         .arg("-b")
         .arg("feature/install")
-        .current_dir(project.path())
+        .current_dir(&project_root)
         .output()
         .expect("git checkout should run");
     assert!(
@@ -611,9 +672,12 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&checkout.stderr)
     );
 
-    assert_local_install_success("cursor", project.path(), home.path());
+    assert_local_install_success("cursor", &project_root, &home_root);
 
-    let meta = branch_meta::load_branch_meta(&get_tracedecay_dir(project.path()))
+    let data_dir = resolve_layout_for_current_profile(&project_root)
+        .unwrap_or_else(|err| panic!("failed to resolve project store layout: {err}"))
+        .data_root;
+    let meta = branch_meta::load_branch_meta(&data_dir)
         .expect("Cursor install should bootstrap branch tracking metadata");
     assert!(meta.is_tracked("main"));
     assert!(meta.is_tracked("feature/install"));
@@ -1106,11 +1170,13 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
+assert not hasattr(provider, "project_root")
 assert provider.session_id == "session-123"
 # Without an explicit hermes_home the provider resolves the active profile
 # home itself (sync_turn/prefetch need a storage anchor).
 provider.initialize("session-only")
 assert provider.hermes_home == os.environ["HERMES_HOME"]
+assert not hasattr(provider, "project_root")
 assert provider.session_id == "session-only"
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy
@@ -2783,6 +2849,54 @@ fn test_codex_install_creates_plugin_bundle_and_marketplace() {
 }
 
 #[test]
+fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let ctx = make_install_ctx(home);
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
+    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+
+    let bootstrap_dir = codex_plugin_install_dir(home);
+    std::fs::create_dir_all(bootstrap_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(bootstrap_dir.join("skills/stale-skill")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join("skills/stale-skill/SKILL.md"),
+        "---\nname: tracedecay:stale-skill\n---\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join(".agents/plugins")).unwrap();
+    std::fs::write(
+        codex_personal_marketplace_path(home),
+        r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
+    )
+    .unwrap();
+
+    CodexIntegration.install(&ctx).unwrap();
+
+    assert_codex_plugin_bundle(
+        &cached_plugin_dir,
+        &ctx.tracedecay_bin,
+        serde_json::json!(["serve"]),
+        true,
+    );
+    assert!(
+        !bootstrap_dir.exists(),
+        "global Codex install should remove the loose marketplace source once a cache install exists"
+    );
+    assert_codex_marketplace_has_no_tracedecay(&codex_personal_marketplace_path(home));
+}
+
+#[test]
 fn test_codex_install_sweeps_legacy_global_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
@@ -2874,7 +2988,7 @@ fn test_codex_local_install_sweeps_legacy_project_config() {
     .unwrap();
     std::fs::write(
         codex_dir.join("hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tokensave hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-pre-tool-use","timeout":5}]}],"PostToolUse":[{"matcher":"Bash|apply_patch","hooks":[{"type":"command","command":"/old/tracedecay hook-codex-post-tool-use","timeout":60}]}]}}"#,
     )
     .unwrap();
 
@@ -2886,7 +3000,7 @@ fn test_codex_local_install_sweeps_legacy_project_config() {
     );
     assert!(
         !codex_dir.join("hooks.json").exists(),
-        "legacy project Codex hooks should be removed when they only contained tracedecay/tokensave"
+        "legacy project Codex hooks should be removed when they only contained tracedecay"
     );
     assert_codex_plugin_bundle(
         &codex_project_plugin_install_dir(project.path()),
@@ -2952,11 +3066,22 @@ fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
         codex_event_has_handler(hooks, "PostToolUse", "hook-codex-post-tool-use"),
         "Codex PostToolUse hook should keep the index fresh: {hooks}"
     );
+    assert!(
+        codex_event_has_handler(hooks, "PostCompact", "hook-codex-post-compact"),
+        "Codex PostCompact hook should generate app-server LCM summaries: {hooks}"
+    );
     let matcher = codex_matcher_for_handler(hooks, "PostToolUse", "hook-codex-post-tool-use")
         .expect("PostToolUse handler should exist");
     assert!(
         matcher.contains("Bash") && matcher.contains("apply_patch"),
         "PostToolUse matcher should target Bash and apply_patch, got {matcher:?}"
+    );
+    let compact_matcher =
+        codex_matcher_for_handler(hooks, "PostCompact", "hook-codex-post-compact")
+            .expect("PostCompact handler should exist");
+    assert!(
+        compact_matcher.contains("auto") && compact_matcher.contains("manual"),
+        "PostCompact matcher should target auto and manual compactions, got {compact_matcher:?}"
     );
 }
 
@@ -3167,40 +3292,6 @@ fn test_cursor_install_creates_plugin() {
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
     );
-}
-
-#[test]
-fn test_cursor_install_sweeps_legacy_tokensave_plugin_dir() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-
-    // Simulate a pre-rebrand plugin install: tokensave-branded manifest plus
-    // the legacy rule file and dispatcher skill dirs the current bundle no
-    // longer ships. Earlier sweeps missed these and stranded the directory.
-    let legacy_dir = home.join(".cursor/plugins/local/tokensave");
-    std::fs::create_dir_all(legacy_dir.join(".cursor-plugin")).unwrap();
-    std::fs::write(
-        legacy_dir.join(".cursor-plugin/plugin.json"),
-        r#"{"name": "tokensave", "version": "5.0.0"}"#,
-    )
-    .unwrap();
-    std::fs::create_dir_all(legacy_dir.join("rules")).unwrap();
-    std::fs::write(legacy_dir.join("rules/tokensave.mdc"), "legacy rule\n").unwrap();
-    for skill in ["tokensave-audit-safety", "tokensave-map-architecture"] {
-        let skill_dir = legacy_dir.join("skills").join(skill);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "legacy dispatcher\n").unwrap();
-    }
-
-    let ctx = make_install_ctx(home);
-    CursorIntegration.install(&ctx).unwrap();
-
-    assert!(
-        !legacy_dir.exists(),
-        "legacy tokensave plugin dir should be fully removed once the \
-         tokensave.mdc rule and tokensave-<verb> dispatcher skills are swept"
-    );
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
 }
 
 #[test]

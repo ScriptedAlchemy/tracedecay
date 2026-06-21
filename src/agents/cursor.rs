@@ -75,9 +75,7 @@ impl AgentIntegration for CursorIntegration {
         // refreshing it is exactly the install path. User config such as
         // `~/.cursor/mcp.json` is never written by `install_cursor_plugin`,
         // and unmanaged files inside the plugin dir are preserved.
-        if !cursor_plugin_manifest_path(&ctx.home).exists()
-            && !cursor_plugin_legacy_manifest_path(&ctx.home).exists()
-        {
+        if !cursor_plugin_manifest_path(&ctx.home).exists() {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
         install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
@@ -89,7 +87,6 @@ impl AgentIntegration for CursorIntegration {
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         remove_cursor_plugin_install(&cursor_plugin_install_dir(&ctx.home))?;
-        remove_cursor_plugin_install(&cursor_plugin_legacy_install_dir(&ctx.home))?;
         let mcp_path = ctx.home.join(".cursor/mcp.json");
         uninstall_mcp_server(&mcp_path);
         sweep_legacy_project_artifacts_at_cwd(&ctx.home);
@@ -369,16 +366,8 @@ fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
 }
 
-fn cursor_plugin_legacy_install_dir(home: &Path) -> PathBuf {
-    home.join(".cursor/plugins/local/tokensave")
-}
-
 fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
-}
-
-fn cursor_plugin_legacy_manifest_path(home: &Path) -> PathBuf {
-    cursor_plugin_legacy_install_dir(home).join(".cursor-plugin/plugin.json")
 }
 
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
@@ -389,7 +378,6 @@ fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         })?;
     }
     remove_cursor_plugin_install(&install_dir)?;
-    remove_cursor_plugin_install(&cursor_plugin_legacy_install_dir(home))?;
 
     write_embedded_plugin(&install_dir, tracedecay_bin)?;
     eprintln!(
@@ -451,37 +439,12 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// upgrades don't strand stale surfaces (managed-path removal only covers
 /// files the *current* bundle ships). `commands/` was migrated to slash
 /// skills (`disable-model-invocation: true`) when Cursor deprecated the
-/// standalone Commands surface. The `skills/tokensave-*` and
-/// `skills/tracedecay-*` entries are legacy dispatcher slugs renamed to
+/// standalone Commands surface. The `skills/tracedecay-*` entries are
+/// legacy dispatcher slugs renamed to
 /// verb-phrase slugs because Cursor displays the humanized slug as the skill
 /// title.
 const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "commands",
-    "skills/tokensave-arch",
-    "skills/tokensave-audit",
-    "skills/tokensave-audit-safety",
-    "skills/tokensave-branch",
-    "skills/tokensave-check-health",
-    "skills/tokensave-clean",
-    "skills/tokensave-clean-dead-code",
-    "skills/tokensave-commit",
-    "skills/tokensave-compare-branches",
-    "skills/tokensave-curate-memory",
-    "skills/tokensave-diagnose",
-    "skills/tokensave-draft-commit",
-    "skills/tokensave-find-impact",
-    "skills/tokensave-fix-build",
-    "skills/tokensave-health",
-    "skills/tokensave-impact",
-    "skills/tokensave-map-architecture",
-    "skills/tokensave-port",
-    "skills/tokensave-port-code",
-    "skills/tokensave-recall",
-    "skills/tokensave-recall-memory",
-    "skills/tokensave-review",
-    "skills/tokensave-review-diff",
-    "skills/tokensave-test",
-    "skills/tokensave-test-changes",
     "skills/tracedecay-arch",
     "skills/tracedecay-audit",
     "skills/tracedecay-branch",
@@ -495,11 +458,6 @@ const LEGACY_PLUGIN_DIRS: &[&str] = &[
     "skills/tracedecay-review",
     "skills/tracedecay-test",
 ];
-
-/// Individual files shipped by older (pre-rebrand) plugin bundles that the
-/// current bundle no longer contains. Swept alongside [`LEGACY_PLUGIN_DIRS`]
-/// so upgrades from tokensave-branded installs don't strand them.
-const LEGACY_PLUGIN_FILES: &[&str] = &["rules/tokensave.mdc"];
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
@@ -536,12 +494,6 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
             std::fs::remove_dir_all(&path).ok();
         }
     }
-    for legacy in LEGACY_PLUGIN_FILES {
-        let path = install_dir.join(legacy);
-        if path.is_file() {
-            std::fs::remove_file(&path).ok();
-        }
-    }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -558,7 +510,7 @@ fn cursor_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
     let manifest = load_json_file(&install_dir.join(".cursor-plugin/plugin.json"));
     matches!(
         manifest.get("name").and_then(|v| v.as_str()),
-        Some("tracedecay" | "tokensave")
+        Some("tracedecay")
     )
 }
 
@@ -599,16 +551,13 @@ fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::
 fn legacy_mcp_has_tracedecay(mcp_path: &Path) -> bool {
     load_json_file(mcp_path)
         .get("mcpServers")
-        .is_some_and(|servers| {
-            servers.get("tracedecay").is_some() || servers.get("tokensave").is_some()
-        })
+        .is_some_and(|servers| servers.get("tracedecay").is_some())
 }
 
 fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
     legacy_mcp_has_tracedecay(&cursor_dir.join("mcp.json"))
         || legacy_hooks_have_tracedecay(&cursor_dir.join("hooks.json"))
         || legacy_rule_has_tracedecay(&cursor_dir.join("rules/tracedecay.mdc"))
-        || legacy_rule_has_tracedecay(&cursor_dir.join("rules/tokensave.mdc"))
 }
 
 /// Removes legacy PROJECT-local tracedecay artifacts. Pre-plugin versions of
@@ -624,10 +573,7 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
     let cursor_dir = project_path.join(".cursor");
     let mcp_path = cursor_dir.join("mcp.json");
     let hooks_path = cursor_dir.join("hooks.json");
-    let rule_paths = [
-        cursor_dir.join("rules/tracedecay.mdc"),
-        cursor_dir.join("rules/tokensave.mdc"),
-    ];
+    let rule_paths = [cursor_dir.join("rules/tracedecay.mdc")];
     let legacy_mcp = legacy_mcp_has_tracedecay(&mcp_path);
     let legacy_hooks = legacy_hooks_have_tracedecay(&hooks_path);
     let legacy_rule = rule_paths
@@ -737,9 +683,8 @@ fn uninstall_mcp_server(mcp_path: &Path) {
         return;
     };
 
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
             "  No tracedecay MCP server in {}, skipping",
             mcp_path.display()
@@ -802,7 +747,7 @@ fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
         );
     } else if backup_and_write_json(hooks_path, &hooks) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed legacy tokensave hooks from {}",
+            "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
             hooks_path.display()
         );
     }
@@ -816,7 +761,7 @@ fn remove_legacy_project_rule(rule_path: &Path) -> Result<()> {
     let contents = std::fs::read_to_string(rule_path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read {}: {e}", rule_path.display()),
     })?;
-    if contents.contains("tracedecay MCP tools") || contents.contains("tokensave MCP tools") {
+    if contents.contains("tracedecay MCP tools") {
         std::fs::remove_file(rule_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", rule_path.display()),
         })?;
@@ -912,6 +857,7 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("sessionEnd", "hook-cursor-session-end"),
         ("subagentStart", "hook-cursor-subagent-start"),
         ("postToolUse", "hook-cursor-post-tool-use"),
+        ("preCompact", "hook-cursor-pre-compact"),
         ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
         ("afterShellExecution", "hook-cursor-after-shell"),
@@ -1379,7 +1325,7 @@ mod tests {
         let mcp = load_json_file(&cursor_dir.join("mcp.json"));
         assert!(
             mcp["mcpServers"].get("tracedecay").is_none(),
-            "legacy tokensave MCP entry must be removed"
+            "legacy tracedecay MCP entry must be removed"
         );
         assert!(
             mcp["mcpServers"].get("other").is_some(),

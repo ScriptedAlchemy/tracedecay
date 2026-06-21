@@ -10,16 +10,17 @@ use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{discover_project_root, get_config_path, load_config};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::db::Database;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
     retrieve_response_handle, store_response_handle, ResponseHandleLookup,
 };
 use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::storage::{
-    profile_sharded_layout, project_local_layout, read_enrollment_marker, read_store_manifest,
-    resolve_layout, resolve_lcm_payload_root, resolve_project_session_db_path,
-    resolve_response_handle_root, write_store_manifest, ActiveProjectContext, EnrollmentMarker,
-    GraphScopeId, PrivateStoreIo, ProjectPath, StorageMode, StoreArtifactPath,
-    STORE_MANIFEST_FILENAME,
+    default_profile_project_id, default_profile_sharded_layout, profile_sharded_layout,
+    read_enrollment_marker, read_store_manifest, resolve_layout, resolve_lcm_payload_root,
+    resolve_project_session_db_path, resolve_response_handle_root, write_store_manifest,
+    ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath, StorageMode,
+    StoreArtifactPath, STORE_MANIFEST_FILENAME,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -36,8 +37,10 @@ impl HomeGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
+        fs::create_dir_all(home).unwrap();
+        let home = canonical_temp_path(home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
         Self {
             previous_home,
@@ -82,6 +85,12 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     {
         path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
     }
+}
+
+fn test_home(dir: &TempDir) -> PathBuf {
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    canonical_temp_path(&home)
 }
 
 #[test]
@@ -165,23 +174,6 @@ fn project_local_marker_without_graph_db_is_not_initialized() {
 
     assert_eq!(discover_project_root(root), None);
     assert!(!TraceDecay::is_initialized(root));
-}
-
-#[test]
-fn tracedecay_marker_directory_does_not_hide_legacy_project_db() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    fs::write(
-        root.join(".tracedecay/enrollment.json"),
-        r#"{"project_id":"proj_local","storage_mode":"project_local"}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(root.join(".tokensave")).unwrap();
-    fs::write(root.join(".tokensave/tokensave.db"), b"legacy").unwrap();
-
-    assert_eq!(discover_project_root(root), Some(root.to_path_buf()));
-    assert!(TraceDecay::is_initialized(root));
 }
 
 #[test]
@@ -296,19 +288,28 @@ fn store_manifest_write_rejects_symlinked_parent_components() {
 }
 
 #[test]
-fn resolve_layout_uses_project_local_paths_without_profile_marker() {
+fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let profile = dir.path().join("profile");
-    fs::create_dir_all(root.join(".tracedecay")).unwrap();
+    fs::create_dir_all(&root).unwrap();
 
     let layout = resolve_layout(&root, &profile).unwrap();
-    let local = project_local_layout(&root);
+    let project_id = default_profile_project_id(&root);
 
-    assert_eq!(layout.storage_mode, StorageMode::ProjectLocal);
-    assert_eq!(layout.data_root, root.join(".tracedecay"));
-    assert_eq!(layout.graph_db_path, root.join(".tracedecay/tracedecay.db"));
-    assert_eq!(layout, local);
+    assert_eq!(layout.storage_mode, StorageMode::ProfileSharded);
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(project_id.as_str())
+    );
+    assert_eq!(
+        layout.data_root,
+        profile.join(format!("projects/{project_id}"))
+    );
+    assert_eq!(
+        layout.graph_db_path,
+        profile.join(format!("projects/{project_id}/tracedecay.db"))
+    );
 }
 
 #[tokio::test]
@@ -316,7 +317,7 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
-    let home = dir.path().join("home");
+    let home = test_home(&dir);
     let shard_root = home.join(".tracedecay/projects/proj_123");
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
     fs::create_dir_all(&shard_root).unwrap();
@@ -349,15 +350,20 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     );
 }
 
-#[test]
-fn project_local_config_path_is_unchanged_without_enrollment() {
+#[tokio::test]
+async fn config_path_defaults_to_profile_shard_without_enrollment() {
+    let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    let project_id = default_profile_project_id(&project);
 
     assert_eq!(
         get_config_path(&project),
-        project.join(".tracedecay/config.json")
+        profile_root.join(format!("projects/{project_id}/config.json"))
     );
 }
 
@@ -366,7 +372,8 @@ fn active_project_context_keeps_layout_and_scope_identity() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
-    let layout = project_local_layout(&root);
+    let profile = dir.path().join("profile");
+    let layout = default_profile_sharded_layout(&root, &profile).unwrap();
 
     let context = ActiveProjectContext::new(layout.clone(), GraphScopeId::Project);
 
@@ -374,7 +381,10 @@ fn active_project_context_keeps_layout_and_scope_identity() {
     assert_eq!(context.scope_id, GraphScopeId::Project);
     assert_eq!(
         context.query_target.graph_db_path,
-        root.join(".tracedecay/tracedecay.db")
+        profile.join(format!(
+            "projects/{}/tracedecay.db",
+            default_profile_project_id(&root)
+        ))
     );
 }
 
@@ -523,7 +533,7 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
-    let home = dir.path().join("home");
+    let home = test_home(&dir);
     let profile_root = home.join(".tracedecay");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -548,30 +558,91 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
 }
 
 #[tokio::test]
-async fn resolved_project_store_helpers_preserve_repo_local_artifact_paths() {
+async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_paths() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
-    let home = dir.path().join("home");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeGuard::set(&home);
+    let project_id = default_profile_project_id(&project);
 
     assert_eq!(
         resolve_project_session_db_path(&project).unwrap(),
-        project.join(".tracedecay/sessions.db")
-    );
-    assert_eq!(
-        resolve_response_handle_root(&project).unwrap(),
-        project.join(".tracedecay/response-handles")
-    );
-    assert_eq!(
-        resolve_lcm_payload_root(&project).unwrap(),
-        project.join(".tracedecay/lcm-payloads")
+        profile_root.join(format!("projects/{project_id}/sessions.db"))
     );
     assert_eq!(
         project_session_db_path(&project),
-        project.join(".tracedecay/sessions.db")
+        profile_root.join(format!("projects/{project_id}/sessions.db"))
     );
+}
+
+#[tokio::test]
+async fn hermes_profile_home_session_path_wins_over_default_profile_shard() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let hermes_home = dir.path().join(".hermes");
+    let home = test_home(&dir);
+    fs::create_dir_all(&hermes_home).unwrap();
+    fs::write(
+        hermes_home.join("config.yaml"),
+        "memory:\n  provider: tracedecay\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+
+    let expected = hermes_home.join(".tracedecay/sessions.db");
+    assert_eq!(project_session_db_path(&hermes_home), expected);
+    assert_eq!(
+        tracedecay::sessions::cursor::resolved_project_session_db_path(&hermes_home)
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn trace_decay_init_defaults_to_profile_shard_without_repo_marker() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let child = project.join("src");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(&child).unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    let project_id = default_profile_project_id(&project);
+    let shard_root = profile_root.join(format!("projects/{project_id}"));
+
+    assert!(!TraceDecay::is_initialized(&project));
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+
+    assert_eq!(cg.store_layout().storage_mode, StorageMode::ProfileSharded);
+    assert_eq!(cg.store_layout().data_root, shard_root);
+    assert_eq!(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_eq!(discover_project_root(&child), Some(project.clone()));
+    assert!(!project.join(".tracedecay").exists());
+    assert!(shard_root.join("config.json").exists());
+    assert!(shard_root.join(STORE_MANIFEST_FILENAME).exists());
+}
+
+#[tokio::test]
+async fn trace_decay_init_registers_default_profile_shard_globally() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    fs::create_dir_all(&project).unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    let project_id = default_profile_project_id(&project);
+
+    TraceDecay::init(&project).await.unwrap();
+    let db = GlobalDb::open().await.unwrap();
+    let resolution = db.resolve_project_store_by_alias(&project).await.unwrap();
+
+    assert_eq!(resolution.project.project_id, project_id);
 }
 
 #[tokio::test]
@@ -579,7 +650,7 @@ async fn response_handles_route_to_profile_shard_when_enrolled() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
-    let home = dir.path().join("home");
+    let home = test_home(&dir);
     let shard_root = home.join(".tracedecay/projects/proj_123");
     fs::create_dir_all(&project).unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -603,7 +674,7 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
-    let home = dir.path().join("home");
+    let home = test_home(&dir);
     let profile_root = home.join(".tracedecay");
     let shard_root = profile_root.join("projects/proj_123");
     fs::create_dir_all(project.join(".tracedecay")).unwrap();

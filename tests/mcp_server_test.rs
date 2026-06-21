@@ -1974,14 +1974,10 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let mut env = vec![EnvVarGuard::set("HOME", tmp_home.path().as_os_str())];
     #[cfg(target_os = "windows")]
     env.push(EnvVarGuard::set("USERPROFILE", tmp_home.path().as_os_str()));
-    // Simulate a real (non-cargo) launch: neither the legacy opt-in nor the
+    // Simulate a real (non-cargo) launch: neither the opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
-    // Legacy `TOKENSAVE_*` spellings are still honored at runtime (and
-    // `.cargo/config.toml` injects the legacy opt-out), so clear both.
     env.push(EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB"));
     env.push(EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB"));
-    env.push(EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB"));
-    env.push(EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB"));
     assert!(tracedecay::global_db::global_accounting_enabled());
 
     let (server, proj_tmp) = setup_server().await;
@@ -2021,12 +2017,8 @@ fn global_accounting_env_overrides() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     use tracedecay::global_db::{global_accounting_mode, AccountingMode};
 
-    // Clear the legacy `TOKENSAVE_*` spellings too: they remain honored as a
-    // runtime fallback, and `.cargo/config.toml` injects the legacy opt-out.
     let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
     let _clear_disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
-    let _clear_legacy_enable = EnvVarGuard::unset("TOKENSAVE_ENABLE_GLOBAL_DB");
-    let _clear_legacy_disable = EnvVarGuard::unset("TOKENSAVE_DISABLE_GLOBAL_DB");
     assert_eq!(global_accounting_mode(), AccountingMode::Default);
     assert!(global_accounting_mode().enabled());
 

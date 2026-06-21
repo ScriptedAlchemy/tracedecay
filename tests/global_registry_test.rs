@@ -96,6 +96,23 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
 }
 
 #[tokio::test]
+async fn upsert_preserves_highest_known_tokens_saved() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+
+    db.upsert(&project, 12_007_312).await;
+    db.upsert(&project.join("."), 0).await;
+    assert_eq!(db.get_project_tokens(&project).await, 12_007_312);
+
+    db.upsert(&project, 12_100_000).await;
+    assert_eq!(db.get_project_tokens(&project).await, 12_100_000);
+}
+
+#[tokio::test]
 async fn open_at_creates_registry_tables_and_round_trips_registry_records() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();

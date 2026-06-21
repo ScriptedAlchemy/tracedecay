@@ -1,3 +1,6 @@
+mod common;
+
+use common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use tracedecay::hooks::{
     build_cursor_session_context, codex_additional_context_json, codex_apply_patch_rel_paths,
     codex_project_root_from_event, cursor_branch_switch_target, cursor_project_root_from_event,
@@ -5,6 +8,9 @@ use tracedecay::hooks::{
     cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_post_tool_use,
     evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
     is_git_state_changing_command, CursorShellSyncPlan,
+};
+use tracedecay::storage::{
+    resolve_layout_for_current_profile, write_enrollment_marker, EnrollmentMarker, StorageMode,
 };
 
 fn is_blocked(json: &str) -> bool {
@@ -359,9 +365,29 @@ fn test_cursor_post_tool_use_hints_for_single_file_read() {
 #[test]
 fn test_cursor_post_tool_use_dedupes_hints_per_session() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
-    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
-    let root = serde_json::to_string(dir.path().to_str().unwrap()).unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let project_root = dir.path().canonicalize().unwrap();
+    let profile_root = project_root.join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile_root),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile_root.join("global.db")),
+        EnvVarGuard::set("HOME", project_root.join("home")),
+        EnvVarGuard::set("USERPROFILE", project_root.join("home")),
+    ];
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_hooks_dedupe".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    std::fs::write(&layout.graph_db_path, "").unwrap();
+    let root = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
     let grep_event = format!(
         r#"{{
             "hook_event_name": "postToolUse",
@@ -402,8 +428,8 @@ fn test_cursor_post_tool_use_dedupes_hints_per_session() {
     );
 
     assert!(
-        dir.path().join(".tracedecay/tool_hints_seen.json").exists(),
-        "dedupe state must be persisted under .tracedecay/"
+        layout.data_root.join("tool_hints_seen.json").exists(),
+        "dedupe state must be persisted under the profile project shard"
     );
 }
 

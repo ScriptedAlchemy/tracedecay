@@ -874,7 +874,12 @@ mod tests {
     #[test]
     fn test_truncated_json_envelope_reports_store_failure() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join(".tracedecay"), "not-a-directory").unwrap();
+        std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+        std::fs::write(
+            dir.path().join(".tracedecay/enrollment.json"),
+            r#"{"project_id":"../invalid","storage_mode":"profile_sharded"}"#,
+        )
+        .unwrap();
         let long = format!(
             "{{\"items\":[{}]}}",
             (0..3_000)

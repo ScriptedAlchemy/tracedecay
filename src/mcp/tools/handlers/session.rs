@@ -114,19 +114,6 @@ fn compact_lcm_preflight_payload(
     Value::Object(object)
 }
 
-fn lcm_compress_tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
-    let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
-    let text = if formatted.len() <= MAX_RESPONSE_CHARS {
-        formatted
-    } else {
-        truncated_json_envelope_with_handle(project_root, &formatted)
-    };
-    ToolResult {
-        value: json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files: Vec::new(),
-    }
-}
-
 fn compact_messages_for_mcp(
     value: Option<&Value>,
     limit: usize,
@@ -910,7 +897,7 @@ fn lcm_unavailable() -> ToolResult {
         None,
         &json!({
             "status": "unavailable",
-            "message": "could not open project-local tracedecay session database",
+            "message": "could not open active project tracedecay session database",
         }),
     )
 }
@@ -947,7 +934,7 @@ fn lcm_storage_scope_unavailable(storage_scope: &str) -> ToolResult {
     lcm_scoped_unavailable(
         storage_scope,
         format!(
-            "{storage_scope} LCM status storage is not available from the project-local handler"
+            "{storage_scope} LCM status storage is not available from the active project handler"
         ),
     )
 }
@@ -1099,7 +1086,11 @@ async fn open_lcm_storage(
             let Some(project_root) = project_root else {
                 return LcmStorageResolution::Unavailable(project_local_storage_without_project());
             };
-            let db_path = crate::sessions::cursor::project_session_db_path(project_root);
+            let Some(db_path) =
+                crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+            else {
+                return LcmStorageResolution::Unavailable(project_local_storage_without_project());
+            };
             let db = match mode {
                 LcmOpenMode::Writable => open_session_db_with_cached_ensure(&db_path).await,
                 LcmOpenMode::ReadOnlyExisting => GlobalDb::open_read_only_at(&db_path).await,
@@ -1328,13 +1319,25 @@ pub(super) async fn handle_message_search(cg: &TraceDecay, args: Value) -> Resul
         .unwrap_or(10)
         .clamp(1, 50) as usize;
 
-    let db_path = crate::sessions::cursor::project_session_db_path(cg.project_root());
+    let Some(db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(cg.project_root()).await
+    else {
+        return Ok(tool_json(
+            Some(cg.project_root()),
+            &json!({
+                "status": "unavailable",
+                "message": "could not resolve active project tracedecay session database",
+                "results": [],
+                "count": 0
+            }),
+        ));
+    };
     let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
         return Ok(tool_json(
             Some(cg.project_root()),
             &json!({
                 "status": "unavailable",
-                "message": "could not open project-local tracedecay session database",
+                "message": "could not open active project tracedecay session database",
                 "results": [],
                 "count": 0
             }),
@@ -1807,7 +1810,7 @@ pub(super) async fn handle_lcm_compress(
         })
         .await
         .map_err(lcm_error)?;
-    Ok(lcm_compress_tool_json(
+    Ok(tool_json(
         response_handle_root.as_deref(),
         &json!({
             "status": response.status,

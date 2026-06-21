@@ -17,7 +17,6 @@ use super::{
 };
 
 const PROMPT_RULE_MARKER: &str = "## Prefer tracedecay MCP tools";
-const LEGACY_PROMPT_RULE_MARKER: &str = "## Prefer tokensave MCP tools";
 
 /// GitHub Copilot agent.
 pub struct CopilotIntegration;
@@ -135,7 +134,6 @@ impl AgentIntegration for CopilotIntegration {
             let json = load_jsonc_file(&vscode_settings_path);
             let servers = json.get("mcp").and_then(|v| v.get("servers"));
             servers.and_then(|v| v.get("tracedecay")).is_some()
-                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
@@ -144,7 +142,6 @@ impl AgentIntegration for CopilotIntegration {
             let json = load_jsonc_file(&insiders_settings_path);
             let servers = json.get("mcp").and_then(|v| v.get("servers"));
             servers.and_then(|v| v.get("tracedecay")).is_some()
-                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
@@ -153,7 +150,6 @@ impl AgentIntegration for CopilotIntegration {
             let json = load_json_file(&cli_settings_path);
             let servers = json.get("mcpServers");
             servers.and_then(|v| v.get("tracedecay")).is_some()
-                || servers.and_then(|v| v.get("tokensave")).is_some()
         } else {
             false
         };
@@ -267,22 +263,19 @@ fn uninstall_vscode_mcp_server(settings_path: &Path) {
 
     let mut settings = load_jsonc_file(settings_path);
 
-    // Remove both new and legacy server keys.
     let removed = if let Some(map) = settings
         .get_mut("mcp")
         .and_then(|mcp| mcp.get_mut("servers"))
         .and_then(|servers| servers.as_object_mut())
     {
-        let removed_new = map.remove("tracedecay").is_some();
-        let removed_legacy = map.remove("tokensave").is_some();
-        removed_new || removed_legacy
+        map.remove("tracedecay").is_some()
     } else {
         false
     };
 
     if !removed {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -312,7 +305,7 @@ fn uninstall_vscode_mcp_server(settings_path: &Path) {
     // backup_and_write_json leaves a .bak so any mistake is recoverable (issue #63).
     if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             settings_path.display()
         );
     }
@@ -335,11 +328,10 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
     else {
         return;
     };
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
-            "  No tracedecay/tokensave MCP server in {}, skipping",
+            "  No tracedecay MCP server in {}, skipping",
             settings_path.display()
         );
         return;
@@ -356,7 +348,7 @@ fn uninstall_cli_mcp_server(settings_path: &Path) {
         );
     } else if backup_and_write_json(settings_path, &settings) {
         eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay/tokensave MCP server from {}",
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             settings_path.display()
         );
     }
@@ -434,14 +426,10 @@ fn uninstall_prompt_rules(instructions_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(instructions_path) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         return;
     }
-    let marker = if contents.contains(PROMPT_RULE_MARKER) {
-        PROMPT_RULE_MARKER
-    } else {
-        LEGACY_PROMPT_RULE_MARKER
-    };
+    let marker = PROMPT_RULE_MARKER;
     let Some(start) = contents.find(marker) else {
         return;
     };

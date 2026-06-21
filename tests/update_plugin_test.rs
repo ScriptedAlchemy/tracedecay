@@ -40,6 +40,12 @@ fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
     }
 }
 
+fn ctx_with_project(home: &Path, tracedecay_bin: &str, project_root: &Path) -> InstallContext {
+    let mut ctx = ctx(home, tracedecay_bin);
+    ctx.project_root = Some(project_root.to_path_buf());
+    ctx
+}
+
 fn bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
@@ -240,6 +246,7 @@ fn cursor_update_plugin_reports_not_installed_without_a_bundle() {
 #[test]
 fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
     let codex = get_integration("codex").unwrap();
     codex.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
@@ -250,7 +257,9 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
     std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
     let config_before = bytes(&codex_config);
 
-    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
     let UpdatePluginOutcome::Refreshed(paths) = outcome else {
         panic!("expected codex update_plugin to refresh the bundle");
     };
@@ -264,8 +273,105 @@ fn codex_update_plugin_refreshes_bundle_without_touching_config() {
 }
 
 #[test]
+fn codex_update_plugin_refreshes_cache_and_removes_bootstrap_source() {
+    let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
+    let cached_plugin_dir = home
+        .path()
+        .join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"));
+    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+
+    let bootstrap_dir = home.path().join("plugins/tracedecay");
+    std::fs::create_dir_all(bootstrap_dir.join(".codex-plugin")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join(".codex-plugin/plugin.json"),
+        r#"{"name":"tracedecay","version":"0.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(bootstrap_dir.join("skills/stale-skill")).unwrap();
+    std::fs::write(
+        bootstrap_dir.join("skills/stale-skill/SKILL.md"),
+        "---\nname: tracedecay:stale-skill\n---\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.path().join(".agents/plugins")).unwrap();
+    std::fs::write(
+        home.path().join(".agents/plugins/marketplace.json"),
+        r#"{"interface":{"displayName":"Personal"},"name":"personal","plugins":[{"name":"tracedecay","source":{"source":"local","path":"./plugins/tracedecay"}}]}"#,
+    )
+    .unwrap();
+
+    let codex = get_integration("codex").unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the installed cache");
+    };
+    assert_eq!(paths, vec![cached_plugin_dir.clone()]);
+
+    assert!(text(&cached_plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&cached_plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert!(!bootstrap_dir.exists());
+
+    let marketplace = text(&home.path().join(".agents/plugins/marketplace.json"));
+    assert!(!marketplace.contains(r#""name": "tracedecay""#));
+    assert!(!marketplace.contains(r#""name":"tracedecay""#));
+}
+
+#[test]
+fn codex_update_plugin_refreshes_repo_local_bundle_from_project_root() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    codex
+        .install_local(&ctx(home.path(), OLD_BIN), project.path())
+        .unwrap();
+    let plugin_dir = project.path().join("plugins/tracedecay");
+    std::fs::write(plugin_dir.join("user-note.txt"), "mine\n").unwrap();
+
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, project.path()))
+        .unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected codex update_plugin to refresh the repo-local bundle");
+    };
+
+    assert_eq!(paths, vec![plugin_dir.clone()]);
+    assert_eq!(text(&plugin_dir.join("user-note.txt")), "mine\n");
+    assert!(text(&plugin_dir.join(".mcp.json")).contains(NEW_BIN));
+    assert!(text(&plugin_dir.join("hooks/hooks.json")).contains(NEW_BIN));
+    assert!(text(&plugin_dir.join(".codex-plugin/plugin.json")).contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn codex_uninstall_removes_repo_local_bundle_from_project_root() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let codex = get_integration("codex").unwrap();
+    let install_ctx = ctx_with_project(home.path(), OLD_BIN, project.path());
+    codex.install_local(&install_ctx, project.path()).unwrap();
+    let plugin_dir = project.path().join("plugins/tracedecay");
+    let marketplace = project.path().join(".agents/plugins/marketplace.json");
+    assert!(plugin_dir.exists());
+
+    codex.uninstall(&install_ctx).unwrap();
+
+    assert!(!plugin_dir.exists());
+    assert!(!text(&marketplace).contains(r#""name":"tracedecay""#));
+    assert!(!text(&marketplace).contains(r#""name": "tracedecay""#));
+}
+
+#[test]
 fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
     let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
     let codex_dir = home.path().join(".codex");
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
@@ -276,7 +382,9 @@ fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
     let before = bytes(&codex_dir.join("config.toml"));
 
     let codex = get_integration("codex").unwrap();
-    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::ConfigOnly));
     assert_eq!(bytes(&codex_dir.join("config.toml")), before);
     assert!(!home.path().join("plugins/tracedecay").exists());
@@ -285,9 +393,12 @@ fn codex_update_plugin_reports_config_only_for_legacy_config_only_install() {
 #[test]
 fn codex_update_plugin_reports_not_installed_without_bundle_or_legacy_config() {
     let home = TempDir::new().unwrap();
+    let project_root = home.path().join("workspace");
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
     let codex = get_integration("codex").unwrap();
-    let outcome = codex.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let outcome = codex
+        .update_plugin(&ctx_with_project(home.path(), NEW_BIN, &project_root))
+        .unwrap();
     assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
     assert!(!home.path().join("plugins").exists());
 }

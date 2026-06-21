@@ -25,6 +25,12 @@
         "timeout": 5
       }
     ],
+    "preCompact": [
+      {
+        "command": "tracedecay hook-cursor-pre-compact",
+        "timeout": 120
+      }
+    ],
     "beforeSubmitPrompt": [
       {
         "command": "tracedecay hook-cursor-before-submit-prompt",

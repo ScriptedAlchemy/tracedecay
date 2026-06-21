@@ -75,12 +75,6 @@ fn make_project_store(root: &Path) {
     fs::write(data_dir.join("tracedecay.db"), b"not sqlite").unwrap();
 }
 
-fn make_legacy_store(root: &Path) {
-    let data_dir = root.join(".tokensave");
-    fs::create_dir_all(&data_dir).unwrap();
-    fs::write(data_dir.join("tokensave.db"), b"legacy sqlite placeholder").unwrap();
-}
-
 fn single_ok_inventory(project: &Path, data_dir: &Path, graph_db: &Path) -> MigrationInventory {
     MigrationInventory {
         stores: vec![StoreInventory {
@@ -250,31 +244,6 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
         .expect("project store should be inventoried");
     assert!(store.statuses.contains(&StoreStatus::Dirty));
     assert!(store.statuses.contains(&StoreStatus::Corrupt));
-}
-
-#[tokio::test]
-async fn inventory_discovers_legacy_tokensave_store() {
-    let dir = TempDir::new().unwrap();
-    let legacy = dir.path().join("legacy");
-    fs::create_dir_all(&legacy).unwrap();
-    make_legacy_store(&legacy);
-
-    let report = build_inventory(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
-    .await
-    .unwrap();
-
-    let store = report
-        .stores
-        .iter()
-        .find(|store| store.project_root == legacy)
-        .expect("legacy store should be inventoried");
-    assert_eq!(store.brand, StoreBrand::LegacyTokensave);
-    assert_eq!(store.role, StoreRole::CodeProjectStore);
-    assert_eq!(store.registry_status, RegistryStatus::Unregistered);
-    assert_eq!(store.db_path, legacy.join(".tokensave/tokensave.db"));
 }
 
 #[tokio::test]
@@ -603,12 +572,12 @@ fn inventory_discovers_hermes_home_profiles_and_state_dbs() {
     let hermes_home = dir.path().join("custom-hermes");
     let default_store = hermes_home.join(".tracedecay");
     let work_profile = hermes_home.join("profiles/work");
-    let work_store = work_profile.join(".tokensave");
+    let work_store = work_profile.join(".tracedecay");
     fs::create_dir_all(&default_store).unwrap();
     fs::create_dir_all(&work_store).unwrap();
     fs::write(default_store.join("tracedecay.db"), b"not sqlite").unwrap();
     fs::write(hermes_home.join("state.db"), b"not sqlite").unwrap();
-    fs::write(work_store.join("tokensave.db"), b"not sqlite").unwrap();
+    fs::write(work_store.join("tracedecay.db"), b"not sqlite").unwrap();
     fs::write(work_profile.join("state.db"), b"not sqlite").unwrap();
 
     let report = with_env_vars(&[("HERMES_HOME", Some(&hermes_home))], || {
@@ -631,9 +600,9 @@ fn inventory_discovers_hermes_home_profiles_and_state_dbs() {
         .stores
         .iter()
         .find(|store| store.data_dir == work_store)
-        .expect("named Hermes profile legacy store should be inventoried");
+        .expect("named Hermes profile store should be inventoried");
     assert_eq!(work.role, StoreRole::HermesProfileStore);
-    assert_eq!(work.brand, StoreBrand::LegacyTokensave);
+    assert_eq!(work.brand, StoreBrand::TraceDecay);
 
     assert!(report.stores.iter().any(|store| {
         store.role == StoreRole::HermesStateDbSource

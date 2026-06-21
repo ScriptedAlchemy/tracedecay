@@ -11,6 +11,7 @@ use common::{
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::branch;
+use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
@@ -30,7 +31,9 @@ otherwise assume the integration is broken when the store simply has no rows yet
 struct DashboardFixture {
     _tmp: TempDir,
     _env_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
     base_url: String,
+    project_root: std::path::PathBuf,
     project_db_path: std::path::PathBuf,
     server: tokio::task::JoinHandle<()>,
 }
@@ -359,9 +362,15 @@ fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) 
 
 async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     let tmp = tempdir_or_panic();
-    let project_root = tmp.path().join("project");
+    let tmp_root = tmp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+    let project_root = tmp_root.join("project");
     let global_db_path = tmp.path().join("global").join("global.db");
+    let profile_root = tmp_root.join("profile").join(".tracedecay");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
     let cg = setup_project(&project_root).await;
     seed_memory_fixture(&cg).await;
@@ -380,7 +389,7 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let project_db_path = project_root.join(".tracedecay").join("tracedecay.db");
+    let project_db_path = cg.store_layout().graph_db_path.clone();
     let server = tokio::spawn(async move {
         let _ = dashboard::run(&cg, "127.0.0.1", port, false).await;
     });
@@ -391,7 +400,9 @@ async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
     DashboardFixture {
         _tmp: tmp,
         _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
         base_url,
+        project_root,
         project_db_path,
         server,
     }
@@ -631,13 +642,7 @@ fn dashboard_memory_repairs_vectors_and_invalidates_similarity_cache() {
         clear_fact_vector_without_touching_updated_at(&fixture, 103).await;
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
-        let project_root = fixture
-            .project_db_path
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| panic!("fixture DB path should be under .tracedecay"))
-            .to_path_buf();
-        let cg = match TraceDecay::open(&project_root).await {
+        let cg = match TraceDecay::open(&fixture.project_root).await {
             Ok(cg) => cg,
             Err(err) => panic!("failed to reopen fixture project: {err}"),
         };
@@ -706,9 +711,7 @@ fn dashboard_reports_resolved_branch_db_path() {
         };
         let expected = cg.db_path().display().to_string();
         assert!(
-            expected
-                .replace('\\', "/")
-                .contains(".tracedecay/branches/"),
+            expected.replace('\\', "/").contains("/branches/"),
             "fixture should serve a branch DB path, got {expected}"
         );
 
@@ -1960,10 +1963,20 @@ fn lcm_serves_project_session_store_without_global_override() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let project_root = tmp.path().join("project");
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::unset(GLOBAL_DB_ENV);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let cg = setup_project(&project_root).await;
+        let expected_session_db =
+            tracedecay::sessions::cursor::project_session_db_path(&project_root)
+                .display()
+                .to_string();
         let session_store = open_project_session_store(&project_root).await;
         seed_lcm_fixture(&session_store, &project_root).await;
         drop(session_store);
@@ -1984,12 +1997,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         let lcm_db = capabilities["lcm_db"]
             .as_str()
             .unwrap_or_else(|| panic!("expected capabilities.lcm_db string"));
-        assert!(
-            lcm_db
-                .replace('\\', "/")
-                .ends_with(".tracedecay/sessions.db"),
-            "capabilities.lcm_db should be the project session store, got {lcm_db}"
-        );
+        assert_eq!(lcm_db, expected_session_db);
 
         let (status, overview) = get_json(
             &agent,
@@ -2004,10 +2012,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         let path = overview["path"]
             .as_str()
             .unwrap_or_else(|| panic!("expected overview.path string"));
-        assert!(
-            path.replace('\\', "/").ends_with(".tracedecay/sessions.db"),
-            "overview.path should be the project session store, got {path}"
-        );
+        assert_eq!(path, expected_session_db);
 
         let (status, search) = get_json(
             &agent,
@@ -2038,9 +2043,15 @@ fn lcm_global_override_wins_over_project_store() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let project_root = tmp.path().join("project");
-        let global_db_path = tmp.path().join("global").join("global.db");
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let cg = setup_project(&project_root).await;
         // The project store has rows; the overridden global store has none.
@@ -2093,9 +2104,15 @@ fn curation_preview_persists_across_dashboard_restarts() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let project_root = tmp.path().join("project");
-        let global_db_path = tmp.path().join("global").join("global.db");
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let cg = setup_project(&project_root).await;
         seed_memory_fixture(&cg).await;

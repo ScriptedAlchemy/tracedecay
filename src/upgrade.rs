@@ -18,7 +18,7 @@ const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 // whose CI hasn't finished uploading the current platform's binary yet.
 use crate::cloud::asset_name_candidates;
 #[cfg(test)]
-use crate::cloud::{asset_name, current_platform, legacy_asset_name};
+use crate::cloud::{asset_name, current_platform};
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {
@@ -32,8 +32,7 @@ fn io_err(msg: &str) -> impl Fn(std::io::Error) -> TraceDecayError + '_ {
 }
 
 /// Fetches the `browser_download_url` for the first matching asset name in a
-/// GitHub release. Candidates are probed in order, so the post-rebrand
-/// `tracedecay-v*` name wins over the legacy `tokensave-v*` fallback.
+/// GitHub release.
 fn fetch_asset_url(tag: &str, candidates: &[String]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Asset {
@@ -525,7 +524,7 @@ fn replace_for_scoop(new_exe: &Path, _new_version: &str) -> Result<()> {
 fn preflight_asset_check(version: &str, is_beta: bool) -> Result<String> {
     let tag = release_tag(version);
     let candidates = asset_name_candidates(version, is_beta);
-    let [primary_candidate, _legacy_candidate] = &candidates;
+    let [primary_candidate] = &candidates;
     eprintln!("  Asset: {primary_candidate}");
     fetch_asset_url(&tag, &candidates)
 }
@@ -551,12 +550,10 @@ fn record_previous_version() {
 }
 
 fn perform_upgrade(version: &str, asset_url: &str, method: &InstallMethod) -> Result<()> {
-    // Post-rebrand archives ship a `tracedecay` binary; legacy archives a
-    // `tokensave` one. Probe new name first.
     let bin_names: &[&str] = if cfg!(windows) {
-        &["tracedecay.exe", "tokensave.exe"]
+        &["tracedecay.exe"]
     } else {
-        &["tracedecay", "tokensave"]
+        &["tracedecay"]
     };
 
     let tmp = download_and_extract(asset_url, bin_names)?;
@@ -741,18 +738,9 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_asset_name_keeps_tokensave_prefix() {
-        let stable = legacy_asset_name("3.3.3", false);
-        assert!(stable.starts_with("tokensave-v3.3.3-"));
-        let beta = legacy_asset_name("4.0.2-beta.1", true);
-        assert!(beta.starts_with("tokensave-beta-v4.0.2-beta.1-"));
-    }
-
-    #[test]
-    fn test_asset_name_candidates_probe_new_then_legacy() {
+    fn test_asset_name_candidates_use_current_name() {
         let candidates = asset_name_candidates("3.3.3", false);
         assert!(candidates[0].starts_with("tracedecay-v3.3.3-"));
-        assert!(candidates[1].starts_with("tokensave-v3.3.3-"));
     }
 
     #[test]

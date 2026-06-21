@@ -15,7 +15,7 @@ pub mod python;
 pub mod rust;
 pub mod typescript;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -93,4 +93,16 @@ pub async fn run_all(project_root: &Path, scope: &Scope) -> Result<Vec<Diagnosti
         all.append(&mut diags);
     }
     Ok(all)
+}
+
+fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
+    let abs = if Path::new(file_name).is_absolute() {
+        PathBuf::from(file_name)
+    } else {
+        project_root.join(file_name)
+    };
+    if let Ok(rel) = abs.strip_prefix(project_root) {
+        return rel.to_string_lossy().to_string();
+    }
+    file_name.to_string()
 }

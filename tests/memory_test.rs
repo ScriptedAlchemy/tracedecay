@@ -119,8 +119,9 @@ async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
 }
 
 async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
-    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
-    let (db, _) = Database::open(&db_path).await.unwrap();
+    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+        .await
+        .unwrap();
     db.conn()
         .execute(
             "UPDATE memory_facts
@@ -134,8 +135,9 @@ async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
 }
 
 async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
-    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
-    let (db, _) = Database::open(&db_path).await.unwrap();
+    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+        .await
+        .unwrap();
     db.conn()
         .execute(
             "UPDATE memory_facts SET updated_at = ?2 WHERE fact_id = ?1",
@@ -147,8 +149,9 @@ async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
 }
 
 async fn fact_updated_at(cg: &TraceDecay, fact_id: i64) -> i64 {
-    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
-    let (db, _) = Database::open(&db_path).await.unwrap();
+    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+        .await
+        .unwrap();
     let mut rows = db
         .conn()
         .query(

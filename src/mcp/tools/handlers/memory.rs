@@ -5,6 +5,9 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::retrieval::FactRetriever;
+use crate::memory::store::MemoryStore;
+use crate::memory::trust::DEFAULT_TRUST;
 use crate::memory::types::{
     AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory, SearchFactsRequest,
     UpdateFactRequest,
@@ -13,6 +16,9 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::truncated_json_envelope_with_handle;
+
+const DEFAULT_FACT_LIMIT: usize = 20;
+const MAX_FACT_LIMIT: usize = 200;
 
 fn tool_json(project_root: Option<&Path>, value: &Value) -> ToolResult {
     let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
@@ -45,7 +51,9 @@ fn optional_category(args: &Value) -> Result<Option<MemoryCategory>> {
 fn limit(args: &Value) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)
-        .map_or(20, |n| (n as usize).clamp(1, 200))
+        .map_or(DEFAULT_FACT_LIMIT, |n| {
+            (n as usize).clamp(1, MAX_FACT_LIMIT)
+        })
 }
 
 fn optional_f64(args: &Value, key: &str) -> Option<f64> {
@@ -134,6 +142,14 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
+fn fact_result_ids(results: &[crate::memory::types::FactSearchResult]) -> Vec<i64> {
+    results.iter().map(|result| result.fact.fact_id).collect()
+}
+
+fn fact_ids(facts: &[crate::memory::types::FactRecord]) -> Vec<i64> {
+    facts.iter().map(|fact| fact.fact_id).collect()
+}
+
 fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
     match err {
         TraceDecayError::Database { message, operation }
@@ -145,14 +161,14 @@ fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
     }
 }
 
-async fn update_trust(args: &Value, cg: &TraceDecay, fact_id: i64) -> Result<Option<f64>> {
+async fn update_trust(args: &Value, store: &MemoryStore<'_>, fact_id: i64) -> Result<Option<f64>> {
     if let Some(trust) = optional_f64(args, "trust") {
         return Ok(Some(trust));
     }
     let Some(delta) = optional_f64(args, "trust_delta") else {
         return Ok(None);
     };
-    let existing = cg
+    let existing = store
         .get_fact(fact_id)
         .await?
         .ok_or_else(|| config_error(format!("fact {fact_id} not found")))?;
@@ -161,21 +177,27 @@ async fn update_trust(args: &Value, cg: &TraceDecay, fact_id: i64) -> Result<Opt
 
 pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
+    let db = cg.open_project_store_db().await?;
+    let conn = db.conn();
+    let store = MemoryStore::new(conn);
     let out = match action {
         "add" => {
-            let outcome = cg
-                .add_fact(AddFactRequest {
-                    content: required_str(&args, "content")?.to_string(),
-                    category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
-                    source: args
-                        .get("source")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    tags: string_array(&args, "tags"),
-                    entities: request_entities(&args),
-                    trust: optional_f64(&args, "trust"),
-                    metadata: metadata_with_tags(&args),
-                })
+            let outcome = store
+                .add_fact(
+                    AddFactRequest {
+                        content: required_str(&args, "content")?.to_string(),
+                        category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
+                        source: args
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        tags: string_array(&args, "tags"),
+                        entities: request_entities(&args),
+                        trust: optional_f64(&args, "trust"),
+                        metadata: metadata_with_tags(&args),
+                    },
+                    DEFAULT_TRUST,
+                )
                 .await?;
             // Additive write-time diff report fields, so writers SEE
             // near-duplicates, possible conflicts, and secret rejections.
@@ -191,73 +213,123 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
             })
         }
         "search" => {
-            let facts = cg
-                .search_facts(SearchFactsRequest {
-                    query: required_str(&args, "query")?.to_string(),
-                    category: optional_category(&args)?,
-                    limit: Some(limit(&args)),
-                    min_trust: optional_f64(&args, "min_trust"),
-                    include_why: true,
-                })
+            let request = SearchFactsRequest {
+                query: required_str(&args, "query")?.to_string(),
+                category: optional_category(&args)?,
+                limit: Some(limit(&args)),
+                min_trust: optional_f64(&args, "min_trust"),
+                include_why: true,
+            };
+            let facts = FactRetriever::new(conn)
+                .search(
+                    &request.query,
+                    request.category,
+                    request.min_trust,
+                    request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
+                )
                 .await?;
+            let ids = fact_result_ids(&facts);
+            store.increment_retrieval_counts(&ids).await?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "probe" => {
-            let facts = cg
-                .probe_entity(
+            let facts = FactRetriever::new(conn)
+                .probe(
                     required_str(&args, "entity")?,
                     optional_category(&args)?,
                     optional_f64(&args, "min_trust"),
                     limit(&args),
                 )
                 .await?;
+            let ids = fact_result_ids(&facts);
+            store.increment_retrieval_counts(&ids).await?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "related" => {
-            let facts = cg
-                .related_facts(
-                    required_str(&args, "entity")?,
-                    optional_category(&args)?,
-                    optional_f64(&args, "min_trust"),
-                    limit(&args),
-                )
+            let limit = limit(&args);
+            let retriever = FactRetriever::new(conn);
+            let related_entities = retriever
+                .related(required_str(&args, "entity")?, limit)
                 .await?;
+            let mut seen = std::collections::HashSet::new();
+            let mut facts = Vec::new();
+            for related in related_entities {
+                for result in retriever
+                    .probe(
+                        &related.name,
+                        optional_category(&args)?,
+                        optional_f64(&args, "min_trust"),
+                        limit.saturating_mul(2),
+                    )
+                    .await?
+                {
+                    if seen.insert(result.fact.fact_id) {
+                        facts.push(result);
+                        if facts.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                            break;
+                        }
+                    }
+                }
+                if facts.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                    break;
+                }
+            }
+            let ids = fact_result_ids(&facts);
+            store.increment_retrieval_counts(&ids).await?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "reason" => {
             let entities = request_entities(&args);
-            let facts = cg
-                .reason_facts(
+            let facts = FactRetriever::new(conn)
+                .reason(
                     &entities,
                     optional_category(&args)?,
                     optional_f64(&args, "min_trust"),
                     limit(&args),
                 )
                 .await?;
+            let ids = fact_result_ids(&facts);
+            store.increment_retrieval_counts(&ids).await?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "contradict" => {
-            let facts = cg
-                .contradict_facts(
-                    optional_category(&args)?,
-                    optional_f64(&args, "threshold").unwrap_or(0.3),
-                    limit(&args),
-                )
-                .await?;
+            let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
+            let limit = limit(&args);
+            let retriever = FactRetriever::new(conn);
+            let facts = if let Some(category) = optional_category(&args)? {
+                retriever.contradict(category, threshold, limit).await?
+            } else {
+                let mut out = Vec::new();
+                for category in [
+                    MemoryCategory::General,
+                    MemoryCategory::UserPref,
+                    MemoryCategory::Project,
+                    MemoryCategory::Tool,
+                    MemoryCategory::Decision,
+                    MemoryCategory::CodeArea,
+                ] {
+                    out.extend(retriever.contradict(category, threshold, limit).await?);
+                    if out.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
+                        out.truncate(limit.clamp(1, MAX_FACT_LIMIT));
+                        break;
+                    }
+                }
+                out
+            };
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "get" => {
             let id = fact_id(&args)?;
-            let fact = cg
+            let fact = store
                 .get_fact(id)
                 .await?
                 .ok_or_else(|| config_error(format!("fact {id} not found")))?;
-            let trust_history = cg.fact_trust_history(id).await?;
+            let trust_history = store.fact_trust_history(id).await?;
             json!({
                 "action": action,
                 "fact": fact,
@@ -276,14 +348,14 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
                 category: optional_category(&args)?,
                 tags: args.get("tags").map(|_| string_array(&args, "tags")),
                 entities: args.get("entities").map(|_| request_entities(&args)),
-                trust: update_trust(&args, cg, id).await?,
+                trust: update_trust(&args, &store, id).await?,
                 source: args
                     .get("source")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 metadata: args.get("metadata").cloned(),
             };
-            match cg.update_fact(update).await {
+            match store.update_fact(update).await {
                 Ok(fact) => json!({ "action": action, "fact": fact, "count": 1 }),
                 Err(err) => {
                     if let Some(reason) = update_rejected_secret_like(&err) {
@@ -302,17 +374,19 @@ pub(super) async fn handle_fact_store(cg: &TraceDecay, args: Value) -> Result<To
             }
         }
         "remove" => {
-            let removed = cg.remove_fact(fact_id(&args)?).await?;
+            let removed = store.remove_fact(fact_id(&args)?).await?;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
         "list" => {
-            let facts = cg
+            let facts = store
                 .list_facts(
                     optional_category(&args)?,
                     optional_f64(&args, "min_trust"),
                     limit(&args),
                 )
                 .await?;
+            let ids = fact_ids(&facts);
+            store.increment_retrieval_counts(&ids).await?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
@@ -327,8 +401,9 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
         .or_else(|| args.get("reason"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let result = cg
-        .record_fact_feedback(FeedbackRequest {
+    let db = cg.open_project_store_db().await?;
+    let result = MemoryStore::new(db.conn())
+        .record_feedback_event(FeedbackRequest {
             fact_id: fact_id(&args)?,
             action: feedback_action(&args)?,
             source: args
@@ -345,7 +420,7 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
 }
 
 pub(super) async fn handle_memory_status(cg: &TraceDecay) -> Result<ToolResult> {
-    let status = cg.memory_status().await?;
+    let status = cg.project_memory_status().await?;
     Ok(tool_json(
         Some(cg.project_root()),
         &json!({ "status": "ok", "memory": status }),

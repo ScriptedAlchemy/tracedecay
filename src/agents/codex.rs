@@ -78,6 +78,7 @@ impl AgentIntegration for CodexIntegration {
         uninstall_prompt_rules(&agents_md);
 
         uninstall_hooks(&codex_dir.join("hooks.json"));
+        uninstall_codex_repo_plugin_if_present(ctx)?;
 
         eprintln!();
         eprintln!("Uninstall complete. TraceDecay has been removed from Codex CLI.");
@@ -86,12 +87,32 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
+        let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
-        let legacy_dir = codex_plugin_legacy_install_dir(&ctx.home);
+        if !cached_dirs.is_empty() {
+            for target in &cached_dirs {
+                install_codex_plugin_bundle(target, &ctx.tracedecay_bin, InstallScope::Global)?;
+            }
+            cleanup_codex_plugin_bootstrap(&ctx.home)?;
+            return Ok(UpdatePluginOutcome::Refreshed(cached_dirs));
+        }
+
+        if let Some(project_path) = codex_update_project_path(ctx) {
+            let repo_dir = codex_repo_plugin_install_dir(&project_path);
+            if repo_dir.join(".codex-plugin/plugin.json").exists()
+                && codex_plugin_dir_is_tracedecay(&repo_dir)
+            {
+                install_codex_plugin_bundle(
+                    &repo_dir,
+                    &ctx.tracedecay_bin,
+                    InstallScope::ProjectLocal,
+                )?;
+                return Ok(UpdatePluginOutcome::Refreshed(vec![repo_dir]));
+            }
+        }
+
         let target = if codex_plugin_manifest_path(&ctx.home).exists() {
-            Some(plugin_dir)
-        } else if codex_plugin_legacy_manifest_path(&ctx.home).exists() {
-            Some(legacy_dir)
+            Some(plugin_dir.clone())
         } else if Self::has_legacy_config_install(&ctx.home) {
             return Ok(UpdatePluginOutcome::ConfigOnly);
         } else {
@@ -123,15 +144,22 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn is_detected(&self, home: &Path) -> bool {
-        home.join(".codex").is_dir() || codex_plugin_manifest_path(home).exists()
+        home.join(".codex").is_dir()
+            || !codex_plugin_cached_install_dirs(home).is_empty()
+            || codex_plugin_manifest_path(home).exists()
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(codex_plugin_manifest_path(home))
+        Some(codex_plugin_cached_install_dirs(home).pop().map_or_else(
+            || codex_plugin_manifest_path(home),
+            |dir| dir.join(".codex-plugin/plugin.json"),
+        ))
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        if codex_plugin_manifest_path(home).exists() {
+        if !codex_plugin_cached_install_dirs(home).is_empty()
+            || codex_plugin_manifest_path(home).exists()
+        {
             return true;
         }
         Self::has_legacy_config_install(home)
@@ -278,16 +306,24 @@ fn codex_plugin_install_dir(home: &Path) -> PathBuf {
     home.join("plugins/tracedecay")
 }
 
-fn codex_plugin_legacy_install_dir(home: &Path) -> PathBuf {
-    home.join("plugins/tokensave")
+fn codex_plugin_cached_root(home: &Path) -> PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay")
+}
+
+fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(codex_plugin_cached_root(home)) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir() && codex_plugin_dir_is_tracedecay(path))
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 fn codex_plugin_manifest_path(home: &Path) -> PathBuf {
     codex_plugin_install_dir(home).join(".codex-plugin/plugin.json")
-}
-
-fn codex_plugin_legacy_manifest_path(home: &Path) -> PathBuf {
-    codex_plugin_legacy_install_dir(home).join(".codex-plugin/plugin.json")
 }
 
 fn codex_personal_marketplace_path(home: &Path) -> PathBuf {
@@ -302,14 +338,31 @@ fn codex_repo_marketplace_path(project_path: &Path) -> PathBuf {
     project_path.join(".agents/plugins/marketplace.json")
 }
 
+fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
+    ctx.project_root
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+}
+
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
+    let cached_dirs = codex_plugin_cached_install_dirs(home);
+    if !cached_dirs.is_empty() {
+        for install_dir in &cached_dirs {
+            install_codex_plugin_bundle(install_dir, tracedecay_bin, InstallScope::Global)?;
+        }
+        cleanup_codex_plugin_bootstrap(home)?;
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Refreshed installed Codex plugin bundle at {}",
+            cached_dirs
+                .last()
+                .map_or_else(|| codex_plugin_cached_root(home), PathBuf::from)
+                .display()
+        );
+        return Ok(());
+    }
+
     let install_dir = codex_plugin_install_dir(home);
-    install_codex_plugin_bundle(
-        &install_dir,
-        Some(&codex_plugin_legacy_install_dir(home)),
-        tracedecay_bin,
-        InstallScope::Global,
-    )?;
+    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global)?;
     install_codex_marketplace_entry(
         &codex_personal_marketplace_path(home),
         "personal",
@@ -325,12 +378,7 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
 
 fn install_codex_repo_plugin(project_path: &Path, tracedecay_bin: &str) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
-    install_codex_plugin_bundle(
-        &install_dir,
-        None,
-        tracedecay_bin,
-        InstallScope::ProjectLocal,
-    )?;
+    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::ProjectLocal)?;
     install_codex_marketplace_entry(
         &codex_repo_marketplace_path(project_path),
         "local-repo",
@@ -361,7 +409,7 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(config_path) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         return;
     }
     if let Err(err) = uninstall_mcp_server(config_path) {
@@ -374,7 +422,6 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
 
 fn install_codex_plugin_bundle(
     install_dir: &Path,
-    legacy_dir: Option<&Path>,
     tracedecay_bin: &str,
     scope: InstallScope,
 ) -> Result<()> {
@@ -384,9 +431,6 @@ fn install_codex_plugin_bundle(
         })?;
     }
     remove_codex_plugin_install(install_dir)?;
-    if let Some(legacy_dir) = legacy_dir {
-        remove_codex_plugin_install(legacy_dir)?;
-    }
     write_codex_plugin_files(install_dir, tracedecay_bin, scope)
 }
 
@@ -466,6 +510,14 @@ fn codex_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
         60,
         Some("Bash|apply_patch"),
     );
+    install_codex_hook_event(
+        &mut hooks,
+        "PostCompact",
+        tracedecay_bin,
+        "hook-codex-post-compact",
+        120,
+        Some("auto|manual"),
+    );
     Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
 }
 
@@ -512,7 +564,7 @@ fn install_codex_marketplace_entry(
     plugins.retain(|entry| {
         !matches!(
             entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay" | "tokensave")
+            Some("tracedecay")
         )
     });
     plugins.push(json!({
@@ -536,9 +588,55 @@ fn install_codex_marketplace_entry(
 }
 
 fn uninstall_codex_plugin(home: &Path) -> Result<()> {
-    remove_codex_plugin_install(&codex_plugin_install_dir(home))?;
-    remove_codex_plugin_install(&codex_plugin_legacy_install_dir(home))?;
+    for install_dir in codex_plugin_cached_install_dirs(home) {
+        remove_codex_plugin_bootstrap_source(&install_dir)?;
+    }
+    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
     remove_codex_marketplace_entry(home)?;
+    Ok(())
+}
+
+fn uninstall_codex_repo_plugin_if_present(ctx: &InstallContext) -> Result<()> {
+    let Some(project_path) = codex_update_project_path(ctx) else {
+        return Ok(());
+    };
+    let install_dir = codex_repo_plugin_install_dir(&project_path);
+    if install_dir.join(".codex-plugin/plugin.json").exists()
+        && codex_plugin_dir_is_tracedecay(&install_dir)
+    {
+        remove_codex_plugin_install(&install_dir)?;
+    }
+    remove_codex_marketplace_entry_at(&codex_repo_marketplace_path(&project_path), "repo")?;
+    Ok(())
+}
+
+fn cleanup_codex_plugin_bootstrap(home: &Path) -> Result<()> {
+    remove_codex_plugin_bootstrap_source(&codex_plugin_install_dir(home))?;
+    remove_codex_marketplace_entry(home)?;
+    Ok(())
+}
+
+fn remove_codex_plugin_bootstrap_source(install_dir: &Path) -> Result<()> {
+    if install_dir.exists() && codex_plugin_dir_is_tracedecay(install_dir) {
+        remove_codex_plugin_skills_dir(install_dir)?;
+    }
+    remove_codex_plugin_install(install_dir)
+}
+
+fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
+    let skills_dir = install_dir.join("skills");
+    let Ok(metadata) = std::fs::symlink_metadata(&skills_dir) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(&skills_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", skills_dir.display()),
+        })?;
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(&skills_dir).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove {}: {e}", skills_dir.display()),
+        })?;
+    }
     Ok(())
 }
 
@@ -584,7 +682,7 @@ fn codex_plugin_dir_is_tracedecay(install_dir: &Path) -> bool {
     let manifest = load_json_file(&install_dir.join(".codex-plugin/plugin.json"));
     matches!(
         manifest.get("name").and_then(|value| value.as_str()),
-        Some("tracedecay" | "tokensave")
+        Some("tracedecay")
     )
 }
 
@@ -624,10 +722,14 @@ fn collect_regular_files_inner(root: &Path, out: &mut Vec<PathBuf>) -> std::io::
 
 fn remove_codex_marketplace_entry(home: &Path) -> Result<()> {
     let marketplace_path = codex_personal_marketplace_path(home);
+    remove_codex_marketplace_entry_at(&marketplace_path, "personal")
+}
+
+fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Result<()> {
     if !marketplace_path.exists() {
         return Ok(());
     }
-    let mut marketplace = load_json_file_strict(&marketplace_path)?;
+    let mut marketplace = load_json_file_strict(marketplace_path)?;
     let Some(plugins) = marketplace
         .get_mut("plugins")
         .and_then(|value| value.as_array_mut())
@@ -638,15 +740,15 @@ fn remove_codex_marketplace_entry(home: &Path) -> Result<()> {
     plugins.retain(|entry| {
         !matches!(
             entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay" | "tokensave")
+            Some("tracedecay")
         )
     });
     if plugins.len() == before {
         return Ok(());
     }
-    safe_write_json_file(&marketplace_path, &marketplace, None)?;
+    safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Removed tracedecay from Codex personal marketplace at {}",
+        "\x1b[32m✔\x1b[0m Removed tracedecay from Codex {label} marketplace at {}",
         marketplace_path.display()
     );
     Ok(())
@@ -719,11 +821,12 @@ fn print_hook_trust_guidance() {
 
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
-    const SUBCOMMANDS: [&str; 5] = [
+    const SUBCOMMANDS: [&str; 6] = [
         "hook-codex-session-start",
         "hook-codex-user-prompt-submit",
         "hook-codex-subagent-start",
         "hook-codex-post-tool-use",
+        "hook-codex-post-compact",
         "hook-codex-pre-tool-use",
     ];
 
@@ -774,9 +877,8 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     let Some(servers) = table.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) else {
         return Ok(());
     };
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!(
             "  No tracedecay MCP server in {}, skipping",
             config_path.display()
@@ -810,16 +912,13 @@ fn uninstall_prompt_rules(agents_md: &Path) {
     let Ok(contents) = std::fs::read_to_string(agents_md) else {
         return;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         eprintln!("  AGENTS.md does not contain tracedecay rules, skipping");
         return;
     }
     let marker_new = "## Prefer tracedecay MCP tools";
-    let marker_legacy = "## Prefer tokensave MCP tools";
     let (marker, start) = if let Some(start) = contents.find(marker_new) {
         (marker_new, start)
-    } else if let Some(start) = contents.find(marker_legacy) {
-        (marker_legacy, start)
     } else {
         return;
     };
@@ -855,6 +954,14 @@ fn uninstall_prompt_rules(agents_md: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    let cached_dirs = codex_plugin_cached_install_dirs(home);
+    if !cached_dirs.is_empty() {
+        for plugin_dir in cached_dirs {
+            doctor_check_plugin_dir(dc, &plugin_dir);
+        }
+        return;
+    }
+
     let plugin_dir = codex_plugin_install_dir(home);
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     if !manifest_path.exists() {
@@ -1077,6 +1184,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
         ("UserPromptSubmit", "hook-codex-user-prompt-submit"),
         ("SubagentStart", "hook-codex-subagent-start"),
         ("PostToolUse", "hook-codex-post-tool-use"),
+        ("PostCompact", "hook-codex-post-compact"),
     ];
     let missing: Vec<&str> = expected
         .iter()

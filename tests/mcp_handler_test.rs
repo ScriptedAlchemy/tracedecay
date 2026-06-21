@@ -7,22 +7,27 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{get_tool_definitions, handle_tool_call};
+use tracedecay::memory::store::MemoryStore;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::{
+    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_project_session_db_path,
+    resolve_response_handle_root,
+};
 use tracedecay::tracedecay::TraceDecay;
 
 static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -46,6 +51,7 @@ struct GlobalDbEnvGuard {
 impl GlobalDbEnvGuard {
     fn set(db_path: &Path) -> Self {
         let previous = std::env::var_os("TRACEDECAY_GLOBAL_DB");
+        let db_path = canonicalize_test_db_path(db_path);
         std::env::set_var("TRACEDECAY_GLOBAL_DB", db_path);
         Self { previous }
     }
@@ -71,8 +77,9 @@ impl HomeEnvGuard {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
+        let home = canonicalize_test_dir(home);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         std::env::set_var(
             tracedecay::config::USER_DATA_DIR_ENV,
             home.join(tracedecay::config::TRACEDECAY_DIR),
@@ -102,15 +109,65 @@ impl Drop for HomeEnvGuard {
     }
 }
 
+fn canonicalize_test_dir(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).unwrap_or_else(|err| {
+        panic!(
+            "failed to create test directory '{}': {err}",
+            path.display()
+        )
+    });
+    path.canonicalize().unwrap_or_else(|err| {
+        panic!(
+            "failed to canonicalize test directory '{}': {err}",
+            path.display()
+        )
+    })
+}
+
+fn canonicalize_test_db_path(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    canonicalize_test_dir(parent).join(
+        path.file_name()
+            .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
 
+struct TestProject {
+    dir: TempDir,
+    _env_lock: MutexGuard<'static, ()>,
+    _home_guard: HomeEnvGuard,
+    _global_db_guard: GlobalDbEnvGuard,
+}
+
+impl std::ops::Deref for TestProject {
+    type Target = TempDir;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
+}
+
+struct TestEnv {
+    _env_lock: MutexGuard<'static, ()>,
+    _home_guard: HomeEnvGuard,
+    _global_db_guard: GlobalDbEnvGuard,
+}
+
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-async fn setup_project() -> (TraceDecay, TempDir) {
+async fn setup_project() -> (TraceDecay, TestProject) {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path();
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -157,15 +214,70 @@ fn test_helper() { assert!(!helper().is_empty()); }
 
     let cg = TraceDecay::init(project).await.unwrap();
     index_all_retrying_sync_lock(&cg).await;
-    (cg, dir)
+    (
+        cg,
+        TestProject {
+            dir,
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
+}
+
+async fn init_test_project(project: &Path) -> (TraceDecay, TestEnv) {
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    let cg = TraceDecay::init(project).await.unwrap();
+    (
+        cg,
+        TestEnv {
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
+}
+
+fn project_data_dir(cg: &TraceDecay) -> PathBuf {
+    resolve_layout_for_current_profile(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
+        .data_root
+}
+
+fn project_graph_db(cg: &TraceDecay) -> PathBuf {
+    resolve_layout_for_current_profile(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
+        .graph_db_path
+}
+
+fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
+    resolve_response_handle_root(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
+}
+
+fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
+    resolve_lcm_payload_root(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test LCM payload root: {err}"))
+}
+
+fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
+    resolve_project_session_db_path(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test project session DB path: {err}"))
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
 /// public entry point, which then reaches an internal helper. This exercises
 /// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
-async fn setup_integration_test_risk_project() -> (TraceDecay, TempDir) {
+async fn setup_integration_test_risk_project() -> (TraceDecay, TestProject) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::create_dir_all(project.join("tests")).unwrap();
 
@@ -221,14 +333,26 @@ fn integration_public_entry() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    (cg, dir)
+    (
+        cg,
+        TestProject {
+            dir,
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
 }
 
 /// Extends the calibrated integration-risk fixture with a build script so the
 /// test-risk denominator can prove non-`src/` functions are excluded.
-async fn setup_test_risk_non_src_fixture() -> (TraceDecay, TempDir) {
+async fn setup_test_risk_non_src_fixture() -> (TraceDecay, TestProject) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::create_dir_all(project.join("tests")).unwrap();
 
@@ -298,7 +422,15 @@ fn main() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    (cg, dir)
+    (
+        cg,
+        TestProject {
+            dir,
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
 }
 
 /// Extracts the text content from a `ToolResult` value (the standard
@@ -402,7 +534,6 @@ async fn seed_project_registry(db_path: &Path, project_root: &Path) {
 
 #[tokio::test]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
-    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
     let (cg, _project_dir) = setup_project().await;
     let registry_dir = TempDir::new().unwrap();
     let registry_path = registry_dir.path().join("global.db");
@@ -614,14 +745,14 @@ async fn active_project_tool_reports_resolved_store_metadata() {
         Some("active_project")
     );
     assert_eq!(payload["storage"]["class"].as_str(), Some("code_project"));
-    assert_eq!(payload["storage"]["mode"].as_str(), Some("project_local"));
+    assert_eq!(payload["storage"]["mode"].as_str(), Some("profile_sharded"));
     assert_eq!(
         payload["storage"]["graph_db_path"].as_str(),
         Some(graph_db_path.as_str())
     );
     assert!(payload["storage"]["data_root"]
         .as_str()
-        .is_some_and(|path| path.ends_with(".tracedecay")));
+        .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects")));
     assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
 }
 
@@ -1056,12 +1187,8 @@ async fn retrieve_tool_returns_full_stored_response() {
     .unwrap();
 
     let stored_payload: Value = serde_json::from_str(
-        &fs::read_to_string(
-            cg.project_root()
-                .join(".tracedecay/response-handles")
-                .join(format!("{}.json", stored.handle)),
-        )
-        .unwrap(),
+        &fs::read_to_string(response_handle_dir(&cg).join(format!("{}.json", stored.handle)))
+            .unwrap(),
     )
     .unwrap();
     assert!(stored_payload.get("handle").is_none());
@@ -1276,11 +1403,7 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
         .unwrap();
     }
 
-    fs::write(
-        cg.project_root().join(".tracedecay/response-handles"),
-        "not-a-directory",
-    )
-    .unwrap();
+    fs::write(response_handle_dir(&cg), "not-a-directory").unwrap();
 
     let listed = handle_tool_call(
         &cg,
@@ -1506,6 +1629,10 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
+    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
     git(project, &["init"]);
@@ -1517,8 +1644,11 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
+    let tracedecay_dir = resolve_layout_for_current_profile(project)
+        .unwrap()
+        .data_root;
     tracedecay::branch_meta::save_branch_meta(
-        &project.join(".tracedecay"),
+        &tracedecay_dir,
         &tracedecay::branch_meta::BranchMeta::new("main"),
     )
     .unwrap();
@@ -2098,7 +2228,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
@@ -2156,7 +2286,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -2519,7 +2649,7 @@ async fn test_changelog_with_real_git() {
         .output()
         .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
@@ -2861,7 +2991,7 @@ async fn test_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -2901,7 +3031,7 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
     )
     .unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let (cg, _env) = init_test_project(&project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -2927,7 +3057,7 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(dir.path().join("outside.rs"), "fn leaked() {}\n").unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let (cg, _env) = init_test_project(&project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -2956,7 +3086,7 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
     fs::write(external.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
     unix_fs::symlink(&external, project.join("src")).unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let (cg, _env) = init_test_project(&project).await;
     cg.index_all().await.unwrap();
 
     let read = handle_tool_call(
@@ -3017,7 +3147,7 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
     .unwrap();
     unix_fs::symlink(&outside_dir, project.join("escape")).unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let (cg, _env) = init_test_project(&project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3063,7 +3193,7 @@ async fn test_str_replace_not_found() {
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3094,7 +3224,7 @@ async fn test_str_replace_multiple_matches_fails() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3132,7 +3262,7 @@ async fn test_multi_str_replace_success() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3170,7 +3300,7 @@ async fn test_multi_str_replace_atomic_failure() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3212,7 +3342,7 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let missing_old = format!("{}é", "a".repeat(19));
@@ -3251,7 +3381,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
 
     fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3287,7 +3417,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -3324,7 +3454,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -3362,7 +3492,7 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
     let (cg, _dir) = setup_project().await;
 
     // branch_diff requires branch tracking metadata to be present.
-    let tracedecay_dir = tracedecay::config::get_tracedecay_dir(cg.project_root());
+    let tracedecay_dir = project_data_dir(&cg);
     let meta = tracedecay::branch_meta::BranchMeta::new("master");
     tracedecay::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
@@ -3400,7 +3530,7 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -3441,7 +3571,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3484,7 +3614,7 @@ async fn test_insert_at_string_anchor_before() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3530,7 +3660,7 @@ async fn test_insert_at_line_number() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3573,7 +3703,7 @@ async fn test_insert_at_anchor_not_found() {
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3606,7 +3736,7 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let long_anchor = format!("{}é", "a".repeat(99));
@@ -3646,7 +3776,7 @@ async fn test_insert_at_ambiguous_anchor() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3683,7 +3813,7 @@ async fn test_insert_at_preserves_trailing_newline() {
     let original = "fn hello() {}\n\nfn world() {}\n";
     fs::write(project.join("src/lib.rs"), original).unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -3882,7 +4012,7 @@ pub fn unrelated(x: i32) -> i32 {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -4251,7 +4381,7 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
 
 #[tokio::test]
 async fn test_session_start() {
-    let (cg, dir) = setup_project().await;
+    let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
@@ -4259,13 +4389,13 @@ async fn test_session_start() {
     let output: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(output["quality_signal"].as_u64().is_some());
     assert_eq!(output["status"].as_str().unwrap(), "baseline_saved");
-    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
+    let baseline_path = project_data_dir(&cg).join("session_baseline.json");
     assert!(baseline_path.exists(), "baseline file should exist");
 }
 
 #[tokio::test]
 async fn test_session_end() {
-    let (cg, dir) = setup_project().await;
+    let (cg, _dir) = setup_project().await;
     handle_tool_call(&cg, "tracedecay_session_start", json!({}), None, None)
         .await
         .unwrap();
@@ -4277,7 +4407,7 @@ async fn test_session_end() {
     assert!(output["signal_before"].as_u64().is_some());
     assert!(output["signal_after"].as_u64().is_some());
     assert!(output["delta"].is_number());
-    let baseline_path = dir.path().join(".tracedecay/session_baseline.json");
+    let baseline_path = project_data_dir(&cg).join("session_baseline.json");
     assert!(
         !baseline_path.exists(),
         "baseline should be removed after session_end"
@@ -4406,7 +4536,7 @@ fn helper() {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
@@ -4453,7 +4583,7 @@ fn main() {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -5046,6 +5176,90 @@ async fn memory_feedback_and_status_include_trust_fields() {
 }
 
 #[tokio::test]
+async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
+    fn git(project: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(&project, &["init"]);
+    git(&project, &["config", "user.email", "test@test.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-m", "initial"]);
+    git(&project, &["branch", "-M", "main"]);
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    index_all_retrying_sync_lock(&cg).await;
+    git(&project, &["checkout", "-b", "feature"]);
+    let cg = TraceDecay::open(&project).await.unwrap();
+    assert_ne!(
+        cg.db_path(),
+        cg.store_layout().graph_db_path,
+        "test must serve a branch DB distinct from the shared project store"
+    );
+
+    let added = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Branch memory writes stay project-scoped",
+            "category": "project",
+            "entity": "Branch memory"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_i64()
+        .expect("fact_store add should return numeric id");
+
+    let (branch_db, _) = Database::open(&cg.db_path()).await.unwrap();
+    assert!(
+        MemoryStore::new(branch_db.conn())
+            .get_fact(fact_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "MCP memory writes must not be scoped to the branch graph DB"
+    );
+
+    let (project_db, _) = Database::open(&cg.store_layout().graph_db_path)
+        .await
+        .unwrap();
+    assert!(
+        MemoryStore::new(project_db.conn())
+            .get_fact(fact_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "MCP memory writes must land in the shared project memory store"
+    );
+}
+
+#[tokio::test]
 async fn memory_tools_validate_malformed_inputs() {
     let (cg, _dir) = setup_project().await;
 
@@ -5502,7 +5716,7 @@ async fn seed_lcm_session_message_in_db(
 }
 
 async fn project_lcm_conn(cg: &TraceDecay) -> libsql::Connection {
-    let db = libsql::Builder::new_local(cg.project_root().join(".tracedecay/sessions.db"))
+    let db = libsql::Builder::new_local(project_session_db_path(cg))
         .build()
         .await
         .unwrap();
@@ -5912,15 +6126,9 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
         .await
         .expect("externalized raw message should load");
     let payload_ref = raw.payload_ref.expect("external payload ref");
-    fs::remove_file(
-        cg.project_root()
-            .join(".tracedecay/lcm-payloads")
-            .join(&payload_ref),
-    )
-    .unwrap();
+    fs::remove_file(lcm_payload_dir(&cg).join(&payload_ref)).unwrap();
     fs::write(
-        cg.project_root()
-            .join(".tracedecay/lcm-payloads/payload_unreferenced_test.payload"),
+        lcm_payload_dir(&cg).join("payload_unreferenced_test.payload"),
         "orphan body that must not be returned",
     )
     .unwrap();
@@ -5960,7 +6168,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
     )
     .await;
 
-    let payload_dir = cg.project_root().join(".tracedecay/lcm-payloads");
+    let payload_dir = lcm_payload_dir(&cg);
     fs::create_dir_all(&payload_dir).unwrap();
     fs::write(
         payload_dir.join("payload_gc_candidate_test.payload"),
@@ -6026,7 +6234,7 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
         1,
     )
     .await;
-    let payload_dir = cg.project_root().join(".tracedecay/lcm-payloads");
+    let payload_dir = lcm_payload_dir(&cg);
     fs::create_dir_all(&payload_dir).unwrap();
     let payload_ref =
         "payload_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.payload";
@@ -6392,7 +6600,7 @@ async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
 #[tokio::test]
 async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
     let (cg, _dir) = setup_project().await;
-    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
+    let db_path = project_session_db_path(&cg);
     if db_path.exists() {
         fs::remove_file(&db_path).unwrap();
     }
@@ -7255,7 +7463,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     );
 
     let secret = format!("MCP_STATUS_SECRET_PAYLOAD\n{}", "Q".repeat(300_000));
-    db.lcm_store(cg.project_root().join(".tracedecay"))
+    db.lcm_store(project_data_dir(&cg))
         .ingest_raw_message(&SessionMessageRecord {
             provider: "cursor".to_string(),
             message_id: "lcm-status-secret-message".to_string(),
@@ -8573,7 +8781,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
-    let db_path = cg.project_root().join(".tracedecay").join("tracedecay.db");
+    let db_path = project_graph_db(&cg);
     let (db, _) = Database::open(&db_path).await.unwrap();
     db.conn()
         .execute(
@@ -8640,7 +8848,7 @@ pub fn gmres(x: u32) -> u32 {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     (cg, dir)
 }
@@ -8694,7 +8902,7 @@ pub fn second() { dep::shared(); }
     )
     .unwrap();
     fs::write(project.join("src/dep.rs"), "pub fn shared() {}\n").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -8738,7 +8946,7 @@ pub fn nonrecursive() -> u32 { 42 }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
@@ -8782,7 +8990,7 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
@@ -8815,7 +9023,7 @@ pub fn c() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
@@ -8892,7 +9100,7 @@ async fn changelog_filters_directory_paths() {
         .current_dir(project)
         .output()
         .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly, not the index, and including the index sync subjects
     // this test to a pre-existing SyncLock contention flake.
@@ -8945,7 +9153,7 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     )
     .unwrap();
     fs::write(project.join("src/inner.rs"), "pub fn inner_fn() {}\n").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
@@ -8980,7 +9188,7 @@ pub fn caller() { called(); }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
@@ -9053,7 +9261,7 @@ pub trait T {}
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let qm = GraphQueryManager::new(cg.db());
@@ -9105,7 +9313,7 @@ fn edited_only_test() {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -9154,7 +9362,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let abs_path = project.join("src/lib.rs");
@@ -9211,7 +9419,7 @@ pub fn helper() {}
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let caller_id = find_node_id(&cg, "caller").await;
@@ -9267,7 +9475,7 @@ impl Default for B { fn default() -> Self { B } }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -9321,7 +9529,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
         "use crate::a::a_fn;\npub fn c_fn() { a_fn(); }\n",
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
@@ -9367,7 +9575,7 @@ pub fn leaf() {}
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -9429,7 +9637,7 @@ pub fn h() { a(); }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -9507,7 +9715,7 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -9543,7 +9751,7 @@ pub trait Leaf: Middle {}
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None, None)
         .await
@@ -9604,7 +9812,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
         )
         .unwrap();
     }
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
@@ -9643,7 +9851,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
         "pub struct S; pub fn one() {} pub fn two() {}\n",
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
@@ -9699,7 +9907,7 @@ async fn changelog_filters_deleted_directory_entries() {
     fs::remove_dir_all(project.join("crates")).unwrap();
     git(project, &["add", "-A"]);
     git(project, &["commit", "-m", "drop crates"]);
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     // Intentionally skipping `index_all` — the changelog handler reads from
     // git directly and the sync lock has a pre-existing parallel-test flake.
     let result = handle_tool_call(
@@ -9766,7 +9974,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "deps"]);
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     // Intentionally skipping `index_all()` — pr_context reads the diff
     // from git directly and classifies Cargo.toml as `config` before any
     // index lookup, so we don't need the index to verify the collapse
@@ -9832,7 +10040,7 @@ pub fn used() -> HashMap<u32, u32> { HashMap::new() }
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
         .await
@@ -9899,7 +10107,7 @@ fn dead_helper_with_attr() {}
 "#,
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
@@ -9958,7 +10166,7 @@ pub mod e;
         )
         .unwrap();
     }
-    let cg = TraceDecay::init(project).await.unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
@@ -9989,9 +10197,7 @@ async fn refresh_file_token_map_picks_up_new_files() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tracedecay::tracedecay::TraceDecay::init(project)
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
 
     let server = tracedecay::mcp::McpServer::new(cg, None).await;
@@ -10025,9 +10231,7 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     let project = tmp.path();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tracedecay::tracedecay::TraceDecay::init(project)
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
 
     let server = tracedecay::mcp::McpServer::new(cg, None).await;
@@ -10434,7 +10638,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
         json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
     );
 
-    let db_path = tracedecay::sessions::cursor::project_session_db_path(cg.project_root());
+    let db_path = project_session_db_path(&cg);
     {
         let db = libsql::Builder::new_local(&db_path).build().await.unwrap();
         let conn = db.connect().unwrap();
@@ -10537,9 +10741,7 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let cg = tracedecay::tracedecay::TraceDecay::init(project)
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let db_path = tracedecay::sessions::cursor::project_session_db_path(project);
@@ -10611,9 +10813,7 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let cg = tracedecay::tracedecay::TraceDecay::init(project)
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     // With no sessions.db the tool returns not_ingested — that is fine here;
@@ -10660,9 +10860,7 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
 
-    let cg = tracedecay::tracedecay::TraceDecay::init(project)
-        .await
-        .unwrap();
+    let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
     let server = tracedecay::mcp::McpServer::new(cg, None).await;

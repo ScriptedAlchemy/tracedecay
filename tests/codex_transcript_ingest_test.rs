@@ -3,6 +3,9 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::lcm::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
+};
 use tracedecay::sessions::source::ingest_source;
 
 fn setup(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -121,6 +124,58 @@ fn write_codex_subagent_rollout(
     path
 }
 
+fn write_codex_rollout_with_compaction(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-20-{session}.jsonl"));
+    let contents = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:20.000Z",
+            "type": "session_meta",
+            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:21.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Map the release automation state"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:22.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Release automation is mapped."}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:23.000Z",
+            "type": "compacted",
+            "payload": {
+                "message": "",
+                "replacement_history": [
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Map the release automation state"}]},
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Release automation is mapped."}]},
+                    {"type": "compaction", "encrypted_content": "encrypted-codex-summary"}
+                ]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:23.010Z",
+            "type": "event_msg",
+            "payload": {"type": "context_compacted"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:24.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Continue after compaction"}
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
 #[tokio::test]
 async fn codex_rollout_populates_user_and_agent_messages_only() {
     let tmp = TempDir::new().unwrap();
@@ -184,6 +239,399 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let user_metadata: serde_json::Value =
         serde_json::from_str(user.message.metadata_json.as_deref().unwrap()).unwrap();
     assert!(user_metadata.get("usage").is_none());
+}
+
+#[tokio::test]
+async fn codex_context_compaction_creates_lcm_summary_node() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 4);
+
+    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    assert_eq!(status.raw_message_count, 4);
+    assert_eq!(status.summary_node_count, 1);
+    assert!(status.dag.depths.values().any(|depth| depth.count == 1));
+
+    let description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .unwrap();
+    assert_eq!(description.summary_nodes.len(), 1);
+    assert_eq!(description.summary_nodes[0].depth, 1);
+    assert_eq!(description.summary_nodes[0].source_count, 2);
+
+    let node_id = description.summary_nodes[0].node_id.clone();
+    let expanded = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmDescribeTarget::SummaryNode { node_id },
+        })
+        .await
+        .unwrap();
+    let summary = expanded.summary_node.expect("summary node should expand");
+    assert_eq!(summary.source_count, 2);
+
+    let expansion = db
+        .lcm_expand(LcmExpandRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-compact".to_string(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: summary.node_id.clone(),
+            },
+            content_slice: Some(LcmContentSlice {
+                offset: 0,
+                limit: 1024,
+            }),
+            source_offset: 0,
+            source_limit: Some(10),
+        })
+        .await
+        .unwrap();
+    assert!(expansion
+        .content
+        .contains("Map the release automation state"));
+    assert!(expansion.content.contains("Release automation is mapped"));
+    assert!(!expansion.content.contains("Summary body is encrypted"));
+    assert_eq!(expansion.summary_sources.len(), 2);
+}
+
+#[tokio::test]
+async fn repeated_codex_compactions_only_source_messages_since_previous_boundary() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-30-codex-repeat.jsonl");
+    let cwd = project.to_string_lossy();
+    let compact = |at: &str| {
+        serde_json::json!({
+            "timestamp": at,
+            "type": "compacted",
+            "payload": {
+                "message": "",
+                "replacement_history": [
+                    {"type": "compaction", "encrypted_content": "encrypted"}
+                ]
+            }
+        })
+    };
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:30.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-repeat", "cwd": cwd, "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:31.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "First compacted prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:32.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "First compacted reply"}
+        }),
+        compact("2026-01-01T00:00:33.000Z"),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:34.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Second compacted prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:35.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Second compacted reply"}
+        }),
+        compact("2026-01-01T00:00:36.000Z"),
+    ];
+    std::fs::write(
+        &path,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 6);
+
+    let description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-repeat".to_string(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .unwrap();
+    assert_eq!(description.summary_nodes.len(), 2);
+    let source_counts = description
+        .summary_nodes
+        .iter()
+        .map(|node| (node.depth, node.source_count))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(source_counts.get(&1), Some(&2));
+    assert_eq!(source_counts.get(&2), Some(&2));
+}
+
+#[tokio::test]
+async fn incremental_codex_compaction_depth_continues_from_prior_history() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-40-codex-incremental.jsonl");
+    let cwd = project.to_string_lossy();
+    let compact = |at: &str| {
+        serde_json::json!({
+            "timestamp": at,
+            "type": "compacted",
+            "payload": {
+                "message": "",
+                "replacement_history": [
+                    {"type": "compaction", "encrypted_content": "encrypted"}
+                ]
+            }
+        })
+    };
+    let first = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:40.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-incremental", "cwd": cwd, "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:41.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "First incremental prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:42.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "First incremental reply"}
+        }),
+        compact("2026-01-01T00:00:43.000Z"),
+    ];
+    std::fs::write(
+        &path,
+        first
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 3);
+
+    let second = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:44.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Second incremental prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:45.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Second incremental reply"}
+        }),
+        compact("2026-01-01T00:00:46.000Z"),
+    ];
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for line in second {
+        writeln!(file, "{line}").unwrap();
+    }
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 3);
+
+    let description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-incremental".to_string(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .unwrap();
+    let depths = description
+        .summary_nodes
+        .iter()
+        .map(|node| node.depth)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(depths, [1, 2].into_iter().collect());
+}
+
+#[tokio::test]
+async fn codex_compaction_summary_can_be_replaced_with_auxiliary_summary() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+
+    let pending = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].request.provider, "codex");
+    assert_eq!(pending[0].request.session_id, "codex-compact");
+    assert_eq!(
+        pending[0]
+            .request
+            .source_messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Map the release automation state",
+            "Release automation is mapped."
+        ]
+    );
+
+    let replacement = db
+        .replace_codex_compaction_summary(
+            &pending[0].node_id,
+            "Auxiliary Codex app-server summary",
+            "codex_app_server",
+            Some("gpt-5.4"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement.summary_text,
+        "Auxiliary Codex app-server summary"
+    );
+    assert_ne!(replacement.node_id, pending[0].node_id);
+    assert_eq!(replacement.source_refs.len(), 2);
+
+    let pending_after = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
+        .await
+        .unwrap();
+    assert!(pending_after.is_empty());
+
+    let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
+    assert_eq!(status.summary_node_count, 1);
+}
+
+#[tokio::test]
+async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-40-usage-edge.jsonl");
+    let cwd = project.to_string_lossy();
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:40.000Z",
+            "type": "session_meta",
+            "payload": {"id": "usage-edge", "cwd": cwd}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:41.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Usage edge prompt one"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:42.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Usage edge reply one"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:43.000Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {
+                "last_token_usage": {"cache_read_input_tokens": 123, "total_tokens": 123}
+            }}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:44.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Usage edge prompt two"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:45.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Usage edge reply two"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:46.000Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {
+                "last_token_usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 7,
+                    "total_tokens": 22
+                }
+            }}
+        }),
+    ];
+    std::fs::write(
+        &path,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+
+    let hits = db
+        .search_session_messages("codex", None, "Usage edge reply", 10)
+        .await;
+    let usage_of = |needle: &str| {
+        let hit = hits
+            .iter()
+            .find(|hit| hit.message.text.contains(needle))
+            .unwrap_or_else(|| panic!("message containing {needle:?} should exist"));
+        let metadata: serde_json::Value =
+            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+        metadata["usage"].clone()
+    };
+
+    let cache_only = usage_of("reply one");
+    assert_eq!(cache_only["input_tokens"], 0);
+    assert_eq!(cache_only["output_tokens"], 0);
+    assert_eq!(cache_only["cache_read_input_tokens"], 123);
+    assert_eq!(cache_only["total_tokens"], 123);
+
+    let reasoning = usage_of("reply two");
+    assert_eq!(reasoning["input_tokens"], 10);
+    assert_eq!(reasoning["output_tokens"], 12);
+    assert_eq!(reasoning["reasoning_tokens"], 7);
+    assert_eq!(reasoning["total_tokens"], 22);
 }
 
 #[tokio::test]

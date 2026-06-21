@@ -7,8 +7,7 @@ use super::util;
 pub const LCM_SCHEMA_VERSION: i64 = 5;
 
 const MIGRATION_NAME: &str = "lcm";
-const LEGACY_TRUNCATION_MARKERS: &[&str] =
-    &["\n[truncated by tracedecay]", "\n[truncated by tokensave]"];
+const TRUNCATION_MARKER: &str = "\n[truncated by tracedecay]";
 
 /// Raw-message FTS structure (schema v3): index only `index_text`, matching
 /// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
@@ -405,9 +404,7 @@ async fn carry_forward_legacy_messages_in_transaction(conn: &Connection) -> Opti
         let ordinal: i64 = row.get(5).ok()?;
         let content: String = row.get(6).ok()?;
         let metadata_json: Option<String> = row.get(7).ok()?;
-        let legacy_truncated = LEGACY_TRUNCATION_MARKERS
-            .iter()
-            .any(|marker| content.contains(marker));
+        let legacy_truncated = content.contains(TRUNCATION_MARKER);
         let content_hash = raw::sha256_hex(&content);
         let snippet_text = raw::derived_text_for_snippet(&content);
         let index_text = raw::derived_text_for_index(&content);

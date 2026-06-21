@@ -67,7 +67,8 @@ impl ExtractionState {
     fn parse_inline(&mut self, inline_node: TsNode<'_>) -> Option<Tree> {
         let parser = self.inline_parser.get_or_insert_with(|| {
             let mut p = Parser::new();
-            let _ = p.set_language(&tokensave_large_treesitters::markdown::inline::LANGUAGE.into());
+            let _ =
+                p.set_language(&tracedecay_large_treesitters::markdown::inline::LANGUAGE.into());
             p
         });
         let range = Range {
@@ -136,7 +137,7 @@ impl MarkdownExtractor {
     fn parse(source: &str) -> Result<Tree, String> {
         let mut parser = Parser::new();
         parser
-            .set_language(&tokensave_large_treesitters::markdown::LANGUAGE.into())
+            .set_language(&tracedecay_large_treesitters::markdown::LANGUAGE.into())
             .map_err(|e| format!("failed to load markdown grammar: {e}"))?;
         parser
             .parse(source, None)

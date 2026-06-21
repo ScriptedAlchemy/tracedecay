@@ -160,17 +160,13 @@ fn install_mcp_server(claude_json_path: &Path, tracedecay_bin: &str) -> Result<(
 
 /// Remove stale MCP server from old location in settings.json.
 ///
-/// Removes both the new "tracedecay" key and the legacy "tokensave" key,
-/// since either can be present depending on which binary version installed.
+/// Removes the tracedecay key from the old settings location.
 fn install_migrate_old_mcp(settings: &mut serde_json::Value, settings_path: &Path) {
     if let Some(servers) = settings
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
     {
-        // Remove both new and legacy keys from the old location.
-        let removed_new = servers.remove("tracedecay").is_some();
-        let removed_legacy = servers.remove("tokensave").is_some();
-        if removed_new || removed_legacy {
+        if servers.remove("tracedecay").is_some() {
             if servers.is_empty() {
                 settings.as_object_mut().map(|o| o.remove("mcpServers"));
             }
@@ -231,10 +227,9 @@ fn install_single_hook(
         .cloned()
         .unwrap_or_default();
 
-    // Detect BOTH "tracedecay" (new) and "tracedecay" (legacy) for idempotency.
-    let has_hook = hooks_arr.iter().any(|h| {
-        hook_entry_command(h).is_some_and(|c| c.contains("tracedecay") || c.contains("tokensave"))
-    });
+    let has_hook = hooks_arr
+        .iter()
+        .any(|h| hook_entry_command(h).is_some_and(|c| c.contains("tracedecay")));
 
     if !has_hook {
         let mut new_hooks = hooks_arr;
@@ -287,8 +282,8 @@ fn parse_hook_command(cmd_entry: &serde_json::Value) -> Option<(String, String)>
     Some((bin, sub))
 }
 
-/// Find the first tracedecay (or legacy tokensave) hook entry under an event
-/// and return `(bin, subcommand, is_legacy_shape)`. `is_legacy_shape` is true
+/// Find the first tracedecay hook entry under an event and return
+/// `(bin, subcommand, is_legacy_shape)`. `is_legacy_shape` is true
 /// when the entry uses the broken single-string command shape and needs
 /// rewriting.
 fn find_tracedecay_hook(
@@ -299,8 +294,7 @@ fn find_tracedecay_hook(
     arr.iter().find_map(|wrapper| {
         let cmd_entry = wrapper.get("hooks")?.as_array()?.first()?;
         let raw_command = cmd_entry.get("command").and_then(|c| c.as_str())?;
-        // Detect both new "tracedecay" and legacy "tracedecay" binary names.
-        if !raw_command.contains("tracedecay") && !raw_command.contains("tokensave") {
+        if !raw_command.contains("tracedecay") {
             return None;
         }
         let (bin, sub) = parse_hook_command(cmd_entry)?;
@@ -335,9 +329,8 @@ fn install_permissions(settings: &mut serde_json::Value, tool_permissions: &[Str
 /// Append CLAUDE.md rules (idempotent).
 fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     let marker = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
-    // Legacy markers from older product/binary names — treat as already present.
+    // Display-case marker from older versions — treat as already present.
     let display_marker = "## MANDATORY: No Explore Agents When TraceDecay Is Available";
-    let legacy_marker = "## MANDATORY: No Explore Agents When Tokensave Is Available";
     let existing_md = if claude_md_path.is_file() {
         std::fs::read_to_string(claude_md_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {}: {e}", claude_md_path.display()),
@@ -347,7 +340,6 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     };
     if existing_md.contains(marker)
         || existing_md.contains(display_marker)
-        || existing_md.contains(legacy_marker)
         || existing_md.contains("No Explore Agents When Codegraph Is Available")
     {
         eprintln!("  CLAUDE.md already contains tracedecay rules, skipping");
@@ -431,9 +423,7 @@ fn install_clean_local_config() {
                     .get_mut("mcpServers")
                     .and_then(|v| v.as_object_mut())
                 {
-                    // Remove both new and legacy keys.
-                    let removed = servers.remove("tracedecay").is_some()
-                        | servers.remove("tokensave").is_some();
+                    let removed = servers.remove("tracedecay").is_some();
                     if removed {
                         if servers.is_empty() {
                             std::fs::remove_file(&mcp_json_path).ok();
@@ -455,13 +445,12 @@ fn install_clean_local_config() {
     }
 }
 
-/// Remove tracedecay (and legacy tokensave) entries from a local settings.local.json file.
+/// Remove tracedecay entries from a local settings.local.json file.
 fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(local_settings_path) else {
         return;
     };
-    // Fast-path: file must reference either new or legacy name.
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         return;
     }
     let Ok(mut local_val) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -474,8 +463,7 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
         .and_then(|v| v.as_array_mut())
     {
         let before = arr.len();
-        // Remove both new and legacy server name entries.
-        arr.retain(|v| v.as_str() != Some("tracedecay") && v.as_str() != Some("tokensave"));
+        arr.retain(|v| v.as_str() != Some("tracedecay"));
         if arr.len() < before {
             modified = true;
         }
@@ -485,8 +473,7 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
     {
-        let removed =
-            servers.remove("tracedecay").is_some() | servers.remove("tokensave").is_some();
+        let removed = servers.remove("tracedecay").is_some();
         if removed {
             modified = true;
             if servers.is_empty() {
@@ -526,9 +513,6 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Remove MCP server from ~/.claude.json.
-///
-/// Removes both the new "tracedecay" key and the legacy "tokensave" key so
-/// uninstall is complete regardless of which binary version installed them.
 fn uninstall_mcp_server(claude_json_path: &Path) {
     if !claude_json_path.exists() {
         return;
@@ -545,10 +529,8 @@ fn uninstall_mcp_server(claude_json_path: &Path) {
     else {
         return;
     };
-    // Remove both new and legacy keys; success if either was present.
-    let removed_new = servers.remove("tracedecay").is_some();
-    let removed_legacy = servers.remove("tokensave").is_some();
-    if !removed_new && !removed_legacy {
+    let removed = servers.remove("tracedecay").is_some();
+    if !removed {
         eprintln!("  No tracedecay MCP server in ~/.claude.json, skipping");
         return;
     }
@@ -595,16 +577,12 @@ fn uninstall_settings(settings_path: &Path) {
 }
 
 /// Remove stale MCP server from settings.json. Returns true if modified.
-///
-/// Removes both the new "tracedecay" key and the legacy "tokensave" key.
 fn uninstall_stale_mcp(settings: &mut serde_json::Value) -> bool {
     if let Some(servers) = settings
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
     {
-        let removed_new = servers.remove("tracedecay").is_some();
-        let removed_legacy = servers.remove("tokensave").is_some();
-        if removed_new || removed_legacy {
+        if servers.remove("tracedecay").is_some() {
             if servers.is_empty() {
                 settings.as_object_mut().map(|o| o.remove("mcpServers"));
             }
@@ -615,7 +593,7 @@ fn uninstall_stale_mcp(settings: &mut serde_json::Value) -> bool {
     false
 }
 
-/// Remove all tracedecay (and legacy tokensave) hooks. Returns true if modified.
+/// Remove all tracedecay hooks. Returns true if modified.
 fn uninstall_hook(settings: &mut serde_json::Value) -> bool {
     let mut modified = false;
     for event in &["PreToolUse", "UserPromptSubmit", "Stop"] {
@@ -624,13 +602,12 @@ fn uninstall_hook(settings: &mut serde_json::Value) -> bool {
     modified
 }
 
-/// Remove tracedecay (and legacy tokensave) entries from a single hook event.
+/// Remove tracedecay entries from a single hook event.
 /// Returns true if modified.
 fn uninstall_single_hook(settings: &mut serde_json::Value, event: &str) -> bool {
     let Some(arr) = settings["hooks"][event].as_array().cloned() else {
         return false;
     };
-    // Remove entries whose command contains either the new or legacy binary name.
     let filtered: Vec<serde_json::Value> = arr
         .into_iter()
         .filter(|h| {
@@ -641,7 +618,7 @@ fn uninstall_single_hook(settings: &mut serde_json::Value, event: &str) -> bool 
                         entry
                             .get("command")
                             .and_then(|c| c.as_str())
-                            .is_some_and(|c| c.contains("tracedecay") || c.contains("tokensave"))
+                            .is_some_and(|c| c.contains("tracedecay"))
                     })
                 })
         })
@@ -667,18 +644,16 @@ fn uninstall_single_hook(settings: &mut serde_json::Value, event: &str) -> bool 
     true
 }
 
-/// Remove tracedecay (and legacy tokensave) tool permissions. Returns true if modified.
+/// Remove tracedecay tool permissions. Returns true if modified.
 fn uninstall_permissions(settings: &mut serde_json::Value) -> bool {
     let Some(arr) = settings["permissions"]["allow"].as_array().cloned() else {
         return false;
     };
-    // Remove both new mcp__tracedecay__* and legacy mcp__tracedecay__* entries.
     let filtered: Vec<serde_json::Value> = arr
         .into_iter()
         .filter(|v| {
-            !v.as_str().is_some_and(|s| {
-                s.starts_with("mcp__tracedecay__") || s.starts_with("mcp__tracedecay__")
-            })
+            !v.as_str()
+                .is_some_and(|s| s.starts_with("mcp__tracedecay__"))
         })
         .collect();
     if filtered.len()
@@ -705,10 +680,9 @@ fn uninstall_permissions(settings: &mut serde_json::Value) -> bool {
     true
 }
 
-/// Remove tracedecay (and legacy tokensave) rules from CLAUDE.md.
+/// Remove tracedecay rules from CLAUDE.md.
 ///
-/// Handles the steady marker plus display-case and legacy product names so
-/// uninstall works regardless of which version installed the rules.
+/// Handles the steady marker plus display-case product name.
 fn uninstall_claude_md_rules(claude_md_path: &Path) {
     if !claude_md_path.exists() {
         return;
@@ -716,21 +690,17 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) {
     let Ok(contents) = std::fs::read_to_string(claude_md_path) else {
         return;
     };
-    // Check for either new or legacy brand name in the file.
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
         return;
     }
-    // Try steady marker first, then display-case and legacy markers.
+    // Try steady marker first, then display-case marker.
     let marker_new = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
     let marker_display = "## MANDATORY: No Explore Agents When TraceDecay Is Available";
-    let marker_legacy = "## MANDATORY: No Explore Agents When Tokensave Is Available";
     let (marker, start) = if let Some(s) = contents.find(marker_new) {
         (marker_new, s)
     } else if let Some(s) = contents.find(marker_display) {
         (marker_display, s)
-    } else if let Some(s) = contents.find(marker_legacy) {
-        (marker_legacy, s)
     } else {
         return;
     };
@@ -745,8 +715,7 @@ fn uninstall_claude_md_rules(claude_md_path: &Path) {
                     let abs = search_from + pos;
                     let heading_start = abs + 1; // skip the leading '\n'
                     let heading_line = contents[heading_start..].lines().next().unwrap_or("");
-                    // Treat headings that contain either new or legacy brand as owned.
-                    if heading_line.contains("tracedecay") || heading_line.contains("tokensave") {
+                    if heading_line.contains("tracedecay") {
                         search_from = heading_start + heading_line.len();
                     } else {
                         break abs;
@@ -1037,10 +1006,7 @@ fn doctor_check_permissions(dc: &mut DoctorCounters, settings: &serde_json::Valu
 
     let stale: Vec<&&str> = installed
         .iter()
-        .filter(|p| {
-            (p.starts_with("mcp__tracedecay__") || p.starts_with("mcp__tokensave__"))
-                && !expected.contains(&p.to_string())
-        })
+        .filter(|p| p.starts_with("mcp__tracedecay__") && !expected.contains(&p.to_string()))
         .collect();
     if !stale.is_empty() {
         dc.warn(&format!(
@@ -1089,7 +1055,7 @@ fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// Remove tracedecay (and legacy tokensave) from local .mcp.json. Returns true if cleaned.
+/// Remove tracedecay from local .mcp.json. Returns true if cleaned.
 fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) -> bool {
     let Ok(contents) = std::fs::read_to_string(mcp_json_path) else {
         return false;
@@ -1097,10 +1063,7 @@ fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) ->
     let Ok(mcp_val) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return false;
     };
-    // Check for either new or legacy key.
-    if !mcp_val["mcpServers"]["tracedecay"].is_object()
-        && !mcp_val["mcpServers"]["tokensave"].is_object()
-    {
+    if !mcp_val["mcpServers"]["tracedecay"].is_object() {
         dc.pass("No tracedecay in .mcp.json");
         return false;
     }
@@ -1109,7 +1072,6 @@ fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) ->
         return false;
     };
     servers.remove("tracedecay");
-    servers.remove("tokensave");
     if servers.is_empty() {
         if std::fs::remove_file(mcp_json_path).is_ok() {
             dc.warn(&format!(
@@ -1126,7 +1088,7 @@ fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) ->
     true
 }
 
-/// Remove tracedecay (and legacy tokensave) from local .claude/settings.local.json.
+/// Remove tracedecay from local .claude/settings.local.json.
 /// Returns true if cleaned.
 fn doctor_clean_local_settings(
     dc: &mut DoctorCounters,
@@ -1136,7 +1098,7 @@ fn doctor_clean_local_settings(
     let Ok(contents) = std::fs::read_to_string(local_settings_path) else {
         return false;
     };
-    if !contents.contains("tracedecay") && !contents.contains("tokensave") {
+    if !contents.contains("tracedecay") {
         dc.pass("No tracedecay in .claude/settings.local.json");
         return false;
     }
@@ -1147,7 +1109,7 @@ fn doctor_clean_local_settings(
 
     if let Some(arr) = local_val["enabledMcpjsonServers"].as_array_mut() {
         let before = arr.len();
-        arr.retain(|v| v.as_str() != Some("tracedecay") && v.as_str() != Some("tokensave"));
+        arr.retain(|v| v.as_str() != Some("tracedecay"));
         if arr.len() < before {
             modified = true;
         }
@@ -1157,8 +1119,7 @@ fn doctor_clean_local_settings(
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
     {
-        let removed =
-            servers.remove("tracedecay").is_some() | servers.remove("tokensave").is_some();
+        let removed = servers.remove("tracedecay").is_some();
         if removed {
             modified = true;
             if servers.is_empty() {
@@ -1273,10 +1234,10 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
     }
 }
 
-/// Load `path`, normalize any backslashed tracedecay/tracedecay hook commands,
+/// Load `path`, normalize any backslashed tracedecay hook commands,
 /// backfill missing hook events, and write back if anything changed. Silent on
 /// any error (missing file, unparseable JSON, write failure). Safe no-op when
-/// no tracedecay or legacy tokensave hook is present in the file.
+/// no tracedecay hook is present in the file.
 fn normalize_and_backfill_settings_file(path: &Path) {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return;
@@ -1284,8 +1245,8 @@ fn normalize_and_backfill_settings_file(path: &Path) {
     let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return;
     };
-    // Only touch files that already reference tracedecay or legacy tokensave —
-    // don't accidentally rewrite unrelated project settings.
+    // Only touch files that already reference tracedecay so unrelated project
+    // settings stay untouched.
     let Some(bin) = extract_tracedecay_bin_from_hooks(&settings) else {
         return;
     };
@@ -1298,11 +1259,10 @@ fn normalize_and_backfill_settings_file(path: &Path) {
     }
 }
 
-/// Rewrite any tracedecay or legacy tokensave hook command containing a
+/// Rewrite any tracedecay hook command containing a
 /// backslash to use forward slashes. Fixes pre-v4.0.x Windows installs where
 /// backslashed paths got mangled by `bash -c` (see issue #38). Only touches
-/// commands that mention `tracedecay` or `tracedecay` so unrelated hooks are
-/// left alone.
+/// commands that mention `tracedecay` so unrelated hooks are left alone.
 fn normalize_hook_command_paths(settings: &mut serde_json::Value) {
     let Some(hooks) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
         return;
@@ -1322,10 +1282,7 @@ fn normalize_hook_command_paths(settings: &mut serde_json::Value) {
                 let Some(command) = command_val.as_str() else {
                     continue;
                 };
-                // Normalize backslash paths for either new or legacy binary name.
-                if (command.contains("tracedecay") || command.contains("tokensave"))
-                    && command.contains('\\')
-                {
+                if command.contains("tracedecay") && command.contains('\\') {
                     *command_val = serde_json::Value::String(command.replace('\\', "/"));
                 }
             }
@@ -1333,12 +1290,12 @@ fn normalize_hook_command_paths(settings: &mut serde_json::Value) {
     }
 }
 
-/// Extracts the tracedecay (or legacy tokensave) binary path from any existing
+/// Extracts the tracedecay binary path from any existing
 /// hook command.
 ///
-/// Scans all hook events for a command containing "tracedecay" or "tracedecay"
-/// and returns the binary path. Handles both the modern `{command, args}` shape
-/// and the legacy single-string shape. Returns `None` if no managed hook is found.
+/// Scans all hook events for a command containing "tracedecay" and returns the
+/// binary path. Handles both the modern `{command, args}` shape and the legacy
+/// single-string shape. Returns `None` if no managed hook is found.
 fn extract_tracedecay_bin_from_hooks(settings: &serde_json::Value) -> Option<String> {
     let hooks = settings.get("hooks")?.as_object()?;
     for entries in hooks.values() {
@@ -1353,8 +1310,7 @@ fn extract_tracedecay_bin_from_hooks(settings: &serde_json::Value) -> Option<Str
                 let Some(raw) = cmd.get("command").and_then(|c| c.as_str()) else {
                     continue;
                 };
-                // Detect both new and legacy binary names.
-                if !raw.contains("tracedecay") && !raw.contains("tokensave") {
+                if !raw.contains("tracedecay") {
                     continue;
                 }
                 let bin = if cmd.get("args").is_some() {
