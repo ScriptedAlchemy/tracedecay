@@ -1,6 +1,6 @@
 ---
 name: tracedecay-find-impact
-description: Find the blast radius of a change — impacted symbols, files, and the tests to run.
+description: 'Find the blast radius of a change — impacted symbols, files, and the tests to run.'
 disable-model-invocation: true
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: reading-code-cheaply
-description: Inspect code at the cheapest sufficient depth — file outlines, cached signatures, single-symbol bodies, line slices, and module API surfaces instead of full-file reads. Use when about to read or open a source file, when a file is large, for "what's in this file", "what's the signature of X", or "what does this module export".
+description: 'Inspect code at the cheapest sufficient depth — file outlines, cached signatures, single-symbol bodies, line slices, and module API surfaces instead of full-file reads. Use when about to read or open a source file, when a file is large, for "what''s in this file", "what''s the signature of X", or "what does this module export".'
 ---
 
 # Reading code cheaply

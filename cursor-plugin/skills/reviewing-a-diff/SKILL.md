@@ -1,6 +1,6 @@
 ---
 name: reviewing-a-diff
-description: Use when reviewing a PR, branch diff, or working-tree diff for impact, behavioral risk, quality issues, unsafe patterns, affected tests, or pre-merge readiness.
+description: 'Use when reviewing a PR, branch diff, or working-tree diff for impact, behavioral risk, quality issues, unsafe patterns, affected tests, or pre-merge readiness.'
 ---
 
 # Reviewing a diff

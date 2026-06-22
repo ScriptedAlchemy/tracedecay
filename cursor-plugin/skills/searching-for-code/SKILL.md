@@ -1,6 +1,6 @@
 ---
 name: searching-for-code
-description: Find code by concept, symbol, signature, or qualified name in this repo using the TraceDecay code graph. Use when searching the codebase, locating a function/struct/trait/class/method, exploring how a feature works, or before grep/file-search when a .tracedecay index exists.
+description: 'Find code by concept, symbol, signature, or qualified name in this repo using the TraceDecay code graph. Use when searching the codebase, locating a function/struct/trait/class/method, exploring how a feature works, or before grep/file-search when a .tracedecay index exists.'
 ---
 
 # Searching for code

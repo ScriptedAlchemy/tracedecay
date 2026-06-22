@@ -1,6 +1,6 @@
 ---
 name: tracking-session-health
-description: Use when bracketing refactor or cleanup work with a code-health baseline and final per-dimension delta to prove whether quality improved or degraded.
+description: 'Use when bracketing refactor or cleanup work with a code-health baseline and final per-dimension delta to prove whether quality improved or degraded.'
 ---
 
 # Tracking session health

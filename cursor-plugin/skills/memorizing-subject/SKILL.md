@@ -1,6 +1,6 @@
 ---
 name: memorizing-subject
-description: Use when the user explicitly asks to memorize or remember a subject, code area, PR, branch, or decision set by researching it and storing only durable cited facts.
+description: 'Use when the user explicitly asks to memorize or remember a subject, code area, PR, branch, or decision set by researching it and storing only durable cited facts.'
 disable-model-invocation: true
 ---
 

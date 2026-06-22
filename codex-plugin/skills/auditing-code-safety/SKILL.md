@@ -1,6 +1,6 @@
 ---
 name: auditing-code-safety
-description: Use when auditing ship-blocking code risk: panic/unwrap/expect/todo/unimplemented/unsafe sites, FIXME/HACK markers, dead code, unused imports, or high-risk untested symbols.
+description: 'Use when auditing ship-blocking code risk: panic/unwrap/expect/todo/unimplemented/unsafe sites, FIXME/HACK markers, dead code, unused imports, or high-risk untested symbols.'
 ---
 
 # Auditing code safety

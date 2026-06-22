@@ -1,6 +1,6 @@
 ---
 name: recalling-session-context
-description: Use when retrieving what happened in past agent sessions: full-text transcript recall, scoped/time-filtered grep, lossless session replay, summary-DAG drill-down, or compaction recovery.
+description: 'Use when retrieving what happened in past agent sessions: full-text transcript recall, scoped/time-filtered grep, lossless session replay, summary-DAG drill-down, or compaction recovery.'
 ---
 
 # Recalling session context

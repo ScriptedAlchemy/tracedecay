@@ -1,6 +1,6 @@
 ---
 name: project-status
-description: Use when checking tracedecay index freshness, project file/config status, TODO/FIXME markers, MCP runtime CPU/RAM, dashboard URL, or memory subsystem counts.
+description: 'Use when checking tracedecay index freshness, project file/config status, TODO/FIXME markers, MCP runtime CPU/RAM, dashboard URL, or memory subsystem counts.'
 ---
 
 # Project status & config

@@ -1,6 +1,6 @@
 ---
 name: refactoring-safely
-description: Use when planning or executing mechanical refactors: renames, signature changes, field add/remove/rename, moving helpers, or any edit where missed call sites break the build.
+description: 'Use when planning or executing mechanical refactors: renames, signature changes, field add/remove/rename, moving helpers, or any edit where missed call sites break the build.'
 ---
 
 # Refactoring safely

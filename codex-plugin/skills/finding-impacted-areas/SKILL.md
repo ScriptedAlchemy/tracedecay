@@ -1,6 +1,6 @@
 ---
 name: finding-impacted-areas
-description: Use when estimating blast radius: what depends on a symbol or file, affected tests, risk of a change, impacted areas for a refactor, or what could break if a target changes.
+description: 'Use when estimating blast radius: what depends on a symbol or file, affected tests, risk of a change, impacted areas for a refactor, or what could break if a target changes.'
 ---
 
 # Finding impacted areas

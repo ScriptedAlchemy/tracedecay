@@ -1,6 +1,6 @@
 ---
 name: code-health-report
-description: Use when producing a code-health scorecard, tech-debt audit, worst-code ranking, complexity/duplication/doc-gap/test-risk report, or before/after health review; use architecture-overview for module maps.
+description: 'Use when producing a code-health scorecard, tech-debt audit, worst-code ranking, complexity/duplication/doc-gap/test-risk report, or before/after health review; use architecture-overview for module maps.'
 ---
 
 # Code-health report

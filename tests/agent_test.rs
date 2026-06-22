@@ -458,6 +458,45 @@ fn generated_guidance_prefers_resolved_active_project_store() {
 }
 
 #[test]
+fn generated_plugin_skill_descriptions_are_yaml_quoted() {
+    for root in ["codex-plugin/skills", "cursor-plugin/skills"] {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root);
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let skill_path = entry.unwrap().path().join("SKILL.md");
+            if !skill_path.is_file() {
+                continue;
+            }
+
+            let skill = std::fs::read_to_string(&skill_path).unwrap();
+            let description = skill
+                .lines()
+                .find(|line| line.starts_with("description: "))
+                .unwrap_or_else(|| panic!("{} has no description", skill_path.display()));
+            let value = description.strip_prefix("description: ").unwrap();
+            assert!(
+                valid_single_quoted_yaml_scalar(value),
+                "{} description must be a valid single-quoted YAML scalar",
+                skill_path.display()
+            );
+        }
+    }
+}
+
+fn valid_single_quoted_yaml_scalar(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) else {
+        return false;
+    };
+
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.next() != Some('\'') {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
 fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
     for (name, source) in [
         ("claude", include_str!("../src/agents/claude.rs")),
