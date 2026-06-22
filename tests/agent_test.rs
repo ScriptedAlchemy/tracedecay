@@ -304,10 +304,10 @@ fn assert_codex_marketplace_has_no_tracedecay(marketplace_path: &Path) {
     );
 }
 
-fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expected_version: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
-    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["version"], expected_version);
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
@@ -410,6 +410,7 @@ fn test_cursor_plugin_bundle_files_are_valid() {
             .join("cursor-plugin")
             .as_path(),
         "tracedecay",
+        "0.0.0",
     );
 }
 
@@ -546,7 +547,7 @@ fn test_cursor_install_installs_local_plugin_without_global_mcp() {
     CursorIntegration.install(&ctx).unwrap();
 
     let plugin_dir = cursor_plugin_install_dir(home.path());
-    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin);
+    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin, env!("CARGO_PKG_VERSION"));
     assert!(
         !std::fs::symlink_metadata(&plugin_dir)
             .unwrap()
@@ -570,6 +571,7 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
     assert_cursor_plugin_bundle(
         &cursor_plugin_install_dir(home.path()),
         &expected_tracedecay_bin(),
+        env!("CARGO_PKG_VERSION"),
     );
 
     let mcp_path = project.path().join(".cursor/mcp.json");
@@ -3287,7 +3289,11 @@ fn test_cursor_install_creates_plugin() {
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(home),
+        &ctx.tracedecay_bin,
+        env!("CARGO_PKG_VERSION"),
+    );
     assert!(
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
@@ -3739,6 +3745,7 @@ fn test_cursor_install_preserves_existing_legacy_mcp_config() {
     assert_cursor_plugin_bundle(
         &cursor_plugin_install_dir(dir.path()),
         &make_install_ctx(dir.path()).tracedecay_bin,
+        env!("CARGO_PKG_VERSION"),
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
