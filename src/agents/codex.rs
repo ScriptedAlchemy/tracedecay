@@ -90,11 +90,9 @@ impl AgentIntegration for CodexIntegration {
         let cached_dirs = codex_plugin_cached_install_dirs(&ctx.home);
         let plugin_dir = codex_plugin_install_dir(&ctx.home);
         if !cached_dirs.is_empty() {
-            for target in &cached_dirs {
-                install_codex_plugin_bundle(target, &ctx.tracedecay_bin, InstallScope::Global)?;
-            }
+            let target = install_codex_cached_plugin(&ctx.home, &ctx.tracedecay_bin)?;
             cleanup_codex_plugin_bootstrap(&ctx.home)?;
-            return Ok(UpdatePluginOutcome::Refreshed(cached_dirs));
+            return Ok(UpdatePluginOutcome::Refreshed(vec![target]));
         }
 
         if let Some(project_path) = codex_update_project_path(ctx) {
@@ -310,6 +308,10 @@ fn codex_plugin_cached_root(home: &Path) -> PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay")
 }
 
+fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
+    codex_plugin_cached_root(home).join(env!("CARGO_PKG_VERSION"))
+}
+
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(codex_plugin_cached_root(home)) else {
         return Vec::new();
@@ -347,16 +349,11 @@ fn codex_update_project_path(ctx: &InstallContext) -> Option<PathBuf> {
 fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
-        for install_dir in &cached_dirs {
-            install_codex_plugin_bundle(install_dir, tracedecay_bin, InstallScope::Global)?;
-        }
+        let install_dir = install_codex_cached_plugin(home, tracedecay_bin)?;
         cleanup_codex_plugin_bootstrap(home)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Refreshed installed Codex plugin bundle at {}",
-            cached_dirs
-                .last()
-                .map_or_else(|| codex_plugin_cached_root(home), PathBuf::from)
-                .display()
+            install_dir.display()
         );
         return Ok(());
     }
@@ -374,6 +371,17 @@ fn install_codex_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
         install_dir.display()
     );
     Ok(())
+}
+
+fn install_codex_cached_plugin(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
+    let target = codex_plugin_current_cached_install_dir(home);
+    install_codex_plugin_bundle(&target, tracedecay_bin, InstallScope::Global)?;
+    for stale_dir in codex_plugin_cached_install_dirs(home) {
+        if stale_dir != target {
+            remove_codex_plugin_install(&stale_dir)?;
+        }
+    }
+    Ok(target)
 }
 
 fn install_codex_repo_plugin(project_path: &Path, tracedecay_bin: &str) -> Result<()> {

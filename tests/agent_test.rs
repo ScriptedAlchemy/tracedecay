@@ -208,6 +208,11 @@ fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 }
 
 fn codex_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
+fn codex_stale_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
 }
 
@@ -2855,10 +2860,10 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    let stale_plugin_dir = codex_stale_cached_plugin_install_dir(home);
+    std::fs::create_dir_all(stale_plugin_dir.join(".codex-plugin")).unwrap();
     std::fs::write(
-        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        stale_plugin_dir.join(".codex-plugin/plugin.json"),
         r#"{"name":"tracedecay","version":"0.0.0"}"#,
     )
     .unwrap();
@@ -2885,6 +2890,7 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
 
     CodexIntegration.install(&ctx).unwrap();
 
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
     assert_codex_plugin_bundle(
         &cached_plugin_dir,
         &ctx.tracedecay_bin,
@@ -2894,6 +2900,10 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
     assert!(
         !bootstrap_dir.exists(),
         "global Codex install should remove the loose marketplace source once a cache install exists"
+    );
+    assert!(
+        !stale_plugin_dir.exists(),
+        "global Codex install should migrate managed cache installs to the current plugin version"
     );
     assert_codex_marketplace_has_no_tracedecay(&codex_personal_marketplace_path(home));
 }

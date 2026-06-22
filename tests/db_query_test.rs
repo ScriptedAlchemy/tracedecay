@@ -1,17 +1,30 @@
+use std::ops::Deref;
+
 use tempfile::TempDir;
 use tracedecay::db::{Database, StoredFingerprint};
 use tracedecay::redundancy::Fingerprint;
 use tracedecay::types::*;
 
-/// Helper: create a temp database and return (Database, TempDir).
-/// The TempDir is returned so that it stays alive for the duration of the test.
-async fn setup_db() -> (Database, TempDir) {
+struct TestDb {
+    db: Database,
+    _dir: TempDir,
+}
+
+impl Deref for TestDb {
+    type Target = Database;
+
+    fn deref(&self) -> &Self::Target {
+        &self.db
+    }
+}
+
+async fn setup_db() -> TestDb {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
     let (db, _) = Database::initialize(&db_path)
         .await
         .expect("failed to initialize database");
-    (db, dir)
+    TestDb { db, _dir: dir }
 }
 
 /// Helper: create a sample node with reasonable defaults.
@@ -80,7 +93,7 @@ async fn assert_can_start_new_transaction(db: &Database) {
 
 #[tokio::test]
 async fn test_db_module_reexports_database_and_stored_fingerprint() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     let node = sample_node("fp-node", "fingerprinted", "src/lib.rs");
     db.insert_node(&node).await.expect("insert_node failed");
 
@@ -116,7 +129,7 @@ async fn test_db_module_reexports_database_and_stored_fingerprint() {
 
 #[tokio::test]
 async fn test_insert_nodes_rolls_back_after_execute_failure() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.conn()
         .execute_batch(
             "CREATE TRIGGER fail_nodes_insert BEFORE INSERT ON nodes BEGIN
@@ -140,7 +153,7 @@ async fn test_insert_nodes_rolls_back_after_execute_failure() {
 
 #[tokio::test]
 async fn test_insert_edges_rolls_back_after_execute_failure() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     let nodes = vec![
         sample_node("rb-edge-a", "edge_a", "src/lib.rs"),
         sample_node("rb-edge-b", "edge_b", "src/lib.rs"),
@@ -169,7 +182,7 @@ async fn test_insert_edges_rolls_back_after_execute_failure() {
 
 #[tokio::test]
 async fn test_upsert_files_rolls_back_after_execute_failure() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.conn()
         .execute_batch(
             "CREATE TRIGGER fail_files_insert BEFORE INSERT ON files BEGIN
@@ -193,7 +206,7 @@ async fn test_upsert_files_rolls_back_after_execute_failure() {
 
 #[tokio::test]
 async fn test_insert_unresolved_refs_rolls_back_after_execute_failure() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.insert_nodes(&[sample_node("rb-ref", "ref_source", "src/lib.rs")])
         .await
         .expect("insert_nodes failed");
@@ -232,7 +245,7 @@ async fn test_insert_unresolved_refs_rolls_back_after_execute_failure() {
 
 #[tokio::test]
 async fn test_get_nodes_by_kind() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut func_node = sample_node("n1", "my_func", "src/lib.rs");
     func_node.kind = NodeKind::Function;
@@ -284,7 +297,7 @@ async fn test_get_nodes_by_kind() {
 
 #[tokio::test]
 async fn test_get_all_nodes() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes: Vec<Node> = (0..5)
         .map(|i| sample_node(&format!("all-{i}"), &format!("func_{i}"), "src/lib.rs"))
@@ -302,7 +315,7 @@ async fn test_get_all_nodes() {
 
 #[tokio::test]
 async fn test_get_all_edges() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("ea", "fa", "src/lib.rs");
     let n2 = sample_node("eb", "fb", "src/lib.rs");
@@ -326,7 +339,7 @@ async fn test_get_all_edges() {
 
 #[tokio::test]
 async fn test_insert_edges_batch() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes: Vec<Node> = (0..4)
         .map(|i| sample_node(&format!("be-{i}"), &format!("f{i}"), "src/lib.rs"))
@@ -354,7 +367,7 @@ async fn test_insert_edges_batch() {
 
 #[tokio::test]
 async fn test_insert_edges_empty() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.insert_edges(&[])
         .await
         .expect("insert_edges with empty slice should succeed");
@@ -369,7 +382,7 @@ async fn test_insert_edges_empty() {
 /// Both source and target are missing — edge must be silently skipped.
 #[tokio::test]
 async fn test_insert_edges_both_endpoints_missing() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let edges = vec![sample_edge("ghost-a", "ghost-b", EdgeKind::Calls)];
     db.insert_edges(&edges)
@@ -386,7 +399,7 @@ async fn test_insert_edges_both_endpoints_missing() {
 /// Source exists but target is missing — edge must be skipped.
 #[tokio::test]
 async fn test_insert_edges_missing_target() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let node = sample_node("src-ok", "func_a", "src/lib.rs");
     db.insert_nodes(&[node]).await.expect("insert_nodes failed");
@@ -403,7 +416,7 @@ async fn test_insert_edges_missing_target() {
 /// Target exists but source is missing — edge must be skipped.
 #[tokio::test]
 async fn test_insert_edges_missing_source() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let node = sample_node("tgt-ok", "func_b", "src/lib.rs");
     db.insert_nodes(&[node]).await.expect("insert_nodes failed");
@@ -421,7 +434,7 @@ async fn test_insert_edges_missing_source() {
 /// Valid edges must be inserted; invalid ones silently skipped.
 #[tokio::test]
 async fn test_insert_edges_mixed_valid_and_missing() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("mx-a", "fa", "src/a.rs"),
@@ -452,7 +465,7 @@ async fn test_insert_edges_mixed_valid_and_missing() {
 /// Singular insert_edge also skips when target is missing.
 #[tokio::test]
 async fn test_insert_edge_singular_missing_target() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let node = sample_node("se-a", "fa", "src/lib.rs");
     db.insert_nodes(&[node]).await.expect("insert_nodes failed");
@@ -469,7 +482,7 @@ async fn test_insert_edge_singular_missing_target() {
 /// Singular insert_edge also skips when source is missing.
 #[tokio::test]
 async fn test_insert_edge_singular_missing_source() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let node = sample_node("se-b", "fb", "src/lib.rs");
     db.insert_nodes(&[node]).await.expect("insert_nodes failed");
@@ -486,7 +499,7 @@ async fn test_insert_edge_singular_missing_source() {
 /// Singular insert_edge works normally when both endpoints exist.
 #[tokio::test]
 async fn test_insert_edge_singular_valid() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("sv-a", "fa", "src/lib.rs"),
@@ -506,7 +519,7 @@ async fn test_insert_edge_singular_valid() {
 /// Duplicate edges (same source/target/kind) are ignored via INSERT OR IGNORE.
 #[tokio::test]
 async fn test_insert_edges_duplicate_ignored() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("dup-a", "fa", "src/lib.rs"),
@@ -528,7 +541,7 @@ async fn test_insert_edges_duplicate_ignored() {
 /// This simulates the incremental sync reordering fix.
 #[tokio::test]
 async fn test_insert_edges_cross_file_after_all_nodes() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Simulate phase 1: insert nodes from two different files
     let nodes_file_a = vec![sample_node("cf-a1", "func_a", "src/a.rs")];
@@ -558,7 +571,7 @@ async fn test_insert_edges_cross_file_after_all_nodes() {
 /// Large batch with many missing endpoints does not abort the transaction.
 #[tokio::test]
 async fn test_insert_edges_large_batch_with_missing() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Only insert one node
     let node = sample_node("lb-0", "f0", "src/lib.rs");
@@ -582,7 +595,7 @@ async fn test_insert_edges_large_batch_with_missing() {
 /// Edges with None line values and missing endpoints are handled correctly.
 #[tokio::test]
 async fn test_insert_edges_null_line_with_missing() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("nl-a", "fa", "src/lib.rs"),
@@ -617,7 +630,7 @@ async fn test_insert_edges_null_line_with_missing() {
 
 #[tokio::test]
 async fn test_insert_all_bulk() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("bulk-1", "func_a", "src/a.rs"),
@@ -648,7 +661,7 @@ async fn test_insert_all_bulk() {
 
 #[tokio::test]
 async fn test_insert_all_sql_literal_helpers_preserve_payloads() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let payload = "quoted ' value; -- comment\nnext line */";
     let mut node = sample_node("bulk-sql-1", payload, "src/bulk'sql.rs");
@@ -685,7 +698,7 @@ async fn test_insert_all_sql_literal_helpers_preserve_payloads() {
 
 #[tokio::test]
 async fn test_delete_edges_by_source() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes: Vec<Node> = ["ds-a", "ds-b", "ds-c"]
         .iter()
@@ -716,7 +729,7 @@ async fn test_delete_edges_by_source() {
 
 #[tokio::test]
 async fn test_get_ranked_nodes_by_edge_kind_incoming() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Create target nodes that receive calls
     let target_a = sample_node("rt-a", "popular", "src/lib.rs");
@@ -753,7 +766,7 @@ async fn test_get_ranked_nodes_by_edge_kind_incoming() {
 
 #[tokio::test]
 async fn test_get_ranked_nodes_by_edge_kind_outgoing() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let caller = sample_node("ro-caller", "big_caller", "src/lib.rs");
     let target1 = sample_node("ro-t1", "t1", "src/lib.rs");
@@ -780,7 +793,7 @@ async fn test_get_ranked_nodes_by_edge_kind_outgoing() {
 
 #[tokio::test]
 async fn test_get_ranked_nodes_by_edge_kind_with_node_filter() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut func_node = sample_node("rnf-1", "func1", "src/lib.rs");
     func_node.kind = NodeKind::Function;
@@ -816,7 +829,7 @@ async fn test_get_ranked_nodes_by_edge_kind_with_node_filter() {
 
 #[tokio::test]
 async fn test_get_largest_nodes() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut small = sample_node("ln-small", "small_fn", "src/lib.rs");
     small.start_line = 1;
@@ -851,7 +864,7 @@ async fn test_get_largest_nodes() {
 
 #[tokio::test]
 async fn test_get_largest_nodes_with_kind_filter() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut func = sample_node("lk-func", "big_fn", "src/lib.rs");
     func.kind = NodeKind::Function;
@@ -878,7 +891,7 @@ async fn test_get_largest_nodes_with_kind_filter() {
 
 #[tokio::test]
 async fn test_get_largest_nodes_respects_limit() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes: Vec<Node> = (0..10)
         .map(|i| {
@@ -904,7 +917,7 @@ async fn test_get_largest_nodes_respects_limit() {
 
 #[tokio::test]
 async fn test_get_file_coupling_fan_in() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Nodes in different files
     let n1 = sample_node("fc-1", "f1", "src/a.rs");
@@ -935,7 +948,7 @@ async fn test_get_file_coupling_fan_in() {
 
 #[tokio::test]
 async fn test_get_file_coupling_fan_out() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("fco-1", "f1", "src/a.rs");
     let n2 = sample_node("fco-2", "f2", "src/b.rs");
@@ -963,7 +976,7 @@ async fn test_get_file_coupling_fan_out() {
 
 #[tokio::test]
 async fn test_get_file_coupling_binds_path_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("fc-sql-1", "f1", "src/a.rs");
     let n2 = sample_node("fc-sql-2", "f2", "src/b.rs");
@@ -991,7 +1004,7 @@ async fn test_get_file_coupling_binds_path_prefix() {
 
 #[tokio::test]
 async fn test_get_inheritance_depth() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Create a chain: Child extends Parent extends GrandParent
     let mut grandparent = sample_node("ih-gp", "GrandParent", "src/lib.rs");
@@ -1039,7 +1052,7 @@ async fn test_get_inheritance_depth() {
 
 #[tokio::test]
 async fn test_get_inheritance_depth_binds_path_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut parent = sample_node("ih-sql-p", "Parent", "src/lib.rs");
     parent.kind = NodeKind::Class;
@@ -1071,7 +1084,7 @@ async fn test_get_inheritance_depth_binds_path_prefix() {
 /// a 2-node cycle does not hang and reports finite depths.
 #[tokio::test]
 async fn test_get_inheritance_depth_terminates_on_cycle() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // A and B extend each other (cycle).
     let mut a = sample_node("ih-cy-a", "A", "src/lib.rs");
@@ -1142,7 +1155,7 @@ async fn test_get_inheritance_depth_terminates_on_cycle() {
 
 #[tokio::test]
 async fn test_get_node_distribution_no_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("nd-1", "f1", "src/a.rs");
     n1.kind = NodeKind::Function;
@@ -1171,7 +1184,7 @@ async fn test_get_node_distribution_no_prefix() {
 
 #[tokio::test]
 async fn test_get_node_distribution_with_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("ndp-1", "f1", "src/a/foo.rs");
     n1.kind = NodeKind::Function;
@@ -1198,7 +1211,7 @@ async fn test_get_node_distribution_with_prefix() {
 
 #[tokio::test]
 async fn test_get_call_edges() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("ce-1", "f1", "src/lib.rs");
     let n2 = sample_node("ce-2", "f2", "src/lib.rs");
@@ -1232,7 +1245,7 @@ async fn test_get_call_edges() {
 
 #[tokio::test]
 async fn test_get_complexity_ranked_no_filter() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Returns (Node, lines, fan_out, fan_in, score)
     // score = lines + fan_out*3 + fan_in
@@ -1275,7 +1288,7 @@ async fn test_get_complexity_ranked_no_filter() {
 
 #[tokio::test]
 async fn test_get_complexity_ranked_with_filter() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("cxf-1", "fn1", "src/lib.rs");
     n1.kind = NodeKind::Function;
@@ -1306,7 +1319,7 @@ async fn test_get_complexity_ranked_with_filter() {
 
 #[tokio::test]
 async fn test_get_undocumented_public_symbols() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Undocumented public function
     let mut undoc_pub = sample_node("udp-1", "undoc_fn", "src/lib.rs");
@@ -1357,7 +1370,7 @@ async fn test_get_undocumented_public_symbols() {
 
 #[tokio::test]
 async fn test_get_undocumented_public_symbols_with_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("udpp-1", "f1", "src/a/foo.rs");
     n1.kind = NodeKind::Function;
@@ -1388,7 +1401,7 @@ async fn test_get_undocumented_public_symbols_with_prefix() {
 /// must be reported when public and undocumented.
 #[tokio::test]
 async fn test_get_undocumented_public_symbols_includes_fields_and_variants() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut field = sample_node("udpa-1", "freq", "src/lib.rs");
     field.kind = NodeKind::Field;
@@ -1448,7 +1461,7 @@ async fn test_get_undocumented_public_symbols_includes_fields_and_variants() {
 
 #[tokio::test]
 async fn test_get_god_classes() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // A struct with many contained members
     let mut class_node = sample_node("gc-class", "GodClass", "src/lib.rs");
@@ -1517,7 +1530,7 @@ async fn test_get_god_classes() {
 
 #[tokio::test]
 async fn test_get_god_classes_binds_path_prefix() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut class_node = sample_node("gc-sql-class", "GodClass", "src/lib.rs");
     class_node.kind = NodeKind::Class;
@@ -1552,7 +1565,7 @@ async fn test_get_god_classes_binds_path_prefix() {
 
 #[tokio::test]
 async fn test_upsert_files_batch() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let files = vec![
         sample_file("src/a.rs"),
@@ -1590,7 +1603,7 @@ async fn test_upsert_files_batch() {
 
 #[tokio::test]
 async fn test_upsert_files_empty() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.upsert_files(&[])
         .await
         .expect("upsert_files with empty slice should succeed");
@@ -1602,7 +1615,7 @@ async fn test_upsert_files_empty() {
 
 #[tokio::test]
 async fn test_delete_file() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let file = sample_file("src/target.rs");
     db.upsert_file(&file).await.expect("upsert_file failed");
@@ -1637,7 +1650,7 @@ async fn test_delete_file() {
 
 #[tokio::test]
 async fn test_get_all_files() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let files = vec![sample_file("src/a.rs"), sample_file("src/b.rs")];
     db.upsert_files(&files).await.expect("upsert_files failed");
@@ -1655,7 +1668,7 @@ async fn test_get_all_files() {
 
 #[tokio::test]
 async fn test_last_index_time_empty() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let time = db.last_index_time().await.expect("last_index_time failed");
     assert_eq!(time, 0);
@@ -1663,7 +1676,7 @@ async fn test_last_index_time_empty() {
 
 #[tokio::test]
 async fn test_last_index_time_with_files() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut f1 = sample_file("src/a.rs");
     f1.indexed_at = 1000;
@@ -1688,7 +1701,7 @@ async fn test_last_index_time_with_files() {
 
 #[tokio::test]
 async fn test_metadata_get_set() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Non-existent key returns None
     let val = db
@@ -1724,7 +1737,7 @@ async fn test_metadata_get_set() {
 
 #[tokio::test]
 async fn test_metadata_multiple_keys() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     db.set_metadata("key1", "val1")
         .await
@@ -1754,7 +1767,7 @@ async fn test_metadata_multiple_keys() {
 
 #[tokio::test]
 async fn test_get_nodes_by_dir() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("dir-1", "f1", "src/a/foo.rs");
     n1.kind = NodeKind::Function;
@@ -1785,7 +1798,7 @@ async fn test_get_nodes_by_dir() {
 
 #[tokio::test]
 async fn test_get_nodes_by_dir_multiple_kinds() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n1 = sample_node("dirk-1", "f1", "src/a/foo.rs");
     n1.kind = NodeKind::Function;
@@ -1810,7 +1823,7 @@ async fn test_get_nodes_by_dir_multiple_kinds() {
 
 #[tokio::test]
 async fn test_get_nodes_by_dir_empty_kinds() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("dire-1", "f1", "src/a/foo.rs");
     db.insert_node(&n1).await.expect("insert_node failed");
@@ -1830,7 +1843,7 @@ async fn test_get_nodes_by_dir_empty_kinds() {
 
 #[tokio::test]
 async fn test_get_internal_edges() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("ie-1", "f1", "src/lib.rs");
     let n2 = sample_node("ie-2", "f2", "src/lib.rs");
@@ -1866,7 +1879,7 @@ async fn test_get_internal_edges() {
 
 #[tokio::test]
 async fn test_get_internal_edges_empty() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let result = db
         .get_internal_edges(&[])
@@ -1881,7 +1894,7 @@ async fn test_get_internal_edges_empty() {
 
 #[tokio::test]
 async fn test_insert_unresolved_refs_batch() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let node = sample_node("ur-node", "my_func", "src/lib.rs");
     db.insert_node(&node).await.expect("insert_node failed");
@@ -1926,7 +1939,7 @@ async fn test_insert_unresolved_refs_batch() {
 
 #[tokio::test]
 async fn test_insert_unresolved_refs_empty() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     db.insert_unresolved_refs(&[])
         .await
         .expect("insert_unresolved_refs with empty slice should succeed");
@@ -1938,7 +1951,7 @@ async fn test_insert_unresolved_refs_empty() {
 
 #[tokio::test]
 async fn test_search_nodes_ranking_order() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Node whose name exactly contains the query term should rank higher
     let mut exact_match = sample_node("sr-1", "process_data", "src/lib.rs");
@@ -1977,7 +1990,7 @@ async fn test_search_nodes_ranking_order() {
 
 #[tokio::test]
 async fn test_insert_all_comprehensive() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("ia-1", "alpha", "src/a.rs"),
@@ -2049,7 +2062,7 @@ async fn test_insert_all_comprehensive() {
 
 #[tokio::test]
 async fn test_get_nodes_by_kind_same_file_multiple_kinds() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut func = sample_node("kmf-1", "func_a", "src/mixed.rs");
     func.kind = NodeKind::Function;
@@ -2098,7 +2111,7 @@ async fn test_get_nodes_by_kind_same_file_multiple_kinds() {
 
 #[tokio::test]
 async fn test_get_complexity_ranked_by_branches_and_nesting() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // High complexity: many branches + deep nesting + large body
     let mut complex = sample_node("cxb-1", "complex_fn", "src/lib.rs");
@@ -2149,7 +2162,7 @@ async fn test_get_complexity_ranked_by_branches_and_nesting() {
 
 #[tokio::test]
 async fn test_get_god_classes_multiple_classes() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Big class with many members
     let mut big_class = sample_node("gcm-big", "BigClass", "src/lib.rs");
@@ -2242,7 +2255,7 @@ async fn test_get_god_classes_multiple_classes() {
 
 #[tokio::test]
 async fn test_edge_line_none_and_some() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("eln-1", "f1", "src/lib.rs");
     let n2 = sample_node("eln-2", "f2", "src/lib.rs");
@@ -2283,7 +2296,7 @@ async fn test_edge_line_none_and_some() {
 
 #[tokio::test]
 async fn test_edge_unique_constraint_dedup() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let n1 = sample_node("euc-1", "f1", "src/lib.rs");
     let n2 = sample_node("euc-2", "f2", "src/lib.rs");
@@ -2313,7 +2326,7 @@ async fn test_edge_unique_constraint_dedup() {
 
 #[tokio::test]
 async fn test_get_internal_edges_larger_set() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Create 10 nodes
     let nodes: Vec<Node> = (0..10)
@@ -2351,7 +2364,7 @@ async fn test_get_internal_edges_larger_set() {
 
 #[tokio::test]
 async fn test_fts_name_match_outranks_docstring_match() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Node A: search term in name
     let node_a = Node {
@@ -2486,7 +2499,7 @@ async fn test_batch_incoming_call_counts() {
 /// fallback replaces invalid bytes with U+FFFD.
 #[tokio::test]
 async fn test_non_utf8_signature_does_not_crash() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Insert a node with a BLOB signature containing 0xFF (invalid UTF-8)
     // via raw SQL — the Rust insert_node API only accepts valid Strings.
@@ -2550,7 +2563,7 @@ async fn test_non_utf8_signature_does_not_crash() {
 
 #[tokio::test]
 async fn test_get_incoming_edges_bulk_returns_all_targets() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("caller_a", "caller_a", "src/lib.rs"),
@@ -2591,7 +2604,7 @@ async fn test_get_incoming_edges_bulk_returns_all_targets() {
 
 #[tokio::test]
 async fn test_get_incoming_edges_bulk_empty_kinds_returns_all_kinds() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let nodes = vec![
         sample_node("a", "a", "src/lib.rs"),
@@ -2616,7 +2629,7 @@ async fn test_get_incoming_edges_bulk_empty_kinds_returns_all_kinds() {
 
 #[tokio::test]
 async fn test_get_incoming_edges_bulk_empty_input() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     let result = db
         .get_incoming_edges_bulk(&[], &[])
         .await
@@ -2630,7 +2643,7 @@ async fn test_get_incoming_edges_bulk_empty_input() {
 
 #[tokio::test]
 async fn test_get_nodes_by_qualified_name_returns_all_matches() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Two nodes with the same qualified name (e.g. overloaded methods or
     // multiple impl blocks). Both should come back.
@@ -2667,7 +2680,7 @@ async fn test_get_nodes_by_qualified_name_returns_all_matches() {
 
 #[tokio::test]
 async fn test_attrs_start_line_round_trips_through_db() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let mut n = sample_node("n", "documented_fn", "src/lib.rs");
     n.start_line = 10;
@@ -2690,7 +2703,7 @@ async fn test_attrs_start_line_round_trips_through_db() {
 
 #[tokio::test]
 async fn test_get_test_annotated_node_ids_finds_test_functions() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // A source function and a test function in the same file.
     let src_fn = sample_node("fn_prod", "production_code", "src/lib.rs");
@@ -2724,7 +2737,7 @@ async fn test_get_test_annotated_node_ids_finds_test_functions() {
 
 #[tokio::test]
 async fn test_get_test_annotated_node_ids_empty_input() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
     let result = db
         .get_test_annotated_node_ids(&[])
         .await
@@ -2734,7 +2747,7 @@ async fn test_get_test_annotated_node_ids_empty_input() {
 
 #[tokio::test]
 async fn test_get_test_annotated_node_ids_chunks_large_candidate_sets() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     let test_fn = sample_node("fn_test_large", "test_large_candidate_set", "src/lib.rs");
     let mut annot = sample_node("annot_test_large", "test", "src/lib.rs");
@@ -2767,7 +2780,7 @@ async fn test_get_test_annotated_node_ids_chunks_large_candidate_sets() {
 
 #[tokio::test]
 async fn test_get_files_with_test_annotations() {
-    let (db, _dir) = setup_db().await;
+    let db = setup_db().await;
 
     // Two files: one with inline tests, one without.
     let src_fn = sample_node("fn1", "foo", "src/lib.rs");
