@@ -1,6 +1,6 @@
 ---
 name: cross-branch-investigation
-description: Use when searching or comparing code across git branches without switching checkout, checking whether a symbol exists on another branch, or diffing branch graph changes.
+description: 'Use when searching or comparing code across git branches without switching checkout, checking whether a symbol exists on another branch, or diffing branch graph changes.'
 ---
 
 # Cross-branch investigation

@@ -1,6 +1,6 @@
 ---
 name: curating-project-memory
-description: Use when reviewing, updating, merging, deleting, pruning, or repairing tracedecay memory facts; handling stale, contradictory, duplicate, or secret-like facts; inspecting memory health; or opening the dashboard curation UI.
+description: 'Use when reviewing, updating, merging, deleting, pruning, or repairing tracedecay memory facts; handling stale, contradictory, duplicate, or secret-like facts; inspecting memory health; or opening the dashboard curation UI.'
 ---
 
 # Curating project memory

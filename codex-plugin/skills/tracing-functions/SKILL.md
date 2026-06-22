@@ -1,6 +1,6 @@
 ---
 name: tracing-functions
-description: Use when tracing call relationships: who calls a function, what it calls, shortest call paths between symbols, references for rename prep, recursion, hubs, or dynamic dispatch.
+description: 'Use when tracing call relationships: who calls a function, what it calls, shortest call paths between symbols, references for rename prep, recursion, hubs, or dynamic dispatch.'
 ---
 
 # Tracing functions

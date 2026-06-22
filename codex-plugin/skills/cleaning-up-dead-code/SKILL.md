@@ -1,6 +1,6 @@
 ---
 name: cleaning-up-dead-code
-description: Use when removing or consolidating dead code, unused imports, duplicate implementations, stale helpers, or cleanup findings after confirming callers and references.
+description: 'Use when removing or consolidating dead code, unused imports, duplicate implementations, stale helpers, or cleanup findings after confirming callers and references.'
 ---
 
 # Cleaning up dead code

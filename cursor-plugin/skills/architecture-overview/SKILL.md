@@ -1,6 +1,6 @@
 ---
 name: architecture-overview
-description: Use when mapping repo or directory architecture, module structure, public APIs, dependency layers, circular dependencies, coupling hotspots, or onboarding; use tracedecay:code-health-report for quality scoring and tech-debt ranking.
+description: 'Use when mapping repo or directory architecture, module structure, public APIs, dependency layers, circular dependencies, coupling hotspots, or onboarding; use tracedecay:code-health-report for quality scoring and tech-debt ranking.'
 ---
 
 # Architecture overview

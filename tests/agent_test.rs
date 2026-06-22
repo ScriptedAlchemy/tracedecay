@@ -208,6 +208,11 @@ fn codex_plugin_install_dir(home: &Path) -> std::path::PathBuf {
 }
 
 fn codex_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".codex/plugins/cache/personal/tracedecay")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
+fn codex_stale_cached_plugin_install_dir(home: &Path) -> std::path::PathBuf {
     home.join(".codex/plugins/cache/personal/tracedecay/0.0.4")
 }
 
@@ -304,10 +309,10 @@ fn assert_codex_marketplace_has_no_tracedecay(marketplace_path: &Path) {
     );
 }
 
-fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str) {
+fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expected_version: &str) {
     let manifest = read_json(&plugin_dir.join(".cursor-plugin/plugin.json"));
     assert_eq!(manifest["name"], "tracedecay");
-    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest["version"], expected_version);
     assert_eq!(manifest["license"], "MIT");
     assert_eq!(manifest["mcpServers"], "mcp.json");
     assert_eq!(manifest["hooks"], "hooks/hooks.json");
@@ -410,6 +415,7 @@ fn test_cursor_plugin_bundle_files_are_valid() {
             .join("cursor-plugin")
             .as_path(),
         "tracedecay",
+        "0.0.0",
     );
 }
 
@@ -449,6 +455,45 @@ fn generated_guidance_prefers_resolved_active_project_store() {
         !cursor_rule.contains("when `.tracedecay/` exists"),
         "the always-on Cursor rule must not gate MCP usage on a repo-local marker"
     );
+}
+
+#[test]
+fn generated_plugin_skill_descriptions_are_yaml_quoted() {
+    for root in ["codex-plugin/skills", "cursor-plugin/skills"] {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root);
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let skill_path = entry.unwrap().path().join("SKILL.md");
+            if !skill_path.is_file() {
+                continue;
+            }
+
+            let skill = std::fs::read_to_string(&skill_path).unwrap();
+            let description = skill
+                .lines()
+                .find(|line| line.starts_with("description: "))
+                .unwrap_or_else(|| panic!("{} has no description", skill_path.display()));
+            let value = description.strip_prefix("description: ").unwrap();
+            assert!(
+                valid_single_quoted_yaml_scalar(value),
+                "{} description must be a valid single-quoted YAML scalar",
+                skill_path.display()
+            );
+        }
+    }
+}
+
+fn valid_single_quoted_yaml_scalar(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) else {
+        return false;
+    };
+
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.next() != Some('\'') {
+            return false;
+        }
+    }
+    true
 }
 
 #[test]
@@ -546,7 +591,7 @@ fn test_cursor_install_installs_local_plugin_without_global_mcp() {
     CursorIntegration.install(&ctx).unwrap();
 
     let plugin_dir = cursor_plugin_install_dir(home.path());
-    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin);
+    assert_cursor_plugin_bundle(&plugin_dir, &ctx.tracedecay_bin, env!("CARGO_PKG_VERSION"));
     assert!(
         !std::fs::symlink_metadata(&plugin_dir)
             .unwrap()
@@ -570,6 +615,7 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
     assert_cursor_plugin_bundle(
         &cursor_plugin_install_dir(home.path()),
         &expected_tracedecay_bin(),
+        env!("CARGO_PKG_VERSION"),
     );
 
     let mcp_path = project.path().join(".cursor/mcp.json");
@@ -2853,10 +2899,10 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let ctx = make_install_ctx(home);
-    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
-    std::fs::create_dir_all(cached_plugin_dir.join(".codex-plugin")).unwrap();
+    let stale_plugin_dir = codex_stale_cached_plugin_install_dir(home);
+    std::fs::create_dir_all(stale_plugin_dir.join(".codex-plugin")).unwrap();
     std::fs::write(
-        cached_plugin_dir.join(".codex-plugin/plugin.json"),
+        stale_plugin_dir.join(".codex-plugin/plugin.json"),
         r#"{"name":"tracedecay","version":"0.0.0"}"#,
     )
     .unwrap();
@@ -2883,6 +2929,7 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
 
     CodexIntegration.install(&ctx).unwrap();
 
+    let cached_plugin_dir = codex_cached_plugin_install_dir(home);
     assert_codex_plugin_bundle(
         &cached_plugin_dir,
         &ctx.tracedecay_bin,
@@ -2892,6 +2939,10 @@ fn test_codex_install_refreshes_existing_cache_and_removes_bootstrap_source() {
     assert!(
         !bootstrap_dir.exists(),
         "global Codex install should remove the loose marketplace source once a cache install exists"
+    );
+    assert!(
+        !stale_plugin_dir.exists(),
+        "global Codex install should migrate managed cache installs to the current plugin version"
     );
     assert_codex_marketplace_has_no_tracedecay(&codex_personal_marketplace_path(home));
 }
@@ -3287,7 +3338,11 @@ fn test_cursor_install_creates_plugin() {
     let ctx = make_install_ctx(home);
     CursorIntegration.install(&ctx).unwrap();
 
-    assert_cursor_plugin_bundle(&cursor_plugin_install_dir(home), &ctx.tracedecay_bin);
+    assert_cursor_plugin_bundle(
+        &cursor_plugin_install_dir(home),
+        &ctx.tracedecay_bin,
+        env!("CARGO_PKG_VERSION"),
+    );
     assert!(
         !home.join(".cursor/mcp.json").exists(),
         "Cursor plugin install should not write legacy ~/.cursor/mcp.json"
@@ -3739,6 +3794,7 @@ fn test_cursor_install_preserves_existing_legacy_mcp_config() {
     assert_cursor_plugin_bundle(
         &cursor_plugin_install_dir(dir.path()),
         &make_install_ctx(dir.path()).tracedecay_bin,
+        env!("CARGO_PKG_VERSION"),
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),

@@ -1,6 +1,6 @@
 ---
 name: fixing-build-and-type-errors
-description: Use when diagnosing or fixing compiler/type-checker errors, cargo/clippy output, tsc/pyright failures, mapped diagnostics, or build failures that need graph-anchored context.
+description: 'Use when diagnosing or fixing compiler/type-checker errors, cargo/clippy output, tsc/pyright failures, mapped diagnostics, or build failures that need graph-anchored context.'
 ---
 
 # Fixing build & type errors

@@ -1,6 +1,6 @@
 ---
 name: porting-code
-description: Use when porting, migrating, or rewriting code between directories, crates, modules, branches, or languages while preserving dependency order and tracking port progress.
+description: 'Use when porting, migrating, or rewriting code between directories, crates, modules, branches, or languages while preserving dependency order and tracking port progress.'
 ---
 
 # Porting code

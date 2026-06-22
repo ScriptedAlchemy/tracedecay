@@ -1,6 +1,6 @@
 ---
 name: tracedecay-draft-commit
-description: Draft a commit message, PR description, or changelog from the semantic meaning of the changes (drafts text only — never commits or pushes).
+description: 'Draft a commit message, PR description, or changelog from the semantic meaning of the changes (drafts text only — never commits or pushes).'
 disable-model-invocation: true
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: assessing-test-coverage
-description: Use when answering which tests cover code, whether a function or file is tested, which tests are affected by changed files, or where the next test should go without running tests.
+description: 'Use when answering which tests cover code, whether a function or file is tested, which tests are affected by changed files, or where the next test should go without running tests.'
 ---
 
 # Assessing test coverage

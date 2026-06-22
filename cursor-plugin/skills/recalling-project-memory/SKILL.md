@@ -1,6 +1,6 @@
 ---
 name: recalling-project-memory
-description: Use when recalling prior decisions, durable facts, user/project preferences, or past project context before answering or planning; use curating-project-memory for updating or deleting stored facts.
+description: 'Use when recalling prior decisions, durable facts, user/project preferences, or past project context before answering or planning; use curating-project-memory for updating or deleting stored facts.'
 ---
 
 # Recalling project memory
