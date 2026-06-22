@@ -1980,7 +1980,7 @@ fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, summary-DAG depth distribution with compression ratio, payload byte totals, and payload GC status from the active project or Hermes profile session store.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, stored summary-depth distribution with compression ratio, payload byte totals, and payload GC status from the active project or Hermes profile session store. Codex compaction summaries store compaction generation in the depth field.",
         json!({
             "type": "object",
             "properties": {

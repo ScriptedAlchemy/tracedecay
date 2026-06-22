@@ -473,8 +473,9 @@ pub struct LcmStoreStatus {
     pub estimated_tokens: i64,
 }
 
-/// Per-depth summary DAG counters mirroring the hermes-lcm `lcm_status`
-/// `dag.depths` entries.
+/// Per-depth summary counters mirroring the hermes-lcm `lcm_status`
+/// `dag.depths` entries. Most LCM producers use this as DAG lineage depth;
+/// Codex compaction summaries store compaction generation in the same field.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmDagDepthStatus {
     pub count: i64,
@@ -482,9 +483,9 @@ pub struct LcmDagDepthStatus {
     pub source_tokens: i64,
 }
 
-/// Summary DAG diagnostics mirroring the hermes-lcm `lcm_status` `dag`
-/// block: node/depth distribution and the source-to-summary compression
-/// ratio rendered as `"N.N:1"` (`"0:1"` when the DAG is empty).
+/// Summary diagnostics mirroring the hermes-lcm `lcm_status` `dag` block:
+/// node/depth distribution and the source-to-summary compression ratio rendered
+/// as `"N.N:1"` (`"0:1"` when the DAG is empty).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmDagStatus {
     pub total_nodes: i64,

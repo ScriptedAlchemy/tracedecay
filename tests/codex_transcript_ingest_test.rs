@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
+use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
@@ -471,6 +472,95 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
         .lcm_describe(LcmDescribeRequest {
             provider: "codex".to_string(),
             session_id: "codex-incremental".to_string(),
+            target: LcmDescribeTarget::Session,
+        })
+        .await
+        .unwrap();
+    let depths = description
+        .summary_nodes
+        .iter()
+        .map(|node| node.depth)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(depths, [1, 2].into_iter().collect());
+}
+
+#[tokio::test]
+async fn codex_compaction_depth_resets_when_rollout_replays_from_start() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-01-01T00-00-45-codex-replay.jsonl");
+    let cwd = project.to_string_lossy();
+    let compact = |at: &str| {
+        serde_json::json!({
+            "timestamp": at,
+            "type": "compacted",
+            "payload": {
+                "message": "",
+                "replacement_history": [
+                    {"type": "compaction", "encrypted_content": "encrypted"}
+                ]
+            }
+        })
+    };
+    let lines = [
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:45.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-replay", "cwd": cwd, "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:46.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "First replay prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:47.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "First replay reply"}
+        }),
+        compact("2026-01-01T00:00:48.000Z"),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:49.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Second replay prompt"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:50.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Second replay reply"}
+        }),
+        compact("2026-01-01T00:00:51.000Z"),
+    ];
+    let contents = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, contents).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    let path_str = path.to_string_lossy().to_string();
+    db.set_parse_offset(
+        &path_str,
+        ParseOffset {
+            byte_offset: std::fs::metadata(&path).unwrap().len(),
+            mtime: 1,
+            file_id: 1,
+        },
+    )
+    .await;
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 6);
+
+    let description = db
+        .lcm_describe(LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "codex-replay".to_string(),
             target: LcmDescribeTarget::Session,
         })
         .await

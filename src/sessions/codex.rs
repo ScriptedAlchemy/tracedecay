@@ -122,7 +122,13 @@ impl TranscriptSource for CodexSource {
         // Real session_meta lines carry no model; track the active model from
         // `turn_context` lines instead (it can change mid-session).
         let mut current_model = meta.model.clone();
-        let mut compaction_depth = prior_compaction_depth(path, prev.position);
+        let replayed_from_start =
+            prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
+        let mut compaction_depth = if replayed_from_start {
+            0
+        } else {
+            prior_compaction_depth(path, prev.position)
+        };
         for line in &new.lines {
             if turn_usage.observe(&line.value) {
                 continue;

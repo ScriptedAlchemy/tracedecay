@@ -278,7 +278,9 @@ Summary statistics and recent activity:
 - Summary node counts and compression ratios
 - Role distribution (user, assistant, system, tool)
 - Source/provider breakdown
-- Summary depth distribution
+- Summary depth distribution. Codex compaction summaries use this depth as
+  compaction generation; ordinary LCM condensation summaries use DAG lineage
+  depth.
 - Recent sessions with message counts
 - Recent summary nodes
 
