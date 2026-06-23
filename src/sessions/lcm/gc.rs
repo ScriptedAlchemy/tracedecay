@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use libsql::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -327,6 +328,7 @@ pub async fn run_payload_gc_with_apply(
     apply: bool,
     now: i64,
 ) -> Result<LcmGcReport, LcmError> {
+    let started = Instant::now();
     let cfg = cfg.clone().normalized();
     let mut report = LcmGcReport::new(provider, session_id, &cfg, apply, now);
     report.last_gc_at = schema::get_gc_meta(conn, "last_gc_at")
@@ -399,7 +401,15 @@ pub async fn run_payload_gc_with_apply(
 
     report.ended_at = now;
     if apply {
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = if report.errors.is_empty() {
+            "ok"
+        } else {
+            "partial"
+        };
         schema::set_gc_meta(conn, "last_gc_at", &now.to_string()).await?;
+        schema::set_gc_meta(conn, "last_gc_duration_ms", &duration_ms.to_string()).await?;
+        schema::set_gc_meta(conn, "last_gc_status", status).await?;
         schema::set_gc_meta(conn, "last_reaped_refs", &report.totals.files.to_string()).await?;
         schema::set_gc_meta(conn, "last_reaped_bytes", &report.totals.bytes.to_string()).await?;
         if report.errors.is_empty() {
@@ -899,7 +909,7 @@ mod tests {
             .map_err(|err| format!("set test busy timeout: {err}"))?;
         schema::ensure_lcm_schema(&conn)
             .await
-            .ok_or_else(|| "ensure lcm schema".to_string())?;
+            .map_err(|err| format!("ensure lcm schema: {err}"))?;
         Ok(TestStore {
             _temp: temp,
             storage_root,
@@ -1707,6 +1717,13 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.errors[0].payload_ref, corrupted_ref);
         assert_eq!(report.errors[0].kind, "integrity_mismatch");
+        assert_eq!(
+            schema::get_gc_meta(&store.conn, "last_gc_status")
+                .await
+                .map_err(|err| err.to_string())?
+                .as_deref(),
+            Some("partial")
+        );
         assert!(payload::load_payload_metadata(&store.conn, &corrupted_ref)
             .await
             .is_ok());

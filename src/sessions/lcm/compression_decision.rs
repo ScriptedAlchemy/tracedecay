@@ -247,7 +247,7 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
         input.request.dynamic_leaf_chunk_max,
         source_token_count(input.backlog),
     );
-    let selected_len = bounded_leaf_chunk_len(
+    let selected_len = progress_leaf_chunk_len(
         input.backlog,
         leaf_chunk_tokens,
         input.request.max_source_messages,
@@ -316,17 +316,28 @@ pub fn bounded_leaf_chunk_len(
     let mut selected_tokens = 0;
     for message in backlog.iter().take(max_messages) {
         let message_tokens = estimate_tokens(&message.content);
-        if selected_len > 0 {
-            if let Some(token_limit) = token_limit {
-                if selected_tokens + message_tokens > token_limit {
-                    break;
-                }
+        if let Some(token_limit) = token_limit {
+            if selected_tokens + message_tokens > token_limit {
+                break;
             }
         }
         selected_tokens += message_tokens;
         selected_len += 1;
     }
-    selected_len.max(1)
+    selected_len
+}
+
+pub fn progress_leaf_chunk_len(
+    backlog: &[LcmRawMessage],
+    leaf_chunk_tokens: Option<i64>,
+    max_source_messages: Option<usize>,
+) -> usize {
+    let selected_len = bounded_leaf_chunk_len(backlog, leaf_chunk_tokens, max_source_messages);
+    if selected_len == 0 && !backlog.is_empty() {
+        1
+    } else {
+        selected_len
+    }
 }
 
 fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {

@@ -893,7 +893,7 @@ async fn persist_compression_transaction_writes(
             write.request.dynamic_leaf_chunk_max,
             source_token_count(&remaining_backlog),
         );
-        let selected_len = compression_decision::bounded_leaf_chunk_len(
+        let selected_len = compression_decision::progress_leaf_chunk_len(
             &remaining_backlog,
             leaf_chunk_tokens,
             write.request.max_source_messages,

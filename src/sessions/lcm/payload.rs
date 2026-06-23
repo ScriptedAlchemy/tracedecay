@@ -349,14 +349,15 @@ pub async fn delete_external_payload(
 
     conn.execute("BEGIN IMMEDIATE", ()).await?;
     let tx_result: Result<(), LcmError> = async {
-        if opts.verify_hash {
-            if let Some(metadata) = metadata.as_ref() {
-                if gc::referenced_payload_refs(conn, &metadata.provider, None)
-                    .await?
-                    .contains(payload_ref)
-                {
-                    return Err(LcmError::StillReferenced);
-                }
+        let tombstone_missing_payload =
+            opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
+        if let Some(metadata) = metadata.as_ref() {
+            if gc::referenced_payload_refs(conn, &metadata.provider, None)
+                .await?
+                .contains(payload_ref)
+                && !tombstone_missing_payload
+            {
+                return Err(LcmError::StillReferenced);
             }
         }
         conn.execute(

@@ -382,6 +382,45 @@ async fn nested_summary_expansion_is_direct_only() {
 }
 
 #[tokio::test]
+async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_rows() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
+    let child = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            1,
+            "child summary",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("child summary insert should succeed");
+    let before = summary_table_counts(&db_path).await;
+
+    let result = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            1,
+            "parent summary at invalid depth",
+            vec![LcmSourceRef::SummaryNode {
+                node_id: child.node_id,
+            }],
+        ))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(LcmError::SummarySourceNotOwnedBySession)
+    ));
+    assert_eq!(summary_table_counts(&db_path).await, before);
+}
+
+#[tokio::test]
 async fn summary_fts_matches_inserted_summary_text() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);

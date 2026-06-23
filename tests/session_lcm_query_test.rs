@@ -2,9 +2,9 @@ use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandQueryRequest,
-    LcmExpandRequest, LcmExpandTarget, LcmGrepRequest, LcmGrepSort, LcmLifecycleUpdate,
-    LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope, LcmSourceRef, LcmStorageKind,
-    LcmSummaryNodeDraft, LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
+    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest, LcmGrepSort,
+    LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope, LcmSourceRef,
+    LcmStorageKind, LcmSummaryNodeDraft, LCM_SCHEMA_VERSION, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -792,6 +792,72 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
 
     let rendered = serde_json::to_string(&status).unwrap();
     assert!(!rendered.contains("private payload marker"));
+}
+
+#[tokio::test]
+async fn status_reports_payload_gc_run_metadata_after_apply() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = GlobalDb::open_at(&db_path).await.expect("session db open");
+    insert_session(&db, "cursor", "session-gc").await;
+
+    let payload = format!("gc metadata payload\n{}", "G".repeat(300_000));
+    let mut external = raw_message("cursor", "tool-gc", "session-gc", 1, &payload);
+    external.role = "tool".to_string();
+    external.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&external)
+        .await
+        .expect("external payload should ingest");
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let cfg = LcmGcConfig {
+        backup_before_reap: false,
+        ..LcmGcConfig::default()
+    };
+    let report = tracedecay::sessions::lcm::gc::run_payload_gc_with_apply(
+        &conn,
+        &storage_root,
+        "cursor",
+        Some("session-gc"),
+        &cfg,
+        true,
+        1_715_123_456,
+    )
+    .await
+    .expect("payload gc should run");
+    assert_eq!(report.status, "applied");
+
+    let mut rows = conn
+        .query(
+            "SELECT value FROM lcm_gc_meta WHERE key = 'last_gc_status'",
+            (),
+        )
+        .await
+        .expect("last GC status query should run");
+    let row = rows
+        .next()
+        .await
+        .expect("last GC status row should load")
+        .expect("last GC status should be stored");
+    let stored_status: String = row.get(0).expect("last GC status should be text");
+    assert_eq!(stored_status, "ok");
+
+    let status = db
+        .lcm_status("cursor", Some("session-gc"))
+        .await
+        .expect("status should load");
+    assert_eq!(status.payload_gc.last_gc_at, Some(1_715_123_456));
+    assert!(
+        status.payload_gc.last_gc_duration_ms.is_some(),
+        "status should expose the last GC duration"
+    );
+    assert_eq!(status.payload_gc.last_gc_status.as_deref(), Some("ok"));
+    assert_eq!(status.payload_gc.last_gc_error, None);
+    assert_eq!(status.payload_gc.last_reaped_refs, Some(0));
+    assert_eq!(status.payload_gc.last_reaped_bytes, Some(0));
 }
 
 #[tokio::test]
