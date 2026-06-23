@@ -284,8 +284,9 @@ fn run_ok(fixture: &Fixture, args: &[&str]) -> Output {
     let output = run_with_timeout(command, Duration::from_secs(120));
     assert!(
         output.status.success(),
-        "`tracedecay {}` failed\nstdout:\n{}\nstderr:\n{}",
+        "`tracedecay {}` failed with status {}\nstdout:\n{}\nstderr:\n{}",
         args.join(" "),
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

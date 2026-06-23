@@ -1121,7 +1121,8 @@ class Result:
 
 def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
-    assert argv[1:] == ["tool", "tracedecay_context", "--json", "--args", "{\"query\": \"x\"}"]
+    assert argv[1:5] == ["tool", "tracedecay_context", "--json", "--args"]
+    assert json.loads(argv[5]) == {"format": "json", "query": "x"}
     assert "cwd" not in kwargs
     assert kwargs["timeout"] == 120
     assert kwargs["shell"] is False

@@ -8757,6 +8757,8 @@ async fn lcm_status_uses_explicit_hermes_profile_session_db() {
     assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
     assert_eq!(payload["lcm"]["raw_message_count"], 2);
     assert!(hermes_home.path().join(".tracedecay/sessions.db").exists());
+    #[cfg(windows)]
+    let _ = hermes_home.keep();
 }
 
 #[tokio::test]
