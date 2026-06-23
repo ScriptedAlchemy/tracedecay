@@ -5040,6 +5040,7 @@ async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() 
         "build script helper should not be ranked as source risk, got: {}",
         text
     );
+    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
