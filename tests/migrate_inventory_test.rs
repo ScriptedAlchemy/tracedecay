@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use libsql::Builder;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
@@ -73,6 +74,19 @@ fn make_project_store(root: &Path) {
     let data_dir = root.join(".tracedecay");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(data_dir.join("tracedecay.db"), b"not sqlite").unwrap();
+}
+
+async fn make_healthy_project_store(root: &Path) {
+    let data_dir = root.join(".tracedecay");
+    fs::create_dir_all(&data_dir).unwrap();
+    let db = Builder::new_local(data_dir.join("tracedecay.db"))
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("CREATE TABLE health_check (id INTEGER PRIMARY KEY)", ())
+        .await
+        .unwrap();
 }
 
 fn single_ok_inventory(project: &Path, data_dir: &Path, graph_db: &Path) -> MigrationInventory {
@@ -285,6 +299,89 @@ async fn inventory_records_project_store_sidecar_artifacts() {
     ] {
         assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
     }
+}
+
+#[tokio::test]
+async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fails() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("repo");
+    let branches_dir = root.join(".tracedecay/branches");
+    let branch_db = branches_dir.join("feature.db");
+    fs::create_dir_all(&root).unwrap();
+    make_healthy_project_store(&root).await;
+    fs::create_dir_all(&branches_dir).unwrap();
+    fs::write(&branch_db, b"not sqlite").unwrap();
+    fs::write(branches_dir.join("feature.db-wal"), b"wal").unwrap();
+    fs::write(branches_dir.join("feature.db-shm"), b"shm").unwrap();
+
+    let report = build_inventory(MigrationInventoryOptions {
+        roots: vec![dir.path().to_path_buf()],
+        ..MigrationInventoryOptions::default()
+    })
+    .await
+    .unwrap();
+
+    let store = report
+        .stores
+        .iter()
+        .find(|store| store.project_root == root)
+        .expect("project store should be inventoried");
+    let artifact = store
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "branch_graph_db")
+        .expect("branch DB artifact should be recorded");
+
+    assert!(same_path(&artifact.path, &branch_db));
+    assert_eq!(artifact.size_bytes, fs::metadata(&branch_db).unwrap().len());
+    assert!(store.artifacts.iter().any(|artifact| {
+        artifact.kind == "branch_graph_db_wal"
+            && same_path(&artifact.path, &branches_dir.join("feature.db-wal"))
+            && artifact.size_bytes == 3
+    }));
+    assert!(store.artifacts.iter().any(|artifact| {
+        artifact.kind == "branch_graph_db_shm"
+            && same_path(&artifact.path, &branches_dir.join("feature.db-shm"))
+            && artifact.size_bytes == 3
+    }));
+    assert_eq!(store.statuses, vec![StoreStatus::Corrupt]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inventory_skips_symlinked_branches_dir_by_default() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("repo");
+    let real_branches = dir.path().join("outside_branches");
+    let branch_db = real_branches.join("feature.db");
+    fs::create_dir_all(&root).unwrap();
+    make_healthy_project_store(&root).await;
+    fs::create_dir_all(&real_branches).unwrap();
+    fs::write(&branch_db, b"not sqlite").unwrap();
+    symlink(&real_branches, root.join(".tracedecay/branches")).unwrap();
+
+    let report = build_inventory(MigrationInventoryOptions {
+        roots: vec![dir.path().to_path_buf()],
+        follow_symlinks: false,
+        ..MigrationInventoryOptions::default()
+    })
+    .await
+    .unwrap();
+
+    let store = report
+        .stores
+        .iter()
+        .find(|store| store.project_root == root)
+        .expect("project store should be inventoried");
+
+    assert_eq!(store.statuses, vec![StoreStatus::Ok]);
+    assert!(!store
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "branch_graph_db"));
+    assert!(report.skipped.iter().any(|skipped| {
+        skipped.path == root.join(".tracedecay/branches") && skipped.reason == "symlink"
+    }));
 }
 
 #[tokio::test]
