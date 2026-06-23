@@ -244,6 +244,11 @@ pub enum Commands {
         #[arg(long)]
         timings: bool,
     },
+    /// Manage the long-running TraceDecay daemon used by MCP clients
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
     /// Download and install the latest version from GitHub
     Upgrade,
     /// Show or switch the update channel (stable or beta)
@@ -365,6 +370,35 @@ pub enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DaemonAction {
+    /// Run the foreground daemon process
+    Run {
+        /// Unix socket path for MCP clients
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Install the daemon as a user service
+    #[command(name = "install-service")]
+    InstallService {
+        /// Unix socket path for MCP clients
+        #[arg(long)]
+        socket: Option<String>,
+        /// Write the service file but do not start/enable it
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// Remove the installed daemon user service
+    #[command(name = "uninstall-service")]
+    UninstallService {
+        /// Remove the service file but do not stop/disable a running service
+        #[arg(long)]
+        no_stop: bool,
+    },
+    /// Print daemon service/socket status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -594,7 +628,9 @@ pub enum BranchAction {
 
 #[cfg(test)]
 mod cli_parse_tests {
-    use super::{BranchAction, Cli, Commands, MemoryAction, MigrateAction, SessionsAction};
+    use super::{
+        BranchAction, Cli, Commands, DaemonAction, MemoryAction, MigrateAction, SessionsAction,
+    };
     use clap::{error::ErrorKind, Parser};
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -688,6 +724,26 @@ mod cli_parse_tests {
                 automation,
                 ..
             }) if agent.as_deref() == Some("codex") && automation
+        ));
+    }
+
+    #[test]
+    fn daemon_install_service_command_parses_socket_and_no_start() {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "daemon",
+            "install-service",
+            "--socket",
+            "/tmp/tracedecay.sock",
+            "--no-start",
+        ])
+        .expect("daemon install-service should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::InstallService { socket, no_start }
+            }) if socket.as_deref() == Some("/tmp/tracedecay.sock") && no_start
         ));
     }
 

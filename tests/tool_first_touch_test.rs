@@ -6,35 +6,27 @@
 //! failing with "run tracedecay init". Code-graph tools keep the strict
 //! behaviour, as does any store tool invoked without an explicit `--project`.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
+use std::path::Path;
+
+use common::{canonical_existing_path, tracedecay_command_with_home};
 use tempfile::TempDir;
 
 fn canonical_temp_path(path: &Path) -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-    }
+    canonical_existing_path(path)
 }
 
 fn run_tool(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+    tracedecay_command_with_home(home)
         .current_dir(cwd)
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
-        .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"))
         .arg("tool")
         .args(args)
         .output()
         .expect("failed to spawn tracedecay")
 }
 
+#[cfg(unix)]
 #[test]
 fn fact_store_creates_profile_store_on_first_touch() {
     let home = TempDir::new().unwrap();
@@ -43,6 +35,7 @@ fn fact_store_creates_profile_store_on_first_touch() {
     let cwd_path = canonical_temp_path(cwd.path());
     let profile = home_path.join(".hermes");
     std::fs::create_dir_all(&profile).unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(&home_path);
 
     let profile_arg = profile.to_string_lossy().to_string();
     let output = run_tool(
@@ -116,7 +109,7 @@ fn store_tools_without_explicit_project_still_require_init() {
 }
 
 #[test]
-fn code_graph_tools_keep_strict_init_requirement() {
+fn code_graph_tools_require_daemon_before_opening_project_store() {
     let target = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
@@ -131,12 +124,12 @@ fn code_graph_tools_keep_strict_init_requirement() {
     );
     assert!(
         !output.status.success(),
-        "code-graph tools must not bootstrap stores on first touch"
+        "code-graph tools must not open stores in the CLI process"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no TraceDecay index found"),
-        "expected init guidance, got:\n{stderr}"
+        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+        "expected daemon availability guidance, got:\n{stderr}"
     );
     assert!(!target_path.join(".tracedecay").exists());
 }

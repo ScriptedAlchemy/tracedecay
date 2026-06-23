@@ -28,13 +28,9 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
+use tracedecay::daemon::{call_default_tool, DaemonHandshake};
 use tracedecay::errors::{Result, TraceDecayError};
-use tracedecay::mcp::tools::{
-    get_tool_definitions, handle_profile_scoped_lcm_tool_call, handle_tool_call, ToolDefinition,
-};
-use tracedecay::tracedecay::TraceDecay;
-
-use crate::serve;
+use tracedecay::mcp::tools::{get_tool_definitions, ToolDefinition};
 
 /// Old CLI command names that don't match the MCP tool name. Keeps muscle
 /// memory working for the seven removed top-level commands. The right-hand
@@ -54,7 +50,7 @@ const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
 ];
 // Maintenance note: this CLI allowlist must match the MCP registry's
 // profile-scoped LCM schemas (tools with `storage_scope` including
-// `hermes_profile`) and `handle_profile_scoped_lcm_tool_call`; update it
+// `hermes_profile`) and the daemon's projectless dispatch path; update it
 // alongside the handler lockstep tests so profile-scoped calls do not silently
 // route through project initialization.
 /// Profile-store tools the generated Hermes plugin anchors at the Hermes
@@ -105,28 +101,23 @@ pub(crate) async fn run(
     } = parsed;
 
     if is_profile_scoped_lcm_dispatch(&def.name, &tool_args) {
-        let result = handle_profile_scoped_lcm_tool_call(&def.name, tool_args).await?;
-        print_tool_output(&result.value, raw_json);
-        return Ok(());
+        return dispatch_daemon_tool(
+            DaemonToolDispatch::profile_scoped(),
+            &def.name,
+            tool_args,
+            raw_json,
+        )
+        .await;
     }
 
-    // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
-    // --project wins; otherwise walk up from cwd to the nearest initialised
-    // project so the command works from subdirectories.
     let explicit_project = project.or(parsed_project);
-    let explicitly_targeted = explicit_project.is_some();
-    let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
-    let cg = if explicitly_targeted
-        && FIRST_TOUCH_STORE_TOOLS.contains(&def.name.as_str())
-        && !TraceDecay::is_initialized(&project_path)
-    {
-        TraceDecay::init(&project_path).await?
-    } else {
-        serve::ensure_initialized(&project_path).await?
-    };
-    let result = handle_tool_call(&cg, &def.name, tool_args, None, None).await?;
-    print_tool_output(&result.value, raw_json);
-    Ok(())
+    dispatch_daemon_tool(
+        DaemonToolDispatch::project_scoped(explicit_project, &def.name),
+        &def.name,
+        tool_args,
+        raw_json,
+    )
+    .await
 }
 
 /// Result of CLI argument parsing: the JSON value to hand to the MCP handler,
@@ -159,6 +150,51 @@ fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
             .get("storage_scope")
             .and_then(Value::as_str)
             .is_some_and(|scope| scope == "hermes_profile")
+}
+
+struct DaemonToolDispatch {
+    project_path: Option<PathBuf>,
+    allow_init: bool,
+}
+
+impl DaemonToolDispatch {
+    fn profile_scoped() -> Self {
+        Self {
+            project_path: None,
+            allow_init: false,
+        }
+    }
+
+    fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
+        // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
+        // --project wins; otherwise walk up from cwd to the nearest initialised
+        // project so the command works from subdirectories.
+        let explicitly_targeted = explicit_project.is_some();
+        let project_path = tracedecay::config::resolve_path_with_discovery(explicit_project);
+        let allow_init = explicitly_targeted && FIRST_TOUCH_STORE_TOOLS.contains(&tool_name);
+
+        Self {
+            project_path: Some(project_path),
+            allow_init,
+        }
+    }
+
+    async fn call(self, tool_name: &str, tool_args: Value) -> Result<Value> {
+        let handshake =
+            DaemonHandshake::for_current_client(self.project_path, None, false, self.allow_init)?;
+        call_default_tool(&handshake, tool_name, tool_args).await
+    }
+}
+
+async fn dispatch_daemon_tool(
+    dispatch: DaemonToolDispatch,
+    tool_name: &str,
+    tool_args: Value,
+    raw_json: bool,
+) -> Result<()> {
+    let result_value = dispatch.call(tool_name, tool_args).await?;
+    print_tool_output(&result_value, raw_json);
+    Ok(())
 }
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {

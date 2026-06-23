@@ -1265,16 +1265,45 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                     .map(|rel| rel.to_string_lossy().into_owned())
             });
 
-            let server = tracedecay::mcp::McpServer::new(cg, scope_prefix).await;
-            server.set_timings_enabled(timings);
-            let mut transport = tracedecay::mcp::StdioTransport::new();
-            // If we peeked at stdin to read `initialize` roots, replay that line.
-            if let Some(line) = peeked_line {
-                server.handle_and_write(&line, &mut transport).await?;
-            }
-            server.run(&mut transport).await?;
-            server.shutdown().await;
+            let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+                Some(cg.project_root().to_path_buf()),
+                scope_prefix,
+                timings,
+                false,
+            )?;
+            tracedecay::daemon::proxy_stdio_to_default_daemon(&handshake, peeked_line).await?;
         }
+        Commands::Daemon { action } => match action {
+            DaemonAction::Run { socket } => {
+                let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
+                tracedecay::daemon::run_foreground(socket_path).await?;
+            }
+            DaemonAction::InstallService { socket, no_start } => {
+                let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "tracedecay not found on PATH".to_string(),
+                    }
+                })?;
+                let spec = tracedecay::daemon::service_spec(tracedecay_bin, socket)?;
+                let service_path = tracedecay::daemon::install_service(&spec, !no_start)?;
+                eprintln!(
+                    "Installed TraceDecay daemon service at {}",
+                    service_path.display()
+                );
+                eprintln!("Daemon socket: {}", spec.socket_path.display());
+            }
+            DaemonAction::UninstallService { no_stop } => {
+                let service_path = tracedecay::daemon::uninstall_service(!no_stop)?;
+                eprintln!(
+                    "Removed TraceDecay daemon service at {}",
+                    service_path.display()
+                );
+            }
+            DaemonAction::Status => {
+                let socket_path = tracedecay::daemon::socket_path_or_default(None)?;
+                print!("{}", tracedecay::daemon::service_status(&socket_path));
+            }
+        },
         Commands::Upgrade => {
             tracedecay::upgrade::run_upgrade()?;
         }
@@ -1685,6 +1714,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::HookCodexSubagentStart
             | Commands::HookCodexPostToolUse
             | Commands::HookCodexPostCompact
+            | Commands::Daemon { .. }
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
             // every pre-serve startup task — `try_flush` network round-trip,
@@ -1725,6 +1755,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Doctor { .. }
             | Commands::Migrate { .. }
             | Commands::Tool { .. }
+            | Commands::Daemon { .. }
     )
 }
 

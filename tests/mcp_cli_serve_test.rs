@@ -1,8 +1,11 @@
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Output, Stdio};
 
+use common::{canonical_existing_path, tracedecay_command_with_home};
 use libsql::Builder;
 use serde_json::{json, Value};
 #[cfg(unix)]
@@ -62,22 +65,6 @@ async fn register_global_project(home: &Path, project: &Path) {
     db.checkpoint().await;
 }
 
-fn tracedecay_command_with_home(home: &Path) -> Command {
-    let home = canonical_existing_path(home);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    command
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", home.join(".tracedecay"))
-        .env("TRACEDECAY_GLOBAL_DB", home.join(".tracedecay/global.db"));
-    command
-}
-
-fn canonical_existing_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn runtime_project_root(stdout: &[u8], id: i64) -> String {
     let stdout = String::from_utf8(stdout.to_vec()).unwrap();
     let runtime_response: Value = stdout
@@ -93,6 +80,74 @@ fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .as_str()
         .expect("runtime should include database.project_root")
         .to_string()
+}
+
+#[cfg(unix)]
+fn run_serve_runtime_with_initialize_root(
+    home: &Path,
+    cwd: &Path,
+    explicit_path: Option<&Path>,
+    root_uri: String,
+    root_name: &str,
+) -> Output {
+    let mut command = tracedecay_command_with_home(home);
+    command.arg("serve");
+    if let Some(path) = explicit_path {
+        command.arg("--path").arg(path);
+    }
+
+    let mut child = command
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should start");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "roots": [{
+                        "uri": root_uri,
+                        "name": root_name
+                    }]
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_runtime",
+                    "arguments": { "format": "json" }
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
 }
 
 fn canonical_path_string(path: &Path) -> String {
@@ -224,6 +279,34 @@ async fn explicit_uninitialized_path_reports_error_instead_of_global_fallback() 
     );
 }
 
+#[tokio::test]
+async fn serve_without_daemon_socket_reports_client_only_error() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn client_only_marker() {}\n").await;
+
+    let output = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay serve should run");
+
+    assert!(
+        !output.status.success(),
+        "serve must not run an in-process MCP engine when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("daemon") && stderr.contains("socket"),
+        "error should explain that the daemon socket is unavailable\nstderr:\n{stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
@@ -304,6 +387,7 @@ async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_stor
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let home = TempDir::new().unwrap();
@@ -311,58 +395,14 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     let stale = init_project_with_file(home.path(), "pub fn stale_project_marker() {}\n").await;
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), stale.path()).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .current_dir(cwd.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": file_uri(active.path()),
-                        "name": "active"
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
-    assert!(
-        output.status.success(),
-        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri(active.path()),
+        "active",
     );
 
     assert_eq!(
@@ -372,64 +412,21 @@ async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     let home = TempDir::new().unwrap();
     let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
     let nested_cwd = cwd_project.path().join("src");
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .current_dir(&nested_cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": file_uri(active.path()),
-                        "name": "active"
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
-    assert!(
-        output.status.success(),
-        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        &nested_cwd,
+        None,
+        file_uri(active.path()),
+        "active",
     );
 
     assert_eq!(
@@ -439,65 +436,21 @@ async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn explicit_initialized_path_ignores_initialize_roots() {
     let home = TempDir::new().unwrap();
     let explicit =
         init_project_with_file(home.path(), "pub fn explicit_project_marker() {}\n").await;
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(explicit.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": file_uri(active.path()),
-                        "name": "active"
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
-    assert!(
-        output.status.success(),
-        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        explicit.path(),
+        Some(explicit.path()),
+        file_uri(active.path()),
+        "active",
     );
 
     assert_eq!(
@@ -507,12 +460,14 @@ async fn explicit_initialized_path_ignores_initialize_roots() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn no_explicit_path_without_roots_still_uses_global_fallback() {
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
     register_global_project(home.path(), active.path()).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let output = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -553,58 +508,14 @@ async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
     .await;
     register_global_project(home.path(), &stale).await;
     register_global_project(home.path(), &active).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .current_dir(cwd.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "roots": [{
-                        "uri": file_uri_localhost_percent_encoded(&active),
-                        "name": "active"
-                    }]
-                }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_runtime",
-                    "arguments": { "format": "json" }
-                }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
-    assert!(
-        output.status.success(),
-        "tracedecay serve should accept encoded file://localhost MCP roots\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri_localhost_percent_encoded(&active),
+        "active",
     );
     assert_eq!(
         canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
